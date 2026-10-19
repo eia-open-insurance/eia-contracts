@@ -1,0 +1,573 @@
+asyncapi: 3.0.0
+id: urn:eia:contracts:events:contract
+info:
+  title: EIA Contract events
+  version: 1.0.0
+  summary: Published domain event names for the Contract vertical.
+  description: >
+    Event contract for the Contract vertical. The authoritative event names are
+    SPEC 11.3.9; the canonical envelope is
+    ../schemas/event-envelope.schema.json.
+
+    There is no message broker (ADR-0004). The platform outbox delivers events
+    over authenticated HTTPS to each subscriber endpoint, with an HMAC-SHA256
+    signature (SPEC 7.5.1). A channel address is the logical routing key and
+    equals the event name; it is not a broker topic.
+
+    No publisher or subscriber exists in the current codebase. Every channel
+    and operation in this document is therefore marked x-status planned. The
+    catalog and cross-vertical subscriptions live in event-catalog.yaml.
+  contact:
+    name: EIA Architecture
+    url: https://github.com/eia-open-insurance
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+defaultContentType: application/json
+servers:
+  subscriberEndpoint:
+    host: subscriber-defined
+    protocol: https
+    description: >
+      Each subscriber registers an HTTPS endpoint and signing key. The outbox
+      posts one event per request and requires a 2xx acknowledgement.
+channels:
+  ContractContractCreated:
+    address: contract.contract.created
+    title: contract.contract.created
+    description: >
+      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: contract.contract.created
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.3.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  ContractContractBound:
+    address: contract.contract.bound
+    title: contract.contract.bound
+    description: >
+      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: contract.contract.bound
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.3.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  ContractContractSigned:
+    address: contract.contract.signed
+    title: contract.contract.signed
+    description: >
+      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: contract.contract.signed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.3.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  ContractContractEndorsed:
+    address: contract.contract.endorsed
+    title: contract.contract.endorsed
+    description: >
+      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: contract.contract.endorsed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.3.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  ContractContractRenewed:
+    address: contract.contract.renewed
+    title: contract.contract.renewed
+    description: >
+      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: contract.contract.renewed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.3.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  ContractContractExpired:
+    address: contract.contract.expired
+    title: contract.contract.expired
+    description: >
+      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: contract.contract.expired
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.3.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  ContractContractCancelled:
+    address: contract.contract.cancelled
+    title: contract.contract.cancelled
+    description: >
+      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: contract.contract.cancelled
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.3.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  ContractContractCommuted:
+    address: contract.contract.commuted
+    title: contract.contract.commuted
+    description: >
+      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: contract.contract.commuted
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.3.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  ContractCessionRecorded:
+    address: contract.cession.recorded
+    title: contract.cession.recorded
+    description: >
+      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: contract.cession.recorded
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.3.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  ContractBordereauReceived:
+    address: contract.bordereau.received
+    title: contract.bordereau.received
+    description: >
+      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: contract.bordereau.received
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.3.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  ContractBordereauPosted:
+    address: contract.bordereau.posted
+    title: contract.bordereau.posted
+    description: >
+      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: contract.bordereau.posted
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.3.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  ContractBordereauRejected:
+    address: contract.bordereau.rejected
+    title: contract.bordereau.rejected
+    description: >
+      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: contract.bordereau.rejected
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.3.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  ContractAccountIssued:
+    address: contract.account.issued
+    title: contract.account.issued
+    description: >
+      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: contract.account.issued
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.3.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  ContractAccountAgreed:
+    address: contract.account.agreed
+    title: contract.account.agreed
+    description: >
+      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: contract.account.agreed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.3.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  ContractCashCallIssued:
+    address: contract.cash-call.issued
+    title: contract.cash-call.issued
+    description: >
+      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: contract.cash-call.issued
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.3.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  ContractSecurityRecorded:
+    address: contract.security.recorded
+    title: contract.security.recorded
+    description: >
+      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: contract.security.recorded
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.3.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  ContractSecurityBreached:
+    address: contract.security.breached
+    title: contract.security.breached
+    description: >
+      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: contract.security.breached
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.3.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  ContractReinstatementApplied:
+    address: contract.reinstatement.applied
+    title: contract.reinstatement.applied
+    description: >
+      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: contract.reinstatement.applied
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.3.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  ContractPremiumAdjusted:
+    address: contract.premium.adjusted
+    title: contract.premium.adjusted
+    description: >
+      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: contract.premium.adjusted
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.3.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  ContractLossAggregateUpdated:
+    address: contract.loss-aggregate.updated
+    title: contract.loss-aggregate.updated
+    description: >
+      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: contract.loss-aggregate.updated
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.3.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+operations:
+  publishContractContractCreated:
+    action: send
+    channel:
+      $ref: '#/channels/ContractContractCreated'
+    summary: Publish contract.contract.created
+    description: >
+      Publishes contract.contract.created through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: contract.contract.created
+    x-status: planned
+  publishContractContractBound:
+    action: send
+    channel:
+      $ref: '#/channels/ContractContractBound'
+    summary: Publish contract.contract.bound
+    description: >
+      Publishes contract.contract.bound through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: contract.contract.bound
+    x-status: planned
+  publishContractContractSigned:
+    action: send
+    channel:
+      $ref: '#/channels/ContractContractSigned'
+    summary: Publish contract.contract.signed
+    description: >
+      Publishes contract.contract.signed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: contract.contract.signed
+    x-status: planned
+  publishContractContractEndorsed:
+    action: send
+    channel:
+      $ref: '#/channels/ContractContractEndorsed'
+    summary: Publish contract.contract.endorsed
+    description: >
+      Publishes contract.contract.endorsed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: contract.contract.endorsed
+    x-status: planned
+  publishContractContractRenewed:
+    action: send
+    channel:
+      $ref: '#/channels/ContractContractRenewed'
+    summary: Publish contract.contract.renewed
+    description: >
+      Publishes contract.contract.renewed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: contract.contract.renewed
+    x-status: planned
+  publishContractContractExpired:
+    action: send
+    channel:
+      $ref: '#/channels/ContractContractExpired'
+    summary: Publish contract.contract.expired
+    description: >
+      Publishes contract.contract.expired through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: contract.contract.expired
+    x-status: planned
+  publishContractContractCancelled:
+    action: send
+    channel:
+      $ref: '#/channels/ContractContractCancelled'
+    summary: Publish contract.contract.cancelled
+    description: >
+      Publishes contract.contract.cancelled through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: contract.contract.cancelled
+    x-status: planned
+  publishContractContractCommuted:
+    action: send
+    channel:
+      $ref: '#/channels/ContractContractCommuted'
+    summary: Publish contract.contract.commuted
+    description: >
+      Publishes contract.contract.commuted through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: contract.contract.commuted
+    x-status: planned
+  publishContractCessionRecorded:
+    action: send
+    channel:
+      $ref: '#/channels/ContractCessionRecorded'
+    summary: Publish contract.cession.recorded
+    description: >
+      Publishes contract.cession.recorded through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: contract.cession.recorded
+    x-status: planned
+  publishContractBordereauReceived:
+    action: send
+    channel:
+      $ref: '#/channels/ContractBordereauReceived'
+    summary: Publish contract.bordereau.received
+    description: >
+      Publishes contract.bordereau.received through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: contract.bordereau.received
+    x-status: planned
+  publishContractBordereauPosted:
+    action: send
+    channel:
+      $ref: '#/channels/ContractBordereauPosted'
+    summary: Publish contract.bordereau.posted
+    description: >
+      Publishes contract.bordereau.posted through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: contract.bordereau.posted
+    x-status: planned
+  publishContractBordereauRejected:
+    action: send
+    channel:
+      $ref: '#/channels/ContractBordereauRejected'
+    summary: Publish contract.bordereau.rejected
+    description: >
+      Publishes contract.bordereau.rejected through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: contract.bordereau.rejected
+    x-status: planned
+  publishContractAccountIssued:
+    action: send
+    channel:
+      $ref: '#/channels/ContractAccountIssued'
+    summary: Publish contract.account.issued
+    description: >
+      Publishes contract.account.issued through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: contract.account.issued
+    x-status: planned
+  publishContractAccountAgreed:
+    action: send
+    channel:
+      $ref: '#/channels/ContractAccountAgreed'
+    summary: Publish contract.account.agreed
+    description: >
+      Publishes contract.account.agreed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: contract.account.agreed
+    x-status: planned
+  publishContractCashCallIssued:
+    action: send
+    channel:
+      $ref: '#/channels/ContractCashCallIssued'
+    summary: Publish contract.cash-call.issued
+    description: >
+      Publishes contract.cash-call.issued through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: contract.cash-call.issued
+    x-status: planned
+  publishContractSecurityRecorded:
+    action: send
+    channel:
+      $ref: '#/channels/ContractSecurityRecorded'
+    summary: Publish contract.security.recorded
+    description: >
+      Publishes contract.security.recorded through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: contract.security.recorded
+    x-status: planned
+  publishContractSecurityBreached:
+    action: send
+    channel:
+      $ref: '#/channels/ContractSecurityBreached'
+    summary: Publish contract.security.breached
+    description: >
+      Publishes contract.security.breached through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: contract.security.breached
+    x-status: planned
+  publishContractReinstatementApplied:
+    action: send
+    channel:
+      $ref: '#/channels/ContractReinstatementApplied'
+    summary: Publish contract.reinstatement.applied
+    description: >
+      Publishes contract.reinstatement.applied through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: contract.reinstatement.applied
+    x-status: planned
+  publishContractPremiumAdjusted:
+    action: send
+    channel:
+      $ref: '#/channels/ContractPremiumAdjusted'
+    summary: Publish contract.premium.adjusted
+    description: >
+      Publishes contract.premium.adjusted through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: contract.premium.adjusted
+    x-status: planned
+  publishContractLossAggregateUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/ContractLossAggregateUpdated'
+    summary: Publish contract.loss-aggregate.updated
+    description: >
+      Publishes contract.loss-aggregate.updated through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: contract.loss-aggregate.updated
+    x-status: planned
+components:
+  messages:
+    DomainEvent:
+      name: DomainEvent
+      title: EIA domain event envelope
+      summary: One immutable fact published by a vertical.
+      contentType: application/json
+      headers:
+        type: object
+        additionalProperties: true
+        properties:
+          X-EIA-Event-Id:
+            type: string
+            format: uuid
+          X-EIA-Event-Type:
+            type: string
+          X-EIA-Event-Version:
+            type: integer
+          X-EIA-Aggregate-Version:
+            type: integer
+          Idempotency-Key:
+            type: string
+          X-EIA-Signature:
+            type: string
+      payload:
+        $ref: '../schemas/event-envelope.schema.json'
+  securitySchemes:
+    outboxSignature:
+      type: httpApiKey
+      name: X-EIA-Signature
+      in: header
+      description: >
+        HMAC-SHA256 over the timestamp and the exact request body, in the form
+        t=<unix>,v1=<hex> (SPEC 7.5.1).
+x-vertical: contract
+x-spec-section: SPEC 11.3.9
+x-status: planned
+x-implementation:
+  publisher: none
+  subscriber: none
+  notes: >
+    The current vertical slices emit no events; the outbox tables and the
+    dispatcher described in SPEC 7.5 are not implemented. This document is the
+    agreed event contract for the publisher that will be built.
+
+x-consumed-events:
+  - policy.policy.issued
+  - policy.policy.endorsed
+  - policy.policy.cancelled
+  - policy.premium.changed
+  - direct.claim.registered
+  - direct.claim.paid
+  - assumed.claim.registered
+  - assumed.claim.reserve-changed
+  - assumed.claim.paid
+  - assumed.claim.commuted
+  - payment.payment.paid
+  - document.document.registered

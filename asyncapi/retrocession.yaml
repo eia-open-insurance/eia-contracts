@@ -1,0 +1,419 @@
+asyncapi: 3.0.0
+id: urn:eia:contracts:events:retrocession
+info:
+  title: EIA Retrocession events
+  version: 1.0.0
+  summary: Published domain event names for the Retrocession vertical.
+  description: >
+    Event contract for the Retrocession vertical. The authoritative event names are
+    SPEC 11.10.6; the canonical envelope is
+    ../schemas/event-envelope.schema.json.
+
+    There is no message broker (ADR-0004). The platform outbox delivers events
+    over authenticated HTTPS to each subscriber endpoint, with an HMAC-SHA256
+    signature (SPEC 7.5.1). A channel address is the logical routing key and
+    equals the event name; it is not a broker topic.
+
+    No publisher or subscriber exists in the current codebase. Every channel
+    and operation in this document is therefore marked x-status planned. The
+    catalog and cross-vertical subscriptions live in event-catalog.yaml.
+  contact:
+    name: EIA Architecture
+    url: https://github.com/eia-open-insurance
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+defaultContentType: application/json
+servers:
+  subscriberEndpoint:
+    host: subscriber-defined
+    protocol: https
+    description: >
+      Each subscriber registers an HTTPS endpoint and signing key. The outbox
+      posts one event per request and requires a 2xx acknowledgement.
+channels:
+  RetrocessionContractCreated:
+    address: retrocession.contract.created
+    title: retrocession.contract.created
+    description: >
+      Declared domain event for this vertical (SPEC 11.10.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: retrocession.contract.created
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.10.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  RetrocessionContractBound:
+    address: retrocession.contract.bound
+    title: retrocession.contract.bound
+    description: >
+      Declared domain event for this vertical (SPEC 11.10.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: retrocession.contract.bound
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.10.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  RetrocessionContractEndorsed:
+    address: retrocession.contract.endorsed
+    title: retrocession.contract.endorsed
+    description: >
+      Declared domain event for this vertical (SPEC 11.10.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: retrocession.contract.endorsed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.10.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  RetrocessionContractRenewed:
+    address: retrocession.contract.renewed
+    title: retrocession.contract.renewed
+    description: >
+      Declared domain event for this vertical (SPEC 11.10.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: retrocession.contract.renewed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.10.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  RetrocessionContractCancelled:
+    address: retrocession.contract.cancelled
+    title: retrocession.contract.cancelled
+    description: >
+      Declared domain event for this vertical (SPEC 11.10.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: retrocession.contract.cancelled
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.10.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  RetrocessionContractCommuted:
+    address: retrocession.contract.commuted
+    title: retrocession.contract.commuted
+    description: >
+      Declared domain event for this vertical (SPEC 11.10.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: retrocession.contract.commuted
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.10.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  RetrocessionRuleActivated:
+    address: retrocession.rule.activated
+    title: retrocession.rule.activated
+    description: >
+      Declared domain event for this vertical (SPEC 11.10.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: retrocession.rule.activated
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.10.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  RetrocessionCaseCreated:
+    address: retrocession.case.created
+    title: retrocession.case.created
+    description: >
+      Declared domain event for this vertical (SPEC 11.10.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: retrocession.case.created
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.10.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  RetrocessionHandoffSent:
+    address: retrocession.handoff.sent
+    title: retrocession.handoff.sent
+    description: >
+      Declared domain event for this vertical (SPEC 11.10.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: retrocession.handoff.sent
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.10.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  RetrocessionHandoffAcknowledged:
+    address: retrocession.handoff.acknowledged
+    title: retrocession.handoff.acknowledged
+    description: >
+      Declared domain event for this vertical (SPEC 11.10.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: retrocession.handoff.acknowledged
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.10.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  RetrocessionHandoffRejected:
+    address: retrocession.handoff.rejected
+    title: retrocession.handoff.rejected
+    description: >
+      Declared domain event for this vertical (SPEC 11.10.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: retrocession.handoff.rejected
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.10.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  RetrocessionConfirmationReceived:
+    address: retrocession.confirmation.received
+    title: retrocession.confirmation.received
+    description: >
+      Declared domain event for this vertical (SPEC 11.10.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: retrocession.confirmation.received
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.10.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  RetrocessionRecoverableUpdated:
+    address: retrocession.recoverable.updated
+    title: retrocession.recoverable.updated
+    description: >
+      Declared domain event for this vertical (SPEC 11.10.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: retrocession.recoverable.updated
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.10.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  RetrocessionReconciliationBreak:
+    address: retrocession.reconciliation.break
+    title: retrocession.reconciliation.break
+    description: >
+      Declared domain event for this vertical (SPEC 11.10.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: retrocession.reconciliation.break
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.10.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+operations:
+  publishRetrocessionContractCreated:
+    action: send
+    channel:
+      $ref: '#/channels/RetrocessionContractCreated'
+    summary: Publish retrocession.contract.created
+    description: >
+      Publishes retrocession.contract.created through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: retrocession.contract.created
+    x-status: planned
+  publishRetrocessionContractBound:
+    action: send
+    channel:
+      $ref: '#/channels/RetrocessionContractBound'
+    summary: Publish retrocession.contract.bound
+    description: >
+      Publishes retrocession.contract.bound through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: retrocession.contract.bound
+    x-status: planned
+  publishRetrocessionContractEndorsed:
+    action: send
+    channel:
+      $ref: '#/channels/RetrocessionContractEndorsed'
+    summary: Publish retrocession.contract.endorsed
+    description: >
+      Publishes retrocession.contract.endorsed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: retrocession.contract.endorsed
+    x-status: planned
+  publishRetrocessionContractRenewed:
+    action: send
+    channel:
+      $ref: '#/channels/RetrocessionContractRenewed'
+    summary: Publish retrocession.contract.renewed
+    description: >
+      Publishes retrocession.contract.renewed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: retrocession.contract.renewed
+    x-status: planned
+  publishRetrocessionContractCancelled:
+    action: send
+    channel:
+      $ref: '#/channels/RetrocessionContractCancelled'
+    summary: Publish retrocession.contract.cancelled
+    description: >
+      Publishes retrocession.contract.cancelled through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: retrocession.contract.cancelled
+    x-status: planned
+  publishRetrocessionContractCommuted:
+    action: send
+    channel:
+      $ref: '#/channels/RetrocessionContractCommuted'
+    summary: Publish retrocession.contract.commuted
+    description: >
+      Publishes retrocession.contract.commuted through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: retrocession.contract.commuted
+    x-status: planned
+  publishRetrocessionRuleActivated:
+    action: send
+    channel:
+      $ref: '#/channels/RetrocessionRuleActivated'
+    summary: Publish retrocession.rule.activated
+    description: >
+      Publishes retrocession.rule.activated through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: retrocession.rule.activated
+    x-status: planned
+  publishRetrocessionCaseCreated:
+    action: send
+    channel:
+      $ref: '#/channels/RetrocessionCaseCreated'
+    summary: Publish retrocession.case.created
+    description: >
+      Publishes retrocession.case.created through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: retrocession.case.created
+    x-status: planned
+  publishRetrocessionHandoffSent:
+    action: send
+    channel:
+      $ref: '#/channels/RetrocessionHandoffSent'
+    summary: Publish retrocession.handoff.sent
+    description: >
+      Publishes retrocession.handoff.sent through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: retrocession.handoff.sent
+    x-status: planned
+  publishRetrocessionHandoffAcknowledged:
+    action: send
+    channel:
+      $ref: '#/channels/RetrocessionHandoffAcknowledged'
+    summary: Publish retrocession.handoff.acknowledged
+    description: >
+      Publishes retrocession.handoff.acknowledged through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: retrocession.handoff.acknowledged
+    x-status: planned
+  publishRetrocessionHandoffRejected:
+    action: send
+    channel:
+      $ref: '#/channels/RetrocessionHandoffRejected'
+    summary: Publish retrocession.handoff.rejected
+    description: >
+      Publishes retrocession.handoff.rejected through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: retrocession.handoff.rejected
+    x-status: planned
+  publishRetrocessionConfirmationReceived:
+    action: send
+    channel:
+      $ref: '#/channels/RetrocessionConfirmationReceived'
+    summary: Publish retrocession.confirmation.received
+    description: >
+      Publishes retrocession.confirmation.received through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: retrocession.confirmation.received
+    x-status: planned
+  publishRetrocessionRecoverableUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/RetrocessionRecoverableUpdated'
+    summary: Publish retrocession.recoverable.updated
+    description: >
+      Publishes retrocession.recoverable.updated through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: retrocession.recoverable.updated
+    x-status: planned
+  publishRetrocessionReconciliationBreak:
+    action: send
+    channel:
+      $ref: '#/channels/RetrocessionReconciliationBreak'
+    summary: Publish retrocession.reconciliation.break
+    description: >
+      Publishes retrocession.reconciliation.break through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: retrocession.reconciliation.break
+    x-status: planned
+components:
+  messages:
+    DomainEvent:
+      name: DomainEvent
+      title: EIA domain event envelope
+      summary: One immutable fact published by a vertical.
+      contentType: application/json
+      headers:
+        type: object
+        additionalProperties: true
+        properties:
+          X-EIA-Event-Id:
+            type: string
+            format: uuid
+          X-EIA-Event-Type:
+            type: string
+          X-EIA-Event-Version:
+            type: integer
+          X-EIA-Aggregate-Version:
+            type: integer
+          Idempotency-Key:
+            type: string
+          X-EIA-Signature:
+            type: string
+      payload:
+        $ref: '../schemas/event-envelope.schema.json'
+  securitySchemes:
+    outboxSignature:
+      type: httpApiKey
+      name: X-EIA-Signature
+      in: header
+      description: >
+        HMAC-SHA256 over the timestamp and the exact request body, in the form
+        t=<unix>,v1=<hex> (SPEC 7.5.1).
+x-vertical: retrocession
+x-spec-section: SPEC 11.10.6
+x-status: planned
+x-implementation:
+  publisher: none
+  subscriber: none
+  notes: >
+    The current vertical slices emit no events; the outbox tables and the
+    dispatcher described in SPEC 7.5 are not implemented. This document is the
+    agreed event contract for the publisher that will be built.
+
+x-consumed-events: []
+x-consumed-events-note: >
+  SPEC 11.10.6 lists published events only. Retrocession pulls contract and assumed claim facts through the domain API, not through subscriptions.

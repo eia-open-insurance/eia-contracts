@@ -1,0 +1,402 @@
+asyncapi: 3.0.0
+id: urn:eia:contracts:events:catalog
+info:
+  title: EIA canonical domain event catalog
+  version: 1.0.0
+  summary: The authoritative catalog of domain event names, publishers, and subscribers.
+  description: >
+    Cross-vertical event catalog. Every domain event name used by the platform
+    appears here exactly once, grouped by the vertical that publishes it. The
+    per-vertical documents in this directory define one channel per published
+    event; this catalog is the authority for the names, the publisher, and the
+    subscribers named in SPEC 11.
+
+    Event names follow EV-01: `{vertical}.{aggregate}.{past-tense-verb}` in
+    kebab case. The envelope is ../schemas/event-envelope.schema.json. There is
+    no broker (ADR-0004); delivery is an authenticated HTTPS POST from the
+    transactional outbox (SPEC 7.5.1).
+
+    No publisher exists yet, so every entry is planned. Changing an existing
+    name is a breaking change and requires a new event and a dual-publish
+    window; adding an event is a compatible change.
+  contact:
+    name: EIA Architecture
+    url: https://github.com/eia-open-insurance
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+defaultContentType: application/json
+servers:
+  subscriberEndpoint:
+    host: subscriber-defined
+    protocol: https
+    description: >
+      Each subscriber registers an HTTPS endpoint and signing key. The outbox
+      posts one event per request and requires a 2xx acknowledgement.
+channels:
+  domainEventStream:
+    address: eia.domain-events
+    title: Domain event stream
+    description: >
+      Logical stream behind the transactional outbox. The concrete routing key
+      of a message is its eventType, not this address.
+    x-status: planned
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+operations:
+  deliverDomainEvent:
+    action: send
+    channel:
+      $ref: '#/channels/domainEventStream'
+    summary: Deliver one domain event to a subscribed consumer.
+    description: >
+      The dispatcher groups by partition key, preserves per-aggregate order,
+      signs the body, and retries with the SPEC 7.5.1 backoff. A permanent
+      consumer rejection marks the event DEAD; a 5xx keeps it PENDING.
+    x-status: planned
+components:
+  messages:
+    DomainEvent:
+      name: DomainEvent
+      title: EIA domain event envelope
+      summary: One immutable fact published by a vertical.
+      contentType: application/json
+      headers:
+        type: object
+        additionalProperties: true
+        properties:
+          X-EIA-Event-Id:
+            type: string
+            format: uuid
+          X-EIA-Event-Type:
+            type: string
+          X-EIA-Event-Version:
+            type: integer
+          X-EIA-Aggregate-Version:
+            type: integer
+          Idempotency-Key:
+            type: string
+          X-EIA-Signature:
+            type: string
+      payload:
+        $ref: '../schemas/event-envelope.schema.json'
+  securitySchemes:
+    outboxSignature:
+      type: httpApiKey
+      name: X-EIA-Signature
+      in: header
+      description: >
+        HMAC-SHA256 over the timestamp and the exact request body, in the form
+        t=<unix>,v1=<hex> (SPEC 7.5.1).
+x-status: planned
+x-event-catalog:
+  party:
+    eventVertical: party
+    specSection: SPEC 11.1.9
+    published:
+      - party.party.created
+      - party.party.updated
+      - party.party.status-changed
+      - party.party.merged
+      - party.role.added
+      - party.role.ended
+      - party.screening.completed
+      - party.screening.blocked
+      - party.consent.changed
+    consumed:
+      - policy.policy.issued
+      - contract.contract.bound
+      - direct.claim.registered
+      - assumed.claim.registered
+      - payment.payment.paid
+      - document.document.registered
+  policy:
+    eventVertical: policy
+    specSection: SPEC 11.2.9
+    published:
+      - policy.policy.quoted
+      - policy.policy.bound
+      - policy.policy.issued
+      - policy.policy.version-issued
+      - policy.policy.endorsed
+      - policy.policy.cancelled
+      - policy.policy.reinstated
+      - policy.policy.renewed
+      - policy.policy.expired
+      - policy.policy.non-renewed
+      - policy.policy.voided
+      - policy.premium.changed
+      - policy.premium.audited
+      - policy.occurrence.recorded
+      - policy.aggregate.eroded
+      - policy.aggregate.reconciled
+      - policy.mass-tort-profile.updated
+      - policy.coverage-block.updated
+    consumed:
+      - direct.claim.registered
+      - direct.claim.allocated
+      - direct.claim.paid
+      - direct.claim.recovery-recorded
+      - contract.cession.recorded
+      - payment.payment.paid
+      - document.document.associated
+      - party.party.merged
+  contract:
+    eventVertical: contract
+    specSection: SPEC 11.3.9
+    published:
+      - contract.contract.created
+      - contract.contract.bound
+      - contract.contract.signed
+      - contract.contract.endorsed
+      - contract.contract.renewed
+      - contract.contract.expired
+      - contract.contract.cancelled
+      - contract.contract.commuted
+      - contract.cession.recorded
+      - contract.bordereau.received
+      - contract.bordereau.posted
+      - contract.bordereau.rejected
+      - contract.account.issued
+      - contract.account.agreed
+      - contract.cash-call.issued
+      - contract.security.recorded
+      - contract.security.breached
+      - contract.reinstatement.applied
+      - contract.premium.adjusted
+      - contract.loss-aggregate.updated
+    consumed:
+      - policy.policy.issued
+      - policy.policy.endorsed
+      - policy.policy.cancelled
+      - policy.premium.changed
+      - direct.claim.registered
+      - direct.claim.paid
+      - assumed.claim.registered
+      - assumed.claim.reserve-changed
+      - assumed.claim.paid
+      - assumed.claim.commuted
+      - payment.payment.paid
+      - document.document.registered
+  direct-claims:
+    eventVertical: direct
+    specSection: SPEC 11.4.9
+    published:
+      - direct.claim.registered
+      - direct.claim.updated
+      - direct.claim.coverage-assessed
+      - direct.claim.injury-recorded
+      - direct.claim.exposure-recorded
+      - direct.claim.reserve-established
+      - direct.claim.reserve-changed
+      - direct.claim.litigation-updated
+      - direct.claim.settlement-authorized
+      - direct.claim.settlement-executed
+      - direct.claim.payment-requested
+      - direct.claim.paid
+      - direct.claim.recovery-recorded
+      - direct.claim.lien-recorded
+      - direct.claim.lien-resolved
+      - direct.claim.allocated
+      - direct.claim.closed
+      - direct.claim.reopened
+      - direct.claim.transferred
+      - direct.claim.aggregate-erosion-requested
+    consumed:
+      - policy.policy.issued
+      - policy.policy.endorsed
+      - policy.policy.cancelled
+      - policy.aggregate.eroded
+      - payment.payment.paid
+      - payment.payment.failed
+      - payment.payment.reversed
+      - party.party.merged
+      - document.document.associated
+      - contract.cession.recorded
+  assumed-claims:
+    eventVertical: assumed
+    specSection: SPEC 11.5.9
+    published:
+      - assumed.claim.registered
+      - assumed.claim.loss-advice-received
+      - assumed.claim.loss-advice-posted
+      - assumed.claim.reserve-established
+      - assumed.claim.reserve-changed
+      - assumed.claim.payment-requested
+      - assumed.claim.paid
+      - assumed.claim.recovery-recorded
+      - assumed.claim.cash-call-requested
+      - assumed.claim.commuted
+      - assumed.claim.dispute-raised
+      - assumed.claim.dispute-resolved
+      - assumed.claim.closed
+      - assumed.claim.reopened
+      - assumed.claim.reinstatement-requested
+    consumed:
+      - contract.contract.bound
+      - contract.contract.commuted
+      - contract.cession.recorded
+      - contract.security.recorded
+      - payment.payment.paid
+      - payment.payment.failed
+      - document.document.associated
+      - party.party.merged
+  document:
+    eventVertical: document
+    specSection: SPEC 11.6.9
+    published:
+      - document.document.registered
+      - document.document.classified
+      - document.document.associated
+      - document.document.superseded
+      - document.document.generated
+      - document.document.signed
+      - document.document.held
+      - document.document.hold-released
+      - document.document.archived
+      - document.document.disposed
+      - document.document.requested
+      - document.document.request-fulfilled
+      - document.package.built
+      - document.processing.completed
+      - document.processing.failed
+    consumed:
+      - policy.policy.issued
+      - policy.policy.endorsed
+      - policy.policy.cancelled
+      - contract.contract.bound
+      - contract.bordereau.received
+      - contract.account.issued
+      - direct.claim.registered
+      - direct.claim.settlement-executed
+      - assumed.claim.registered
+      - assumed.claim.commuted
+      - payment.payment.paid
+      - party.party.merged
+  payment:
+    eventVertical: payment
+    specSection: SPEC 11.7.10
+    published:
+      - payment.payment.created
+      - payment.payment.authorized
+      - payment.payment.issued
+      - payment.payment.accepted
+      - payment.payment.confirmed
+      - payment.payment.paid
+      - payment.payment.failed
+      - payment.payment.returned
+      - payment.payment.reversed
+      - payment.payment.reconciled
+      - payment.reconciliation.exception
+      - payment.payment.escheated
+      - payment.batch.completed
+      - payment.sap.posted
+      - payment.sap.failed
+      - payment.recovery.received
+    consumed:
+      - direct.claim.settlement-authorized
+      - direct.claim.reserve-changed
+      - assumed.claim.payment-requested
+      - assumed.claim.cash-call-requested
+      - contract.account.issued
+      - contract.cash-call.issued
+      - contract.contract.commuted
+      - policy.policy.cancelled
+      - policy.premium.audited
+      - party.party.merged
+      - document.document.associated
+  notifications:
+    eventVertical: notifications
+    specSection: SPEC 11.8.9
+    published:
+      - notifications.notification.issued
+      - notifications.notification.delivered
+      - notifications.notification.read
+      - notifications.notification.acknowledged
+      - notifications.notification.actioned
+      - notifications.notification.escalated
+      - notifications.notification.failed
+      - notifications.notification.suppressed
+      - notifications.delivery.failed
+      - notifications.digest.sent
+    consumed: []
+    consumedNote: >
+      Consumed events are every domain event with a notification rule. The subscription registry, not this catalog, is the authoritative list (SPEC 11.8.9).
+  cession:
+    eventVertical: cession
+    specSection: SPEC 11.9.6
+    published:
+      - cession.contract.created
+      - cession.contract.bound
+      - cession.contract.endorsed
+      - cession.contract.renewed
+      - cession.contract.cancelled
+      - cession.contract.commuted
+      - cession.rule.activated
+      - cession.case.created
+      - cession.handoff.sent
+      - cession.handoff.acknowledged
+      - cession.handoff.rejected
+      - cession.confirmation.received
+      - cession.recoverable.updated
+      - cession.reconciliation.break
+    consumed: []
+    consumedNote: >
+      SPEC 11.9.6 lists published events only. Cession pulls policy and claim facts through the domain API, not through subscriptions.
+  retrocession:
+    eventVertical: retrocession
+    specSection: SPEC 11.10.6
+    published:
+      - retrocession.contract.created
+      - retrocession.contract.bound
+      - retrocession.contract.endorsed
+      - retrocession.contract.renewed
+      - retrocession.contract.cancelled
+      - retrocession.contract.commuted
+      - retrocession.rule.activated
+      - retrocession.case.created
+      - retrocession.handoff.sent
+      - retrocession.handoff.acknowledged
+      - retrocession.handoff.rejected
+      - retrocession.confirmation.received
+      - retrocession.recoverable.updated
+      - retrocession.reconciliation.break
+    consumed: []
+    consumedNote: >
+      SPEC 11.10.6 lists published events only. Retrocession pulls contract and assumed claim facts through the domain API, not through subscriptions.
+x-event-rules:
+  - id: EV-01
+    rule: Names are {vertical}.{aggregate}.{past-tense-verb} in kebab case.
+  - id: EV-02
+    rule: Events are facts about the past, never commands or requests.
+  - id: EV-03
+    rule: Payloads carry identifiers and deltas, not entire object graphs.
+  - id: EV-04
+    rule: Payloads carry links for newly created relationships.
+  - id: EV-05
+    rule: Additive fields are compatible; removals or meaning changes need a new eventVersion with dual publication.
+  - id: EV-06
+    rule: Consumers ignore unknown fields and unknown event types.
+  - id: EV-07
+    rule: Payloads never contain PHI beyond the minimum necessary.
+  - id: EV-08
+    rule: aggregateVersion is monotonic per aggregate and is the ordering authority.
+  - id: EV-09
+    rule: Events are immutable and retained for the life of the record.
+  - id: EV-10
+    rule: A republished event keeps its original eventId; a corrected fact is a new event.
+x-delivery:
+  transport: https-outbox
+  broker: none
+  evidence:
+    - SPEC 7.5.1 outbox and dispatcher
+    - SPEC 7.5.2 inbox and gap detection
+    - SPEC 7.5.3 subscriptions
+x-implementation:
+  publisher: none
+  subscriber: none
+  notes: >
+    No outbox publisher, dispatcher, or subscriber exists in the current
+    codebase. The catalog is canonical and planned; it is not verified against
+    a running publisher.

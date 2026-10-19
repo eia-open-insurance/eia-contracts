@@ -1,0 +1,476 @@
+asyncapi: 3.0.0
+id: urn:eia:contracts:events:payment
+info:
+  title: EIA Payment events
+  version: 1.0.0
+  summary: Published domain event names for the Payment vertical.
+  description: >
+    Event contract for the Payment vertical. The authoritative event names are
+    SPEC 11.7.10; the canonical envelope is
+    ../schemas/event-envelope.schema.json.
+
+    There is no message broker (ADR-0004). The platform outbox delivers events
+    over authenticated HTTPS to each subscriber endpoint, with an HMAC-SHA256
+    signature (SPEC 7.5.1). A channel address is the logical routing key and
+    equals the event name; it is not a broker topic.
+
+    No publisher or subscriber exists in the current codebase. Every channel
+    and operation in this document is therefore marked x-status planned. The
+    catalog and cross-vertical subscriptions live in event-catalog.yaml.
+  contact:
+    name: EIA Architecture
+    url: https://github.com/eia-open-insurance
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+defaultContentType: application/json
+servers:
+  subscriberEndpoint:
+    host: subscriber-defined
+    protocol: https
+    description: >
+      Each subscriber registers an HTTPS endpoint and signing key. The outbox
+      posts one event per request and requires a 2xx acknowledgement.
+channels:
+  PaymentPaymentCreated:
+    address: payment.payment.created
+    title: payment.payment.created
+    description: >
+      Declared domain event for this vertical (SPEC 11.7.10). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: payment.payment.created
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.7.10
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PaymentPaymentAuthorized:
+    address: payment.payment.authorized
+    title: payment.payment.authorized
+    description: >
+      Declared domain event for this vertical (SPEC 11.7.10). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: payment.payment.authorized
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.7.10
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PaymentPaymentIssued:
+    address: payment.payment.issued
+    title: payment.payment.issued
+    description: >
+      Declared domain event for this vertical (SPEC 11.7.10). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: payment.payment.issued
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.7.10
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PaymentPaymentAccepted:
+    address: payment.payment.accepted
+    title: payment.payment.accepted
+    description: >
+      Declared domain event for this vertical (SPEC 11.7.10). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: payment.payment.accepted
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.7.10
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PaymentPaymentConfirmed:
+    address: payment.payment.confirmed
+    title: payment.payment.confirmed
+    description: >
+      Declared domain event for this vertical (SPEC 11.7.10). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: payment.payment.confirmed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.7.10
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PaymentPaymentPaid:
+    address: payment.payment.paid
+    title: payment.payment.paid
+    description: >
+      Declared domain event for this vertical (SPEC 11.7.10). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: payment.payment.paid
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.7.10
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PaymentPaymentFailed:
+    address: payment.payment.failed
+    title: payment.payment.failed
+    description: >
+      Declared domain event for this vertical (SPEC 11.7.10). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: payment.payment.failed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.7.10
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PaymentPaymentReturned:
+    address: payment.payment.returned
+    title: payment.payment.returned
+    description: >
+      Declared domain event for this vertical (SPEC 11.7.10). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: payment.payment.returned
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.7.10
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PaymentPaymentReversed:
+    address: payment.payment.reversed
+    title: payment.payment.reversed
+    description: >
+      Declared domain event for this vertical (SPEC 11.7.10). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: payment.payment.reversed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.7.10
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PaymentPaymentReconciled:
+    address: payment.payment.reconciled
+    title: payment.payment.reconciled
+    description: >
+      Declared domain event for this vertical (SPEC 11.7.10). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: payment.payment.reconciled
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.7.10
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PaymentReconciliationException:
+    address: payment.reconciliation.exception
+    title: payment.reconciliation.exception
+    description: >
+      Declared domain event for this vertical (SPEC 11.7.10). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: payment.reconciliation.exception
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.7.10
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PaymentPaymentEscheated:
+    address: payment.payment.escheated
+    title: payment.payment.escheated
+    description: >
+      Declared domain event for this vertical (SPEC 11.7.10). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: payment.payment.escheated
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.7.10
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PaymentBatchCompleted:
+    address: payment.batch.completed
+    title: payment.batch.completed
+    description: >
+      Declared domain event for this vertical (SPEC 11.7.10). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: payment.batch.completed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.7.10
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PaymentSapPosted:
+    address: payment.sap.posted
+    title: payment.sap.posted
+    description: >
+      Declared domain event for this vertical (SPEC 11.7.10). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: payment.sap.posted
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.7.10
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PaymentSapFailed:
+    address: payment.sap.failed
+    title: payment.sap.failed
+    description: >
+      Declared domain event for this vertical (SPEC 11.7.10). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: payment.sap.failed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.7.10
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PaymentRecoveryReceived:
+    address: payment.recovery.received
+    title: payment.recovery.received
+    description: >
+      Declared domain event for this vertical (SPEC 11.7.10). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: payment.recovery.received
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.7.10
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+operations:
+  publishPaymentPaymentCreated:
+    action: send
+    channel:
+      $ref: '#/channels/PaymentPaymentCreated'
+    summary: Publish payment.payment.created
+    description: >
+      Publishes payment.payment.created through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: payment.payment.created
+    x-status: planned
+  publishPaymentPaymentAuthorized:
+    action: send
+    channel:
+      $ref: '#/channels/PaymentPaymentAuthorized'
+    summary: Publish payment.payment.authorized
+    description: >
+      Publishes payment.payment.authorized through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: payment.payment.authorized
+    x-status: planned
+  publishPaymentPaymentIssued:
+    action: send
+    channel:
+      $ref: '#/channels/PaymentPaymentIssued'
+    summary: Publish payment.payment.issued
+    description: >
+      Publishes payment.payment.issued through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: payment.payment.issued
+    x-status: planned
+  publishPaymentPaymentAccepted:
+    action: send
+    channel:
+      $ref: '#/channels/PaymentPaymentAccepted'
+    summary: Publish payment.payment.accepted
+    description: >
+      Publishes payment.payment.accepted through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: payment.payment.accepted
+    x-status: planned
+  publishPaymentPaymentConfirmed:
+    action: send
+    channel:
+      $ref: '#/channels/PaymentPaymentConfirmed'
+    summary: Publish payment.payment.confirmed
+    description: >
+      Publishes payment.payment.confirmed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: payment.payment.confirmed
+    x-status: planned
+  publishPaymentPaymentPaid:
+    action: send
+    channel:
+      $ref: '#/channels/PaymentPaymentPaid'
+    summary: Publish payment.payment.paid
+    description: >
+      Publishes payment.payment.paid through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: payment.payment.paid
+    x-status: planned
+  publishPaymentPaymentFailed:
+    action: send
+    channel:
+      $ref: '#/channels/PaymentPaymentFailed'
+    summary: Publish payment.payment.failed
+    description: >
+      Publishes payment.payment.failed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: payment.payment.failed
+    x-status: planned
+  publishPaymentPaymentReturned:
+    action: send
+    channel:
+      $ref: '#/channels/PaymentPaymentReturned'
+    summary: Publish payment.payment.returned
+    description: >
+      Publishes payment.payment.returned through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: payment.payment.returned
+    x-status: planned
+  publishPaymentPaymentReversed:
+    action: send
+    channel:
+      $ref: '#/channels/PaymentPaymentReversed'
+    summary: Publish payment.payment.reversed
+    description: >
+      Publishes payment.payment.reversed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: payment.payment.reversed
+    x-status: planned
+  publishPaymentPaymentReconciled:
+    action: send
+    channel:
+      $ref: '#/channels/PaymentPaymentReconciled'
+    summary: Publish payment.payment.reconciled
+    description: >
+      Publishes payment.payment.reconciled through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: payment.payment.reconciled
+    x-status: planned
+  publishPaymentReconciliationException:
+    action: send
+    channel:
+      $ref: '#/channels/PaymentReconciliationException'
+    summary: Publish payment.reconciliation.exception
+    description: >
+      Publishes payment.reconciliation.exception through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: payment.reconciliation.exception
+    x-status: planned
+  publishPaymentPaymentEscheated:
+    action: send
+    channel:
+      $ref: '#/channels/PaymentPaymentEscheated'
+    summary: Publish payment.payment.escheated
+    description: >
+      Publishes payment.payment.escheated through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: payment.payment.escheated
+    x-status: planned
+  publishPaymentBatchCompleted:
+    action: send
+    channel:
+      $ref: '#/channels/PaymentBatchCompleted'
+    summary: Publish payment.batch.completed
+    description: >
+      Publishes payment.batch.completed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: payment.batch.completed
+    x-status: planned
+  publishPaymentSapPosted:
+    action: send
+    channel:
+      $ref: '#/channels/PaymentSapPosted'
+    summary: Publish payment.sap.posted
+    description: >
+      Publishes payment.sap.posted through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: payment.sap.posted
+    x-status: planned
+  publishPaymentSapFailed:
+    action: send
+    channel:
+      $ref: '#/channels/PaymentSapFailed'
+    summary: Publish payment.sap.failed
+    description: >
+      Publishes payment.sap.failed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: payment.sap.failed
+    x-status: planned
+  publishPaymentRecoveryReceived:
+    action: send
+    channel:
+      $ref: '#/channels/PaymentRecoveryReceived'
+    summary: Publish payment.recovery.received
+    description: >
+      Publishes payment.recovery.received through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: payment.recovery.received
+    x-status: planned
+components:
+  messages:
+    DomainEvent:
+      name: DomainEvent
+      title: EIA domain event envelope
+      summary: One immutable fact published by a vertical.
+      contentType: application/json
+      headers:
+        type: object
+        additionalProperties: true
+        properties:
+          X-EIA-Event-Id:
+            type: string
+            format: uuid
+          X-EIA-Event-Type:
+            type: string
+          X-EIA-Event-Version:
+            type: integer
+          X-EIA-Aggregate-Version:
+            type: integer
+          Idempotency-Key:
+            type: string
+          X-EIA-Signature:
+            type: string
+      payload:
+        $ref: '../schemas/event-envelope.schema.json'
+  securitySchemes:
+    outboxSignature:
+      type: httpApiKey
+      name: X-EIA-Signature
+      in: header
+      description: >
+        HMAC-SHA256 over the timestamp and the exact request body, in the form
+        t=<unix>,v1=<hex> (SPEC 7.5.1).
+x-vertical: payment
+x-spec-section: SPEC 11.7.10
+x-status: planned
+x-implementation:
+  publisher: none
+  subscriber: none
+  notes: >
+    The current vertical slices emit no events; the outbox tables and the
+    dispatcher described in SPEC 7.5 are not implemented. This document is the
+    agreed event contract for the publisher that will be built.
+
+x-consumed-events:
+  - direct.claim.settlement-authorized
+  - direct.claim.reserve-changed
+  - assumed.claim.payment-requested
+  - assumed.claim.cash-call-requested
+  - contract.account.issued
+  - contract.cash-call.issued
+  - contract.contract.commuted
+  - policy.policy.cancelled
+  - policy.premium.audited
+  - party.party.merged
+  - document.document.associated

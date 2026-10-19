@@ -1,0 +1,521 @@
+asyncapi: 3.0.0
+id: urn:eia:contracts:events:policy
+info:
+  title: EIA Policy events
+  version: 1.0.0
+  summary: Published domain event names for the Policy vertical.
+  description: >
+    Event contract for the Policy vertical. The authoritative event names are
+    SPEC 11.2.9; the canonical envelope is
+    ../schemas/event-envelope.schema.json.
+
+    There is no message broker (ADR-0004). The platform outbox delivers events
+    over authenticated HTTPS to each subscriber endpoint, with an HMAC-SHA256
+    signature (SPEC 7.5.1). A channel address is the logical routing key and
+    equals the event name; it is not a broker topic.
+
+    No publisher or subscriber exists in the current codebase. Every channel
+    and operation in this document is therefore marked x-status planned. The
+    catalog and cross-vertical subscriptions live in event-catalog.yaml.
+  contact:
+    name: EIA Architecture
+    url: https://github.com/eia-open-insurance
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+defaultContentType: application/json
+servers:
+  subscriberEndpoint:
+    host: subscriber-defined
+    protocol: https
+    description: >
+      Each subscriber registers an HTTPS endpoint and signing key. The outbox
+      posts one event per request and requires a 2xx acknowledgement.
+channels:
+  PolicyPolicyQuoted:
+    address: policy.policy.quoted
+    title: policy.policy.quoted
+    description: >
+      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: policy.policy.quoted
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.2.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PolicyPolicyBound:
+    address: policy.policy.bound
+    title: policy.policy.bound
+    description: >
+      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: policy.policy.bound
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.2.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PolicyPolicyIssued:
+    address: policy.policy.issued
+    title: policy.policy.issued
+    description: >
+      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: policy.policy.issued
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.2.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PolicyPolicyVersionIssued:
+    address: policy.policy.version-issued
+    title: policy.policy.version-issued
+    description: >
+      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: policy.policy.version-issued
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.2.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PolicyPolicyEndorsed:
+    address: policy.policy.endorsed
+    title: policy.policy.endorsed
+    description: >
+      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: policy.policy.endorsed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.2.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PolicyPolicyCancelled:
+    address: policy.policy.cancelled
+    title: policy.policy.cancelled
+    description: >
+      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: policy.policy.cancelled
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.2.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PolicyPolicyReinstated:
+    address: policy.policy.reinstated
+    title: policy.policy.reinstated
+    description: >
+      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: policy.policy.reinstated
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.2.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PolicyPolicyRenewed:
+    address: policy.policy.renewed
+    title: policy.policy.renewed
+    description: >
+      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: policy.policy.renewed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.2.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PolicyPolicyExpired:
+    address: policy.policy.expired
+    title: policy.policy.expired
+    description: >
+      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: policy.policy.expired
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.2.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PolicyPolicyNonRenewed:
+    address: policy.policy.non-renewed
+    title: policy.policy.non-renewed
+    description: >
+      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: policy.policy.non-renewed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.2.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PolicyPolicyVoided:
+    address: policy.policy.voided
+    title: policy.policy.voided
+    description: >
+      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: policy.policy.voided
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.2.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PolicyPremiumChanged:
+    address: policy.premium.changed
+    title: policy.premium.changed
+    description: >
+      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: policy.premium.changed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.2.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PolicyPremiumAudited:
+    address: policy.premium.audited
+    title: policy.premium.audited
+    description: >
+      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: policy.premium.audited
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.2.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PolicyOccurrenceRecorded:
+    address: policy.occurrence.recorded
+    title: policy.occurrence.recorded
+    description: >
+      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: policy.occurrence.recorded
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.2.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PolicyAggregateEroded:
+    address: policy.aggregate.eroded
+    title: policy.aggregate.eroded
+    description: >
+      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: policy.aggregate.eroded
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.2.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PolicyAggregateReconciled:
+    address: policy.aggregate.reconciled
+    title: policy.aggregate.reconciled
+    description: >
+      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: policy.aggregate.reconciled
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.2.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PolicyMassTortProfileUpdated:
+    address: policy.mass-tort-profile.updated
+    title: policy.mass-tort-profile.updated
+    description: >
+      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: policy.mass-tort-profile.updated
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.2.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PolicyCoverageBlockUpdated:
+    address: policy.coverage-block.updated
+    title: policy.coverage-block.updated
+    description: >
+      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: policy.coverage-block.updated
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.2.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+operations:
+  publishPolicyPolicyQuoted:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyPolicyQuoted'
+    summary: Publish policy.policy.quoted
+    description: >
+      Publishes policy.policy.quoted through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: policy.policy.quoted
+    x-status: planned
+  publishPolicyPolicyBound:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyPolicyBound'
+    summary: Publish policy.policy.bound
+    description: >
+      Publishes policy.policy.bound through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: policy.policy.bound
+    x-status: planned
+  publishPolicyPolicyIssued:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyPolicyIssued'
+    summary: Publish policy.policy.issued
+    description: >
+      Publishes policy.policy.issued through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: policy.policy.issued
+    x-status: planned
+  publishPolicyPolicyVersionIssued:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyPolicyVersionIssued'
+    summary: Publish policy.policy.version-issued
+    description: >
+      Publishes policy.policy.version-issued through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: policy.policy.version-issued
+    x-status: planned
+  publishPolicyPolicyEndorsed:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyPolicyEndorsed'
+    summary: Publish policy.policy.endorsed
+    description: >
+      Publishes policy.policy.endorsed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: policy.policy.endorsed
+    x-status: planned
+  publishPolicyPolicyCancelled:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyPolicyCancelled'
+    summary: Publish policy.policy.cancelled
+    description: >
+      Publishes policy.policy.cancelled through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: policy.policy.cancelled
+    x-status: planned
+  publishPolicyPolicyReinstated:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyPolicyReinstated'
+    summary: Publish policy.policy.reinstated
+    description: >
+      Publishes policy.policy.reinstated through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: policy.policy.reinstated
+    x-status: planned
+  publishPolicyPolicyRenewed:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyPolicyRenewed'
+    summary: Publish policy.policy.renewed
+    description: >
+      Publishes policy.policy.renewed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: policy.policy.renewed
+    x-status: planned
+  publishPolicyPolicyExpired:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyPolicyExpired'
+    summary: Publish policy.policy.expired
+    description: >
+      Publishes policy.policy.expired through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: policy.policy.expired
+    x-status: planned
+  publishPolicyPolicyNonRenewed:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyPolicyNonRenewed'
+    summary: Publish policy.policy.non-renewed
+    description: >
+      Publishes policy.policy.non-renewed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: policy.policy.non-renewed
+    x-status: planned
+  publishPolicyPolicyVoided:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyPolicyVoided'
+    summary: Publish policy.policy.voided
+    description: >
+      Publishes policy.policy.voided through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: policy.policy.voided
+    x-status: planned
+  publishPolicyPremiumChanged:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyPremiumChanged'
+    summary: Publish policy.premium.changed
+    description: >
+      Publishes policy.premium.changed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: policy.premium.changed
+    x-status: planned
+  publishPolicyPremiumAudited:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyPremiumAudited'
+    summary: Publish policy.premium.audited
+    description: >
+      Publishes policy.premium.audited through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: policy.premium.audited
+    x-status: planned
+  publishPolicyOccurrenceRecorded:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyOccurrenceRecorded'
+    summary: Publish policy.occurrence.recorded
+    description: >
+      Publishes policy.occurrence.recorded through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: policy.occurrence.recorded
+    x-status: planned
+  publishPolicyAggregateEroded:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyAggregateEroded'
+    summary: Publish policy.aggregate.eroded
+    description: >
+      Publishes policy.aggregate.eroded through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: policy.aggregate.eroded
+    x-status: planned
+  publishPolicyAggregateReconciled:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyAggregateReconciled'
+    summary: Publish policy.aggregate.reconciled
+    description: >
+      Publishes policy.aggregate.reconciled through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: policy.aggregate.reconciled
+    x-status: planned
+  publishPolicyMassTortProfileUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyMassTortProfileUpdated'
+    summary: Publish policy.mass-tort-profile.updated
+    description: >
+      Publishes policy.mass-tort-profile.updated through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: policy.mass-tort-profile.updated
+    x-status: planned
+  publishPolicyCoverageBlockUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyCoverageBlockUpdated'
+    summary: Publish policy.coverage-block.updated
+    description: >
+      Publishes policy.coverage-block.updated through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: policy.coverage-block.updated
+    x-status: planned
+components:
+  messages:
+    DomainEvent:
+      name: DomainEvent
+      title: EIA domain event envelope
+      summary: One immutable fact published by a vertical.
+      contentType: application/json
+      headers:
+        type: object
+        additionalProperties: true
+        properties:
+          X-EIA-Event-Id:
+            type: string
+            format: uuid
+          X-EIA-Event-Type:
+            type: string
+          X-EIA-Event-Version:
+            type: integer
+          X-EIA-Aggregate-Version:
+            type: integer
+          Idempotency-Key:
+            type: string
+          X-EIA-Signature:
+            type: string
+      payload:
+        $ref: '../schemas/event-envelope.schema.json'
+  securitySchemes:
+    outboxSignature:
+      type: httpApiKey
+      name: X-EIA-Signature
+      in: header
+      description: >
+        HMAC-SHA256 over the timestamp and the exact request body, in the form
+        t=<unix>,v1=<hex> (SPEC 7.5.1).
+x-vertical: policy
+x-spec-section: SPEC 11.2.9
+x-status: planned
+x-implementation:
+  publisher: none
+  subscriber: none
+  notes: >
+    The current vertical slices emit no events; the outbox tables and the
+    dispatcher described in SPEC 7.5 are not implemented. This document is the
+    agreed event contract for the publisher that will be built.
+
+x-consumed-events:
+  - direct.claim.registered
+  - direct.claim.allocated
+  - direct.claim.paid
+  - direct.claim.recovery-recorded
+  - contract.cession.recorded
+  - payment.payment.paid
+  - document.document.associated
+  - party.party.merged

@@ -1,0 +1,303 @@
+asyncapi: 3.0.0
+id: urn:eia:contracts:events:party
+info:
+  title: EIA Party events
+  version: 1.0.0
+  summary: Published domain event names for the Party vertical.
+  description: >
+    Event contract for the Party vertical. The authoritative event names are
+    SPEC 11.1.9; the canonical envelope is
+    ../schemas/event-envelope.schema.json.
+
+    There is no message broker (ADR-0004). The platform outbox delivers events
+    over authenticated HTTPS to each subscriber endpoint, with an HMAC-SHA256
+    signature (SPEC 7.5.1). A channel address is the logical routing key and
+    equals the event name; it is not a broker topic.
+
+    No publisher or subscriber exists in the current codebase. Every channel
+    and operation in this document is therefore marked x-status planned. The
+    catalog and cross-vertical subscriptions live in event-catalog.yaml.
+  contact:
+    name: EIA Architecture
+    url: https://github.com/eia-open-insurance
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+defaultContentType: application/json
+servers:
+  subscriberEndpoint:
+    host: subscriber-defined
+    protocol: https
+    description: >
+      Each subscriber registers an HTTPS endpoint and signing key. The outbox
+      posts one event per request and requires a 2xx acknowledgement.
+channels:
+  PartyPartyCreated:
+    address: party.party.created
+    title: party.party.created
+    description: >
+      Declared domain event for this vertical (SPEC 11.1.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: party.party.created
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.1.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PartyPartyUpdated:
+    address: party.party.updated
+    title: party.party.updated
+    description: >
+      Declared domain event for this vertical (SPEC 11.1.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: party.party.updated
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.1.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PartyPartyStatusChanged:
+    address: party.party.status-changed
+    title: party.party.status-changed
+    description: >
+      Declared domain event for this vertical (SPEC 11.1.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: party.party.status-changed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.1.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PartyPartyMerged:
+    address: party.party.merged
+    title: party.party.merged
+    description: >
+      Declared domain event for this vertical (SPEC 11.1.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: party.party.merged
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.1.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PartyRoleAdded:
+    address: party.role.added
+    title: party.role.added
+    description: >
+      Declared domain event for this vertical (SPEC 11.1.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: party.role.added
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.1.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PartyRoleEnded:
+    address: party.role.ended
+    title: party.role.ended
+    description: >
+      Declared domain event for this vertical (SPEC 11.1.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: party.role.ended
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.1.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PartyScreeningCompleted:
+    address: party.screening.completed
+    title: party.screening.completed
+    description: >
+      Declared domain event for this vertical (SPEC 11.1.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: party.screening.completed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.1.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PartyScreeningBlocked:
+    address: party.screening.blocked
+    title: party.screening.blocked
+    description: >
+      Declared domain event for this vertical (SPEC 11.1.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: party.screening.blocked
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.1.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PartyConsentChanged:
+    address: party.consent.changed
+    title: party.consent.changed
+    description: >
+      Declared domain event for this vertical (SPEC 11.1.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: party.consent.changed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.1.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+operations:
+  publishPartyPartyCreated:
+    action: send
+    channel:
+      $ref: '#/channels/PartyPartyCreated'
+    summary: Publish party.party.created
+    description: >
+      Publishes party.party.created through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: party.party.created
+    x-status: planned
+  publishPartyPartyUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/PartyPartyUpdated'
+    summary: Publish party.party.updated
+    description: >
+      Publishes party.party.updated through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: party.party.updated
+    x-status: planned
+  publishPartyPartyStatusChanged:
+    action: send
+    channel:
+      $ref: '#/channels/PartyPartyStatusChanged'
+    summary: Publish party.party.status-changed
+    description: >
+      Publishes party.party.status-changed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: party.party.status-changed
+    x-status: planned
+  publishPartyPartyMerged:
+    action: send
+    channel:
+      $ref: '#/channels/PartyPartyMerged'
+    summary: Publish party.party.merged
+    description: >
+      Publishes party.party.merged through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: party.party.merged
+    x-status: planned
+  publishPartyRoleAdded:
+    action: send
+    channel:
+      $ref: '#/channels/PartyRoleAdded'
+    summary: Publish party.role.added
+    description: >
+      Publishes party.role.added through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: party.role.added
+    x-status: planned
+  publishPartyRoleEnded:
+    action: send
+    channel:
+      $ref: '#/channels/PartyRoleEnded'
+    summary: Publish party.role.ended
+    description: >
+      Publishes party.role.ended through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: party.role.ended
+    x-status: planned
+  publishPartyScreeningCompleted:
+    action: send
+    channel:
+      $ref: '#/channels/PartyScreeningCompleted'
+    summary: Publish party.screening.completed
+    description: >
+      Publishes party.screening.completed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: party.screening.completed
+    x-status: planned
+  publishPartyScreeningBlocked:
+    action: send
+    channel:
+      $ref: '#/channels/PartyScreeningBlocked'
+    summary: Publish party.screening.blocked
+    description: >
+      Publishes party.screening.blocked through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: party.screening.blocked
+    x-status: planned
+  publishPartyConsentChanged:
+    action: send
+    channel:
+      $ref: '#/channels/PartyConsentChanged'
+    summary: Publish party.consent.changed
+    description: >
+      Publishes party.consent.changed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: party.consent.changed
+    x-status: planned
+components:
+  messages:
+    DomainEvent:
+      name: DomainEvent
+      title: EIA domain event envelope
+      summary: One immutable fact published by a vertical.
+      contentType: application/json
+      headers:
+        type: object
+        additionalProperties: true
+        properties:
+          X-EIA-Event-Id:
+            type: string
+            format: uuid
+          X-EIA-Event-Type:
+            type: string
+          X-EIA-Event-Version:
+            type: integer
+          X-EIA-Aggregate-Version:
+            type: integer
+          Idempotency-Key:
+            type: string
+          X-EIA-Signature:
+            type: string
+      payload:
+        $ref: '../schemas/event-envelope.schema.json'
+  securitySchemes:
+    outboxSignature:
+      type: httpApiKey
+      name: X-EIA-Signature
+      in: header
+      description: >
+        HMAC-SHA256 over the timestamp and the exact request body, in the form
+        t=<unix>,v1=<hex> (SPEC 7.5.1).
+x-vertical: party
+x-spec-section: SPEC 11.1.9
+x-status: planned
+x-implementation:
+  publisher: none
+  subscriber: none
+  notes: >
+    The current vertical slices emit no events; the outbox tables and the
+    dispatcher described in SPEC 7.5 are not implemented. This document is the
+    agreed event contract for the publisher that will be built.
+
+x-consumed-events:
+  - policy.policy.issued
+  - contract.contract.bound
+  - direct.claim.registered
+  - assumed.claim.registered
+  - payment.payment.paid
+  - document.document.registered

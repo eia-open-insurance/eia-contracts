@@ -1,0 +1,387 @@
+openapi: 3.1.0
+info:
+  title: EIA canonical shared API components
+  version: 1.0.0
+  summary: Shared error, money, paging, audit, and tenant/book components for every EIA API.
+  description: >
+    Shared OpenAPI 3.1 components referenced by the per-vertical contract
+    documents in this directory. The components are the canonical definitions
+    of the error envelope, money, cursor pagination, audit fields, and the
+    tenant and book request headers. Vertical documents reference them with a
+    relative file reference such as
+    `./components.yaml#/components/schemas/Problem`.
+
+    Authority is SPEC.md sections 6.11, 7.6, 10.3, 12.2, and 12.6. Where the
+    implemented services deviate from a component, the deviation is recorded
+    in MISMATCHES.md rather than encoded here: a canonical contract states the
+    agreed shape, not the current drift.
+  contact:
+    name: EIA Architecture
+    url: https://github.com/eia-open-insurance
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+servers:
+  - url: https://gateway.eia-open-insurance.example
+    description: >
+      Public gateway. Only `/api/v1/**` routes are exposed here; the
+      `/internal/v1/**` routes of the expert services are reachable only from
+      inside the platform network.
+tags:
+  - name: Shared components
+    description: Canonical reusable request parameters, responses, and schemas.
+paths: {}
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: EIA_SESSION
+      description: >
+        Opaque session cookie issued and rotated by eia-platform/auth
+        (SPEC 9.1). Authorization and book-role checks happen inside the
+        domain services (SPEC 3.6.2), not in the gateway.
+  parameters:
+    TenantHeader:
+      name: X-EIA-Tenant
+      in: header
+      required: true
+      description: >
+        Signed tenant context. The domain and expert services resolve the
+        tenant from this header and never from the request body. A missing
+        header is a 400 with the vertical's tenant-required error code.
+      schema:
+        type: string
+        format: uuid
+    BookHeaderDirect:
+      name: X-EIA-Book
+      in: header
+      required: true
+      description: >
+        Book scope for a DIRECT-only vertical. The services treat a missing or
+        different book as an inaccessible resource (404) rather than a
+        permission failure (403), so the response cannot confirm that a record
+        exists in the other book (SPEC 3.6.2, WALL-06). Cession and
+        Retrocession currently answer 400 BOOK_REQUIRED instead; see
+        MISMATCHES.md.
+      schema:
+        type: string
+        enum:
+          - DIRECT
+    BookHeaderAssumed:
+      name: X-EIA-Book
+      in: header
+      required: true
+      description: >
+        Book scope for an ASSUMED-only vertical. A missing or different book is
+        hidden as a 404 by Assumed Claims; Retrocession currently answers 400
+        BOOK_REQUIRED instead. See MISMATCHES.md.
+      schema:
+        type: string
+        enum:
+          - ASSUMED
+    TenantIdQuery:
+      name: tenantId
+      in: query
+      required: true
+      description: >
+        Tenant identity on the internal expert API. The expert is never exposed
+        through the gateway and receives the tenant resolved by its domain
+        service.
+      schema:
+        type: string
+        format: uuid
+    DirectClaimStatusFilter:
+      name: status
+      in: query
+      required: false
+      description: Restrict the claim list to one lifecycle status.
+      schema:
+        $ref: '#/components/schemas/DirectClaimStatus'
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      description: >
+        End-to-end correlation identity (SPEC 12.6). Planned: the implemented
+        controllers neither accept nor echo it yet.
+      x-status: planned
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >
+        Idempotency scope for transaction submission (SPEC 12.3 and 12.6).
+        Planned: no implemented create endpoint enforces it yet.
+      x-status: planned
+      schema:
+        type: string
+        pattern: '^[0-9a-fA-F-]{36}$'
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: >
+        Optimistic concurrency entity tag (SPEC 12.6). Planned: the services
+        take `expectedVersion` in the request body instead and do not emit
+        ETag.
+      x-status: planned
+      schema:
+        type: string
+  schemas:
+    Problem:
+      $ref: '../schemas/error-envelope.schema.json'
+    ProblemFieldError:
+      type: object
+      description: One field-level problem inside the canonical error envelope.
+      additionalProperties: false
+      required:
+        - field
+        - code
+        - message
+      properties:
+        field:
+          type: string
+          description: JSON field name or request parameter name.
+        code:
+          type: string
+          description: Stable machine-readable field error code, for example INVALID_STATUS_TRANSITION.
+        message:
+          type: string
+          description: Human-readable explanation. Never contains PHI or stack traces.
+    Money:
+      $ref: '../schemas/money.schema.json'
+    MoneyAmount:
+      $ref: '../schemas/money.schema.json#/$defs/MoneyAmount'
+    CurrencyCode:
+      $ref: '../schemas/money.schema.json#/$defs/CurrencyCode'
+    Percent:
+      type: string
+      description: >
+        Decimal fraction with up to six fraction digits, for example
+        `0.150000` for fifteen percent (SPEC 10.3). Never a JSON number.
+        Planned: no implemented payload carries a Percent yet.
+      x-status: planned
+      pattern: '^[0-9]{1,3}(?:\.[0-9]{1,6})?$'
+      examples:
+        - '0.150000'
+    AuditFields:
+      type: object
+      description: >
+        Audit and optimistic-concurrency fields carried by every persisted
+        resource projection (SPEC 7.10). The implemented services emit
+        `createdAt`, `updatedAt`, and `version`. Actor fields such as
+        `createdBy` and `updatedBy` are planned but are not returned yet, so
+        they are deliberately omitted from this schema.
+      required:
+        - createdAt
+        - updatedAt
+        - version
+      properties:
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        version:
+          type: integer
+          minimum: 0
+          description: >
+            Aggregate version, incremented on every accepted write. Callers
+            echo it back as `expectedVersion` where the operation supports
+            optimistic concurrency.
+    Page:
+      type: object
+      description: >
+        Planned cursor-paged collection envelope (SPEC 7.6). No implemented
+        list endpoint returns it yet: every current list operation returns a
+        bare JSON array. See MISMATCHES.md.
+      x-status: planned
+      required:
+        - data
+        - page
+      properties:
+        data:
+          type: array
+          items: {}
+        page:
+          $ref: '#/components/schemas/PageMeta'
+        _links:
+          $ref: '#/components/schemas/Links'
+    PageMeta:
+      type: object
+      description: Cursor pagination metadata (SPEC 7.6). `total` is optional.
+      x-status: planned
+      additionalProperties: false
+      required:
+        - size
+        - hasMore
+      properties:
+        size:
+          type: integer
+          minimum: 1
+          maximum: 200
+          description: Page size requested by the client. Default 25, maximum 200.
+        hasMore:
+          type: boolean
+        nextCursor:
+          type: [string, 'null']
+          description: Opaque cursor for the next page; null on the last page.
+        total:
+          type: [integer, 'null']
+          minimum: 0
+          description: Omitted when counting would be expensive.
+    Links:
+      type: object
+      description: >
+        Hypermedia links on a detail or collection response (SPEC 7.6). Planned:
+        implemented resource projections do not carry `_links` yet.
+      x-status: planned
+      additionalProperties:
+        type: object
+        required:
+          - href
+        properties:
+          href:
+            type: string
+          type:
+            type: string
+          vertical:
+            type: string
+    EntityRef:
+      type: object
+      description: Cross-vertical reference (SPEC 12.2).
+      additionalProperties: false
+      required:
+        - tenantId
+        - book
+        - vertical
+        - type
+        - id
+      properties:
+        tenantId:
+          type: string
+          format: uuid
+        book:
+          type: string
+          enum:
+            - DIRECT
+            - ASSUMED
+        vertical:
+          $ref: '#/components/schemas/VerticalId'
+        type:
+          type: string
+          description: Allowlisted resource type within the vertical, for example claim.
+        id:
+          type: string
+          format: uuid
+          description: UUIDv7 resource identity.
+        businessKey:
+          type: [string, 'null']
+          maxLength: 64
+        display:
+          type: [string, 'null']
+          maxLength: 300
+        status:
+          type: [string, 'null']
+          maxLength: 32
+        version:
+          type: [integer, 'null']
+          minimum: 0
+        classification:
+          type: [string, 'null']
+        href:
+          type: [string, 'null']
+          maxLength: 512
+    VerticalId:
+      type: string
+      description: >
+        Vertical identity used in references and in the event envelope. The
+        HTTP path segment differs for the claim verticals (`direct-claims`,
+        `assumed-claims`); the identifier here is the event and reference form
+        used by SPEC 12.4.
+      enum:
+        - party
+        - policy
+        - contract
+        - direct
+        - assumed
+        - document
+        - payment
+        - notifications
+        - cession
+        - retrocession
+    DirectClaimStatus:
+      type: string
+      description: Direct claim lifecycle status (SPEC 11.4.6).
+      enum:
+        - DRAFT
+        - REGISTERED
+        - OPEN
+        - COVERAGE_REVIEW
+        - RESERVED
+        - IN_LITIGATION
+        - IN_SETTLEMENT
+        - SETTLED
+        - PAYMENT_PENDING
+        - PAID
+        - CLOSED
+        - DENIED
+        - WITHDRAWN
+        - DISMISSED
+        - TRANSFERRED
+        - BANKRUPTCY_TRUST
+        - ON_APPEAL
+        - REOPENED
+  responses:
+    BadRequest:
+      description: The request is malformed or violates a validation rule.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    NotFound:
+      description: >
+        The resource does not exist or is not visible in the caller's tenant or
+        book scope.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Conflict:
+      description: >
+        A concurrent modification, duplicate business key, or illegal lifecycle
+        transition.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    UnprocessableContent:
+      description: The request is well formed but a domain policy rejects it.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    BadGateway:
+      description: An upstream expert or integration returned an unusable response.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    ServiceUnavailable:
+      description: A dependency is unavailable; retry after backoff.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Problem:
+      description: Canonical error response (RFC 9457 `application/problem+json`).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'

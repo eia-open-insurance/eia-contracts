@@ -1,0 +1,255 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.eia.example/schemas/event-envelope.schema.json",
+  "title": "EIA canonical event envelope",
+  "description": "Envelope for every domain event (SPEC 7.5.4, 12.4, and EV-01 to EV-10). No publisher or subscriber exists in the current codebase, so this schema is canonical and planned rather than verified. Consumers must ignore unknown members and unknown event types (EV-06). The event payload lives in data and carries identifiers and deltas, not entire object graphs (EV-03). SPEC 3.6 requires every business event to carry the book; the example envelope in SPEC 12.4 does not show it.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "eventId",
+    "eventType",
+    "eventVersion",
+    "occurredAt",
+    "recordedAt",
+    "tenantId",
+    "book",
+    "vertical",
+    "aggregateType",
+    "aggregateId",
+    "aggregateVersion",
+    "sequence",
+    "subject",
+    "data"
+  ],
+  "properties": {
+    "eventId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Event identity. A republished event keeps its original eventId (EV-10)."
+    },
+    "eventType": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*\\.[a-z][a-z0-9-]*\\.[a-z][a-z0-9-]*$",
+      "description": "Event name in the form {vertical}.{aggregate}.{past-tense-verb}, kebab case (EV-01), for example policy.policy.issued."
+    },
+    "eventVersion": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Payload version. Additive changes stay in the same version; removals or meaning changes require a new version and dual publication (EV-05)."
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the fact happened, RFC 3339 with offset."
+    },
+    "recordedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the outbox row was written."
+    },
+    "tenantId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "book": {
+      "type": "string",
+      "enum": [
+        "DIRECT",
+        "ASSUMED"
+      ],
+      "description": "Business book of the aggregate (SPEC 3.6.1). Required for business events; shared services must carry the book of the subject."
+    },
+    "vertical": {
+      "type": "string",
+      "enum": [
+        "party",
+        "policy",
+        "contract",
+        "direct",
+        "assumed",
+        "document",
+        "payment",
+        "notifications",
+        "cession",
+        "retrocession"
+      ],
+      "description": "Publishing vertical. The claim verticals use direct and assumed in event names even though their HTTP path segments are direct-claims and assumed-claims."
+    },
+    "aggregateType": {
+      "type": "string",
+      "maxLength": 64,
+      "description": "Aggregate type, for example Policy or Claim."
+    },
+    "aggregateId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "aggregateVersion": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Monotonic aggregate version and the ordering authority for the aggregate (EV-08)."
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Outbox sequence used for replay and gap detection."
+    },
+    "correlationId": {
+      "type": ["string", "null"],
+      "format": "uuid"
+    },
+    "causationId": {
+      "type": ["string", "null"],
+      "format": "uuid",
+      "description": "Event or request that caused this fact."
+    },
+    "transactionId": {
+      "type": ["string", "null"],
+      "format": "uuid",
+      "description": "Business transaction that produced the fact, when there is one."
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "USER",
+            "SYSTEM",
+            "SCHEDULE",
+            "INTEGRATION"
+          ]
+        },
+        "id": {
+          "type": ["string", "null"],
+          "format": "uuid"
+        },
+        "displayName": {
+          "type": ["string", "null"],
+          "maxLength": 200
+        },
+        "delegationId": {
+          "type": ["string", "null"],
+          "format": "uuid"
+        },
+        "authStrength": {
+          "type": ["string", "null"],
+          "maxLength": 32
+        }
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "vertical",
+        "type",
+        "id"
+      ],
+      "properties": {
+        "vertical": {
+          "type": "string",
+          "enum": [
+            "party",
+            "policy",
+            "contract",
+            "direct",
+            "assumed",
+            "document",
+            "payment",
+            "notifications",
+            "cession",
+            "retrocession"
+          ]
+        },
+        "type": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "businessKey": {
+          "type": ["string", "null"],
+          "maxLength": 64
+        }
+      }
+    },
+    "links": {
+      "type": "array",
+      "description": "Newly created relationships so lineage can be projected without a callback (EV-04).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "linkType",
+          "target"
+        ],
+        "properties": {
+          "linkType": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "vertical",
+              "type",
+              "id"
+            ],
+            "properties": {
+              "vertical": {
+                "type": "string",
+                "enum": [
+                  "party",
+                  "policy",
+                  "contract",
+                  "direct",
+                  "assumed",
+                  "document",
+                  "payment",
+                  "notifications",
+                  "cession",
+                  "retrocession"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "maxLength": 64
+              },
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          }
+        }
+      }
+    },
+    "data": {
+      "type": "object",
+      "description": "Event-specific payload. Defined per event type in the owning vertical chapter; never contains PHI beyond the minimum necessary (EV-07).",
+      "additionalProperties": true
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "schemaVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "sourceBuild": {
+          "type": "string",
+          "maxLength": 200
+        }
+      }
+    }
+  }
+}

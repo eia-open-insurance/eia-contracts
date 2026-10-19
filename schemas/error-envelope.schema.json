@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.eia.example/schemas/error-envelope.schema.json",
+  "title": "EIA canonical error envelope",
+  "description": "Canonical error body for every EIA API, modelled on RFC 9457 application/problem+json (SPEC 6.11 and 12.2). Unknown members must be ignored by consumers. The canonical code scheme is EIA-<VERT|-PLT|-TX>-<NNNN> (SPEC 6.11); a service that still emits a legacy code such as NOT_FOUND is tracked in MISMATCHES.md. correlationId, transactionId, and meta are part of the canonical envelope but are not emitted by every service yet.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "type",
+    "title",
+    "status",
+    "detail",
+    "instance",
+    "code",
+    "category",
+    "retryable"
+  ],
+  "properties": {
+    "type": {
+      "type": "string",
+      "format": "uri-reference",
+      "description": "Problem type URI that identifies the error class. Services derive it from the stable error code."
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "description": "Short, human-readable summary of the problem type."
+    },
+    "status": {
+      "type": "integer",
+      "minimum": 400,
+      "maximum": 599,
+      "description": "HTTP status code generated for this occurrence."
+    },
+    "detail": {
+      "type": "string",
+      "description": "Human-readable explanation for this occurrence. Never contains PHI, SQL, stack traces, tokens, or table names."
+    },
+    "instance": {
+      "type": "string",
+      "description": "Request path that produced the problem, for example /api/v1/policies/0192f3a4-2b7e-7d1f-a9c4-3e8b5f0c9d21."
+    },
+    "code": {
+      "type": "string",
+      "pattern": "^EIA-[A-Z]{3}-[0-9]{4}$",
+      "description": "Stable error code in the SPEC 6.11 scheme, for example EIA-PAY-5101. Never reused for a different meaning."
+    },
+    "category": {
+      "type": "string",
+      "description": "Failure category from SPEC 6.11. Consumers may branch on it; it is more stable than the HTTP status.",
+      "enum": [
+        "VALIDATION",
+        "AUTHENTICATION",
+        "AUTHORIZATION",
+        "NOT_FOUND",
+        "CONFLICT",
+        "BUSINESS_RULE",
+        "APPROVAL_REQUIRED",
+        "RATE_LIMIT",
+        "DEPENDENCY",
+        "TIMEOUT",
+        "DEADLINE_EXCEEDED",
+        "INTERNAL"
+      ]
+    },
+    "retryable": {
+      "type": "boolean",
+      "description": "True only when the identical request may be retried without a business change."
+    },
+    "correlationId": {
+      "type": ["string", "null"],
+      "format": "uuid",
+      "description": "Correlation identity of the request chain (SPEC 12.6). Not emitted by every service yet."
+    },
+    "transactionId": {
+      "type": ["string", "null"],
+      "format": "uuid",
+      "description": "Business transaction identity when the failure happened inside a transaction submission."
+    },
+    "errors": {
+      "type": "array",
+      "description": "Field-level problems. Empty when the failure is not attributable to a specific field.",
+      "items": {
+        "$ref": "#/$defs/FieldError"
+      }
+    },
+    "meta": {
+      "type": "object",
+      "description": "Additional machine-readable context for the failure, for example the caller's authority limit. Never contains PHI.",
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "FieldError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "field",
+        "code",
+        "message"
+      ],
+      "properties": {
+        "field": {
+          "type": "string",
+          "description": "JSON field or request parameter name."
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Stable machine-readable field error code, for example INVALID_STATUS_TRANSITION."
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable explanation for the field."
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "type": "https://errors.eia.example/eia-rns-7003",
+      "title": "Invalid status transition",
+      "status": 409,
+      "detail": "Assumed claim status cannot move from OPEN to PAID.",
+      "instance": "/api/v1/assumed-claims/0192f3a4-2b7e-7d1f-a9c4-3e8b5f0c9d21/status",
+      "code": "EIA-RNS-7003",
+      "category": "CONFLICT",
+      "retryable": false,
+      "errors": [
+        {
+          "field": "targetStatus",
+          "code": "INVALID_STATUS_TRANSITION",
+          "message": "OPEN cannot transition to PAID"
+        }
+      ]
+    }
+  ]
+}

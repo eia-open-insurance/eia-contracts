@@ -1,0 +1,419 @@
+asyncapi: 3.0.0
+id: urn:eia:contracts:events:cession
+info:
+  title: EIA Cession events
+  version: 1.0.0
+  summary: Published domain event names for the Cession vertical.
+  description: >
+    Event contract for the Cession vertical. The authoritative event names are
+    SPEC 11.9.6; the canonical envelope is
+    ../schemas/event-envelope.schema.json.
+
+    There is no message broker (ADR-0004). The platform outbox delivers events
+    over authenticated HTTPS to each subscriber endpoint, with an HMAC-SHA256
+    signature (SPEC 7.5.1). A channel address is the logical routing key and
+    equals the event name; it is not a broker topic.
+
+    No publisher or subscriber exists in the current codebase. Every channel
+    and operation in this document is therefore marked x-status planned. The
+    catalog and cross-vertical subscriptions live in event-catalog.yaml.
+  contact:
+    name: EIA Architecture
+    url: https://github.com/eia-open-insurance
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+defaultContentType: application/json
+servers:
+  subscriberEndpoint:
+    host: subscriber-defined
+    protocol: https
+    description: >
+      Each subscriber registers an HTTPS endpoint and signing key. The outbox
+      posts one event per request and requires a 2xx acknowledgement.
+channels:
+  CessionContractCreated:
+    address: cession.contract.created
+    title: cession.contract.created
+    description: >
+      Declared domain event for this vertical (SPEC 11.9.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: cession.contract.created
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.9.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  CessionContractBound:
+    address: cession.contract.bound
+    title: cession.contract.bound
+    description: >
+      Declared domain event for this vertical (SPEC 11.9.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: cession.contract.bound
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.9.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  CessionContractEndorsed:
+    address: cession.contract.endorsed
+    title: cession.contract.endorsed
+    description: >
+      Declared domain event for this vertical (SPEC 11.9.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: cession.contract.endorsed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.9.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  CessionContractRenewed:
+    address: cession.contract.renewed
+    title: cession.contract.renewed
+    description: >
+      Declared domain event for this vertical (SPEC 11.9.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: cession.contract.renewed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.9.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  CessionContractCancelled:
+    address: cession.contract.cancelled
+    title: cession.contract.cancelled
+    description: >
+      Declared domain event for this vertical (SPEC 11.9.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: cession.contract.cancelled
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.9.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  CessionContractCommuted:
+    address: cession.contract.commuted
+    title: cession.contract.commuted
+    description: >
+      Declared domain event for this vertical (SPEC 11.9.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: cession.contract.commuted
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.9.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  CessionRuleActivated:
+    address: cession.rule.activated
+    title: cession.rule.activated
+    description: >
+      Declared domain event for this vertical (SPEC 11.9.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: cession.rule.activated
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.9.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  CessionCaseCreated:
+    address: cession.case.created
+    title: cession.case.created
+    description: >
+      Declared domain event for this vertical (SPEC 11.9.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: cession.case.created
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.9.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  CessionHandoffSent:
+    address: cession.handoff.sent
+    title: cession.handoff.sent
+    description: >
+      Declared domain event for this vertical (SPEC 11.9.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: cession.handoff.sent
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.9.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  CessionHandoffAcknowledged:
+    address: cession.handoff.acknowledged
+    title: cession.handoff.acknowledged
+    description: >
+      Declared domain event for this vertical (SPEC 11.9.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: cession.handoff.acknowledged
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.9.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  CessionHandoffRejected:
+    address: cession.handoff.rejected
+    title: cession.handoff.rejected
+    description: >
+      Declared domain event for this vertical (SPEC 11.9.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: cession.handoff.rejected
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.9.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  CessionConfirmationReceived:
+    address: cession.confirmation.received
+    title: cession.confirmation.received
+    description: >
+      Declared domain event for this vertical (SPEC 11.9.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: cession.confirmation.received
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.9.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  CessionRecoverableUpdated:
+    address: cession.recoverable.updated
+    title: cession.recoverable.updated
+    description: >
+      Declared domain event for this vertical (SPEC 11.9.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: cession.recoverable.updated
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.9.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  CessionReconciliationBreak:
+    address: cession.reconciliation.break
+    title: cession.reconciliation.break
+    description: >
+      Declared domain event for this vertical (SPEC 11.9.6). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: cession.reconciliation.break
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.9.6
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+operations:
+  publishCessionContractCreated:
+    action: send
+    channel:
+      $ref: '#/channels/CessionContractCreated'
+    summary: Publish cession.contract.created
+    description: >
+      Publishes cession.contract.created through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: cession.contract.created
+    x-status: planned
+  publishCessionContractBound:
+    action: send
+    channel:
+      $ref: '#/channels/CessionContractBound'
+    summary: Publish cession.contract.bound
+    description: >
+      Publishes cession.contract.bound through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: cession.contract.bound
+    x-status: planned
+  publishCessionContractEndorsed:
+    action: send
+    channel:
+      $ref: '#/channels/CessionContractEndorsed'
+    summary: Publish cession.contract.endorsed
+    description: >
+      Publishes cession.contract.endorsed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: cession.contract.endorsed
+    x-status: planned
+  publishCessionContractRenewed:
+    action: send
+    channel:
+      $ref: '#/channels/CessionContractRenewed'
+    summary: Publish cession.contract.renewed
+    description: >
+      Publishes cession.contract.renewed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: cession.contract.renewed
+    x-status: planned
+  publishCessionContractCancelled:
+    action: send
+    channel:
+      $ref: '#/channels/CessionContractCancelled'
+    summary: Publish cession.contract.cancelled
+    description: >
+      Publishes cession.contract.cancelled through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: cession.contract.cancelled
+    x-status: planned
+  publishCessionContractCommuted:
+    action: send
+    channel:
+      $ref: '#/channels/CessionContractCommuted'
+    summary: Publish cession.contract.commuted
+    description: >
+      Publishes cession.contract.commuted through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: cession.contract.commuted
+    x-status: planned
+  publishCessionRuleActivated:
+    action: send
+    channel:
+      $ref: '#/channels/CessionRuleActivated'
+    summary: Publish cession.rule.activated
+    description: >
+      Publishes cession.rule.activated through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: cession.rule.activated
+    x-status: planned
+  publishCessionCaseCreated:
+    action: send
+    channel:
+      $ref: '#/channels/CessionCaseCreated'
+    summary: Publish cession.case.created
+    description: >
+      Publishes cession.case.created through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: cession.case.created
+    x-status: planned
+  publishCessionHandoffSent:
+    action: send
+    channel:
+      $ref: '#/channels/CessionHandoffSent'
+    summary: Publish cession.handoff.sent
+    description: >
+      Publishes cession.handoff.sent through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: cession.handoff.sent
+    x-status: planned
+  publishCessionHandoffAcknowledged:
+    action: send
+    channel:
+      $ref: '#/channels/CessionHandoffAcknowledged'
+    summary: Publish cession.handoff.acknowledged
+    description: >
+      Publishes cession.handoff.acknowledged through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: cession.handoff.acknowledged
+    x-status: planned
+  publishCessionHandoffRejected:
+    action: send
+    channel:
+      $ref: '#/channels/CessionHandoffRejected'
+    summary: Publish cession.handoff.rejected
+    description: >
+      Publishes cession.handoff.rejected through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: cession.handoff.rejected
+    x-status: planned
+  publishCessionConfirmationReceived:
+    action: send
+    channel:
+      $ref: '#/channels/CessionConfirmationReceived'
+    summary: Publish cession.confirmation.received
+    description: >
+      Publishes cession.confirmation.received through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: cession.confirmation.received
+    x-status: planned
+  publishCessionRecoverableUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/CessionRecoverableUpdated'
+    summary: Publish cession.recoverable.updated
+    description: >
+      Publishes cession.recoverable.updated through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: cession.recoverable.updated
+    x-status: planned
+  publishCessionReconciliationBreak:
+    action: send
+    channel:
+      $ref: '#/channels/CessionReconciliationBreak'
+    summary: Publish cession.reconciliation.break
+    description: >
+      Publishes cession.reconciliation.break through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: cession.reconciliation.break
+    x-status: planned
+components:
+  messages:
+    DomainEvent:
+      name: DomainEvent
+      title: EIA domain event envelope
+      summary: One immutable fact published by a vertical.
+      contentType: application/json
+      headers:
+        type: object
+        additionalProperties: true
+        properties:
+          X-EIA-Event-Id:
+            type: string
+            format: uuid
+          X-EIA-Event-Type:
+            type: string
+          X-EIA-Event-Version:
+            type: integer
+          X-EIA-Aggregate-Version:
+            type: integer
+          Idempotency-Key:
+            type: string
+          X-EIA-Signature:
+            type: string
+      payload:
+        $ref: '../schemas/event-envelope.schema.json'
+  securitySchemes:
+    outboxSignature:
+      type: httpApiKey
+      name: X-EIA-Signature
+      in: header
+      description: >
+        HMAC-SHA256 over the timestamp and the exact request body, in the form
+        t=<unix>,v1=<hex> (SPEC 7.5.1).
+x-vertical: cession
+x-spec-section: SPEC 11.9.6
+x-status: planned
+x-implementation:
+  publisher: none
+  subscriber: none
+  notes: >
+    The current vertical slices emit no events; the outbox tables and the
+    dispatcher described in SPEC 7.5 are not implemented. This document is the
+    agreed event contract for the publisher that will be built.
+
+x-consumed-events: []
+x-consumed-events-note: >
+  SPEC 11.9.6 lists published events only. Cession pulls policy and claim facts through the domain API, not through subscriptions.

@@ -1,0 +1,323 @@
+asyncapi: 3.0.0
+id: urn:eia:contracts:events:notifications
+info:
+  title: EIA Notifications events
+  version: 1.0.0
+  summary: Published domain event names for the Notifications vertical.
+  description: >
+    Event contract for the Notifications vertical. The authoritative event names are
+    SPEC 11.8.9; the canonical envelope is
+    ../schemas/event-envelope.schema.json.
+
+    There is no message broker (ADR-0004). The platform outbox delivers events
+    over authenticated HTTPS to each subscriber endpoint, with an HMAC-SHA256
+    signature (SPEC 7.5.1). A channel address is the logical routing key and
+    equals the event name; it is not a broker topic.
+
+    No publisher or subscriber exists in the current codebase. Every channel
+    and operation in this document is therefore marked x-status planned. The
+    catalog and cross-vertical subscriptions live in event-catalog.yaml.
+  contact:
+    name: EIA Architecture
+    url: https://github.com/eia-open-insurance
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+defaultContentType: application/json
+servers:
+  subscriberEndpoint:
+    host: subscriber-defined
+    protocol: https
+    description: >
+      Each subscriber registers an HTTPS endpoint and signing key. The outbox
+      posts one event per request and requires a 2xx acknowledgement.
+channels:
+  NotificationsNotificationIssued:
+    address: notifications.notification.issued
+    title: notifications.notification.issued
+    description: >
+      Declared domain event for this vertical (SPEC 11.8.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: notifications.notification.issued
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.8.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  NotificationsNotificationDelivered:
+    address: notifications.notification.delivered
+    title: notifications.notification.delivered
+    description: >
+      Declared domain event for this vertical (SPEC 11.8.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: notifications.notification.delivered
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.8.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  NotificationsNotificationRead:
+    address: notifications.notification.read
+    title: notifications.notification.read
+    description: >
+      Declared domain event for this vertical (SPEC 11.8.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: notifications.notification.read
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.8.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  NotificationsNotificationAcknowledged:
+    address: notifications.notification.acknowledged
+    title: notifications.notification.acknowledged
+    description: >
+      Declared domain event for this vertical (SPEC 11.8.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: notifications.notification.acknowledged
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.8.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  NotificationsNotificationActioned:
+    address: notifications.notification.actioned
+    title: notifications.notification.actioned
+    description: >
+      Declared domain event for this vertical (SPEC 11.8.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: notifications.notification.actioned
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.8.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  NotificationsNotificationEscalated:
+    address: notifications.notification.escalated
+    title: notifications.notification.escalated
+    description: >
+      Declared domain event for this vertical (SPEC 11.8.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: notifications.notification.escalated
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.8.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  NotificationsNotificationFailed:
+    address: notifications.notification.failed
+    title: notifications.notification.failed
+    description: >
+      Declared domain event for this vertical (SPEC 11.8.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: notifications.notification.failed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.8.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  NotificationsNotificationSuppressed:
+    address: notifications.notification.suppressed
+    title: notifications.notification.suppressed
+    description: >
+      Declared domain event for this vertical (SPEC 11.8.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: notifications.notification.suppressed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.8.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  NotificationsDeliveryFailed:
+    address: notifications.delivery.failed
+    title: notifications.delivery.failed
+    description: >
+      Declared domain event for this vertical (SPEC 11.8.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: notifications.delivery.failed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.8.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  NotificationsDigestSent:
+    address: notifications.digest.sent
+    title: notifications.digest.sent
+    description: >
+      Declared domain event for this vertical (SPEC 11.8.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: notifications.digest.sent
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.8.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+operations:
+  publishNotificationsNotificationIssued:
+    action: send
+    channel:
+      $ref: '#/channels/NotificationsNotificationIssued'
+    summary: Publish notifications.notification.issued
+    description: >
+      Publishes notifications.notification.issued through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: notifications.notification.issued
+    x-status: planned
+  publishNotificationsNotificationDelivered:
+    action: send
+    channel:
+      $ref: '#/channels/NotificationsNotificationDelivered'
+    summary: Publish notifications.notification.delivered
+    description: >
+      Publishes notifications.notification.delivered through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: notifications.notification.delivered
+    x-status: planned
+  publishNotificationsNotificationRead:
+    action: send
+    channel:
+      $ref: '#/channels/NotificationsNotificationRead'
+    summary: Publish notifications.notification.read
+    description: >
+      Publishes notifications.notification.read through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: notifications.notification.read
+    x-status: planned
+  publishNotificationsNotificationAcknowledged:
+    action: send
+    channel:
+      $ref: '#/channels/NotificationsNotificationAcknowledged'
+    summary: Publish notifications.notification.acknowledged
+    description: >
+      Publishes notifications.notification.acknowledged through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: notifications.notification.acknowledged
+    x-status: planned
+  publishNotificationsNotificationActioned:
+    action: send
+    channel:
+      $ref: '#/channels/NotificationsNotificationActioned'
+    summary: Publish notifications.notification.actioned
+    description: >
+      Publishes notifications.notification.actioned through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: notifications.notification.actioned
+    x-status: planned
+  publishNotificationsNotificationEscalated:
+    action: send
+    channel:
+      $ref: '#/channels/NotificationsNotificationEscalated'
+    summary: Publish notifications.notification.escalated
+    description: >
+      Publishes notifications.notification.escalated through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: notifications.notification.escalated
+    x-status: planned
+  publishNotificationsNotificationFailed:
+    action: send
+    channel:
+      $ref: '#/channels/NotificationsNotificationFailed'
+    summary: Publish notifications.notification.failed
+    description: >
+      Publishes notifications.notification.failed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: notifications.notification.failed
+    x-status: planned
+  publishNotificationsNotificationSuppressed:
+    action: send
+    channel:
+      $ref: '#/channels/NotificationsNotificationSuppressed'
+    summary: Publish notifications.notification.suppressed
+    description: >
+      Publishes notifications.notification.suppressed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: notifications.notification.suppressed
+    x-status: planned
+  publishNotificationsDeliveryFailed:
+    action: send
+    channel:
+      $ref: '#/channels/NotificationsDeliveryFailed'
+    summary: Publish notifications.delivery.failed
+    description: >
+      Publishes notifications.delivery.failed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: notifications.delivery.failed
+    x-status: planned
+  publishNotificationsDigestSent:
+    action: send
+    channel:
+      $ref: '#/channels/NotificationsDigestSent'
+    summary: Publish notifications.digest.sent
+    description: >
+      Publishes notifications.digest.sent through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: notifications.digest.sent
+    x-status: planned
+components:
+  messages:
+    DomainEvent:
+      name: DomainEvent
+      title: EIA domain event envelope
+      summary: One immutable fact published by a vertical.
+      contentType: application/json
+      headers:
+        type: object
+        additionalProperties: true
+        properties:
+          X-EIA-Event-Id:
+            type: string
+            format: uuid
+          X-EIA-Event-Type:
+            type: string
+          X-EIA-Event-Version:
+            type: integer
+          X-EIA-Aggregate-Version:
+            type: integer
+          Idempotency-Key:
+            type: string
+          X-EIA-Signature:
+            type: string
+      payload:
+        $ref: '../schemas/event-envelope.schema.json'
+  securitySchemes:
+    outboxSignature:
+      type: httpApiKey
+      name: X-EIA-Signature
+      in: header
+      description: >
+        HMAC-SHA256 over the timestamp and the exact request body, in the form
+        t=<unix>,v1=<hex> (SPEC 7.5.1).
+x-vertical: notifications
+x-spec-section: SPEC 11.8.9
+x-status: planned
+x-implementation:
+  publisher: none
+  subscriber: none
+  notes: >
+    The current vertical slices emit no events; the outbox tables and the
+    dispatcher described in SPEC 7.5 are not implemented. This document is the
+    agreed event contract for the publisher that will be built.
+
+x-consumed-events: []
+x-consumed-events-note: >
+  Consumed events are every domain event with a notification rule. The subscription registry, not this catalog, is the authoritative list (SPEC 11.8.9).

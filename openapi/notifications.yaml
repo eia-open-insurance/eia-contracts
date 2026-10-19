@@ -1,0 +1,584 @@
+openapi: 3.1.0
+info:
+  title: EIA Notifications API
+  version: 1.0.0
+  summary: Notification drafting and delivery administration and the Notifications expert API.
+  description: >
+    This document describes the implemented public Notifications domain API and
+    the internal Notifications expert API. The authoritative requirement is
+    SPEC 11.8 and SPEC 12; the implemented surface is the first vertical slice.
+
+    The slice supports list, detail, create, and send. Inbox, read and
+    acknowledge, actions, dismiss, unread count, the SSE stream, subscriptions,
+    preferences, and the admin template, rule, delivery, and queue surfaces
+    from SPEC 11.8.10 are planned and listed under x-planned-operations.
+
+    Notifications already emits the canonical RFC 9457 Problem envelope with
+    stable EIA-NTF-9xxx codes and `application/problem+json`.
+  contact:
+    name: EIA Architecture
+    url: https://github.com/eia-open-insurance
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+servers:
+  - url: https://gateway.eia-open-insurance.example
+    description: Public gateway (`/api/v1`).
+  - url: http://notifications-domain:8100
+    description: Notifications domain service (platform network).
+security:
+  - sessionCookie: []
+tags:
+  - name: Notifications
+    description: Public domain API used by the Notifications web remote.
+  - name: Notifications internal
+    description: Internal expert API. Not exposed through the gateway; called only by the Notifications domain service.
+paths:
+  /api/v1/notifications:
+    get:
+      operationId: listNotifications
+      tags:
+        - Notifications
+      summary: List notifications for the caller's tenant.
+      description: Returns a bare JSON array. Inbox filtering is planned.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+      responses:
+        '200':
+          description: Notifications of the tenant.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Notification'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '502':
+          $ref: './components.yaml#/components/responses/BadGateway'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createNotification
+      tags:
+        - Notifications
+      summary: Draft a notification.
+      description: >
+        Creates a notification in CREATED. When `templateCode` is supplied it
+        must reference an approved template for the tenant and channel; a
+        template version defaults to 1.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateNotificationRequest'
+      responses:
+        '201':
+          description: Notification created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notification'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '502':
+          $ref: './components.yaml#/components/responses/BadGateway'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/notifications/{notificationId}:
+    get:
+      operationId: getNotification
+      tags:
+        - Notifications
+      summary: Get a notification.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: notificationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Notification detail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notification'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/notifications/{notificationId}/send:
+    post:
+      operationId: sendNotification
+      tags:
+        - Notifications
+      summary: Send a drafted notification.
+      description: >
+        Only CREATED or QUEUED notifications can be sent. An approved template
+        is required (NTF-01, NTF-14). The send instant must not precede
+        `scheduledAt`.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: notificationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Notification after sending.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notification'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '502':
+          $ref: './components.yaml#/components/responses/BadGateway'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/notifications:
+    get:
+      operationId: expertListNotifications
+      tags:
+        - Notifications internal
+      summary: List notifications for a tenant (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+      responses:
+        '200':
+          description: Notifications of the tenant.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Notification'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertCreateNotification
+      tags:
+        - Notifications internal
+      summary: Draft a notification (expert).
+      security: []
+      x-internal-api: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateNotificationRequestInternal'
+      responses:
+        '201':
+          description: Notification created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notification'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/notifications/{notificationId}:
+    get:
+      operationId: expertGetNotification
+      tags:
+        - Notifications internal
+      summary: Get a notification (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: notificationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Notification detail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notification'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/notifications/{notificationId}/send:
+    post:
+      operationId: expertSendNotification
+      tags:
+        - Notifications internal
+      summary: Send a drafted notification (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: notificationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Notification after sending.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notification'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+components:
+  securitySchemes:
+    sessionCookie:
+      $ref: './components.yaml#/components/securitySchemes/sessionCookie'
+  schemas:
+    Notification:
+      allOf:
+        - $ref: './components.yaml#/components/schemas/AuditFields'
+      type: object
+      description: >
+        Notification projection. The SPEC 12.5.5 representation carries
+        category, severity, subject EntityRef, body, requiresAction, dueAt,
+        actions[], and _links; those are planned.
+      required:
+        - id
+        - tenantId
+        - notificationNumber
+        - notificationType
+        - channel
+        - status
+        - recipientPartyId
+        - subject
+        - body
+        - templateCode
+        - templateVersion
+        - scheduledAt
+        - sentAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        notificationNumber:
+          type: string
+          examples:
+            - NTF-2026-0000001
+        notificationType:
+          $ref: '#/components/schemas/NotificationType'
+        channel:
+          $ref: '#/components/schemas/NotificationChannel'
+        status:
+          $ref: '#/components/schemas/NotificationStatus'
+        recipientPartyId:
+          type: string
+          format: uuid
+        subject:
+          type: string
+          maxLength: 300
+        body:
+          type: string
+        templateCode:
+          type: [string, 'null']
+          maxLength: 64
+        templateVersion:
+          type: [integer, 'null']
+          minimum: 1
+        scheduledAt:
+          type: [string, 'null']
+          format: date-time
+        sentAt:
+          type: [string, 'null']
+          format: date-time
+    NotificationType:
+      type: string
+      description: Notification type from the SPEC 11.8.5 v1 list, as enforced by the expert.
+      enum:
+        - NEW_CLAIM_NOTICE
+        - CLAIM_ASSIGNED
+        - CLAIM_REASSIGNED
+        - CLAIM_RESERVE_CHANGED
+        - CLAIM_RESERVE_AUTHORITY_REQUEST
+        - CLAIM_SETTLEMENT_AUTHORITY_REQUEST
+        - CLAIM_COVERAGE_TENDER
+        - CLAIM_LARGE_LOSS
+        - CLAIM_SLA_BREACH
+        - CLAIM_DIARY_DUE
+        - CLAIM_SOL_ALERT
+        - CLAIM_CLOSED
+        - CLAIM_REOPENED
+        - CLAIM_MEDICAL_CRITERIA_INCOMPLETE
+        - CLAIM_PFS_MISSING
+        - CLAIM_LIEN_DEADLINE
+        - CLAIM_TRUST_BAR_DATE
+        - CLAIM_MMSEA_REPORTING_DUE
+        - POLICY_BOUND
+        - POLICY_ISSUED
+        - POLICY_ENDORSED
+        - POLICY_CANCELLED
+        - POLICY_REINSTATED
+        - POLICY_RENEWAL_DUE
+        - POLICY_EXPIRING
+        - POLICY_NON_RENEWAL
+        - POLICY_PREMIUM_AUDIT_DUE
+        - POLICY_MASS_TORT_PROFILE_REVIEW
+        - POLICY_AGGREGATE_THRESHOLD
+        - CONTRACT_BOUND
+        - CONTRACT_SIGNED
+        - CONTRACT_EXPIRING
+        - CONTRACT_ENDORSED
+        - BORDEREAU_RECEIVED
+        - BORDEREAU_POSTED
+        - BORDEREAU_REJECTED
+        - BORDEREAU_EXCEPTIONS
+        - TECHNICAL_ACCOUNT_ISSUED
+        - TECHNICAL_ACCOUNT_DISPUTED
+        - CASH_CALL_ISSUED
+        - SECURITY_EXPIRING
+        - SECURITY_BREACH
+        - COMMUTATION_REQUEST
+        - COMMUTATION_APPROVED
+        - LOSS_ADVICE_RECEIVED
+        - LARGE_LOSS_NOTICE
+        - CLAIMS_AUDIT_SCHEDULED
+        - PAYMENT_AUTHORITY_REQUEST
+        - PAYMENT_APPROVED
+        - PAYMENT_REJECTED
+        - PAYMENT_SUBMITTED
+        - PAYMENT_PAID
+        - PAYMENT_FAILED
+        - PAYMENT_RETURNED
+        - PAYMENT_DUPLICATE_SUSPECTED
+        - RECONCILIATION_EXCEPTION
+        - SAP_POSTING_FAILED
+        - ESCHEATMENT_DUE
+        - NEW_DOCUMENT_UPLOAD
+        - DOCUMENT_ASSOCIATED
+        - DOCUMENT_REQUEST
+        - DOCUMENT_OVERDUE
+        - DOCUMENT_LEGAL_HOLD
+        - DOCUMENT_DISPOSITION
+        - DOCUMENT_PROCESSING_FAILED
+        - PARTY_CREATED
+        - PARTY_MERGED
+        - PARTY_SANCTIONS_HIT
+        - PARTY_SCREENING_COMPLETE
+        - PARTY_BANK_ACCOUNT_CHANGED
+        - SANCTIONS_HIT
+        - BREAK_GLASS_USED
+        - ACCESS_REVIEW_DUE
+        - DATA_QUALITY_ISSUE
+        - AUDIT_CHAIN_FAILURE
+        - APPROVAL_REQUEST
+        - APPROVAL_DECIDED
+        - TASK_ASSIGNED
+        - MENTION
+        - COMMENT_ADDED
+        - INTEGRATION_OUTAGE
+        - JOB_FAILED
+        - SLA_BREACH
+    NotificationChannel:
+      type: string
+      description: Delivery channel from SPEC 11.8.5.
+      enum:
+        - IN_APP
+        - EMAIL
+        - SMS
+        - PUSH
+        - WEBHOOK
+        - TASK
+        - DIGEST
+    NotificationStatus:
+      type: string
+      description: Notification lifecycle status from SPEC 11.8.5.
+      enum:
+        - CREATED
+        - QUEUED
+        - SENT
+        - DELIVERED
+        - READ
+        - ACKNOWLEDGED
+        - ACTIONED
+        - FAILED
+        - SUPPRESSED
+        - EXPIRED
+        - CANCELLED
+    CreateNotificationRequest:
+      type: object
+      description: Public create command. The tenant comes from X-EIA-Tenant.
+      required:
+        - notificationType
+        - channel
+        - recipientPartyId
+        - subject
+        - body
+      properties:
+        notificationType:
+          $ref: '#/components/schemas/NotificationType'
+        channel:
+          $ref: '#/components/schemas/NotificationChannel'
+        recipientPartyId:
+          type: string
+          format: uuid
+        subject:
+          type: string
+          minLength: 1
+          maxLength: 300
+        body:
+          type: string
+          minLength: 1
+        templateCode:
+          type: string
+          maxLength: 64
+        templateVersion:
+          type: integer
+          minimum: 1
+          description: Requires templateCode. Defaults to 1.
+        scheduledAt:
+          type: string
+          format: date-time
+    CreateNotificationRequestInternal:
+      type: object
+      description: Internal create command accepted by the Notifications expert.
+      required:
+        - tenantId
+        - notificationType
+        - channel
+        - recipientPartyId
+        - subject
+        - body
+      properties:
+        tenantId:
+          type: string
+          format: uuid
+        notificationType:
+          $ref: '#/components/schemas/NotificationType'
+        channel:
+          $ref: '#/components/schemas/NotificationChannel'
+        recipientPartyId:
+          type: string
+          format: uuid
+        subject:
+          type: string
+          minLength: 1
+          maxLength: 300
+        body:
+          type: string
+          minLength: 1
+        templateCode:
+          type: string
+          maxLength: 64
+        templateVersion:
+          type: integer
+          minimum: 1
+        scheduledAt:
+          type: string
+          format: date-time
+x-vertical: notifications
+x-implementation:
+  status: implemented
+  verifiedAt: '2026-10-19'
+  verifiedAgainst:
+    - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationController.java
+    - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationExpertClient.java
+    - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/ApiExceptionHandler.java
+    - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationController.java
+    - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationService.java
+  errorEnvelope: Canonical RFC 9457 Problem envelope with EIA-NTF-9xxx codes.
+  notes: >
+    The expert returns application/problem+json and the domain translates expert
+    failures into the same envelope. Template and channel rules are enforced in
+    NotificationService.
+x-planned-operations:
+  - method: GET
+    path: /api/v1/notifications/inbox
+    spec: SPEC 11.8.10
+    note: Inbox with filters.
+  - method: POST
+    path: /api/v1/notifications/{notificationId}/read
+    spec: SPEC 11.8.10
+    note: Mark read.
+  - method: POST
+    path: /api/v1/notifications/{notificationId}/acknowledge
+    spec: SPEC 11.8.10
+    note: Acknowledge.
+  - method: POST
+    path: /api/v1/notifications/{notificationId}/actions/{actionCode}
+    spec: SPEC 11.8.10
+    note: Execute a notification action.
+  - method: POST
+    path: /api/v1/notifications/{notificationId}/dismiss
+    spec: SPEC 11.8.10
+    note: Dismiss a non-required notification.
+  - method: GET
+    path: /api/v1/notifications/unread-count
+    spec: SPEC 11.8.10
+    note: Badge count.
+  - method: GET
+    path: /api/v1/notifications/stream
+    spec: SPEC 11.8.10
+    note: SSE new-notification stream.
+  - method: GET
+    path: /api/v1/notifications/subscriptions
+    spec: SPEC 11.8.10
+    note: User subscriptions.
+  - method: PUT
+    path: /api/v1/notifications/subscriptions
+    spec: SPEC 11.8.10
+    note: Update subscriptions.
+  - method: GET
+    path: /api/v1/notifications/preferences
+    spec: SPEC 11.8.10
+    note: Channel preferences.
+  - method: GET
+    path: /api/v1/notifications/admin/templates
+    spec: SPEC 11.8.10
+    note: Templates.
+  - method: POST
+    path: /api/v1/notifications/admin/templates/{templateId}/publish
+    spec: SPEC 11.8.10
+    note: Publish a template (approval).
+  - method: GET
+    path: /api/v1/notifications/admin/rules
+    spec: SPEC 11.8.10
+    note: Notification rules.
+  - method: GET
+    path: /api/v1/notifications/admin/deliveries
+    spec: SPEC 11.8.10
+    note: Delivery diagnostics.
+  - method: POST
+    path: /api/v1/notifications/admin/deliveries/{deliveryId}/retry
+    spec: SPEC 11.8.10
+    note: Retry a delivery.
+  - method: POST
+    path: /internal/v1/notifications/issue
+    spec: SPEC 11.8.10
+    note: Issue a notification from an event or a direct call.

@@ -1,0 +1,537 @@
+openapi: 3.1.0
+info:
+  title: EIA Contract API
+  version: 1.0.0
+  summary: Assumed-book reinsurance contract administration and the Contract expert API.
+  description: >
+    This document describes the implemented public Contract domain API and the
+    internal Contract expert API. The authoritative requirement is SPEC 11.3
+    and SPEC 12; the implemented surface is the first vertical slice.
+
+    The Contract vertical is ASSUMED book only. The aggregate slice carries the
+    contract header, dates, currency, and lifecycle; layers, participants,
+    terms, cessions, bordereaux, accounts, and security from SPEC 11.3 are
+    planned and are listed under x-planned-operations.
+
+    The implemented Contract services emit a compact `ApiError` body of
+    `{code, message, details[]}` rather than the canonical Problem envelope;
+    see MISMATCHES.md.
+  contact:
+    name: EIA Architecture
+    url: https://github.com/eia-open-insurance
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+servers:
+  - url: https://gateway.eia-open-insurance.example
+    description: Public gateway (`/api/v1`).
+  - url: http://contract-domain:8086
+    description: Contract domain service (platform network).
+security:
+  - sessionCookie: []
+tags:
+  - name: Contract
+    description: Public domain API used by the Contract web remote.
+  - name: Contract internal
+    description: Internal expert API. Not exposed through the gateway; called only by the Contract domain service.
+paths:
+  /api/v1/contracts:
+    get:
+      operationId: listContracts
+      tags:
+        - Contract
+      summary: List contracts for the caller's tenant.
+      description: >
+        Returns a bare JSON array. Search and cursor pagination from SPEC
+        11.3.10 and SPEC 7.6 are planned.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+      responses:
+        '200':
+          description: Contracts of the tenant.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Contract'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createContract
+      tags:
+        - Contract
+      summary: Create a contract draft.
+      description: >
+        Creates a contract in DRAFT. The contract number is supplied by the
+        caller and must be unique per tenant. `contractType` must be one of the
+        SPEC 11.3.5 types.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateContractRequest'
+      responses:
+        '201':
+          description: Contract created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Contract'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/{contractId}:
+    get:
+      operationId: getContract
+      tags:
+        - Contract
+      summary: Get a contract.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Contract detail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Contract'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/{contractId}/status:
+    patch:
+      operationId: updateContractStatus
+      tags:
+        - Contract
+      summary: Advance a contract through its lifecycle.
+      description: >
+        Applies one transition from SPEC 11.3.6. `expectedVersion` is required
+        and a mismatch returns 409 CONCURRENT_MODIFICATION.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateContractStatusRequest'
+      responses:
+        '200':
+          description: Contract after the transition.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Contract'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/contracts:
+    get:
+      operationId: expertListContracts
+      tags:
+        - Contract internal
+      summary: List contracts for a tenant (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+      responses:
+        '200':
+          description: Contracts of the tenant.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Contract'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertCreateContract
+      tags:
+        - Contract internal
+      summary: Create a contract (expert).
+      description: >
+        The expert accepts an optional `status`. DRAFT and QUOTED are the only
+        initial statuses; any other value is rejected with
+        INVALID_INITIAL_STATUS.
+      security: []
+      x-internal-api: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateContractRequestInternal'
+      responses:
+        '201':
+          description: Contract created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Contract'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/contracts/{contractId}:
+    get:
+      operationId: expertGetContract
+      tags:
+        - Contract internal
+      summary: Get a contract (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Contract detail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Contract'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/contracts/{contractId}/status:
+    patch:
+      operationId: expertUpdateContractStatus
+      tags:
+        - Contract internal
+      summary: Advance a contract through its lifecycle (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateContractStatusRequest'
+      responses:
+        '200':
+          description: Contract after the transition.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Contract'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+components:
+  securitySchemes:
+    sessionCookie:
+      $ref: './components.yaml#/components/securitySchemes/sessionCookie'
+  schemas:
+    Contract:
+      allOf:
+        - $ref: './components.yaml#/components/schemas/AuditFields'
+      type: object
+      description: >
+        Contract projection. The SPEC 11.3.4 aggregate calls the start date
+        inceptionDate and carries treatyNumber, layers, participants, terms,
+        security, and mass-tort fields; those are planned.
+      required:
+        - id
+        - tenantId
+        - contractNumber
+        - contractType
+        - cedentPartyId
+        - reinsurerPartyId
+        - status
+        - effectiveDate
+        - expirationDate
+        - currency
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        contractNumber:
+          type: string
+          maxLength: 32
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._/-]{1,31}$'
+        contractType:
+          $ref: '#/components/schemas/ContractType'
+        cedentPartyId:
+          type: string
+          format: uuid
+        reinsurerPartyId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/ContractStatus'
+        effectiveDate:
+          type: string
+          format: date
+        expirationDate:
+          type: string
+          format: date
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+    ContractType:
+      type: string
+      description: Contract type from SPEC 11.3.5.
+      enum:
+        - QUOTA_SHARE
+        - SURPLUS
+        - FACULTATIVE
+        - FACULTATIVE_OBLIGATORY
+        - EXCESS_OF_LOSS
+        - AGGREGATE_EXCESS_OF_LOSS
+        - STOP_LOSS
+        - CATASTROPHE_EXCESS_OF_LOSS
+        - CLASH
+        - ADVERSE_DEVELOPMENT_COVER
+        - LOSS_PORTFOLIO_TRANSFER
+        - RETROCESSION
+        - FRONTING
+        - FINITE
+        - PROPORTIONAL_TREATY
+        - NON_PROPORTIONAL_TREATY
+    ContractStatus:
+      type: string
+      description: Contract lifecycle status from SPEC 11.3.6.
+      enum:
+        - DRAFT
+        - QUOTED
+        - PLACED
+        - BOUND
+        - SIGNED
+        - IN_FORCE
+        - ENDORSED
+        - EXPIRED
+        - CANCELLED
+        - COMMUTED
+        - RUNOFF
+        - CLOSED
+        - VOID
+    CreateContractRequest:
+      type: object
+      description: Public create command. The tenant comes from X-EIA-Tenant.
+      required:
+        - contractNumber
+        - contractType
+        - cedentPartyId
+        - reinsurerPartyId
+        - effectiveDate
+        - expirationDate
+        - currency
+      properties:
+        contractNumber:
+          type: string
+          maxLength: 32
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._/-]{1,31}$'
+        contractType:
+          $ref: '#/components/schemas/ContractType'
+        cedentPartyId:
+          type: string
+          format: uuid
+        reinsurerPartyId:
+          type: string
+          format: uuid
+        effectiveDate:
+          type: string
+          format: date
+        expirationDate:
+          type: string
+          format: date
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+    CreateContractRequestInternal:
+      type: object
+      description: Internal create command accepted by the Contract expert.
+      required:
+        - tenantId
+        - contractNumber
+        - contractType
+        - cedentPartyId
+        - reinsurerPartyId
+        - effectiveDate
+        - expirationDate
+        - currency
+      properties:
+        tenantId:
+          type: string
+          format: uuid
+        contractNumber:
+          type: string
+          maxLength: 32
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._/-]{1,31}$'
+        contractType:
+          $ref: '#/components/schemas/ContractType'
+        cedentPartyId:
+          type: string
+          format: uuid
+        reinsurerPartyId:
+          type: string
+          format: uuid
+        effectiveDate:
+          type: string
+          format: date
+        expirationDate:
+          type: string
+          format: date
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        status:
+          type: string
+          enum:
+            - DRAFT
+            - QUOTED
+          description: Optional initial status. Defaults to DRAFT.
+    UpdateContractStatusRequest:
+      type: object
+      description: Lifecycle transition command used by the public and expert APIs.
+      required:
+        - status
+        - expectedVersion
+      properties:
+        status:
+          $ref: '#/components/schemas/ContractStatus'
+        expectedVersion:
+          type: integer
+          minimum: 0
+x-vertical: contract
+x-implementation:
+  status: implemented
+  verifiedAt: '2026-10-19'
+  verifiedAgainst:
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/ContractController.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/ContractClient.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ContractController.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ApiExceptionHandler.java
+  errorEnvelope: >
+    Vertical-specific ApiError {code, message, details[{field, message}]}.
+    Not the canonical Problem envelope yet.
+  notes: >
+    The public PATCH requires expectedVersion in the body. There is no ETag;
+    concurrency is body-based. effectiveDate is the implemented name for the
+    SPEC inception date.
+x-planned-operations:
+  - method: PATCH
+    path: /api/v1/contracts/{contractId}
+    spec: SPEC 11.3.10
+    note: Update a contract draft.
+  - method: POST
+    path: /api/v1/contracts/{contractId}/bind
+    spec: SPEC 11.3.10
+    note: Bind a contract.
+  - method: POST
+    path: /api/v1/contracts/{contractId}/endorse
+    spec: SPEC 11.3.10
+    note: Endorse a contract.
+  - method: POST
+    path: /api/v1/contracts/{contractId}/renew
+    spec: SPEC 11.3.10
+    note: Renew a contract.
+  - method: POST
+    path: /api/v1/contracts/{contractId}/commute
+    spec: SPEC 11.3.10
+    note: Commute a contract.
+  - method: GET
+    path: /api/v1/contracts/{contractId}/layers
+    spec: SPEC 11.3.10
+    note: Contract layers.
+  - method: GET
+    path: /api/v1/contracts/{contractId}/participants
+    spec: SPEC 11.3.10
+    note: Participations.
+  - method: GET
+    path: /api/v1/contracts/{contractId}/terms
+    spec: SPEC 11.3.10
+    note: Financial terms.
+  - method: GET
+    path: /api/v1/contracts/{contractId}/cessions
+    spec: SPEC 11.3.10
+    note: Cessions recorded on the contract.
+  - method: POST
+    path: /api/v1/contracts/{contractId}/cessions
+    spec: SPEC 11.3.10
+    note: Record a cession.
+  - method: GET
+    path: /api/v1/contracts/{contractId}/bordereaux
+    spec: SPEC 11.3.10
+    note: Bordereaux.
+  - method: GET
+    path: /api/v1/contracts/{contractId}/accounts
+    spec: SPEC 11.3.10
+    note: Technical accounts.
+  - method: GET
+    path: /api/v1/contracts/{contractId}/security
+    spec: SPEC 11.3.10
+    note: Security and collateral.
+  - method: GET
+    path: /api/v1/contracts/{contractId}/loss-aggregate
+    spec: SPEC 11.3.10
+    note: Aggregate loss position.
+  - method: GET
+    path: /api/v1/contracts/{contractId}/lineage
+    spec: SPEC 11.3.10
+    note: Lineage summary.
+  - method: GET
+    path: /internal/v1/contracts/{contractId}/terms
+    spec: SPEC 11.3.10
+    note: Terms for Cession.
+  - method: POST
+    path: /internal/v1/contracts/{contractId}/cession
+    spec: SPEC 11.3.10
+    note: Record a cession for Cession.

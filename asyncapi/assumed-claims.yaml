@@ -1,0 +1,449 @@
+asyncapi: 3.0.0
+id: urn:eia:contracts:events:assumed-claims
+info:
+  title: EIA Assumed Claims events
+  version: 1.0.0
+  summary: Published domain event names for the Assumed Claims vertical.
+  description: >
+    Event contract for the Assumed Claims vertical. The authoritative event names are
+    SPEC 11.5.9; the canonical envelope is
+    ../schemas/event-envelope.schema.json.
+
+    There is no message broker (ADR-0004). The platform outbox delivers events
+    over authenticated HTTPS to each subscriber endpoint, with an HMAC-SHA256
+    signature (SPEC 7.5.1). A channel address is the logical routing key and
+    equals the event name; it is not a broker topic.
+
+    No publisher or subscriber exists in the current codebase. Every channel
+    and operation in this document is therefore marked x-status planned. The
+    catalog and cross-vertical subscriptions live in event-catalog.yaml.
+  contact:
+    name: EIA Architecture
+    url: https://github.com/eia-open-insurance
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+defaultContentType: application/json
+servers:
+  subscriberEndpoint:
+    host: subscriber-defined
+    protocol: https
+    description: >
+      Each subscriber registers an HTTPS endpoint and signing key. The outbox
+      posts one event per request and requires a 2xx acknowledgement.
+channels:
+  AssumedClaimRegistered:
+    address: assumed.claim.registered
+    title: assumed.claim.registered
+    description: >
+      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: assumed.claim.registered
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.5.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  AssumedClaimLossAdviceReceived:
+    address: assumed.claim.loss-advice-received
+    title: assumed.claim.loss-advice-received
+    description: >
+      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: assumed.claim.loss-advice-received
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.5.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  AssumedClaimLossAdvicePosted:
+    address: assumed.claim.loss-advice-posted
+    title: assumed.claim.loss-advice-posted
+    description: >
+      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: assumed.claim.loss-advice-posted
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.5.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  AssumedClaimReserveEstablished:
+    address: assumed.claim.reserve-established
+    title: assumed.claim.reserve-established
+    description: >
+      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: assumed.claim.reserve-established
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.5.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  AssumedClaimReserveChanged:
+    address: assumed.claim.reserve-changed
+    title: assumed.claim.reserve-changed
+    description: >
+      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: assumed.claim.reserve-changed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.5.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  AssumedClaimPaymentRequested:
+    address: assumed.claim.payment-requested
+    title: assumed.claim.payment-requested
+    description: >
+      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: assumed.claim.payment-requested
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.5.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  AssumedClaimPaid:
+    address: assumed.claim.paid
+    title: assumed.claim.paid
+    description: >
+      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: assumed.claim.paid
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.5.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  AssumedClaimRecoveryRecorded:
+    address: assumed.claim.recovery-recorded
+    title: assumed.claim.recovery-recorded
+    description: >
+      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: assumed.claim.recovery-recorded
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.5.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  AssumedClaimCashCallRequested:
+    address: assumed.claim.cash-call-requested
+    title: assumed.claim.cash-call-requested
+    description: >
+      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: assumed.claim.cash-call-requested
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.5.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  AssumedClaimCommuted:
+    address: assumed.claim.commuted
+    title: assumed.claim.commuted
+    description: >
+      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: assumed.claim.commuted
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.5.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  AssumedClaimDisputeRaised:
+    address: assumed.claim.dispute-raised
+    title: assumed.claim.dispute-raised
+    description: >
+      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: assumed.claim.dispute-raised
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.5.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  AssumedClaimDisputeResolved:
+    address: assumed.claim.dispute-resolved
+    title: assumed.claim.dispute-resolved
+    description: >
+      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: assumed.claim.dispute-resolved
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.5.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  AssumedClaimClosed:
+    address: assumed.claim.closed
+    title: assumed.claim.closed
+    description: >
+      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: assumed.claim.closed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.5.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  AssumedClaimReopened:
+    address: assumed.claim.reopened
+    title: assumed.claim.reopened
+    description: >
+      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: assumed.claim.reopened
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.5.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  AssumedClaimReinstatementRequested:
+    address: assumed.claim.reinstatement-requested
+    title: assumed.claim.reinstatement-requested
+    description: >
+      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: assumed.claim.reinstatement-requested
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.5.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+operations:
+  publishAssumedClaimRegistered:
+    action: send
+    channel:
+      $ref: '#/channels/AssumedClaimRegistered'
+    summary: Publish assumed.claim.registered
+    description: >
+      Publishes assumed.claim.registered through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: assumed.claim.registered
+    x-status: planned
+  publishAssumedClaimLossAdviceReceived:
+    action: send
+    channel:
+      $ref: '#/channels/AssumedClaimLossAdviceReceived'
+    summary: Publish assumed.claim.loss-advice-received
+    description: >
+      Publishes assumed.claim.loss-advice-received through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: assumed.claim.loss-advice-received
+    x-status: planned
+  publishAssumedClaimLossAdvicePosted:
+    action: send
+    channel:
+      $ref: '#/channels/AssumedClaimLossAdvicePosted'
+    summary: Publish assumed.claim.loss-advice-posted
+    description: >
+      Publishes assumed.claim.loss-advice-posted through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: assumed.claim.loss-advice-posted
+    x-status: planned
+  publishAssumedClaimReserveEstablished:
+    action: send
+    channel:
+      $ref: '#/channels/AssumedClaimReserveEstablished'
+    summary: Publish assumed.claim.reserve-established
+    description: >
+      Publishes assumed.claim.reserve-established through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: assumed.claim.reserve-established
+    x-status: planned
+  publishAssumedClaimReserveChanged:
+    action: send
+    channel:
+      $ref: '#/channels/AssumedClaimReserveChanged'
+    summary: Publish assumed.claim.reserve-changed
+    description: >
+      Publishes assumed.claim.reserve-changed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: assumed.claim.reserve-changed
+    x-status: planned
+  publishAssumedClaimPaymentRequested:
+    action: send
+    channel:
+      $ref: '#/channels/AssumedClaimPaymentRequested'
+    summary: Publish assumed.claim.payment-requested
+    description: >
+      Publishes assumed.claim.payment-requested through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: assumed.claim.payment-requested
+    x-status: planned
+  publishAssumedClaimPaid:
+    action: send
+    channel:
+      $ref: '#/channels/AssumedClaimPaid'
+    summary: Publish assumed.claim.paid
+    description: >
+      Publishes assumed.claim.paid through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: assumed.claim.paid
+    x-status: planned
+  publishAssumedClaimRecoveryRecorded:
+    action: send
+    channel:
+      $ref: '#/channels/AssumedClaimRecoveryRecorded'
+    summary: Publish assumed.claim.recovery-recorded
+    description: >
+      Publishes assumed.claim.recovery-recorded through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: assumed.claim.recovery-recorded
+    x-status: planned
+  publishAssumedClaimCashCallRequested:
+    action: send
+    channel:
+      $ref: '#/channels/AssumedClaimCashCallRequested'
+    summary: Publish assumed.claim.cash-call-requested
+    description: >
+      Publishes assumed.claim.cash-call-requested through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: assumed.claim.cash-call-requested
+    x-status: planned
+  publishAssumedClaimCommuted:
+    action: send
+    channel:
+      $ref: '#/channels/AssumedClaimCommuted'
+    summary: Publish assumed.claim.commuted
+    description: >
+      Publishes assumed.claim.commuted through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: assumed.claim.commuted
+    x-status: planned
+  publishAssumedClaimDisputeRaised:
+    action: send
+    channel:
+      $ref: '#/channels/AssumedClaimDisputeRaised'
+    summary: Publish assumed.claim.dispute-raised
+    description: >
+      Publishes assumed.claim.dispute-raised through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: assumed.claim.dispute-raised
+    x-status: planned
+  publishAssumedClaimDisputeResolved:
+    action: send
+    channel:
+      $ref: '#/channels/AssumedClaimDisputeResolved'
+    summary: Publish assumed.claim.dispute-resolved
+    description: >
+      Publishes assumed.claim.dispute-resolved through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: assumed.claim.dispute-resolved
+    x-status: planned
+  publishAssumedClaimClosed:
+    action: send
+    channel:
+      $ref: '#/channels/AssumedClaimClosed'
+    summary: Publish assumed.claim.closed
+    description: >
+      Publishes assumed.claim.closed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: assumed.claim.closed
+    x-status: planned
+  publishAssumedClaimReopened:
+    action: send
+    channel:
+      $ref: '#/channels/AssumedClaimReopened'
+    summary: Publish assumed.claim.reopened
+    description: >
+      Publishes assumed.claim.reopened through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: assumed.claim.reopened
+    x-status: planned
+  publishAssumedClaimReinstatementRequested:
+    action: send
+    channel:
+      $ref: '#/channels/AssumedClaimReinstatementRequested'
+    summary: Publish assumed.claim.reinstatement-requested
+    description: >
+      Publishes assumed.claim.reinstatement-requested through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: assumed.claim.reinstatement-requested
+    x-status: planned
+components:
+  messages:
+    DomainEvent:
+      name: DomainEvent
+      title: EIA domain event envelope
+      summary: One immutable fact published by a vertical.
+      contentType: application/json
+      headers:
+        type: object
+        additionalProperties: true
+        properties:
+          X-EIA-Event-Id:
+            type: string
+            format: uuid
+          X-EIA-Event-Type:
+            type: string
+          X-EIA-Event-Version:
+            type: integer
+          X-EIA-Aggregate-Version:
+            type: integer
+          Idempotency-Key:
+            type: string
+          X-EIA-Signature:
+            type: string
+      payload:
+        $ref: '../schemas/event-envelope.schema.json'
+  securitySchemes:
+    outboxSignature:
+      type: httpApiKey
+      name: X-EIA-Signature
+      in: header
+      description: >
+        HMAC-SHA256 over the timestamp and the exact request body, in the form
+        t=<unix>,v1=<hex> (SPEC 7.5.1).
+x-vertical: assumed
+x-spec-section: SPEC 11.5.9
+x-status: planned
+x-implementation:
+  publisher: none
+  subscriber: none
+  notes: >
+    The current vertical slices emit no events; the outbox tables and the
+    dispatcher described in SPEC 7.5 are not implemented. This document is the
+    agreed event contract for the publisher that will be built.
+
+x-consumed-events:
+  - contract.contract.bound
+  - contract.contract.commuted
+  - contract.cession.recorded
+  - contract.security.recorded
+  - payment.payment.paid
+  - payment.payment.failed
+  - document.document.associated
+  - party.party.merged

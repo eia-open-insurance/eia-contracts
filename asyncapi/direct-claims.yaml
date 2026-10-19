@@ -1,0 +1,571 @@
+asyncapi: 3.0.0
+id: urn:eia:contracts:events:direct-claims
+info:
+  title: EIA Direct Claims events
+  version: 1.0.0
+  summary: Published domain event names for the Direct Claims vertical.
+  description: >
+    Event contract for the Direct Claims vertical. The authoritative event names are
+    SPEC 11.4.9; the canonical envelope is
+    ../schemas/event-envelope.schema.json.
+
+    There is no message broker (ADR-0004). The platform outbox delivers events
+    over authenticated HTTPS to each subscriber endpoint, with an HMAC-SHA256
+    signature (SPEC 7.5.1). A channel address is the logical routing key and
+    equals the event name; it is not a broker topic.
+
+    No publisher or subscriber exists in the current codebase. Every channel
+    and operation in this document is therefore marked x-status planned. The
+    catalog and cross-vertical subscriptions live in event-catalog.yaml.
+  contact:
+    name: EIA Architecture
+    url: https://github.com/eia-open-insurance
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+defaultContentType: application/json
+servers:
+  subscriberEndpoint:
+    host: subscriber-defined
+    protocol: https
+    description: >
+      Each subscriber registers an HTTPS endpoint and signing key. The outbox
+      posts one event per request and requires a 2xx acknowledgement.
+channels:
+  DirectClaimRegistered:
+    address: direct.claim.registered
+    title: direct.claim.registered
+    description: >
+      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: direct.claim.registered
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.4.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimUpdated:
+    address: direct.claim.updated
+    title: direct.claim.updated
+    description: >
+      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: direct.claim.updated
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.4.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimCoverageAssessed:
+    address: direct.claim.coverage-assessed
+    title: direct.claim.coverage-assessed
+    description: >
+      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: direct.claim.coverage-assessed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.4.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimInjuryRecorded:
+    address: direct.claim.injury-recorded
+    title: direct.claim.injury-recorded
+    description: >
+      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: direct.claim.injury-recorded
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.4.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimExposureRecorded:
+    address: direct.claim.exposure-recorded
+    title: direct.claim.exposure-recorded
+    description: >
+      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: direct.claim.exposure-recorded
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.4.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimReserveEstablished:
+    address: direct.claim.reserve-established
+    title: direct.claim.reserve-established
+    description: >
+      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: direct.claim.reserve-established
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.4.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimReserveChanged:
+    address: direct.claim.reserve-changed
+    title: direct.claim.reserve-changed
+    description: >
+      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: direct.claim.reserve-changed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.4.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimLitigationUpdated:
+    address: direct.claim.litigation-updated
+    title: direct.claim.litigation-updated
+    description: >
+      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: direct.claim.litigation-updated
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.4.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimSettlementAuthorized:
+    address: direct.claim.settlement-authorized
+    title: direct.claim.settlement-authorized
+    description: >
+      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: direct.claim.settlement-authorized
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.4.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimSettlementExecuted:
+    address: direct.claim.settlement-executed
+    title: direct.claim.settlement-executed
+    description: >
+      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: direct.claim.settlement-executed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.4.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimPaymentRequested:
+    address: direct.claim.payment-requested
+    title: direct.claim.payment-requested
+    description: >
+      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: direct.claim.payment-requested
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.4.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimPaid:
+    address: direct.claim.paid
+    title: direct.claim.paid
+    description: >
+      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: direct.claim.paid
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.4.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimRecoveryRecorded:
+    address: direct.claim.recovery-recorded
+    title: direct.claim.recovery-recorded
+    description: >
+      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: direct.claim.recovery-recorded
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.4.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimLienRecorded:
+    address: direct.claim.lien-recorded
+    title: direct.claim.lien-recorded
+    description: >
+      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: direct.claim.lien-recorded
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.4.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimLienResolved:
+    address: direct.claim.lien-resolved
+    title: direct.claim.lien-resolved
+    description: >
+      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: direct.claim.lien-resolved
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.4.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimAllocated:
+    address: direct.claim.allocated
+    title: direct.claim.allocated
+    description: >
+      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: direct.claim.allocated
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.4.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimClosed:
+    address: direct.claim.closed
+    title: direct.claim.closed
+    description: >
+      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: direct.claim.closed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.4.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimReopened:
+    address: direct.claim.reopened
+    title: direct.claim.reopened
+    description: >
+      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: direct.claim.reopened
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.4.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimTransferred:
+    address: direct.claim.transferred
+    title: direct.claim.transferred
+    description: >
+      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: direct.claim.transferred
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.4.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimAggregateErosionRequested:
+    address: direct.claim.aggregate-erosion-requested
+    title: direct.claim.aggregate-erosion-requested
+    description: >
+      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: direct.claim.aggregate-erosion-requested
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.4.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+operations:
+  publishDirectClaimRegistered:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimRegistered'
+    summary: Publish direct.claim.registered
+    description: >
+      Publishes direct.claim.registered through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: direct.claim.registered
+    x-status: planned
+  publishDirectClaimUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimUpdated'
+    summary: Publish direct.claim.updated
+    description: >
+      Publishes direct.claim.updated through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: direct.claim.updated
+    x-status: planned
+  publishDirectClaimCoverageAssessed:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimCoverageAssessed'
+    summary: Publish direct.claim.coverage-assessed
+    description: >
+      Publishes direct.claim.coverage-assessed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: direct.claim.coverage-assessed
+    x-status: planned
+  publishDirectClaimInjuryRecorded:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimInjuryRecorded'
+    summary: Publish direct.claim.injury-recorded
+    description: >
+      Publishes direct.claim.injury-recorded through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: direct.claim.injury-recorded
+    x-status: planned
+  publishDirectClaimExposureRecorded:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimExposureRecorded'
+    summary: Publish direct.claim.exposure-recorded
+    description: >
+      Publishes direct.claim.exposure-recorded through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: direct.claim.exposure-recorded
+    x-status: planned
+  publishDirectClaimReserveEstablished:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimReserveEstablished'
+    summary: Publish direct.claim.reserve-established
+    description: >
+      Publishes direct.claim.reserve-established through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: direct.claim.reserve-established
+    x-status: planned
+  publishDirectClaimReserveChanged:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimReserveChanged'
+    summary: Publish direct.claim.reserve-changed
+    description: >
+      Publishes direct.claim.reserve-changed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: direct.claim.reserve-changed
+    x-status: planned
+  publishDirectClaimLitigationUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimLitigationUpdated'
+    summary: Publish direct.claim.litigation-updated
+    description: >
+      Publishes direct.claim.litigation-updated through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: direct.claim.litigation-updated
+    x-status: planned
+  publishDirectClaimSettlementAuthorized:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimSettlementAuthorized'
+    summary: Publish direct.claim.settlement-authorized
+    description: >
+      Publishes direct.claim.settlement-authorized through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: direct.claim.settlement-authorized
+    x-status: planned
+  publishDirectClaimSettlementExecuted:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimSettlementExecuted'
+    summary: Publish direct.claim.settlement-executed
+    description: >
+      Publishes direct.claim.settlement-executed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: direct.claim.settlement-executed
+    x-status: planned
+  publishDirectClaimPaymentRequested:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimPaymentRequested'
+    summary: Publish direct.claim.payment-requested
+    description: >
+      Publishes direct.claim.payment-requested through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: direct.claim.payment-requested
+    x-status: planned
+  publishDirectClaimPaid:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimPaid'
+    summary: Publish direct.claim.paid
+    description: >
+      Publishes direct.claim.paid through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: direct.claim.paid
+    x-status: planned
+  publishDirectClaimRecoveryRecorded:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimRecoveryRecorded'
+    summary: Publish direct.claim.recovery-recorded
+    description: >
+      Publishes direct.claim.recovery-recorded through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: direct.claim.recovery-recorded
+    x-status: planned
+  publishDirectClaimLienRecorded:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimLienRecorded'
+    summary: Publish direct.claim.lien-recorded
+    description: >
+      Publishes direct.claim.lien-recorded through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: direct.claim.lien-recorded
+    x-status: planned
+  publishDirectClaimLienResolved:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimLienResolved'
+    summary: Publish direct.claim.lien-resolved
+    description: >
+      Publishes direct.claim.lien-resolved through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: direct.claim.lien-resolved
+    x-status: planned
+  publishDirectClaimAllocated:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimAllocated'
+    summary: Publish direct.claim.allocated
+    description: >
+      Publishes direct.claim.allocated through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: direct.claim.allocated
+    x-status: planned
+  publishDirectClaimClosed:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimClosed'
+    summary: Publish direct.claim.closed
+    description: >
+      Publishes direct.claim.closed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: direct.claim.closed
+    x-status: planned
+  publishDirectClaimReopened:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimReopened'
+    summary: Publish direct.claim.reopened
+    description: >
+      Publishes direct.claim.reopened through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: direct.claim.reopened
+    x-status: planned
+  publishDirectClaimTransferred:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimTransferred'
+    summary: Publish direct.claim.transferred
+    description: >
+      Publishes direct.claim.transferred through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: direct.claim.transferred
+    x-status: planned
+  publishDirectClaimAggregateErosionRequested:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimAggregateErosionRequested'
+    summary: Publish direct.claim.aggregate-erosion-requested
+    description: >
+      Publishes direct.claim.aggregate-erosion-requested through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: direct.claim.aggregate-erosion-requested
+    x-status: planned
+components:
+  messages:
+    DomainEvent:
+      name: DomainEvent
+      title: EIA domain event envelope
+      summary: One immutable fact published by a vertical.
+      contentType: application/json
+      headers:
+        type: object
+        additionalProperties: true
+        properties:
+          X-EIA-Event-Id:
+            type: string
+            format: uuid
+          X-EIA-Event-Type:
+            type: string
+          X-EIA-Event-Version:
+            type: integer
+          X-EIA-Aggregate-Version:
+            type: integer
+          Idempotency-Key:
+            type: string
+          X-EIA-Signature:
+            type: string
+      payload:
+        $ref: '../schemas/event-envelope.schema.json'
+  securitySchemes:
+    outboxSignature:
+      type: httpApiKey
+      name: X-EIA-Signature
+      in: header
+      description: >
+        HMAC-SHA256 over the timestamp and the exact request body, in the form
+        t=<unix>,v1=<hex> (SPEC 7.5.1).
+x-vertical: direct
+x-spec-section: SPEC 11.4.9
+x-status: planned
+x-implementation:
+  publisher: none
+  subscriber: none
+  notes: >
+    The current vertical slices emit no events; the outbox tables and the
+    dispatcher described in SPEC 7.5 are not implemented. This document is the
+    agreed event contract for the publisher that will be built.
+
+x-consumed-events:
+  - policy.policy.issued
+  - policy.policy.endorsed
+  - policy.policy.cancelled
+  - policy.aggregate.eroded
+  - payment.payment.paid
+  - payment.payment.failed
+  - payment.payment.reversed
+  - party.party.merged
+  - document.document.associated
+  - contract.cession.recorded

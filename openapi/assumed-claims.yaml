@@ -1,0 +1,624 @@
+openapi: 3.1.0
+info:
+  title: EIA Assumed Claims API
+  version: 1.0.0
+  summary: Assumed-book reinsurance claim administration and the Assumed Claims expert API.
+  description: >
+    This document describes the implemented public Assumed Claims domain API
+    and the internal Assumed Claims expert API. The authoritative requirement is
+    SPEC 11.5 and SPEC 12; the implemented surface is the first vertical slice.
+
+    Assumed Claims is fixed to the ASSUMED book. A book filter answers 404 with
+    code EIA-RNS-7005 when X-EIA-Book is missing or different, so the response
+    cannot confirm that a claim exists in the other book (SPEC 3.6.2, WALL-06).
+
+    The controller is mapped to both `/api/v1/assumed-claims` and
+    `/api/v1/assumed-claims/claims`; both route sets are documented because the
+    Assumed Claims web remote calls the `/claims` form. The status transition
+    uses POST, matching the implementation.
+
+    This vertical already emits the canonical RFC 9457 Problem envelope.
+  contact:
+    name: EIA Architecture
+    url: https://github.com/eia-open-insurance
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+servers:
+  - url: https://gateway.eia-open-insurance.example
+    description: Public gateway (`/api/v1`).
+  - url: http://assumed-claims-domain:8090
+    description: Assumed Claims domain service (platform network).
+security:
+  - sessionCookie: []
+tags:
+  - name: Assumed Claims
+    description: Public domain API used by the Assumed Claims web remote.
+  - name: Assumed Claims internal
+    description: Internal expert API. Not exposed through the gateway; called only by the Assumed Claims domain service.
+paths:
+  /api/v1/assumed-claims:
+    get:
+      operationId: listAssumedClaims
+      tags:
+        - Assumed Claims
+      summary: List assumed claims for the caller's tenant and book.
+      description: Returns a bare JSON array.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+      responses:
+        '200':
+          description: Assumed claims of the tenant.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AssumedClaim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createAssumedClaim
+      tags:
+        - Assumed Claims
+      summary: Create an assumed claim from a notice.
+      description: >
+        The claim is created in NOTIFIED. The assumed claim number is generated
+        by the expert as RNS-{year}-{7 digits}.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAssumedClaimRequest'
+      responses:
+        '201':
+          description: Assumed claim created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssumedClaim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/assumed-claims/{assumedClaimId}:
+    get:
+      operationId: getAssumedClaim
+      tags:
+        - Assumed Claims
+      summary: Get an assumed claim.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Assumed claim detail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssumedClaim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/assumed-claims/{assumedClaimId}/status:
+    post:
+      operationId: changeAssumedClaimStatus
+      tags:
+        - Assumed Claims
+      summary: Advance an assumed claim through its lifecycle.
+      description: >
+        Applies one transition from SPEC 11.5.6. The command carries the target
+        status and the expected version; a stale version returns 409 with
+        code EIA-RNS-7006.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangeAssumedClaimStatusRequest'
+      responses:
+        '200':
+          description: Assumed claim after the transition.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssumedClaim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/assumed-claims/claims:
+    get:
+      operationId: listAssumedClaimsAlias
+      tags:
+        - Assumed Claims
+      summary: List assumed claims (path alias used by the web remote).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+      responses:
+        '200':
+          description: Assumed claims of the tenant.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AssumedClaim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createAssumedClaimAlias
+      tags:
+        - Assumed Claims
+      summary: Create an assumed claim (path alias used by the web remote).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAssumedClaimRequest'
+      responses:
+        '201':
+          description: Assumed claim created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssumedClaim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/assumed-claims/claims/{assumedClaimId}:
+    get:
+      operationId: getAssumedClaimAlias
+      tags:
+        - Assumed Claims
+      summary: Get an assumed claim (path alias used by the web remote).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Assumed claim detail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssumedClaim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/assumed-claims/claims/{assumedClaimId}/status:
+    post:
+      operationId: changeAssumedClaimStatusAlias
+      tags:
+        - Assumed Claims
+      summary: Advance an assumed claim (path alias used by the web remote).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangeAssumedClaimStatusRequest'
+      responses:
+        '200':
+          description: Assumed claim after the transition.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssumedClaim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/assumed-claims:
+    get:
+      operationId: expertListAssumedClaims
+      tags:
+        - Assumed Claims internal
+      summary: List assumed claims for a tenant (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+      responses:
+        '200':
+          description: Assumed claims of the tenant.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AssumedClaim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertCreateAssumedClaim
+      tags:
+        - Assumed Claims internal
+      summary: Create an assumed claim (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAssumedClaimRequestInternal'
+      responses:
+        '201':
+          description: Assumed claim created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssumedClaim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/assumed-claims/{assumedClaimId}:
+    get:
+      operationId: expertGetAssumedClaim
+      tags:
+        - Assumed Claims internal
+      summary: Get an assumed claim (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Assumed claim detail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssumedClaim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/assumed-claims/{assumedClaimId}/status:
+    post:
+      operationId: expertChangeAssumedClaimStatus
+      tags:
+        - Assumed Claims internal
+      summary: Advance an assumed claim through its lifecycle (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangeAssumedClaimStatusRequestInternal'
+      responses:
+        '200':
+          description: Assumed claim after the transition.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssumedClaim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+components:
+  securitySchemes:
+    sessionCookie:
+      $ref: './components.yaml#/components/securitySchemes/sessionCookie'
+  schemas:
+    AssumedClaim:
+      allOf:
+        - $ref: './components.yaml#/components/schemas/AuditFields'
+      type: object
+      description: >
+        Assumed claim projection. The SPEC 11.5.4 aggregate carries advices,
+        reserves, allocations, recoveries, disputes, audits, and cash calls;
+        those are planned. reserveAmount is currently serialized by the expert
+        as a JSON number.
+      required:
+        - id
+        - tenantId
+        - businessBook
+        - assumedClaimNumber
+        - contractId
+        - cedentClaimNumber
+        - status
+        - lossDate
+        - reportDate
+        - reserveAmount
+        - reserveCurrency
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        businessBook:
+          type: string
+          enum:
+            - ASSUMED
+        assumedClaimNumber:
+          type: string
+          examples:
+            - RNS-2026-0000001
+        contractId:
+          type: string
+          format: uuid
+        cedentClaimNumber:
+          type: [string, 'null']
+          maxLength: 64
+        status:
+          $ref: '#/components/schemas/AssumedClaimStatus'
+        lossDate:
+          type: [string, 'null']
+          format: date
+        reportDate:
+          type: [string, 'null']
+          format: date
+        reserveAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        reserveCurrency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+    AssumedClaimStatus:
+      type: string
+      description: Assumed claim lifecycle status from SPEC 11.5.6.
+      enum:
+        - NOTIFIED
+        - OPEN
+        - RESERVED
+        - IN_ADJUSTMENT
+        - SETTLED
+        - PAYMENT_PENDING
+        - PAID
+        - CLOSED
+        - DENIED
+        - COMMUTED
+        - REOPENED
+        - DISPUTED
+        - WITHDRAWN
+    CreateAssumedClaimRequest:
+      type: object
+      description: Public create command. The tenant comes from X-EIA-Tenant.
+      required:
+        - contractId
+        - reserveAmount
+        - reserveCurrency
+      properties:
+        contractId:
+          type: string
+          format: uuid
+        cedentClaimNumber:
+          type: string
+          maxLength: 64
+        lossDate:
+          type: string
+          format: date
+        reportDate:
+          type: string
+          format: date
+          description: When present, must be on or after lossDate.
+        reserveAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        reserveCurrency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+    CreateAssumedClaimRequestInternal:
+      type: object
+      description: Internal create command accepted by the Assumed Claims expert.
+      required:
+        - tenantId
+        - contractId
+        - reserveAmount
+        - reserveCurrency
+      properties:
+        tenantId:
+          type: string
+          format: uuid
+        contractId:
+          type: string
+          format: uuid
+        cedentClaimNumber:
+          type: string
+          maxLength: 64
+        lossDate:
+          type: string
+          format: date
+        reportDate:
+          type: string
+          format: date
+        reserveAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        reserveCurrency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+    ChangeAssumedClaimStatusRequest:
+      type: object
+      description: Public lifecycle transition command.
+      required:
+        - targetStatus
+        - expectedVersion
+      properties:
+        targetStatus:
+          $ref: '#/components/schemas/AssumedClaimStatus'
+        expectedVersion:
+          type: integer
+          minimum: 0
+    ChangeAssumedClaimStatusRequestInternal:
+      type: object
+      description: Internal lifecycle transition command accepted by the Assumed Claims expert.
+      required:
+        - tenantId
+        - targetStatus
+        - expectedVersion
+      properties:
+        tenantId:
+          type: string
+          format: uuid
+        targetStatus:
+          $ref: '#/components/schemas/AssumedClaimStatus'
+        expectedVersion:
+          type: integer
+          minimum: 0
+x-vertical: assumed-claims
+x-implementation:
+  status: implemented
+  verifiedAt: '2026-10-19'
+  verifiedAgainst:
+    - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/AssumedClaimController.java
+    - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/AssumedClaimClient.java
+    - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/BookScopeFilter.java
+    - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/AssumedClaimController.java
+    - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/ApiExceptionHandler.java
+  errorEnvelope: Canonical RFC 9457 Problem envelope (SPEC 6.11).
+  notes: >
+    Both public path forms are implemented by the same controller methods. The
+    expert create and transition bodies carry tenantId because the expert is
+    not exposed publicly.
+x-planned-operations:
+  - method: GET
+    path: /api/v1/assumed-claims/claims/{assumedClaimId}/advices
+    spec: SPEC 11.5.10
+    note: Loss advices.
+  - method: POST
+    path: /api/v1/assumed-claims/claims/{assumedClaimId}/advices
+    spec: SPEC 11.5.10
+    note: Record a loss advice.
+  - method: GET
+    path: /api/v1/assumed-claims/claims/{assumedClaimId}/reserves
+    spec: SPEC 11.5.10
+    note: Reserves.
+  - method: GET
+    path: /api/v1/assumed-claims/claims/{assumedClaimId}/allocations
+    spec: SPEC 11.5.10
+    note: Allocations.
+  - method: GET
+    path: /api/v1/assumed-claims/claims/{assumedClaimId}/recoveries
+    spec: SPEC 11.5.10
+    note: Recoveries.
+  - method: GET
+    path: /api/v1/assumed-claims/claims/{assumedClaimId}/disputes
+    spec: SPEC 11.5.10
+    note: Disputes.
+  - method: POST
+    path: /api/v1/assumed-claims/claims/{assumedClaimId}/cash-calls
+    spec: SPEC 11.5.10
+    note: Request a cash call.
+  - method: POST
+    path: /api/v1/assumed-claims/claims/{assumedClaimId}/commute
+    spec: SPEC 11.5.10
+    note: Commute an assumed claim.
+  - method: GET
+    path: /api/v1/assumed-claims/claims/{assumedClaimId}/financials
+    spec: SPEC 11.5.10
+    note: Financial summary.
+  - method: GET
+    path: /api/v1/assumed-claims/claims/{assumedClaimId}/documents
+    spec: SPEC 11.5.10
+    note: Documents via the Document service.
+  - method: GET
+    path: /api/v1/assumed-claims/claims/{assumedClaimId}/lineage
+    spec: SPEC 11.5.10
+    note: Lineage summary.
+  - method: GET
+    path: /api/v1/assumed-claims/queues/{queueCode}
+    spec: SPEC 11.5.10
+    note: Work queue.
+  - method: POST
+    path: /internal/v1/assumed-claims/import
+    spec: SPEC 11.5.10
+    note: Bordereau batch import.

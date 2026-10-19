@@ -1,0 +1,453 @@
+asyncapi: 3.0.0
+id: urn:eia:contracts:events:document
+info:
+  title: EIA Document events
+  version: 1.0.0
+  summary: Published domain event names for the Document vertical.
+  description: >
+    Event contract for the Document vertical. The authoritative event names are
+    SPEC 11.6.9; the canonical envelope is
+    ../schemas/event-envelope.schema.json.
+
+    There is no message broker (ADR-0004). The platform outbox delivers events
+    over authenticated HTTPS to each subscriber endpoint, with an HMAC-SHA256
+    signature (SPEC 7.5.1). A channel address is the logical routing key and
+    equals the event name; it is not a broker topic.
+
+    No publisher or subscriber exists in the current codebase. Every channel
+    and operation in this document is therefore marked x-status planned. The
+    catalog and cross-vertical subscriptions live in event-catalog.yaml.
+  contact:
+    name: EIA Architecture
+    url: https://github.com/eia-open-insurance
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+defaultContentType: application/json
+servers:
+  subscriberEndpoint:
+    host: subscriber-defined
+    protocol: https
+    description: >
+      Each subscriber registers an HTTPS endpoint and signing key. The outbox
+      posts one event per request and requires a 2xx acknowledgement.
+channels:
+  DocumentDocumentRegistered:
+    address: document.document.registered
+    title: document.document.registered
+    description: >
+      Declared domain event for this vertical (SPEC 11.6.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: document.document.registered
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.6.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DocumentDocumentClassified:
+    address: document.document.classified
+    title: document.document.classified
+    description: >
+      Declared domain event for this vertical (SPEC 11.6.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: document.document.classified
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.6.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DocumentDocumentAssociated:
+    address: document.document.associated
+    title: document.document.associated
+    description: >
+      Declared domain event for this vertical (SPEC 11.6.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: document.document.associated
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.6.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DocumentDocumentSuperseded:
+    address: document.document.superseded
+    title: document.document.superseded
+    description: >
+      Declared domain event for this vertical (SPEC 11.6.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: document.document.superseded
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.6.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DocumentDocumentGenerated:
+    address: document.document.generated
+    title: document.document.generated
+    description: >
+      Declared domain event for this vertical (SPEC 11.6.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: document.document.generated
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.6.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DocumentDocumentSigned:
+    address: document.document.signed
+    title: document.document.signed
+    description: >
+      Declared domain event for this vertical (SPEC 11.6.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: document.document.signed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.6.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DocumentDocumentHeld:
+    address: document.document.held
+    title: document.document.held
+    description: >
+      Declared domain event for this vertical (SPEC 11.6.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: document.document.held
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.6.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DocumentDocumentHoldReleased:
+    address: document.document.hold-released
+    title: document.document.hold-released
+    description: >
+      Declared domain event for this vertical (SPEC 11.6.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: document.document.hold-released
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.6.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DocumentDocumentArchived:
+    address: document.document.archived
+    title: document.document.archived
+    description: >
+      Declared domain event for this vertical (SPEC 11.6.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: document.document.archived
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.6.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DocumentDocumentDisposed:
+    address: document.document.disposed
+    title: document.document.disposed
+    description: >
+      Declared domain event for this vertical (SPEC 11.6.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: document.document.disposed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.6.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DocumentDocumentRequested:
+    address: document.document.requested
+    title: document.document.requested
+    description: >
+      Declared domain event for this vertical (SPEC 11.6.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: document.document.requested
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.6.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DocumentDocumentRequestFulfilled:
+    address: document.document.request-fulfilled
+    title: document.document.request-fulfilled
+    description: >
+      Declared domain event for this vertical (SPEC 11.6.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: document.document.request-fulfilled
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.6.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DocumentPackageBuilt:
+    address: document.package.built
+    title: document.package.built
+    description: >
+      Declared domain event for this vertical (SPEC 11.6.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: document.package.built
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.6.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DocumentProcessingCompleted:
+    address: document.processing.completed
+    title: document.processing.completed
+    description: >
+      Declared domain event for this vertical (SPEC 11.6.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: document.processing.completed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.6.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DocumentProcessingFailed:
+    address: document.processing.failed
+    title: document.processing.failed
+    description: >
+      Declared domain event for this vertical (SPEC 11.6.9). No publisher is
+      implemented yet, so the channel is planned and the payload contract is
+      the shared event envelope.
+    x-event-type: document.processing.failed
+    x-event-version: 1
+    x-status: planned
+    x-spec-section: SPEC 11.6.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+operations:
+  publishDocumentDocumentRegistered:
+    action: send
+    channel:
+      $ref: '#/channels/DocumentDocumentRegistered'
+    summary: Publish document.document.registered
+    description: >
+      Publishes document.document.registered through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: document.document.registered
+    x-status: planned
+  publishDocumentDocumentClassified:
+    action: send
+    channel:
+      $ref: '#/channels/DocumentDocumentClassified'
+    summary: Publish document.document.classified
+    description: >
+      Publishes document.document.classified through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: document.document.classified
+    x-status: planned
+  publishDocumentDocumentAssociated:
+    action: send
+    channel:
+      $ref: '#/channels/DocumentDocumentAssociated'
+    summary: Publish document.document.associated
+    description: >
+      Publishes document.document.associated through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: document.document.associated
+    x-status: planned
+  publishDocumentDocumentSuperseded:
+    action: send
+    channel:
+      $ref: '#/channels/DocumentDocumentSuperseded'
+    summary: Publish document.document.superseded
+    description: >
+      Publishes document.document.superseded through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: document.document.superseded
+    x-status: planned
+  publishDocumentDocumentGenerated:
+    action: send
+    channel:
+      $ref: '#/channels/DocumentDocumentGenerated'
+    summary: Publish document.document.generated
+    description: >
+      Publishes document.document.generated through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: document.document.generated
+    x-status: planned
+  publishDocumentDocumentSigned:
+    action: send
+    channel:
+      $ref: '#/channels/DocumentDocumentSigned'
+    summary: Publish document.document.signed
+    description: >
+      Publishes document.document.signed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: document.document.signed
+    x-status: planned
+  publishDocumentDocumentHeld:
+    action: send
+    channel:
+      $ref: '#/channels/DocumentDocumentHeld'
+    summary: Publish document.document.held
+    description: >
+      Publishes document.document.held through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: document.document.held
+    x-status: planned
+  publishDocumentDocumentHoldReleased:
+    action: send
+    channel:
+      $ref: '#/channels/DocumentDocumentHoldReleased'
+    summary: Publish document.document.hold-released
+    description: >
+      Publishes document.document.hold-released through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: document.document.hold-released
+    x-status: planned
+  publishDocumentDocumentArchived:
+    action: send
+    channel:
+      $ref: '#/channels/DocumentDocumentArchived'
+    summary: Publish document.document.archived
+    description: >
+      Publishes document.document.archived through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: document.document.archived
+    x-status: planned
+  publishDocumentDocumentDisposed:
+    action: send
+    channel:
+      $ref: '#/channels/DocumentDocumentDisposed'
+    summary: Publish document.document.disposed
+    description: >
+      Publishes document.document.disposed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: document.document.disposed
+    x-status: planned
+  publishDocumentDocumentRequested:
+    action: send
+    channel:
+      $ref: '#/channels/DocumentDocumentRequested'
+    summary: Publish document.document.requested
+    description: >
+      Publishes document.document.requested through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: document.document.requested
+    x-status: planned
+  publishDocumentDocumentRequestFulfilled:
+    action: send
+    channel:
+      $ref: '#/channels/DocumentDocumentRequestFulfilled'
+    summary: Publish document.document.request-fulfilled
+    description: >
+      Publishes document.document.request-fulfilled through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: document.document.request-fulfilled
+    x-status: planned
+  publishDocumentPackageBuilt:
+    action: send
+    channel:
+      $ref: '#/channels/DocumentPackageBuilt'
+    summary: Publish document.package.built
+    description: >
+      Publishes document.package.built through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: document.package.built
+    x-status: planned
+  publishDocumentProcessingCompleted:
+    action: send
+    channel:
+      $ref: '#/channels/DocumentProcessingCompleted'
+    summary: Publish document.processing.completed
+    description: >
+      Publishes document.processing.completed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: document.processing.completed
+    x-status: planned
+  publishDocumentProcessingFailed:
+    action: send
+    channel:
+      $ref: '#/channels/DocumentProcessingFailed'
+    summary: Publish document.processing.failed
+    description: >
+      Publishes document.processing.failed through the transactional outbox over authenticated
+      HTTPS (SPEC 7.5). Planned.
+    x-event-type: document.processing.failed
+    x-status: planned
+components:
+  messages:
+    DomainEvent:
+      name: DomainEvent
+      title: EIA domain event envelope
+      summary: One immutable fact published by a vertical.
+      contentType: application/json
+      headers:
+        type: object
+        additionalProperties: true
+        properties:
+          X-EIA-Event-Id:
+            type: string
+            format: uuid
+          X-EIA-Event-Type:
+            type: string
+          X-EIA-Event-Version:
+            type: integer
+          X-EIA-Aggregate-Version:
+            type: integer
+          Idempotency-Key:
+            type: string
+          X-EIA-Signature:
+            type: string
+      payload:
+        $ref: '../schemas/event-envelope.schema.json'
+  securitySchemes:
+    outboxSignature:
+      type: httpApiKey
+      name: X-EIA-Signature
+      in: header
+      description: >
+        HMAC-SHA256 over the timestamp and the exact request body, in the form
+        t=<unix>,v1=<hex> (SPEC 7.5.1).
+x-vertical: document
+x-spec-section: SPEC 11.6.9
+x-status: planned
+x-implementation:
+  publisher: none
+  subscriber: none
+  notes: >
+    The current vertical slices emit no events; the outbox tables and the
+    dispatcher described in SPEC 7.5 are not implemented. This document is the
+    agreed event contract for the publisher that will be built.
+
+x-consumed-events:
+  - policy.policy.issued
+  - policy.policy.endorsed
+  - policy.policy.cancelled
+  - contract.contract.bound
+  - contract.bordereau.received
+  - contract.account.issued
+  - direct.claim.registered
+  - direct.claim.settlement-executed
+  - assumed.claim.registered
+  - assumed.claim.commuted
+  - payment.payment.paid
+  - party.party.merged

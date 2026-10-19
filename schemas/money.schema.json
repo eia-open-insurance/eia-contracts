@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.eia.example/schemas/money.schema.json",
+  "title": "EIA Money",
+  "description": "Canonical money value for every EIA API (SPEC 10.3 and 12.2). The amount is always a decimal string with at most four fraction digits and is never a JSON number; the currency is an ISO 4217 alpha-3 code. Zero is valid. A negative amount is permitted only for an explicit reversal, return, or credit field, never for an original payment. The flat amount/currency pairs used by the current vertical payloads (premiumAmount/premiumCurrency, reserveAmount/reserveCurrency) are documented in each vertical schema and must migrate to this object; see MISMATCHES.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "amount",
+    "currency"
+  ],
+  "properties": {
+    "amount": {
+      "$ref": "#/$defs/MoneyAmount"
+    },
+    "currency": {
+      "$ref": "#/$defs/CurrencyCode"
+    }
+  },
+  "$defs": {
+    "MoneyAmount": {
+      "type": "string",
+      "description": "Decimal amount as a string with at most four fraction digits, for example 1250000.00. Never a JSON number.",
+      "pattern": "^-?(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,4})?$",
+      "examples": [
+        "0.00",
+        "1250000.00",
+        "-450.50"
+      ]
+    },
+    "CurrencyCode": {
+      "type": "string",
+      "description": "ISO 4217 alpha-3 currency code, uppercase.",
+      "pattern": "^[A-Z]{3}$",
+      "examples": [
+        "USD"
+      ]
+    }
+  },
+  "examples": [
+    {
+      "amount": "1250000.00",
+      "currency": "USD"
+    }
+  ]
+}
