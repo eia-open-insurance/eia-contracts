@@ -1,20 +1,25 @@
 openapi: 3.1.0
 info:
   title: EIA canonical shared API components
-  version: 1.0.0
-  summary: Shared error, money, paging, audit, and tenant/book components for every EIA API.
+  version: 1.1.0
+  summary: Shared error, money, paging, concurrency, idempotency, audit, and tenant/book components for every EIA API.
   description: >
     Shared OpenAPI 3.1 components referenced by the per-vertical contract
     documents in this directory. The components are the canonical definitions
-    of the error envelope, money, cursor pagination, audit fields, and the
-    tenant and book request headers. Vertical documents reference them with a
-    relative file reference such as
+    of the RFC 9457 Problem envelope, money, the page envelope, ETag/If-Match,
+    Idempotency-Key, audit fields, and the tenant and book request headers.
+    Vertical documents reference them with a relative file reference such as
     `./components.yaml#/components/schemas/Problem`.
 
-    Authority is SPEC.md sections 6.11, 7.6, 10.3, 12.2, and 12.6. Where the
-    implemented services deviate from a component, the deviation is recorded
-    in MISMATCHES.md rather than encoded here: a canonical contract states the
-    agreed shape, not the current drift.
+    Round 2 (contract 1.1.0) turns the Policy page envelope, ETag/If-Match, and
+    Idempotency-Key from planned components into implemented ones. The
+    remaining verticals still return bare arrays and their own error bodies;
+    the divergence is tracked in MISMATCHES.md.
+
+    Authority is SPEC.md sections 6.11, 7.6, 7.18-7.23, 10.3, 12.2, and 12.6.
+    Where an implemented service deviates from a component, the deviation is
+    recorded in MISMATCHES.md rather than encoded here: a canonical contract
+    states the agreed shape, not the current drift.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -30,7 +35,7 @@ servers:
       inside the platform network.
 tags:
   - name: Shared components
-    description: Canonical reusable request parameters, responses, and schemas.
+    description: Canonical reusable request parameters, responses, headers, and schemas.
 paths: {}
 components:
   securitySchemes:
@@ -59,12 +64,11 @@ components:
       in: header
       required: true
       description: >
-        Book scope for a DIRECT-only vertical. The services treat a missing or
-        different book as an inaccessible resource (404) rather than a
-        permission failure (403), so the response cannot confirm that a record
-        exists in the other book (SPEC 3.6.2, WALL-06). Cession and
-        Retrocession currently answer 400 BOOK_REQUIRED instead; see
-        MISMATCHES.md.
+        Book scope for a DIRECT-only vertical. A different book is hidden as
+        404 `BOOK_SCOPE_VIOLATION` by Direct Claims and Cession, so the
+        response cannot confirm that a record exists in the other book
+        (SPEC 3.6.2, WALL-06). A missing header is still a 400 `BOOK_REQUIRED`
+        in Cession; see MISMATCHES.md.
       schema:
         type: string
         enum:
@@ -74,9 +78,10 @@ components:
       in: header
       required: true
       description: >
-        Book scope for an ASSUMED-only vertical. A missing or different book is
-        hidden as a 404 by Assumed Claims; Retrocession currently answers 400
-        BOOK_REQUIRED instead. See MISMATCHES.md.
+        Book scope for an ASSUMED-only vertical. A different book is hidden as
+        404 `BOOK_SCOPE_VIOLATION` by Assumed Claims and Retrocession
+        (SPEC 3.6.2, WALL-06). A missing header is still a 400 `BOOK_REQUIRED`
+        in Retrocession; see MISMATCHES.md.
       schema:
         type: string
         enum:
@@ -92,6 +97,29 @@ components:
       schema:
         type: string
         format: uuid
+    PageParam:
+      name: page
+      in: query
+      required: false
+      description: >
+        Zero-based page number for the offset page envelope implemented by the
+        Policy list endpoints. Default 0.
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    PageSizeParam:
+      name: size
+      in: query
+      required: false
+      description: >
+        Page size for the offset page envelope implemented by the Policy list
+        endpoints. Default 20, maximum 100.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
     DirectClaimStatusFilter:
       name: status
       in: query
@@ -104,34 +132,67 @@ components:
       in: header
       required: false
       description: >
-        End-to-end correlation identity (SPEC 12.6). Planned: the implemented
-        controllers neither accept nor echo it yet.
-      x-status: planned
+        End-to-end correlation identity (SPEC 12.6). Policy accepts it and
+        echoes a validated UUID as `correlationId` in the Problem body of a
+        failed request; it is not echoed on success yet. The other verticals do
+        not accept it yet.
       schema:
         type: string
         format: uuid
     IdempotencyKey:
       name: Idempotency-Key
       in: header
-      required: true
+      required: false
       description: >
-        Idempotency scope for transaction submission (SPEC 12.3 and 12.6).
-        Planned: no implemented create endpoint enforces it yet.
-      x-status: planned
+        Idempotency scope for a create request, implemented by the Policy
+        create endpoints in Round 2. The key is optional for backward
+        compatibility, but SPEC 12.6 requires it on transaction submission and
+        clients SHOULD always send a UUID. The scope is the tenant plus the key;
+        the maximum length is 255 characters. A retry with the same key and an
+        identical request replays the original resource with 200 and
+        `Idempotent-Replayed: true`; reusing the key with a different request is
+        409 `IDEMPOTENCY_CONFLICT`.
+      x-status: implemented
       schema:
         type: string
-        pattern: '^[0-9a-fA-F-]{36}$'
+        minLength: 1
+        maxLength: 255
     IfMatch:
       name: If-Match
       in: header
-      required: true
+      required: false
       description: >
-        Optimistic concurrency entity tag (SPEC 12.6). Planned: the services
-        take `expectedVersion` in the request body instead and do not emit
-        ETag.
-      x-status: planned
+        Optimistic concurrency for a Policy mutation: the strong entity tag
+        from a prior read, formatted as `"<version>"` (for example `"3"`), or
+        `*`. Implemented by Policy in Round 2. When present it takes precedence
+        over the compatibility `expectedVersion` body field. A malformed value
+        is 400 `INVALID_IF_MATCH`; a stale value is 409
+        `CONCURRENT_MODIFICATION` with `meta.currentVersion` and
+        `meta.expectedVersion`. SPEC 7.6 requires the header on PUT/PATCH;
+        Policy keeps it optional for backward compatibility.
+      x-status: implemented
       schema:
         type: string
+  headers:
+    ETag:
+      description: >
+        Strong entity tag of the current representation, derived from the
+        aggregate version and formatted as a quoted decimal string
+        (for example `"3"`). Send it back in `If-Match` on the next mutation.
+        Emitted by the Policy detail, create, and status responses.
+      schema:
+        type: string
+        pattern: '^"[0-9]+"$'
+    IdempotentReplayed:
+      description: >
+        `true` when the response replays an earlier request that carried the
+        same `Idempotency-Key`, `false` when a new resource was created.
+        Emitted by the Policy create responses.
+      schema:
+        type: string
+        enum:
+          - 'true'
+          - 'false'
   schemas:
     Problem:
       $ref: '../schemas/error-envelope.schema.json'
@@ -192,67 +253,100 @@ components:
           type: integer
           minimum: 0
           description: >
-            Aggregate version, incremented on every accepted write. Callers
-            echo it back as `expectedVersion` where the operation supports
-            optimistic concurrency.
+            Aggregate version, incremented on every accepted write. Policy
+            exposes it as the strong ETag `"<version>"` and accepts it in
+            `If-Match`; the other verticals take it in the request body as
+            `expectedVersion` or `version`.
     Page:
       type: object
       description: >
-        Planned cursor-paged collection envelope (SPEC 7.6). No implemented
-        list endpoint returns it yet: every current list operation returns a
-        bare JSON array. See MISMATCHES.md.
-      x-status: planned
-      required:
-        - data
-        - page
-      properties:
-        data:
-          type: array
-          items: {}
-        page:
-          $ref: '#/components/schemas/PageMeta'
-        _links:
-          $ref: '#/components/schemas/Links'
+        Offset-paged collection envelope implemented by the Policy list
+        endpoints in Round 2: `items`, `page`, `size`, `total`, and `_links`.
+        A vertical document narrows `items` to its resource type. SPEC 7.6 and
+        12.2 describe a cursor envelope (`data`, `page.size`, `hasMore`,
+        `nextCursor`); the implemented offset form and the remaining cursor
+        divergence are recorded in MISMATCHES.md.
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          required:
+            - items
+            - _links
+          properties:
+            items:
+              type: array
+              description: The resources on this page, in the service's stable order.
+              items: {}
+            _links:
+              $ref: '#/components/schemas/PageLinks'
     PageMeta:
       type: object
-      description: Cursor pagination metadata (SPEC 7.6). `total` is optional.
-      x-status: planned
-      additionalProperties: false
+      description: >
+        The pagination members repeated at the top level of a page envelope.
+        `page` is zero-based; `size` is the requested page size; `total` is the
+        tenant-wide count. `Page` composes this object with `items` and
+        `_links`; additional members are therefore allowed here.
       required:
+        - page
         - size
-        - hasMore
+        - total
       properties:
+        page:
+          type: integer
+          minimum: 0
+          description: Zero-based page number.
         size:
           type: integer
           minimum: 1
-          maximum: 200
-          description: Page size requested by the client. Default 25, maximum 200.
-        hasMore:
-          type: boolean
-        nextCursor:
-          type: [string, 'null']
-          description: Opaque cursor for the next page; null on the last page.
+          maximum: 100
+          description: Page size requested by the client. Default 20, maximum 100.
         total:
-          type: [integer, 'null']
+          type: integer
           minimum: 0
-          description: Omitted when counting would be expensive.
+          description: Tenant-wide total number of matching resources.
+    PageLinks:
+      type: object
+      description: >
+        The `_links` object of a page envelope. `self` is always present;
+        `next` is omitted on the last page and `prev` is omitted on the first
+        page. Hrefs are relative so they work behind the gateway.
+      additionalProperties: false
+      required:
+        - self
+      properties:
+        self:
+          $ref: '#/components/schemas/Link'
+        next:
+          $ref: '#/components/schemas/Link'
+        prev:
+          $ref: '#/components/schemas/Link'
+    Link:
+      type: object
+      description: >
+        One hypermedia link. Page links carry only `href`; a typed record link
+        may also carry the resource `type` and `vertical`.
+      additionalProperties: false
+      required:
+        - href
+      properties:
+        href:
+          type: string
+          minLength: 1
+        type:
+          type: string
+          description: Resource type, for example policy or claim.
+        vertical:
+          type: string
+          description: Vertical identifier, for example policy or direct.
     Links:
       type: object
       description: >
-        Hypermedia links on a detail or collection response (SPEC 7.6). Planned:
-        implemented resource projections do not carry `_links` yet.
+        Hypermedia links on a detail or collection response (SPEC 7.6). Planned
+        for detail resources: Policy list responses use `PageLinks`, and no
+        implemented detail projection carries `_links` yet.
       x-status: planned
       additionalProperties:
-        type: object
-        required:
-          - href
-        properties:
-          href:
-            type: string
-          type:
-            type: string
-          vertical:
-            type: string
+        $ref: '#/components/schemas/Link'
     EntityRef:
       type: object
       description: Cross-vertical reference (SPEC 12.2).
@@ -340,41 +434,58 @@ components:
         - REOPENED
   responses:
     BadRequest:
-      description: The request is malformed or violates a validation rule.
+      description: >
+        400. The request is malformed or violates a validation rule. Codes
+        include VALIDATION_ERROR, MISSING_TENANT_HEADER,
+        INVALID_TENANT_HEADER, INVALID_IF_MATCH, INVALID_IDEMPOTENCY_KEY,
+        INVALID_STATUS, FSRI_VALIDATION, and FSRI_REJECTED.
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
     NotFound:
       description: >
-        The resource does not exist or is not visible in the caller's tenant or
-        book scope.
+        404. The resource does not exist, is not visible in the caller's tenant
+        or book scope, or the request used a book that the vertical hides as
+        404 `BOOK_SCOPE_VIOLATION` (SPEC 3.6.2).
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
     Conflict:
       description: >
-        A concurrent modification, duplicate business key, or illegal lifecycle
-        transition.
+        409. A state or version conflict: `CONCURRENT_MODIFICATION` (stale
+        ETag or expected version), `IDEMPOTENCY_CONFLICT` (the key was reused
+        with a different request), a duplicate business key such as
+        `DUPLICATE_POLICY_NUMBER`, `INVALID_STATUS_TRANSITION` (illegal
+        lifecycle edge), or `FSRI_CONFLICT` (FS-RI rejected an immutable
+        hand-off).
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
     UnprocessableContent:
-      description: The request is well formed but a domain policy rejects it.
+      description: >
+        422. The request is well formed but a domain policy rejects it. No
+        Policy operation returns 422 today.
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
     BadGateway:
-      description: An upstream expert or integration returned an unusable response.
+      description: >
+        502. An upstream expert or integration returned an unusable response.
+        FS-RI mappings include `FSRI_CONTRACT_NOT_FOUND`, `FSRI_BOOK_WALL`,
+        `FSRI_INVALID_RESPONSE`, and `FSRI_HANDOFF_NOT_RECORDED`; expert
+        mappings include `EXPERT_ERROR`.
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
     ServiceUnavailable:
-      description: A dependency is unavailable; retry after backoff.
+      description: >
+        503. A dependency is unavailable; retry after backoff. Codes include
+        `FSRI_UNAVAILABLE`, `FSRI_THROTTLED`, and `EXPERT_UNAVAILABLE`.
       content:
         application/problem+json:
           schema:

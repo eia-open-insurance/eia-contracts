@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://contracts.eia.example/schemas/error-envelope.schema.json",
   "title": "EIA canonical error envelope",
-  "description": "Canonical error body for every EIA API, modelled on RFC 9457 application/problem+json (SPEC 6.11 and 12.2). Unknown members must be ignored by consumers. The canonical code scheme is EIA-<VERT|-PLT|-TX>-<NNNN> (SPEC 6.11); a service that still emits a legacy code such as NOT_FOUND is tracked in MISMATCHES.md. correlationId, transactionId, and meta are part of the canonical envelope but are not emitted by every service yet.",
+  "description": "Canonical error body for every EIA API, modelled on RFC 9457 application/problem+json (SPEC 6.11 and 12.2). Unknown members must be ignored by consumers. The Policy domain and Policy expert emit this shape with content type application/problem+json as of Round 2 (2026-10-19); the other verticals still emit their compact ApiError bodies. The canonical code scheme is EIA-<VERT|-PLT|-TX>-<NNNN> (SPEC 6.11); Policy preserves its legacy code strings such as POLICY_NOT_FOUND and CONCURRENT_MODIFICATION, and that migration is tracked in MISMATCHES.md. correlationId is emitted by Policy; transactionId and meta are canonical but are not emitted by every service yet.",
   "type": "object",
   "additionalProperties": true,
   "required": [
@@ -71,7 +71,7 @@
     "correlationId": {
       "type": ["string", "null"],
       "format": "uuid",
-      "description": "Correlation identity of the request chain (SPEC 12.6). Not emitted by every service yet."
+      "description": "Correlation identity of the request chain (SPEC 12.6). Policy echoes a validated X-Correlation-Id here, or a generated UUID when the header is absent; the other services do not emit it yet."
     },
     "transactionId": {
       "type": ["string", "null"],

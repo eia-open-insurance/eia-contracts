@@ -20,15 +20,17 @@ This repository is the contract-first source of truth for the platform:
 - A **standard-library validation script** that every contributor and release
   engineer runs locally before merge.
 
-The normative requirements live in `../../SPEC.md`, chiefly sections 6.11
-(errors), 7.5 (eventing), 7.6 (API conventions), 10.3 (money), 11.1–11.10
-(verticals), 12 (canonical contracts), and 16.9 (repository standard).
+The normative requirements live in `../../SPEC.md`, chiefly sections 3.6 (book
+wall), 6.11 (errors), 7.5 (eventing), 7.6 (API conventions), 7.18-7.23
+(reinsurance administration and the integration standard), 10.3 (money),
+11.1-11.10 (verticals), 12 (canonical contracts), and 16.9 (repository
+standard).
 
 ## Layout
 
 | Path | Contents |
 |---|---|
-| `openapi/components.yaml` | Shared parameters, responses, and schemas: canonical `Problem` error envelope, money, cursor pagination, audit fields, entity references, tenant and book headers. |
+| `openapi/components.yaml` | Shared parameters, headers, responses, and schemas: canonical `Problem` error envelope, money, offset page envelope, ETag/If-Match, Idempotency-Key, audit fields, entity references, tenant and book headers. |
 | `openapi/party.yaml` … `openapi/notifications.yaml` | One OpenAPI 3.1 document per vertical. Ten documents, each covering `/api/v1/**` and `/internal/v1/**`. |
 | `asyncapi/event-catalog.yaml` | Authoritative catalog of the published event names, their publisher, and the subscribers named in SPEC 11. |
 | `asyncapi/{vertical}.yaml` | Published event channels for one vertical. One channel and one `send` operation per event name. |
@@ -57,9 +59,11 @@ machine-readable status:
 |---|---|
 | `x-implementation.status: implemented` | The document was checked against the controller mappings in the named services. |
 | `x-implementation.verifiedAgainst` | Exact source files that were read to verify paths, methods, fields, and enums. |
-| `x-status` | Object-level status. `planned` means the object is agreed but not implemented. |
+| `x-status` | Object-level status. `planned` means the object is agreed but not implemented; `implemented` marks a shared component that a vertical now uses. |
 | `x-planned-operations` | Routes declared by SPEC 11 but not implemented by the current slice. |
 | `x-planned-notes` | Known differences between the SPEC route shape and the implemented route shape. |
+| `x-compatibility` | Per-document compatibility classification: contract version, previous version, breaking changes, compatible changes. |
+| `x-fsri-error-mapping` | Cession and Retrocession: how an upstream FS-RI failure becomes a public 400, 409, 502, or 503 and which code it carries. |
 
 Rules:
 
@@ -69,10 +73,10 @@ Rules:
 2. **A field or endpoint that is not implemented is omitted from `paths` and
    schemas** and listed under `x-planned-operations` or in a schema
    description. No schema claims a field the service never returns.
-3. **Where the implementation violates a normative SPEC rule** (for example a
-   money amount serialized as a JSON number), the canonical schema follows the
-   SPEC and `MISMATCHES.md` records the deviation with the exact source
-   location. Contracts are the target, not a snapshot of drift.
+3. **Where the implementation differs from a normative SPEC rule** (for example
+   the offset page envelope versus the SPEC 7.6 cursor envelope), the canonical
+   schema documents the agreed shape and `MISMATCHES.md` records the deviation
+   with the exact source location and the open decision.
 4. **No official ACORD, NAIC, ISO, or SAP code list is invented here.** The
    enumerations in these documents are the internal values that the services
    actually enforce. External code-list mappings belong in `mappings/` and are
@@ -89,6 +93,30 @@ Rules:
 
 The repository itself is released as `vMAJOR.MINOR.PATCH` from `main`. The
 contract version in `info.version` and the repository tag move together.
+
+### Round 2 compatibility notes (2026-10-19)
+
+Round 2 hardens Policy as the reference vertical and adds the SAP FS-RI hand-off
+to Cession and Retrocession.
+
+| Document | Version | Classification | Round 2 change |
+|---|---|---|---|
+| `openapi/policy.yaml` | 2.0.0 | Breaking | Lists return the page envelope; errors become RFC 9457 `Problem`; illegal transitions and duplicate policy numbers become 409; ETag/If-Match and Idempotency-Key are added. |
+| `openapi/components.yaml` | 1.1.0 | Additive and documentation | The `Page`, `PageLinks`, `IdempotencyKey`, `IfMatch`, and header components move from planned to implemented; `Problem`, `BadGateway`, and the book headers are described against the Round 2 behaviour. |
+| `openapi/cession.yaml` | 1.1.0 | Additive | `fsriHandoffId`, `fsriStatus`, `fsriHandedOffAt`, and `fsriLastError` response fields; optional `fsriContractNumber` request field; hand-off and error-mapping documentation; two internal hand-off persistence operations. |
+| `openapi/retrocession.yaml` | 1.1.0 | Additive | The same additive fields and operations for the ASSUMED book. |
+
+The Policy list response changed from a bare JSON array to the page envelope,
+and the error body changed from the vertical `ApiError` to `Problem`; both are
+breaking for a generated client, so the Policy contract takes a major version.
+The HTTP path stays `/api/v1/policies` because the only consumer,
+`eia-policy-web`, is updated in the same release. A future external consumer
+that needs the old array or error shape requires a `/v2` surface and the
+deprecation window above.
+
+Cession and Retrocession changes are additive: optional response fields,
+optional request fields, and documentation of behaviour that was not previously
+described. The other seven vertical documents are unchanged in Round 2.
 
 ### Compatibility matrix
 
@@ -122,7 +150,7 @@ Every request carries a resolved tenant; no request body may override it.
 | Header | Where | Rule |
 |---|---|---|
 | `X-EIA-Tenant` | All public routes and some internal routes | Required, UUID. Missing or malformed is a 400. |
-| `X-EIA-Book` | Direct Claims, Assumed Claims, Cession, Retrocession | Required and fixed to the vertical's book. The public services are expected to hide a mismatch as 404 (SPEC 3.6.2). Assumed Claims and Direct Claims do; Cession and Retrocession currently return 400. See `MISMATCHES.md`. |
+| `X-EIA-Book` | Direct Claims, Assumed Claims, Cession, Retrocession | Required and fixed to the vertical's book. A different book is hidden as 404 `BOOK_SCOPE_VIOLATION` in all four, so the response cannot confirm existence (SPEC 3.6.2, WALL-06). A missing header is still a 400 `BOOK_REQUIRED` in Cession and Retrocession; that is a validation error, not a book mismatch. |
 | `?tenantId=` | Most internal expert routes | The expert is network-restricted and receives the tenant resolved by its domain service. |
 
 Each operation documents the exact parameter it accepts. Internal routes are
@@ -139,11 +167,17 @@ used with `application/problem+json`:
 - `code` follows the SPEC 6.11 scheme `EIA-<VERT|-PLT|-TX>-<NNNN>`.
 - `category` is the SPEC 6.11 category set.
 - `errors[]` carries field-level problems.
-- `correlationId`, `transactionId`, and `meta` are canonical but not emitted by
-  every service yet.
+- `correlationId`, `transactionId`, and `meta` are canonical; Policy emits
+  `correlationId` and `meta` and keeps `transactionId` absent until a
+  transaction submission exists.
 
-The services do not all emit this shape today; `MISMATCHES.md` lists every
-variant. The canonical schema is what new work must target.
+Policy (domain and expert) now emits this shape and media type, but keeps its
+legacy code strings (`POLICY_NOT_FOUND`, `CONCURRENT_MODIFICATION`,
+`INVALID_STATUS_TRANSITION`, `IDEMPOTENCY_CONFLICT`, and so on) instead of the
+`EIA-XXX-NNNN` scheme. The code migration remains open. The other nine vertical
+documents still describe services that emit their own `ApiError` bodies; their
+`Problem` responses are the canonical target, and `MISMATCHES.md` M-02 and M-17
+list every variant.
 
 ### Money
 
@@ -157,18 +191,48 @@ variant. The canonical schema is what new work must target.
 
 The current vertical payloads use flat pairs (`premiumAmount`/`premiumCurrency`,
 `reserveAmount`/`reserveCurrency`, `cededPremium`/`cededLoss` + `currency`).
-Those field names are documented; `MISMATCHES.md` records which services
-serialize the value as a number and which already use a string.
+Those field names are documented. Every money-bearing service serializes the
+amount as a decimal string (M-03 is closed); moving the flat pairs to the
+canonical `Money` object is M-12/M-13.
+
+### Concurrency, idempotency, and conflicts
+
+Policy is the reference implementation:
+
+- `ETag: "<version>"` is returned on detail, create, and status responses.
+- `If-Match` on the status mutation performs optimistic concurrency. A stale
+  tag or body version is 409 `CONCURRENT_MODIFICATION` with
+  `meta.currentVersion`, `meta.expectedVersion`, and
+  `errors[0].code = STALE_VERSION`; a malformed header is 400
+  `INVALID_IF_MATCH`. The header is optional for backward compatibility and
+  takes precedence over the body `expectedVersion`.
+- `Idempotency-Key` on create is optional but recommended. A same-key replay of
+  an identical request returns 200 with `Idempotent-Replayed: true`; reusing the
+  key with a different request is 409 `IDEMPOTENCY_CONFLICT`; a duplicate
+  business key is 409 `DUPLICATE_POLICY_NUMBER`.
+- An illegal lifecycle transition is 409 `INVALID_STATUS_TRANSITION`.
+
+No other vertical emits `ETag` or accepts `If-Match`/`Idempotency-Key`, and
+Cession/Retrocession still return 400 for an illegal lifecycle edge. Their
+FS-RI hand-off is a separate case: an FS-RI conflict is 409 `FSRI_CONFLICT`, an
+unusable FS-RI response is 502, and an FS-RI outage is 503. See
+`MISMATCHES.md` M-06, M-07, M-11, and M-21.
 
 ### Pagination and collections
 
-The canonical collection envelope is `Page` in `openapi/components.yaml`:
-`data`, `page` (`size`, `hasMore`, `nextCursor`, optional `total`), and
-`_links`, with `?page[size]` and `?page[after]`. It is marked `planned`.
+The implemented Policy page envelope is `Page` in `openapi/components.yaml`:
+`{items, page, size, total, _links:{self, next, prev}}`, with `?page=` (default
+0) and `?size=` (default 20, maximum 100). `next` is omitted on the last page
+and `prev` on the first page; hrefs are relative. Both the public and the expert
+list operations return it, and `items` is narrowed to `Policy` in
+`policy.yaml`.
 
-Every implemented list operation currently returns a bare JSON array. Moving to
-the `Page` envelope is a breaking change and requires a new major version or a
-compatible opt-in, so the current array shape is documented explicitly.
+Every other vertical still returns a bare JSON array, with no page, total,
+cursor, or links. SPEC 7.6 and 12.2 specify a different, cursor-based envelope
+(`data`, `page:{size, hasMore, nextCursor, total?}`, `?page[size]` and
+`?page[after]`, default 25, maximum 200). The offset form is the Round 2
+contract; the divergence and the migration choice are recorded in
+`MISMATCHES.md` M-04.
 
 ## Validation
 
@@ -198,8 +262,9 @@ missing directory.
 3. **OpenAPI structure.** `openapi: 3.1.0`, SemVer `info.version`, the JSON
    Schema 2020-12 dialect, non-empty `paths`, operation IDs (unique per file and
    across the repository), summaries, tags, responses with a 2xx, request-body
-   content types, internal-route security markers, and the complete table of
-   required paths and methods per vertical.
+   content types, internal-route security markers, the required shared
+   components (schemas, parameters, headers, and responses), and the complete
+   table of required paths and methods per vertical.
 4. **AsyncAPI structure.** `asyncapi: 3.0.0`, channel addresses, `x-event-type`,
    `x-status: planned`, one `send` operation per channel, and a `DomainEvent`
    message on every channel.
@@ -244,14 +309,19 @@ missing directory.
 
 `MISMATCHES.md` is the authoritative list. The largest ones are:
 
-- five different error-body shapes across ten verticals plus a shared-library
-  variant;
-- money serialized as a JSON number by four services;
-- no cursor pagination, `_links`, `ETag`/`If-Match`, or `Idempotency-Key`
-  anywhere;
-- different book-mismatch status codes between the claim verticals (404) and
-  the reinsurance verticals (400);
-- no outbox publisher or subscriber, so every AsyncAPI channel is planned.
+- Policy now emits the canonical `Problem` body and media type with legacy code
+  strings; the other nine verticals still emit their own `ApiError` bodies, and
+  the `EIA-XXX-NNNN` code migration is open;
+- the Policy page envelope is offset-based (`items`, `page`, `size`, `total`,
+  `_links`) rather than the cursor envelope in SPEC 7.6/12.2, and the other
+  verticals still return bare arrays;
+- `ETag`/`If-Match` and `Idempotency-Key` exist only in Policy; detail
+  `_links` exist nowhere, and Cession/Retrocession still return 400 for an
+  illegal lifecycle edge;
+- the Cession/Retrocession FS-RI hand-off is synchronous, with no outbox
+  queue or hand-off resource (SPEC 7.18.3/HAND-05);
+- only the Party expert publishes an event, so the other AsyncAPI channels
+  remain planned.
 
 ## Repository standard
 
