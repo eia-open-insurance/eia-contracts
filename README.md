@@ -1,7 +1,7 @@
 # eia-contracts
 
-- GitHub organization: `eia-platform`
-- Repository URL: https://github.com/eia-platform/eia-contracts
+- GitHub organization: `eia-open-insurance`
+- Repository URL: https://github.com/eia-open-insurance/eia-contracts
 - Type: Contracts
 - Deployable: No
 - Owner: Architecture
@@ -34,3 +34,6 @@ Canonical OpenAPI, AsyncAPI, JSON Schema, and external mapping contracts.
 
 Contract-first source of truth for all services and events.
 
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
