@@ -54,6 +54,41 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   M-07, M-11, and M-17 for Policy, notes that the remaining verticals are
   unchanged, and adds M-21 for the synchronous FS-RI hand-off.
 
+### Changed in Round 5 (2026-10-19)
+
+- `openapi/policy.yaml` is contract 2.1.0: adds policy versions, coverage and
+  limits, aggregate erosion, endorsements, insureds, locations, cancellations,
+  and reinstatements on both the public and the expert surfaces; adds the 422
+  `UnprocessableContent` and 428 `PreconditionRequired` responses with the
+  business-rule and approval codes; keeps the page envelope, ETag/If-Match,
+  Idempotency-Key, and Problem schemas unchanged.
+- `openapi/contract.yaml` is contract 2.0.0: adds layers, participants, terms,
+  security, cessions, bordereaux, commutations, bind-eligibility, and bind on
+  both surfaces. `PATCH /status` to BOUND is now 409 `BIND_REQUIRES_COMMAND`;
+  bind is the only path to BOUND.
+- `openapi/direct-claims.yaml` is contract 1.1.0: adds injuries, exposures,
+  append-only reserve history, the coverage decision, litigation, settlements,
+  recoveries, liens, and close, and completes the claim projection.
+- `openapi/assumed-claims.yaml` is contract 1.1.0: adds loss advices,
+  bordereau ingest, reserve history, cash calls, recoveries, commutation,
+  disputes, audit, financials, and close, with 422 and 428 responses.
+- `openapi/components.yaml` is contract 1.2.0: `UnprocessableContent` and
+  `PreconditionRequired` become shared responses, `Percent` becomes
+  implemented, and the page envelope covers the Policy second-slice
+  collections.
+- `asyncapi/party.yaml`, `asyncapi/cession.yaml`,
+  `asyncapi/retrocession.yaml`, `asyncapi/document.yaml`,
+  `asyncapi/payment.yaml`, and `asyncapi/notifications.yaml` are 1.1.0 and mark
+  the events the transactional-outbox rollout actually emits as implemented.
+- `asyncapi/event-catalog.yaml` is 1.1.0: it publishes 164 event names and
+  records the implemented subset per vertical (`implemented`).
+- `scripts/validate_contracts.py` now requires the Round 5 paths, the two new
+  shared responses, the implemented-channel/catalog cross-check, and the
+  Round 5 implemented event names.
+- `README.md` records the Round 5 versions and compatibility classes;
+  `MISMATCHES.md` shrinks M-04, M-06, M-07, M-08, M-10, M-11, M-12, M-13,
+  M-14, M-16, M-20, and M-21, and adds M-22 for the implemented event names.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

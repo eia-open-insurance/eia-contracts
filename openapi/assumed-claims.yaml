@@ -1,23 +1,31 @@
 openapi: 3.1.0
 info:
   title: EIA Assumed Claims API
-  version: 1.0.0
+  version: 1.1.0
   summary: Assumed-book reinsurance claim administration and the Assumed Claims expert API.
   description: >
     This document describes the implemented public Assumed Claims domain API
     and the internal Assumed Claims expert API. The authoritative requirement is
-    SPEC 11.5 and SPEC 12; the implemented surface is the first vertical slice.
+    SPEC 11.5 and SPEC 12.
 
     Assumed Claims is fixed to the ASSUMED book. A book filter answers 404 with
     code EIA-RNS-7005 when X-EIA-Book is missing or different, so the response
     cannot confirm that a claim exists in the other book (SPEC 3.6.2, WALL-06).
 
     The controller is mapped to both `/api/v1/assumed-claims` and
-    `/api/v1/assumed-claims/claims`; both route sets are documented because the
-    Assumed Claims web remote calls the `/claims` form. The status transition
-    uses POST, matching the implementation.
+    `/api/v1/assumed-claims/claims`. The base routes are documented under both
+    path forms because the web remote calls the `/claims` form. Round 5's
+    second-slice routes are documented once under the short form and carry an
+    `x-path-alias` naming the equivalent `/api/v1/assumed-claims/claims`
+    prefix; both forms are served by the same controller methods with identical
+    requests and responses.
 
-    This vertical already emits the canonical RFC 9457 Problem envelope.
+    Round 5 adds loss advices, bordereau ingest, append-only reserve history,
+    cash calls, recoveries, commutation, disputes, the financial summary, the
+    audit trail, and closure. The expert returns the canonical RFC 9457 Problem
+    body with codes in the EIA-RNS-7xxx range; the domain re-emits the expert's
+    status, code, category, and field errors unchanged, including 409, 422, and
+    428.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -130,7 +138,10 @@ paths:
       description: >
         Applies one transition from SPEC 11.5.6. The command carries the target
         status and the expected version; a stale version returns 409 with
-        code EIA-RNS-7006.
+        code EIA-RNS-7006. Moving to OPEN requires at least one accepted loss
+        advice (422 `EIA-RNS-7102`); moving to RESERVED requires a positive
+        current reserve (422 `EIA-RNS-7204`); COMMUTED is rejected with 409
+        `EIA-RNS-7505` and must use POST /commute.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
@@ -153,6 +164,728 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AssumedClaim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/assumed-claims/{assumedClaimId}/close:
+    post:
+      operationId: closeAssumedClaim
+      tags:
+        - Assumed Claims
+      summary: Close an assumed claim.
+      description: >
+        Closure is blocked by an open dispute, a current reserve, an unresolved
+        advice, or an outstanding cash call; the rejection is 422
+        `EIA-RNS-7701`. Closing an already closed claim is 409
+        `EIA-RNS-7702`.
+      x-path-alias: /api/v1/assumed-claims/claims/{assumedClaimId}/close
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Assumed claim closed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssumedClaim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/assumed-claims/{assumedClaimId}/financials:
+    get:
+      operationId: getAssumedClaimFinancials
+      tags:
+        - Assumed Claims
+      summary: Get the ceded financial position.
+      description: >
+        Every amount is a decimal string in the claim currency. `netCededAmount`
+        is incurred minus recoveries; `sourceVersion` is the claim version the
+        summary was derived from.
+      x-path-alias: /api/v1/assumed-claims/claims/{assumedClaimId}/financials
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Financial summary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FinancialSummary'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/assumed-claims/{assumedClaimId}/audit:
+    get:
+      operationId: listAssumedClaimAudit
+      tags:
+        - Assumed Claims
+      summary: List the append-only claim audit trail.
+      description: >
+        Events are returned in occurrence order. The audit table refuses UPDATE
+        and DELETE at the database level.
+      x-path-alias: /api/v1/assumed-claims/claims/{assumedClaimId}/audit
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Audit entries of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ClaimAuditEntry'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/assumed-claims/{assumedClaimId}/advices:
+    get:
+      operationId: listAssumedClaimAdvices
+      tags:
+        - Assumed Claims
+      summary: List loss advices.
+      x-path-alias: /api/v1/assumed-claims/claims/{assumedClaimId}/advices
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Loss advices of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LossAdvice'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: recordAssumedClaimAdvice
+      tags:
+        - Assumed Claims
+      summary: Record a loss advice.
+      description: >
+        `adviceNumber` is unique per claim (409 `EIA-RNS-7101` on a duplicate,
+        RNS-02). The advice starts in RECEIVED. `cessionPct` is a fraction
+        between 0 and 1; `cededAmount` may be supplied or is derived from the
+        reported amount. The claim must be open for financial change (409
+        `EIA-RNS-7205`).
+      x-path-alias: /api/v1/assumed-claims/claims/{assumedClaimId}/advices
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordAdviceRequest'
+      responses:
+        '201':
+          description: Loss advice recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LossAdvice'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/assumed-claims/{assumedClaimId}/advices/{adviceId}/accept:
+    post:
+      operationId: acceptAssumedClaimAdvice
+      tags:
+        - Assumed Claims
+      summary: Accept a loss advice.
+      description: >
+        Only a RECEIVED advice can be accepted (409 `EIA-RNS-7103` otherwise).
+        Acceptance posts the advice, records the audit entry, and makes the
+        claim eligible to open. The optional body carries `acceptedBy` and
+        `note`.
+      x-path-alias: /api/v1/assumed-claims/claims/{assumedClaimId}/advices/{adviceId}/accept
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: adviceId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcceptAdviceRequest'
+      responses:
+        '200':
+          description: Loss advice accepted and posted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LossAdvice'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/assumed-claims/{assumedClaimId}/bordereaux:
+    get:
+      operationId: listAssumedClaimBordereaux
+      tags:
+        - Assumed Claims
+      summary: List bordereau batches.
+      x-path-alias: /api/v1/assumed-claims/claims/{assumedClaimId}/bordereaux
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Bordereau batches of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/BordereauBatch'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: ingestAssumedClaimBordereau
+      tags:
+        - Assumed Claims
+      summary: Ingest a bordereau batch.
+      description: >
+        Ingest is idempotent by `bordereauReference` plus the content hash. A
+        replay returns 200 with `replayed: true`; the same reference with
+        different content is 409 `EIA-RNS-7104`. Each line becomes a loss advice
+        with source BORDEREAU; duplicate advice numbers are reported per line as
+        DUPLICATE instead of overwriting. A batch carries at most 500 lines.
+      x-path-alias: /api/v1/assumed-claims/claims/{assumedClaimId}/bordereaux
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IngestBordereauRequest'
+      responses:
+        '201':
+          description: Bordereau ingested.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BordereauIngestResult'
+        '200':
+          description: Idempotent replay of the same bordereau reference and content.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BordereauIngestResult'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/assumed-claims/{assumedClaimId}/reserves:
+    get:
+      operationId: listAssumedClaimReserves
+      tags:
+        - Assumed Claims
+      summary: List append-only reserve movements.
+      description: >
+        The current reserve is derived from the latest current row per
+        component; CASE and IBNR remain separate (RNS-04).
+      x-path-alias: /api/v1/assumed-claims/claims/{assumedClaimId}/reserves
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Reserve history of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ReserveHistoryEntry'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: changeAssumedClaimReserve
+      tags:
+        - Assumed Claims
+      summary: Record a reserve movement.
+      description: >
+        Reserves are append-only. A negative amount, a missing reason, or a
+        stale effective date is rejected (400 `EIA-RNS-7201`, 409
+        `EIA-RNS-7202`). IBNR, large movements, and an actuarial or
+        underwriting authority require a named approver; otherwise the response
+        is 428 `EIA-RNS-7203`.
+      x-path-alias: /api/v1/assumed-claims/claims/{assumedClaimId}/reserves
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReserveChangeRequest'
+      responses:
+        '201':
+          description: Reserve movement recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReserveHistoryEntry'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        '428':
+          $ref: './components.yaml#/components/responses/PreconditionRequired'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/assumed-claims/{assumedClaimId}/cash-calls:
+    get:
+      operationId: listAssumedClaimCashCalls
+      tags:
+        - Assumed Claims
+      summary: List cash calls.
+      x-path-alias: /api/v1/assumed-claims/claims/{assumedClaimId}/cash-calls
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Cash calls of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CashCall'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: requestAssumedClaimCashCall
+      tags:
+        - Assumed Claims
+      summary: Request a cash call.
+      description: >
+        A cash call may not exceed the current reserve net of outstanding cash
+        calls (422 `EIA-RNS-7301`). An amount above the approval threshold needs
+        a named claims approver; otherwise the response is 428
+        `EIA-RNS-7302`. The request number is generated by the expert.
+      x-path-alias: /api/v1/assumed-claims/claims/{assumedClaimId}/cash-calls
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RequestCashCallRequest'
+      responses:
+        '201':
+          description: Cash call requested.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CashCall'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        '428':
+          $ref: './components.yaml#/components/responses/PreconditionRequired'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/assumed-claims/{assumedClaimId}/recoveries:
+    get:
+      operationId: listAssumedClaimRecoveries
+      tags:
+        - Assumed Claims
+      summary: List recoveries.
+      x-path-alias: /api/v1/assumed-claims/claims/{assumedClaimId}/recoveries
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Recoveries of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Recovery'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: recordAssumedClaimRecovery
+      tags:
+        - Assumed Claims
+      summary: Record a recovery.
+      description: >
+        A recovery may not exceed the ceded advised or paid loss including prior
+        recoveries (422 `EIA-RNS-7401`, RNS-10). The currency must equal the
+        claim currency (400 `EIA-RNS-7703`).
+      x-path-alias: /api/v1/assumed-claims/claims/{assumedClaimId}/recoveries
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordRecoveryRequest'
+      responses:
+        '201':
+          description: Recovery recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Recovery'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/assumed-claims/{assumedClaimId}/commutation:
+    get:
+      operationId: getAssumedClaimCommutation
+      tags:
+        - Assumed Claims
+      summary: Get the claim commutation.
+      description: Returns 404 `EIA-RNS-7506` when no commutation has been recorded.
+      x-path-alias: /api/v1/assumed-claims/claims/{assumedClaimId}/commutation
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Commutation of the claim.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Commutation'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/assumed-claims/{assumedClaimId}/commute:
+    post:
+      operationId: commuteAssumedClaim
+      tags:
+        - Assumed Claims
+      summary: Execute a claim commutation.
+      description: >
+        A named claims or underwriter approver and a signed release document are
+        required; a missing approval is 428 `EIA-RNS-7501` and a missing release
+        is 400 `EIA-RNS-7503`. An open dispute, an unresolved advice, or a block
+        on the lifecycle state is 422 `EIA-RNS-7502`. Execution releases the
+        current reserves and closes the claim.
+      x-path-alias: /api/v1/assumed-claims/claims/{assumedClaimId}/commute
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommuteClaimRequest'
+      responses:
+        '201':
+          description: Commutation executed and the claim closed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Commutation'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        '428':
+          $ref: './components.yaml#/components/responses/PreconditionRequired'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/assumed-claims/{assumedClaimId}/disputes:
+    get:
+      operationId: listAssumedClaimDisputes
+      tags:
+        - Assumed Claims
+      summary: List disputes.
+      x-path-alias: /api/v1/assumed-claims/claims/{assumedClaimId}/disputes
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Disputes of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Dispute'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: raiseAssumedClaimDispute
+      tags:
+        - Assumed Claims
+      summary: Raise a dispute.
+      description: >
+        A dispute blocks commutation and closure while it is open (RNS-11). A
+        dispute that cannot be raised is 422 `EIA-RNS-7603`.
+      x-path-alias: /api/v1/assumed-claims/claims/{assumedClaimId}/disputes
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RaiseDisputeRequest'
+      responses:
+        '201':
+          description: Dispute raised.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dispute'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/assumed-claims/{assumedClaimId}/disputes/{disputeId}/resolve:
+    post:
+      operationId: resolveAssumedClaimDispute
+      tags:
+        - Assumed Claims
+      summary: Resolve a dispute.
+      description: >
+        `resolution` and the resolved status are required. A dispute already
+        resolved or closed is 409 `EIA-RNS-7602`; an unknown dispute is 404
+        `EIA-RNS-7601`.
+      x-path-alias: /api/v1/assumed-claims/claims/{assumedClaimId}/disputes/{disputeId}/resolve
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: disputeId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResolveDisputeRequest'
+      responses:
+        '200':
+          description: Dispute resolved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dispute'
         '400':
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
@@ -274,6 +1007,8 @@ paths:
           $ref: './components.yaml#/components/responses/NotFound'
         '409':
           $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /internal/v1/assumed-claims:
@@ -395,6 +1130,686 @@ paths:
           $ref: './components.yaml#/components/responses/NotFound'
         '409':
           $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/assumed-claims/{assumedClaimId}/close:
+    post:
+      operationId: expertCloseAssumedClaim
+      tags:
+        - Assumed Claims internal
+      summary: Close an assumed claim (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Assumed claim closed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssumedClaim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/assumed-claims/{assumedClaimId}/financials:
+    get:
+      operationId: expertGetAssumedClaimFinancials
+      tags:
+        - Assumed Claims internal
+      summary: Get the ceded financial position (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Financial summary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FinancialSummary'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/assumed-claims/{assumedClaimId}/audit:
+    get:
+      operationId: expertListAssumedClaimAudit
+      tags:
+        - Assumed Claims internal
+      summary: List the claim audit trail (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Audit entries of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ClaimAuditEntry'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/assumed-claims/{assumedClaimId}/advices:
+    get:
+      operationId: expertListAssumedClaimAdvices
+      tags:
+        - Assumed Claims internal
+      summary: List loss advices (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Loss advices of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LossAdvice'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertRecordAssumedClaimAdvice
+      tags:
+        - Assumed Claims internal
+      summary: Record a loss advice (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordAdviceRequest'
+      responses:
+        '201':
+          description: Loss advice recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LossAdvice'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/assumed-claims/{assumedClaimId}/advices/{adviceId}/accept:
+    post:
+      operationId: expertAcceptAssumedClaimAdvice
+      tags:
+        - Assumed Claims internal
+      summary: Accept a loss advice (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: adviceId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcceptAdviceRequest'
+      responses:
+        '200':
+          description: Loss advice accepted and posted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LossAdvice'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/assumed-claims/{assumedClaimId}/bordereaux:
+    get:
+      operationId: expertListAssumedClaimBordereaux
+      tags:
+        - Assumed Claims internal
+      summary: List bordereau batches (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Bordereau batches of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/BordereauBatch'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertIngestAssumedClaimBordereau
+      tags:
+        - Assumed Claims internal
+      summary: Ingest a bordereau batch (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IngestBordereauRequest'
+      responses:
+        '201':
+          description: Bordereau ingested.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BordereauIngestResult'
+        '200':
+          description: Idempotent replay of the same bordereau reference and content.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BordereauIngestResult'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/assumed-claims/{assumedClaimId}/reserves:
+    get:
+      operationId: expertListAssumedClaimReserves
+      tags:
+        - Assumed Claims internal
+      summary: List reserve history (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Reserve history of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ReserveHistoryEntry'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertChangeAssumedClaimReserve
+      tags:
+        - Assumed Claims internal
+      summary: Record a reserve movement (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReserveChangeRequest'
+      responses:
+        '201':
+          description: Reserve movement recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReserveHistoryEntry'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        '428':
+          $ref: './components.yaml#/components/responses/PreconditionRequired'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/assumed-claims/{assumedClaimId}/cash-calls:
+    get:
+      operationId: expertListAssumedClaimCashCalls
+      tags:
+        - Assumed Claims internal
+      summary: List cash calls (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Cash calls of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CashCall'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertRequestAssumedClaimCashCall
+      tags:
+        - Assumed Claims internal
+      summary: Request a cash call (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RequestCashCallRequest'
+      responses:
+        '201':
+          description: Cash call requested.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CashCall'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        '428':
+          $ref: './components.yaml#/components/responses/PreconditionRequired'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/assumed-claims/{assumedClaimId}/recoveries:
+    get:
+      operationId: expertListAssumedClaimRecoveries
+      tags:
+        - Assumed Claims internal
+      summary: List recoveries (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Recoveries of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Recovery'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertRecordAssumedClaimRecovery
+      tags:
+        - Assumed Claims internal
+      summary: Record a recovery (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordRecoveryRequest'
+      responses:
+        '201':
+          description: Recovery recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Recovery'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/assumed-claims/{assumedClaimId}/commutation:
+    get:
+      operationId: expertGetAssumedClaimCommutation
+      tags:
+        - Assumed Claims internal
+      summary: Get the claim commutation (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Commutation of the claim.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Commutation'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/assumed-claims/{assumedClaimId}/commute:
+    post:
+      operationId: expertCommuteAssumedClaim
+      tags:
+        - Assumed Claims internal
+      summary: Execute a commutation (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommuteClaimRequest'
+      responses:
+        '201':
+          description: Commutation executed and the claim closed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Commutation'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        '428':
+          $ref: './components.yaml#/components/responses/PreconditionRequired'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/assumed-claims/{assumedClaimId}/disputes:
+    get:
+      operationId: expertListAssumedClaimDisputes
+      tags:
+        - Assumed Claims internal
+      summary: List disputes (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Disputes of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Dispute'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertRaiseAssumedClaimDispute
+      tags:
+        - Assumed Claims internal
+      summary: Raise a dispute (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RaiseDisputeRequest'
+      responses:
+        '201':
+          description: Dispute raised.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dispute'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/assumed-claims/{assumedClaimId}/disputes/{disputeId}/resolve:
+    post:
+      operationId: expertResolveAssumedClaimDispute
+      tags:
+        - Assumed Claims internal
+      summary: Resolve a dispute (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: assumedClaimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: disputeId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResolveDisputeRequest'
+      responses:
+        '200':
+          description: Dispute resolved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dispute'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
         default:
           $ref: './components.yaml#/components/responses/Problem'
 components:
@@ -407,10 +1822,8 @@ components:
         - $ref: './components.yaml#/components/schemas/AuditFields'
       type: object
       description: >
-        Assumed claim projection. The SPEC 11.5.4 aggregate carries advices,
-        reserves, allocations, recoveries, disputes, audits, and cash calls;
-        those are planned. reserveAmount is currently serialized by the expert
-        as a JSON number.
+        Assumed claim projection. The book is fixed to ASSUMED for every row.
+        Money is a decimal string.
       required:
         - id
         - tenantId
@@ -473,6 +1886,794 @@ components:
         - REOPENED
         - DISPUTED
         - WITHDRAWN
+    LossAdvice:
+      type: object
+      description: >
+        Loss advice (SPEC 11.5.4). Amounts are decimal strings and the advice is
+        unique per claim by `adviceNumber` (RNS-02).
+      required:
+        - id
+        - tenantId
+        - assumedClaimId
+        - adviceNumber
+        - adviceType
+        - adviceDate
+        - reportedAmount
+        - currency
+        - layerAttachmentMet
+        - status
+        - source
+        - version
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        assumedClaimId:
+          type: string
+          format: uuid
+        adviceNumber:
+          type: string
+          maxLength: 32
+        cedentClaimNumber:
+          type: [string, 'null']
+          maxLength: 64
+        adviceType:
+          $ref: '#/components/schemas/AdviceType'
+        adviceDate:
+          type: string
+          format: date
+        receivedDate:
+          type: [string, 'null']
+          format: date
+        periodFrom:
+          type: [string, 'null']
+          format: date
+        periodTo:
+          type: [string, 'null']
+          format: date
+        reportedAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        paidAmount:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        outstandingAmount:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        expenseAmount:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        reserveAmount:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        recoveryAmount:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        cessionPct:
+          $ref: './components.yaml#/components/schemas/Percent'
+        cededAmount:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        layerAttachmentMet:
+          type: boolean
+        status:
+          $ref: '#/components/schemas/AdviceStatus'
+        rejectionReason:
+          type: [string, 'null']
+          maxLength: 2000
+        sourceDocumentId:
+          type: [string, 'null']
+          format: uuid
+        bordereauId:
+          type: [string, 'null']
+          format: uuid
+        bordereauLineNumber:
+          type: [integer, 'null']
+          minimum: 1
+        source:
+          $ref: '#/components/schemas/AdviceSource'
+        version:
+          type: integer
+          minimum: 0
+        postedAt:
+          type: [string, 'null']
+          format: date-time
+        notes:
+          type: [string, 'null']
+          maxLength: 2000
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    AdviceType:
+      type: string
+      enum:
+        - INITIAL_NOTICE
+        - RESERVE_CHANGE
+        - PAYMENT
+        - RECOVERY
+        - EXPENSE
+        - SALVAGE
+        - SUBROGATION
+        - CLOSE
+        - REOPEN
+        - UPDATE
+        - CASH_CALL
+    AdviceStatus:
+      type: string
+      enum:
+        - RECEIVED
+        - VALIDATED
+        - POSTED
+        - REJECTED
+        - SUPERSEDED
+        - DUPLICATE
+    AdviceSource:
+      type: string
+      enum:
+        - MANUAL
+        - BORDEREAU
+        - API
+    BordereauBatch:
+      type: object
+      description: >
+        A bordereau batch header. Lines become loss advices with source
+        BORDEREAU.
+      required:
+        - id
+        - tenantId
+        - assumedClaimId
+        - bordereauReference
+        - adviceDate
+        - currency
+        - status
+        - source
+        - version
+        - lineCount
+        - acceptedCount
+        - duplicateCount
+        - rejectedCount
+        - payloadHash
+        - receivedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        assumedClaimId:
+          type: string
+          format: uuid
+        bordereauReference:
+          type: string
+          maxLength: 64
+        cedentClaimNumber:
+          type: [string, 'null']
+          maxLength: 64
+        adviceDate:
+          type: string
+          format: date
+        reportedAmountTotal:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        status:
+          type: string
+          enum:
+            - PROCESSED
+            - PARTIAL
+            - DUPLICATE
+            - REJECTED
+        source:
+          $ref: '#/components/schemas/AdviceSource'
+        version:
+          type: integer
+          minimum: 0
+        lineCount:
+          type: integer
+          minimum: 0
+        acceptedCount:
+          type: integer
+          minimum: 0
+        duplicateCount:
+          type: integer
+          minimum: 0
+        rejectedCount:
+          type: integer
+          minimum: 0
+        payloadHash:
+          type: string
+          maxLength: 64
+        receivedAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    BordereauIngestResult:
+      type: object
+      required:
+        - batch
+        - lines
+        - replayed
+      properties:
+        batch:
+          $ref: '#/components/schemas/BordereauBatch'
+        lines:
+          type: array
+          items:
+            $ref: '#/components/schemas/BordereauLineResult'
+        replayed:
+          type: boolean
+    BordereauLineResult:
+      type: object
+      required:
+        - lineNumber
+        - adviceNumber
+        - status
+      properties:
+        lineNumber:
+          type: integer
+          minimum: 1
+        adviceNumber:
+          type: string
+          maxLength: 32
+        status:
+          type: string
+          enum:
+            - ACCEPTED
+            - DUPLICATE
+            - REJECTED
+        reason:
+          type: [string, 'null']
+          maxLength: 400
+        adviceId:
+          type: [string, 'null']
+          format: uuid
+        reportedAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+    ReserveHistoryEntry:
+      type: object
+      description: >
+        One append-only reserve movement. `isCurrent` marks the live row per
+        component; the current reserve is derived from the latest current row
+        per component.
+      required:
+        - id
+        - tenantId
+        - assumedClaimId
+        - component
+        - sequence
+        - amount
+        - currency
+        - effectiveDate
+        - reasonCode
+        - authority
+        - authorityRequired
+        - isCurrent
+        - version
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        assumedClaimId:
+          type: string
+          format: uuid
+        component:
+          $ref: '#/components/schemas/ReserveComponent'
+        sequence:
+          type: integer
+          minimum: 1
+        amount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        effectiveDate:
+          type: string
+          format: date
+        reasonCode:
+          $ref: '#/components/schemas/ReserveReason'
+        reasonText:
+          type: [string, 'null']
+          maxLength: 200
+        authority:
+          $ref: '#/components/schemas/ReserveAuthority'
+        authorityRequired:
+          type: boolean
+        approvedBy:
+          type: [string, 'null']
+          format: uuid
+        approvedAt:
+          type: [string, 'null']
+          format: date-time
+        isCurrent:
+          type: boolean
+        version:
+          type: integer
+          minimum: 0
+        createdBy:
+          type: [string, 'null']
+          format: uuid
+        createdAt:
+          type: string
+          format: date-time
+    ReserveComponent:
+      type: string
+      enum:
+        - CASE
+        - IBNR
+        - IBNER
+        - OUTSTANDING
+        - ALAE
+        - ULAE
+        - CASH_LOSS
+        - SALVAGE
+        - SUBROGATION
+    ReserveReason:
+      type: string
+      enum:
+        - INITIAL
+        - ADVICE
+        - DEVELOPMENT
+        - PAYMENT_APPLIED
+        - RECOVERY_APPLIED
+        - REVIEW
+        - COMMUTATION
+        - CLOSE
+    ReserveAuthority:
+      type: string
+      enum:
+        - SYSTEM
+        - ADJUSTER
+        - SENIOR_ADJUSTER
+        - ACTUARIAL
+        - UNDERWRITER
+    ApproverRole:
+      type: string
+      enum:
+        - CLAIMS
+        - UNDERWRITER
+        - ACTUARIAL
+        - SENIOR_ADJUSTER
+    CashCall:
+      type: object
+      description: >
+        A cash call request (SPEC 11.5.4). It may never exceed the claim's
+        current reserve net of outstanding cash calls (RNS-09).
+      required:
+        - id
+        - tenantId
+        - assumedClaimId
+        - requestNumber
+        - requestedAmount
+        - currency
+        - status
+        - reason
+        - version
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        assumedClaimId:
+          type: string
+          format: uuid
+        requestNumber:
+          type: string
+          maxLength: 32
+        requestedAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        requestedAt:
+          type: [string, 'null']
+          format: date
+        dueDate:
+          type: [string, 'null']
+          format: date
+        status:
+          type: string
+          enum:
+            - DRAFT
+            - SUBMITTED
+            - APPROVED
+            - PAID
+            - REJECTED
+            - CANCELLED
+        reason:
+          type: string
+          enum:
+            - LARGE_LOSS
+            - CASH_LOSS
+            - EXPENSE
+            - SECURITY
+            - OTHER
+        reasonText:
+          type: [string, 'null']
+          maxLength: 2000
+        approvedBy:
+          type: [string, 'null']
+          format: uuid
+        approverRole:
+          oneOf:
+            - $ref: '#/components/schemas/ApproverRole'
+            - type: 'null'
+        approvedAt:
+          type: [string, 'null']
+          format: date-time
+        approvalStatus:
+          type: [string, 'null']
+          maxLength: 32
+        paymentId:
+          type: [string, 'null']
+          format: uuid
+        version:
+          type: integer
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    Recovery:
+      type: object
+      description: >
+        A reinsurance recovery (SPEC 11.5.4), capped by the advised or paid
+        loss (RNS-10).
+      required:
+        - id
+        - tenantId
+        - assumedClaimId
+        - recoveryType
+        - amount
+        - currency
+        - status
+        - version
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        assumedClaimId:
+          type: string
+          format: uuid
+        recoveryType:
+          type: string
+          enum:
+            - RETROCESSION
+            - INURING_ASSUMED
+            - FACULTATIVE
+            - SALVAGE
+            - SUBROGATION
+            - OTHER
+        amount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        receivedDate:
+          type: [string, 'null']
+          format: date
+        status:
+          type: string
+          enum:
+            - IDENTIFIED
+            - PURSUING
+            - AGREED
+            - RECEIVED
+            - DENIED
+            - ABANDONED
+        sourcePartyId:
+          type: [string, 'null']
+          format: uuid
+        sourceContractId:
+          type: [string, 'null']
+          format: uuid
+        expectedAmount:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        paymentId:
+          type: [string, 'null']
+          format: uuid
+        version:
+          type: integer
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    Commutation:
+      type: object
+      description: >
+        A claim commutation (SPEC 11.5.4); execution releases the reserves and
+        closes the claim.
+      required:
+        - id
+        - tenantId
+        - assumedClaimId
+        - commutationNumber
+        - offerAmount
+        - acceptedAmount
+        - currency
+        - effectiveDate
+        - status
+        - approvedBy
+        - approverRole
+        - releaseDocumentId
+        - version
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        assumedClaimId:
+          type: string
+          format: uuid
+        commutationNumber:
+          type: string
+          maxLength: 32
+        commutationType:
+          type: [string, 'null']
+          enum:
+            - FULL
+            - PARTIAL
+            - BUYOUT
+        offerAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        acceptedAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        effectiveDate:
+          type: string
+          format: date
+        valuationDate:
+          type: [string, 'null']
+          format: date
+        basis:
+          type: [string, 'null']
+          enum:
+            - NEGOTIATED
+            - CONTRACTUAL
+            - INDUCED
+        releaseDocumentId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+            - PROPOSED
+            - APPROVED
+            - EXECUTED
+            - REJECTED
+        approvedBy:
+          type: string
+          format: uuid
+        approverRole:
+          $ref: '#/components/schemas/ApproverRole'
+        approvedAt:
+          type: [string, 'null']
+          format: date-time
+        executedAt:
+          type: [string, 'null']
+          format: date-time
+        savingsAmount:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        version:
+          type: integer
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    Dispute:
+      type: object
+      description: >
+        A claim dispute (SPEC 11.5.4). An open dispute blocks commutation and
+        closure (RNS-11).
+      required:
+        - id
+        - tenantId
+        - assumedClaimId
+        - disputeNumber
+        - disputeType
+        - reason
+        - contestedAmount
+        - currency
+        - status
+        - arbitrationFlag
+        - version
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        assumedClaimId:
+          type: string
+          format: uuid
+        disputeNumber:
+          type: string
+          maxLength: 32
+        disputeType:
+          type: string
+          enum:
+            - COVERAGE
+            - QUANTUM
+            - LATE_NOTICE
+            - ALLOCATION
+            - CESSION
+            - BORDEREAU
+            - SECURITY
+            - OTHER
+        reason:
+          type: string
+          maxLength: 2000
+        contestedAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        status:
+          type: string
+          enum:
+            - OPEN
+            - UNDER_REVIEW
+            - NEGOTIATING
+            - RESOLVED
+            - ESCALATED
+            - ARBITRATION
+            - CLOSED
+        resolution:
+          type: [string, 'null']
+          maxLength: 2000
+        raisedAt:
+          type: [string, 'null']
+          format: date
+        resolvedAt:
+          type: [string, 'null']
+          format: date
+        arbitrationFlag:
+          type: boolean
+        raisedByPartyId:
+          type: [string, 'null']
+          format: uuid
+        version:
+          type: integer
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    FinancialSummary:
+      type: object
+      description: >
+        Read projection of an assumed claim's ceded financial position. Every
+        amount is a decimal string and the summary always carries the claim
+        currency.
+      required:
+        - assumedClaimId
+        - tenantId
+        - currency
+        - cededPaidAmount
+        - cededOutstandingAmount
+        - cededReserveAmount
+        - cededIbnrAmount
+        - cededIncurredAmount
+        - cededRecoveryAmount
+        - netCededAmount
+        - cashCallAmount
+        - advisedLossAmount
+        - sourceVersion
+      properties:
+        assumedClaimId:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        cededPaidAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        cededOutstandingAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        cededReserveAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        cededIbnrAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        cededIncurredAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        cededRecoveryAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        netCededAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        cashCallAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        advisedLossAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        lastAdviceAt:
+          type: [string, 'null']
+          format: date-time
+        sourceVersion:
+          type: integer
+          minimum: 0
+    ClaimAuditEntry:
+      type: object
+      description: One append-only audit record for a material assumed-claim change.
+      required:
+        - id
+        - tenantId
+        - assumedClaimId
+        - eventType
+        - actor
+        - detail
+        - occurredAt
+        - sequence
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        assumedClaimId:
+          type: string
+          format: uuid
+        eventType:
+          type: string
+          enum:
+            - CLAIM_REGISTERED
+            - CLAIM_STATUS_CHANGED
+            - LOSS_ADVICE_RECORDED
+            - LOSS_ADVICE_ACCEPTED
+            - BORDEREAU_INGESTED
+            - RESERVE_CHANGED
+            - CASH_CALL_REQUESTED
+            - RECOVERY_RECORDED
+            - COMMUTATION_EXECUTED
+            - DISPUTE_RAISED
+            - DISPUTE_RESOLVED
+            - CLAIM_CLOSED
+        actor:
+          type: string
+          maxLength: 120
+        detail:
+          type: [string, 'null']
+          maxLength: 2000
+        occurredAt:
+          type: string
+          format: date-time
+        sequence:
+          type: integer
+          minimum: 1
     CreateAssumedClaimRequest:
       type: object
       description: Public create command. The tenant comes from X-EIA-Tenant.
@@ -554,58 +2755,392 @@ components:
         expectedVersion:
           type: integer
           minimum: 0
+    RecordAdviceRequest:
+      type: object
+      required:
+        - adviceNumber
+        - adviceType
+        - adviceDate
+        - reportedAmount
+        - currency
+      properties:
+        adviceNumber:
+          type: string
+          maxLength: 32
+        adviceType:
+          $ref: '#/components/schemas/AdviceType'
+        adviceDate:
+          type: string
+          format: date
+        receivedDate:
+          type: string
+          format: date
+        periodFrom:
+          type: string
+          format: date
+        periodTo:
+          type: string
+          format: date
+        reportedAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        paidAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        outstandingAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        expenseAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        reserveAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        recoveryAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        cessionPct:
+          $ref: './components.yaml#/components/schemas/Percent'
+        cededAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        layerAttachmentMet:
+          type: boolean
+        sourceDocumentId:
+          type: string
+          format: uuid
+        cedentClaimNumber:
+          type: string
+          maxLength: 64
+        notes:
+          type: string
+          maxLength: 2000
+    AcceptAdviceRequest:
+      type: object
+      properties:
+        acceptedBy:
+          type: string
+          format: uuid
+        note:
+          type: string
+          maxLength: 2000
+    IngestBordereauRequest:
+      type: object
+      required:
+        - bordereauReference
+        - adviceDate
+        - currency
+        - lines
+      properties:
+        bordereauReference:
+          type: string
+          maxLength: 64
+        adviceDate:
+          type: string
+          format: date
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        cedentClaimNumber:
+          type: string
+          maxLength: 64
+        lines:
+          type: array
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/BordereauLine'
+    BordereauLine:
+      type: object
+      required:
+        - adviceNumber
+        - reportedAmount
+      properties:
+        adviceNumber:
+          type: string
+          maxLength: 32
+        adviceDate:
+          type: string
+          format: date
+        reportedAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        paidAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        outstandingAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        expenseAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        adviceType:
+          $ref: '#/components/schemas/AdviceType'
+    ReserveChangeRequest:
+      type: object
+      required:
+        - component
+        - amount
+        - currency
+        - effectiveDate
+        - reasonCode
+        - authority
+      properties:
+        component:
+          $ref: '#/components/schemas/ReserveComponent'
+        amount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        effectiveDate:
+          type: string
+          format: date
+        reasonCode:
+          $ref: '#/components/schemas/ReserveReason'
+        reasonText:
+          type: string
+          maxLength: 200
+        authority:
+          $ref: '#/components/schemas/ReserveAuthority'
+        approvedBy:
+          type: string
+          format: uuid
+    RequestCashCallRequest:
+      type: object
+      required:
+        - requestedAmount
+        - currency
+        - reason
+      properties:
+        requestedAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        reason:
+          type: string
+          enum:
+            - LARGE_LOSS
+            - CASH_LOSS
+            - EXPENSE
+            - SECURITY
+            - OTHER
+        reasonText:
+          type: string
+          maxLength: 2000
+        requestedAt:
+          type: string
+          format: date
+        dueDate:
+          type: string
+          format: date
+        approvedBy:
+          type: string
+          format: uuid
+        approverRole:
+          $ref: '#/components/schemas/ApproverRole'
+        paymentId:
+          type: string
+          format: uuid
+    RecordRecoveryRequest:
+      type: object
+      required:
+        - recoveryType
+        - amount
+        - currency
+      properties:
+        recoveryType:
+          type: string
+          enum:
+            - RETROCESSION
+            - INURING_ASSUMED
+            - FACULTATIVE
+            - SALVAGE
+            - SUBROGATION
+            - OTHER
+        amount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        receivedDate:
+          type: string
+          format: date
+        status:
+          type: string
+          enum:
+            - IDENTIFIED
+            - PURSUING
+            - AGREED
+            - RECEIVED
+            - DENIED
+            - ABANDONED
+        sourcePartyId:
+          type: string
+          format: uuid
+        sourceContractId:
+          type: string
+          format: uuid
+        expectedAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        paymentId:
+          type: string
+          format: uuid
+    CommuteClaimRequest:
+      type: object
+      required:
+        - offerAmount
+        - acceptedAmount
+        - currency
+        - effectiveDate
+        - approvedBy
+        - approverRole
+        - releaseDocumentId
+      properties:
+        offerAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        acceptedAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        effectiveDate:
+          type: string
+          format: date
+        valuationDate:
+          type: string
+          format: date
+        commutationType:
+          type: string
+          enum:
+            - FULL
+            - PARTIAL
+            - BUYOUT
+        basis:
+          type: string
+          enum:
+            - NEGOTIATED
+            - CONTRACTUAL
+            - INDUCED
+        approvedBy:
+          type: string
+          format: uuid
+        approverRole:
+          $ref: '#/components/schemas/ApproverRole'
+        releaseDocumentId:
+          type: string
+          format: uuid
+        savingsAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+    RaiseDisputeRequest:
+      type: object
+      required:
+        - disputeType
+        - reason
+        - contestedAmount
+        - currency
+      properties:
+        disputeType:
+          type: string
+          enum:
+            - COVERAGE
+            - QUANTUM
+            - LATE_NOTICE
+            - ALLOCATION
+            - CESSION
+            - BORDEREAU
+            - SECURITY
+            - OTHER
+        reason:
+          type: string
+          maxLength: 2000
+        contestedAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        raisedAt:
+          type: string
+          format: date
+        arbitrationFlag:
+          type: boolean
+        raisedByPartyId:
+          type: string
+          format: uuid
+    ResolveDisputeRequest:
+      type: object
+      required:
+        - resolution
+        - status
+      properties:
+        resolution:
+          type: string
+          maxLength: 2000
+        status:
+          type: string
+          enum:
+            - OPEN
+            - UNDER_REVIEW
+            - NEGOTIATING
+            - RESOLVED
+            - ESCALATED
+            - ARBITRATION
+            - CLOSED
+        resolvedAt:
+          type: string
+          format: date
 x-vertical: assumed-claims
 x-implementation:
   status: implemented
   verifiedAt: '2026-10-19'
   verifiedAgainst:
     - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/AssumedClaimController.java
+    - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/LossAdviceController.java
+    - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/ReserveController.java
+    - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/CashCallController.java
+    - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/RecoveryController.java
+    - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/CommutationController.java
+    - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/DisputeController.java
     - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/AssumedClaimClient.java
-    - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/BookScopeFilter.java
+    - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/ApiException.java
+    - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/ApiExceptionHandler.java
     - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/AssumedClaimController.java
+    - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/LossAdviceController.java
+    - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/ReserveController.java
+    - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/CashCallController.java
+    - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/RecoveryController.java
+    - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/CommutationController.java
+    - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/DisputeController.java
+    - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/ApiException.java
     - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/ApiExceptionHandler.java
+    - repos/eia-assumed-claims-expert/src/test/java/com/eia/assumedclaims/expert/SecondSliceControllerTest.java
   errorEnvelope: Canonical RFC 9457 Problem envelope (SPEC 6.11).
   notes: >
-    Both public path forms are implemented by the same controller methods. The
-    expert create and transition bodies carry tenantId because the expert is
-    not exposed publicly.
+    Both public path forms are implemented by the same controller methods; the
+    second-slice routes document the short form and name the `/claims` alias in
+    `x-path-alias`. The expert create and transition bodies carry tenantId
+    because the expert is not exposed publicly; the close, financials, audit,
+    and all second-slice expert reads take the tenant from X-EIA-Tenant. The
+    domain preserves the expert's 409, 422, and 428 statuses and EIA-RNS codes.
+x-compatibility:
+  contractVersion: 1.1.0
+  previousContractVersion: 1.0.0
+  breaking: []
+  compatible:
+    - Adds advices, bordereaux, reserves, cash calls, recoveries, commutation, disputes, financials, audit, and close.
+    - Adds the 422 and 428 responses to the new mutation operations.
+  note: >
+    The second Assumed Claims slice is additive over 1.0.0. The HTTP path alias
+    and the Problem envelope are unchanged.
 x-planned-operations:
-  - method: GET
-    path: /api/v1/assumed-claims/claims/{assumedClaimId}/advices
-    spec: SPEC 11.5.10
-    note: Loss advices.
-  - method: POST
-    path: /api/v1/assumed-claims/claims/{assumedClaimId}/advices
-    spec: SPEC 11.5.10
-    note: Record a loss advice.
-  - method: GET
-    path: /api/v1/assumed-claims/claims/{assumedClaimId}/reserves
-    spec: SPEC 11.5.10
-    note: Reserves.
   - method: GET
     path: /api/v1/assumed-claims/claims/{assumedClaimId}/allocations
     spec: SPEC 11.5.10
     note: Allocations.
-  - method: GET
-    path: /api/v1/assumed-claims/claims/{assumedClaimId}/recoveries
-    spec: SPEC 11.5.10
-    note: Recoveries.
-  - method: GET
-    path: /api/v1/assumed-claims/claims/{assumedClaimId}/disputes
-    spec: SPEC 11.5.10
-    note: Disputes.
-  - method: POST
-    path: /api/v1/assumed-claims/claims/{assumedClaimId}/cash-calls
-    spec: SPEC 11.5.10
-    note: Request a cash call.
-  - method: POST
-    path: /api/v1/assumed-claims/claims/{assumedClaimId}/commute
-    spec: SPEC 11.5.10
-    note: Commute an assumed claim.
-  - method: GET
-    path: /api/v1/assumed-claims/claims/{assumedClaimId}/financials
-    spec: SPEC 11.5.10
-    note: Financial summary.
   - method: GET
     path: /api/v1/assumed-claims/claims/{assumedClaimId}/documents
     spec: SPEC 11.5.10
@@ -621,4 +3156,4 @@ x-planned-operations:
   - method: POST
     path: /internal/v1/assumed-claims/import
     spec: SPEC 11.5.10
-    note: Bordereau batch import.
+    note: Bordereau batch import; the implemented route is POST /{id}/bordereaux.

@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-19 (Round 2).
+Status: open, reviewed 2026-10-19 (Round 5).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -55,13 +55,14 @@ removed per the resolution policy.
 | M-11 | Illegal-transition status codes: Policy is 409, five verticals are 400 | M |
 | M-12 | Resource models are narrower than the SPEC aggregates | M |
 | M-13 | Field names differ from the SPEC representations | L |
-| M-14 | Only the Party expert publishes an event; no dispatcher or subscriber | M |
+| M-14 | Six experts publish a subset of their events; no subscriber or inbox | M |
 | M-16 | Assumed Claims mounts two public path sets | L |
 | M-17 | Error content type is `application/json` outside Policy, Notifications, and one book filter | M |
 | M-18 | SPEC 12.4 example envelope omits the book required by SPEC 3.6 | L |
 | M-19 | SPEC 7.6 base-path rule contradicts the SPEC vertical tables | L |
 | M-20 | Audit actor fields (`createdBy`, `updatedBy`) are not returned | L |
-| M-21 | Cession/Retrocession hand-off is synchronous; there is no outbox queue | M |
+| M-21 | Cession/Retrocession FS-RI hand-off is synchronous | M |
+| M-22 | Implemented outbox event names differ from the SPEC catalog names | M |
 
 ## M-01 Public base paths
 
@@ -118,7 +119,7 @@ shapes.
 | Document (domain and expert) | `com.eia.document.*.ApiError` | `{code, message, details[{field, message}]}` |
 | Cession (domain and expert) | `com.eia.cession.*.ApiError` | `{code, message, details{field: message}}` |
 | Retrocession (domain and expert) | `com.eia.retrocession.*.ApiError` | `{code, message, details{field: message}}` |
-| Assumed Claims (domain and expert) | `com.eia.assumedclaims.*.ApiError` | `{type, title, status, detail, instance, code, category, retryable, errors[{field, code, message}]}` (RFC 9457 shape, not the canonical media type everywhere) |
+| Assumed Claims (domain and expert) | `com.eia.assumedclaims.*.ApiError` | `{type, title, status, detail, instance, code, category, retryable, errors[{field, code, message}]}` with `application/problem+json` and `EIA-RNS-7xxx` codes |
 | Notifications (domain) | Spring `ProblemDetail` plus properties | RFC 9457 body with `code`, `category`, `retryable`, `errors[{field, code, message}]`; no `correlationId`, `transactionId`, or `meta` |
 | Party (expert) | inline `Map<String, String>` | `{code, message}` for `NOT_FOUND` only |
 | Party (domain) | `com.eia.party.domain.ApiError` | `{code, message, details{field: message}}` |
@@ -166,17 +167,22 @@ difference in its description.
 
 ## M-04 Pagination
 
-Policy list operations now return the offset page envelope
+Policy list operations and every Policy second-slice collection (versions,
+coverages, limits, aggregate state, endorsements, insureds, locations,
+cancellations, and reinstatements) return the offset page envelope
 `{items, page, size, total, _links:{self, next, prev}}` on both the public and
 the expert routes. `page` defaults to 0 and `size` to 20 with a maximum of 100
 (`Pagination.DEFAULT_SIZE` / `MAX_SIZE`). `next` is omitted on the last page and
 `prev` on the first page; `_links` hrefs are relative and the expert links keep
-the required `tenantId` query parameter.
+the required `tenantId` query parameter. The second-slice domain service
+rebuilds the links against the public base path.
 
 Every other vertical still returns a bare `List<Dto>`: for example
 `ClaimController.list`, `ContractController.list`,
 `NotificationController.list`, `CessionController.list` (public and expert), and
-`RetrocessionController.list` (public and expert). There is no `page` object, no
+`RetrocessionController.list` (public and expert). The Contract second-slice
+collections, the Direct Claims child collections, and the Assumed Claims child
+collections in Round 5 are also bare arrays. There is no `page` object, no
 cursor, and no `total` in those responses.
 
 The implemented Policy envelope is **offset-based** and therefore differs from
@@ -202,9 +208,12 @@ Evidence:
 
 ## M-05 Hypermedia links
 
-Policy page responses carry `_links.self`, `_links.next`, and `_links.prev`.
-No Policy detail representation carries `_links`; `PolicyDto` has no links
-member. No other vertical has `_links` on a collection or a detail.
+Policy page responses carry `_links.self`, `_links.next`, and `_links.prev`; so
+do the Policy second-slice collection responses (versions, coverages, limits,
+aggregate state, endorsements, insureds, locations, cancellations, and
+reinstatements). No Policy detail representation carries `_links`; `PolicyDto`
+has no links member. No other vertical has `_links` on a collection or a
+detail.
 
 SPEC 7.6 and 12.5 require detail links (`self`, `collection`, and typed record
 links). The shared `Links` component remains marked planned; `PageLinks` is the
@@ -227,11 +236,16 @@ Policy now implements the SPEC 12.6 concurrency mechanism:
 | Policy public GET detail | Response `ETag: "<version>"` |
 | Policy public create | Response `ETag: "<version>"` on both 201 and 200 replay |
 | Policy public PATCH status | Accepts `If-Match` (`"<version>"`, `W/"<version>"`, a comma list, or `*`); response `ETag`; stale tag/version is 409 `CONCURRENT_MODIFICATION` with `meta.currentVersion`, `meta.expectedVersion`, and `errors[0].code = STALE_VERSION` |
+| Policy public second-slice mutations (coverage, endorsement, insured, location, cancel, reinstate) | Accept optional `If-Match` and return the policy `ETag`; stale tag is 409 `CONCURRENT_MODIFICATION` |
+| Policy public erosion | Returns the policy `ETag`; the derived limit state is version-checked internally and a lost update is 409 |
 | Policy expert GET/create/PATCH | Same ETag and If-Match behaviour as the public service |
 | Contract public PATCH | Required `expectedVersion` body field; no ETag |
+| Contract public bind and commutation | Required `expectedVersion` on bind; the commutation has no caller-supplied version |
 | Direct Claims public PATCH | Not accepted; the domain reads and forwards the current version |
 | Direct Claims expert PATCH | Optional body version |
+| Direct Claims child PATCH (injuries, exposures, litigation, recoveries, liens) | Required body `expectedVersion` on the public and expert routes; stale is 409 |
 | Assumed Claims public POST status | Required body version |
+| Assumed Claims child mutations | No caller-supplied version on most child commands; reserves use an effective-date guard |
 | Cession/Retrocession public POST transition | Not accepted; the domain reads and forwards the current version |
 | Cession/Retrocession expert PUT status | Required `version` |
 | Document public POST status | Not accepted; the domain forwards the current version |
@@ -245,6 +259,9 @@ Policy nuances:
   header wins when both are present.
 - The expert still accepts a body `expectedVersion`; the domain sends both the
   version it read and the original `If-Match`.
+- Every Policy second-slice mutation returns the policy `ETag` from the expert's
+  version-issuing write; a replay returns 200 with the same ETag and
+  `Idempotent-Replayed: true`.
 - Cession and Retrocession map an expert 409 on a plain status write to a
   public 400 `CONFLICT` (`CessionClient.translate` / `RetrocessionClient`), so
   their public transitions have no 409 concurrency response. The FS-RI
@@ -268,17 +285,20 @@ Evidence:
 ## M-07 Idempotency
 
 Policy create (public and expert) accepts the optional `Idempotency-Key`
-header:
+header. In Round 5 every Policy second-slice mutation (coverage, erosion,
+endorsement, insured, location, cancellation, and reinstatement) accepts the
+same header on both the public and the expert route:
 
 - The key is normalized (trimmed, maximum 255 characters) and scoped to the
   tenant. A blank key is treated as absent.
 - The expert stores `tenant + key + request hash` in `policy_idempotency` in
   the same transaction as the policy row. The domain forwards the header.
-- The same key and an identical request replay the original policy with 200 and
-  `Idempotent-Replayed: true`; a fresh create is 201 with
+- The same key and an identical request replay the original resource with 200
+  and `Idempotent-Replayed: true`; a fresh create is 201 with
   `Idempotent-Replayed: false`.
-- Reusing the key with a different request is 409 `IDEMPOTENCY_CONFLICT` with
-  `meta.existingPolicyId`.
+- Reusing the key with a different request is 409 `IDEMPOTENCY_CONFLICT`. The
+  create response carries `meta.existingPolicyId`; the second-slice commands
+  carry `meta.existingResourceId`.
 - The request hash normalizes amounts numerically (`1000.0` and `1000.0000`
   hash the same), uppercases currencies, and defaults the initial status to
   DRAFT.
@@ -291,10 +311,12 @@ Evidence:
 
 - `repos/eia-policy-domain/.../IdempotencyKeys.java`,
   `PolicyController.java` (`Idempotency-Key` request header),
+  `PolicyContractController.java` (second-slice header),
   `PolicyClient.java` (forwards the header and reads `Idempotent-Replayed`).
 - `repos/eia-policy-expert/.../IdempotencyKeys.java` (normalize, request hash),
-  `PolicyService.java:64-90` (reserve/replay/conflict),
-  `PolicyRepository.findIdempotency` / `insertIdempotencyIfAbsent`,
+  `CommandIdempotency.java` (second-slice replay/conflict),
+  `PolicyService.java:64-90` (create reserve/replay/conflict),
+  `PolicyRepository.findCommandIdempotency` / `insertCommandIdempotencyIfAbsent`,
   `src/main/resources/schema.sql:37-46` (`policy_idempotency`, unique
   `(tenant_id, idempotency_key)`).
 - Tests: `createsPolicyAndForwardsIdempotencyKey`,
@@ -312,8 +334,11 @@ Three mechanisms coexist:
 |---|---|
 | Public routes | `X-EIA-Tenant` header |
 | Party, Policy, Contract, Cession, Retrocession, Document, Payment, Notifications experts | `?tenantId=` query parameter, plus `tenantId` in the create body |
+| Policy second-slice expert routes | `?tenantId=` query parameter |
 | Direct Claims expert status transition | `X-EIA-Tenant` header instead of the query parameter (`ClaimController.java:52-58`) |
+| Direct Claims expert child routes | `?tenantId=` on GET, `X-EIA-Tenant` on POST/PATCH |
 | Assumed Claims expert create and status | `tenantId` in the body plus `X-EIA-Tenant` sent by the domain client |
+| Assumed Claims expert close, financials, audit, and second-slice routes | `X-EIA-Tenant` header |
 
 The contracts document each route exactly. A future cleanup should make the
 internal tenant a header only, and remove `tenantId` from request bodies.
@@ -326,12 +351,17 @@ The same conceptual operation is exposed with four shapes:
 - `POST /{id}/status` - Assumed Claims, Document.
 - `PUT /{id}/status` - Cession, Retrocession expert.
 - `POST /{id}/transition` - Cession, Retrocession public.
-- Named action POSTs - Payment public `/submit`, `/authorize`, `/approve`, `/issue`.
+- Named action POSTs - Payment public `/submit`, `/authorize`, `/approve`,
+  `/issue`; Policy second-slice `/cancel`, `/reinstate`, `/erosion`; Contract
+  `/bind`, `/approve`, `/execute`; Direct Claims `/close`, `/approve`,
+  `/execute`; Assumed Claims `/accept`, `/resolve`, `/commute`, `/close`.
 
-The contracts record the implemented method per route. A future harmonization
-should use one action-on-a-sub-resource convention, preferably
-`POST /{id}/{action}` for lifecycle commands, as SPEC 6.1 does for
-transactions.
+Contract `BOUND` and Assumed Claims `COMMUTED` are intentionally not reachable
+through the generic status endpoint: they are commands with preconditions
+(`POST /bind` and `POST /commute`). The other named actions are ordinary
+sub-resource commands. A future harmonization should use one
+action-on-a-sub-resource convention, preferably `POST /{id}/{action}` for
+lifecycle commands, as SPEC 6.1 does for transactions.
 
 ## M-11 Illegal-transition status codes
 
@@ -339,18 +369,24 @@ transactions.
 |---|---|---|
 | Policy | 409 | `INVALID_STATUS_TRANSITION` |
 | Direct Claims | 400 | `VALIDATION_ERROR` |
-| Contract | 409 | `INVALID_STATUS_TRANSITION` |
-| Assumed Claims | 409 | `EIA-RNS-7003` |
+| Contract | 409 | `INVALID_STATUS_TRANSITION`; `BIND_REQUIRES_COMMAND` for `BOUND` |
+| Assumed Claims | 409 | `EIA-RNS-7003`; `EIA-RNS-7505` for `COMMUTED` |
 | Document | 400 | `INVALID_STATUS_TRANSITION` |
 | Cession / Retrocession | 400 | `INVALID_STATUS_TRANSITION` |
 | Payment | 400 | `INVALID_STATUS_TRANSITION` / `PAYMENT_NOT_APPROVED` |
 
-Policy now follows SPEC 6.11: an illegal edge, including a no-op transition, is
-a 409 `INVALID_STATUS_TRANSITION` (`CONFLICT`), and a duplicate policy number is
-a 409 `DUPLICATE_POLICY_NUMBER`. Cession and Retrocession still return 400 for
-an illegal edge; their contracts document 400. Standardize the remaining five
-on 409 for a version or state conflict and 422 for a domain policy rejection,
-then update the contracts.
+Policy follows SPEC 6.11 for state conflicts (409) and additionally separates
+business-rule rejections (422) from missing approvals (428): coverage, limit,
+endorsement, party, cancellation, and reinstatement rules are 422 with
+`category: BUSINESS_RULE`; a missing `approvedBy`/`approvalRef` is 428 with
+`category: APPROVAL_REQUIRED`. Assumed Claims does the same with its
+`EIA-RNS-7xxx` codes (422 for `EIA-RNS-7102`, -7204, -7301, -7401, -7502,
+-7603, -7701; 428 for -7203, -7302, -7501). Contract `POST /bind` returns 409
+`BIND_PRECONDITION_FAILED` for failed preconditions and 400
+`BIND_APPROVAL_REQUIRED` for a missing approver. Cession, Retrocession, and
+Document still return 400 for an illegal edge; their contracts document 400.
+Standardize the remaining five on 409 for a version or state conflict and 422
+for a domain policy rejection, then update the contracts.
 
 Evidence:
 
@@ -369,14 +405,25 @@ unimplemented fields and list the missing operations under
 - Party: no addresses, roles, relationships, screenings, consents, KYC/AML
   data, or merge. `partyType`, `status`, `sanctionsStatus`, and
   `confidentiality` are unvalidated strings, not SPEC 11.1.5 enums.
-- Policy: no `policyType`, `productLine`, `insured` object, `limits[]`,
-  `massTort`, `claimSummary`, versions, coverages, occurrences, or programs.
-- Contract: no `treatyNumber`, `contractBasis`, inception-date naming, layers,
-  participants, terms, cessions, bordereaux, accounts, or security.
-- Direct Claims: no `claimType`, `tortCode`, `claimant` object, injury,
-  exposure, reserves list, financials, settlements, liens, or recoveries.
-- Assumed Claims: no advices, reserves, allocations, recoveries, disputes,
-  audits, or cash calls.
+- Policy: no `policyType`, `productLine`, `insured` object, `limits[]` array on
+  the header, `massTort`, `claimSummary`, occurrences, programs, billing, or
+  the claims/reinsurance projections. Round 5 adds versions, coverage and limit
+  schedules, aggregate erosion, endorsements, insureds, locations,
+  cancellations, and reinstatements, so those are no longer gaps.
+- Contract: no `treatyNumber`, `contractBasis`, inception-date naming,
+  `contract_section`, `contract_version`, `contract_sliding_scale`,
+  `contract_premium`, `contract_reinstatement`, `contract_wording`,
+  `technical_account`, `bordereau_line`, loss-aggregate, or mass-tort profile.
+  Round 5 adds layers, participants, terms, security, cessions, bordereaux,
+  commutations, and bind, so those are no longer gaps.
+- Direct Claims: no `tortCode` (the implemented name is `causeCode`),
+  `claimant` object, policy-year allocations, financial summary, reopen,
+  documents, lineage, or work queues. Round 5 adds injuries, exposures,
+  reserve history, the coverage decision, litigation, settlements, recoveries,
+  liens, and close.
+- Assumed Claims: no policy-year allocations, documents, lineage, or work
+  queues. Round 5 adds loss advices, bordereau ingest, reserve history, cash
+  calls, recoveries, commutation, disputes, audit, financials, and close.
 - Document: no content, versions, associations, hashes, page count, OCR status,
   tags, holds, packages, requests, or retention class.
 - Payment: no `claim`, `payee` object, `netAmount`, `method`, `dueDate`,
@@ -387,7 +434,8 @@ unimplemented fields and list the missing operations under
   subscriptions, preferences, or admin surfaces.
 - Cession / Retrocession: no contracts, layers, participants, terms, rules,
   confirmations, recoverables, statements, or reconciliations. The case itself
-  is implemented; the FS-RI hand-off fields were added in Round 2.
+  is implemented; the FS-RI hand-off fields were added in Round 2 and the
+  outbox events in Round 5.
 
 ## M-13 Field naming differences
 
@@ -404,6 +452,8 @@ unimplemented fields and list the missing operations under
 | Cession `cededPremium` + `cededLoss` + `currency` | two `Money` objects |
 | Retrocession `cededPremium` + `cededLoss` + `currency` | two `Money` objects |
 | Assumed Claims `assumedClaimNumber` | `assumed_claim_number` (matches DB, not the SPEC JSON examples) |
+| Policy `coinsurancePct` | a decimal fraction (`0.150000`) |
+| Contract `sharePct`, `signedLinePct`, `cessionPct` | percentages of 100 (`15.000000`), not the SPEC 12.2 fraction |
 
 The contracts use the implemented names. Renaming any of these is a breaking
 change and needs a major version.
@@ -412,30 +462,55 @@ change and needs a major version.
 
 The platform gained a transactional outbox library in Round 2
 (`eia-platform/libs`) and the Party expert writes its event in the same
-transaction as the Party row. No other service publishes an event, and there is
-no dispatcher, inbox, subscription registry, subscriber, or consumer. Every
-other AsyncAPI channel and operation is therefore marked `x-status: planned`,
-and `asyncapi/event-catalog.yaml` still describes the planned publisher set.
+transaction as the Party row. Round 5 rolled the outbox out to five more
+experts. The implemented publishers are:
+
+| Vertical | Implemented event names | Source |
+|---|---|---|
+| Party | `party.party.created`, `party.party.updated` | `repos/eia-party-expert/.../PartyEvents.java` |
+| Cession | `cession.cession.created`, `cession.cession.updated`, `cession.cession.handed-off` | `repos/eia-cession-expert/.../CessionEvents.java` |
+| Retrocession | `retrocession.retrocession.created`, `retrocession.retrocession.updated`, `retrocession.retrocession.handed-off` | `repos/eia-retrocession-expert/.../RetrocessionEvents.java` |
+| Document | `document.document.created`, `document.document.updated`, `document.document.status-changed` | `repos/eia-document-expert/.../DocumentEvents.java` |
+| Payment | `payment.payment.created`, `payment.payment.updated`, `payment.payment.status-changed` | `repos/eia-payment-expert/.../PaymentEvents.java` |
+| Notifications | `notifications.notification.created`, `notifications.notification.sent` | `repos/eia-notifications-expert/.../NotificationEvents.java` |
+
+Each `*Service` calls `outbox.insert(OutboxEvent.fromEnvelope(...))` in the same
+transaction as the aggregate write; for example
+`repos/eia-payment-expert/.../PaymentService.java:39-66` and
+`repos/eia-document-expert/.../DocumentService.java:38-55`.
+
+Every other AsyncAPI channel and operation is marked `x-status: planned`, and
+the catalog carries the implemented subset per vertical. The platform outbox
+dispatcher (`RestClientOutboxDispatcher`, `OutboxDispatchService`,
+`OutboxDispatchJob`) is implemented and is scheduled by a Quartz trigger in
+each of these services when `eia.outbox.enabled=true`; it posts each event to a
+subscriber-defined HTTPS endpoint with the HMAC-SHA256 signature. There is
+still no subscriber, inbox, subscription registry, or gap detection, so no
+event has been consumed by another vertical. The `consumed` lists in the
+catalog remain the planned SPEC subscriptions. The event names also differ from
+the SPEC catalog names; see M-22.
 
 ## M-16 Assumed Claims path alias
 
-`AssumedClaimController` is mapped to both
-`/api/v1/assumed-claims` and `/api/v1/assumed-claims/claims`
-(`AssumedClaimController.java:22`). The web remote calls the `/claims` form.
-Both are documented with distinct operation IDs. The duplicate surface should
-be reduced to one path; the alias is compatible today because both are
+`AssumedClaimController`, `LossAdviceController`, `ReserveController`,
+`CashCallController`, `RecoveryController`, `CommutationController`, and
+`DisputeController` are each mapped to both `/api/v1/assumed-claims` and
+`/api/v1/assumed-claims/claims` (`@RequestMapping({...})` on every controller).
+The web remote calls the `/claims` form. Both are documented: the base routes
+under both path forms and the second-slice routes under the short form with an
+`x-path-alias` naming the `/claims` equivalent. The duplicate surface should be
+reduced to one path; the alias is compatible today because both are
 implemented.
 
 ## M-17 Error content type
 
 Policy now sets `application/problem+json` on every handled error, in both the
 domain and the expert (`ApiExceptionHandler` uses
-`MediaType.APPLICATION_PROBLEM_JSON`). Notifications also sets it
-(`ApiExceptionHandler.java:110-112`) and the Assumed Claims book filter sets it
-explicitly (`BookScopeFilter.java:39`). All other handlers return
-`ResponseEntity<ApiError>` without a content type, so Spring writes
-`application/json`. SPEC 6.11 and 7.6 require `application/problem+json` for
-errors; this is part of M-02.
+`MediaType.APPLICATION_PROBLEM_JSON`). Assumed Claims now does the same in both
+services, and Notifications also sets it (`ApiExceptionHandler.java:110-112`).
+All other handlers return `ResponseEntity<ApiError>` without a content type, so
+Spring writes `application/json`. SPEC 6.11 and 7.6 require
+`application/problem+json` for errors; this is part of M-02.
 
 ## M-18 Event envelope book
 
@@ -455,19 +530,22 @@ tables in one change.
 
 ## M-20 Audit actor fields
 
-Every projection carries `createdAt`, `updatedAt`, and `version`, but none
-carries `createdBy` or `updatedBy`. SPEC 7.10 requires actor attribution in the
-audit record, which the services keep in their audit tables and not in the
-resource projection. The shared `AuditFields` component therefore documents only
-the three implemented fields and notes the planned actor fields in its
-description. If actor identity is added to the projection later, it is an
-additive, compatible change.
+Every persisted aggregate projection carries `createdAt`, `updatedAt`, and
+`version` (the Policy and Contract headers, the Direct Claim, and the Assumed
+Claim). The second-slice child projections are append-only or immutable, so they
+carry `createdAt` and either a row `version` or `sequence` but not always
+`updatedAt`. None carries `createdBy` or `updatedBy`. SPEC 7.10 requires actor
+attribution in the audit record, which the services keep in their audit tables
+and not in the resource projection. The shared `AuditFields` component therefore
+documents only the three implemented header fields and notes the planned actor
+fields in its description. If actor identity is added to the projection later,
+it is an additive, compatible change.
 
 ## M-21 Synchronous FS-RI hand-off
 
 SPEC 7.18.3 requires the vertical to write the hand-off to its outbox as
 PENDING and deliver it to FS-RI asynchronously; HAND-05 requires an FS-RI outage
-to queue hand-offs. Round 2 instead calls FS-RI synchronously from the
+to queue hand-offs. The vertical still calls FS-RI synchronously from the
 `HANDOFF_PENDING` transition:
 
 - On a 2xx acknowledgement the case is persisted as `HANDED_OFF` with
@@ -475,19 +553,23 @@ to queue hand-offs. Round 2 instead calls FS-RI synchronously from the
   and the caller receives 200 with that record.
 - On failure the lifecycle status is unchanged, `fsriLastError` records the
   cause, and the caller receives the mapped 400/409/502/503 problem. There is no
-  outbox row, dispatcher, retry scheduler, or `GET /handoffs` queue.
-- This is why the transition is documented as a synchronous hand-off rather
-  than a 202 with a pending resource.
+  FS-RI delivery queue, retry scheduler, or `GET /handoffs` endpoint.
+- Round 5 added the transactional outbox for domain events, including
+  `<vertical>.<vertical>.handed-off`, but that event records the already
+  completed synchronous hand-off; it does not queue the FS-RI call. The outbox
+  is not a substitute for the SPEC hand-off queue.
 
 Evidence:
 
-- `repos/eia-cession-domain/.../CessionService.java:61-137` (transition,
+- `repos/eia-cession-domain/.../CessionService.java` (transition,
   `handOff`, failure recording).
 - `repos/eia-cession-domain/.../FsriCessionClient.java` (synchronous `POST`,
   timeout, error translation).
-- `repos/eia-retrocession-domain/.../RetrocessionService.java:61-138`,
+- `repos/eia-retrocession-domain/.../RetrocessionService.java`,
   `FsriRetroClient.java`.
-- `repos/eia-cession-expert/.../schema.sql:15-18` and
+- `repos/eia-cession-expert/.../CessionEvents.java`,
+  `repos/eia-retrocession-expert/.../RetrocessionEvents.java` (handed-off event).
+- `repos/eia-cession-expert/.../schema.sql` and
   `repos/eia-retrocession-expert/.../schema.sql` - hand-off columns.
 
 Resolution: either implement the outbox and queue (return 202 with a hand-off
@@ -495,9 +577,39 @@ resource and expose `GET /handoffs`), or accept the synchronous hand-off as the
 canonical Round 2 behaviour and amend SPEC 7.18.3/HAND-05. The contracts document
 the synchronous behaviour until that decision.
 
+## M-22 Event names differ from the SPEC catalog
+
+The outbox rollout uses the names actually emitted by the services, which do
+not match every name in SPEC 11.9.6, 11.10.6, 11.6.9, 11.7.10, and 11.8.9:
+
+| Vertical | Implemented | SPEC /
+planned name |
+|---|---|---|
+| Cession | `cession.cession.created` / `.updated` / `.handed-off` | `cession.case.created`, `cession.handoff.sent`/`.acknowledged` |
+| Retrocession | `retrocession.retrocession.created` / `.updated` / `.handed-off` | `retrocession.case.created`, `retrocession.handoff.sent`/`.acknowledged` |
+| Document | `document.document.created` / `.updated` / `.status-changed` | `document.document.registered`, plus the SPEC lifecycle verbs |
+| Payment | `payment.payment.updated` / `.status-changed` | the SPEC per-verb names such as `payment.payment.authorized` |
+| Notifications | `notifications.notification.created` / `.sent` | `notifications.notification.issued` / `.delivered` |
+
+The catalog lists both sets and marks only the implemented ones. Publishing a
+SPEC name in addition to the implemented name is additive; renaming or removing
+an implemented name is breaking and needs the EV-05 dual-publish window.
+
+Evidence:
+
+- `repos/eia-cession-expert/.../CessionEvents.java:27-29`
+- `repos/eia-retrocession-expert/.../RetrocessionEvents.java:28-30`
+- `repos/eia-document-expert/.../DocumentEvents.java:29-31`
+- `repos/eia-payment-expert/.../PaymentEvents.java:31-33`
+- `repos/eia-notifications-expert/.../NotificationEvents.java:36-37`
+
+Resolution: either align the implemented names with the SPEC (with a
+dual-publish window) or amend the SPEC event tables. The contracts document
+both until that decision.
+
 ## Validation evidence
 
-The repository validator was run on the working tree:
+The repository validator was run on the working tree after the Round 5 changes:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -507,10 +619,10 @@ python: 3.12.8 (standard library only)
 
 OpenAPI 3.1 documents
   OK openapi/party.yaml  4 paths, 6 operations
-  OK openapi/policy.yaml  6 paths, 8 operations
-  OK openapi/contract.yaml  6 paths, 8 operations
-  OK openapi/direct-claims.yaml  6 paths, 8 operations
-  OK openapi/assumed-claims.yaml  9 paths, 12 operations
+  OK openapi/policy.yaml  36 paths, 46 operations
+  OK openapi/contract.yaml  35 paths, 51 operations
+  OK openapi/direct-claims.yaml  38 paths, 56 operations
+  OK openapi/assumed-claims.yaml  35 paths, 50 operations
   OK openapi/cession.yaml  8 paths, 10 operations
   OK openapi/retrocession.yaml  8 paths, 10 operations
   OK openapi/document.yaml  6 paths, 8 operations
@@ -523,12 +635,12 @@ AsyncAPI 3 documents
   OK asyncapi/contract.yaml  20 event channels
   OK asyncapi/direct-claims.yaml  20 event channels
   OK asyncapi/assumed-claims.yaml  15 event channels
-  OK asyncapi/cession.yaml  14 event channels
-  OK asyncapi/retrocession.yaml  14 event channels
-  OK asyncapi/document.yaml  15 event channels
-  OK asyncapi/payment.yaml  16 event channels
-  OK asyncapi/notifications.yaml  10 event channels
-  OK catalog: 151 unique published events across 10 verticals
+  OK asyncapi/cession.yaml  17 event channels
+  OK asyncapi/retrocession.yaml  17 event channels
+  OK asyncapi/document.yaml  18 event channels
+  OK asyncapi/payment.yaml  18 event channels
+  OK asyncapi/notifications.yaml  12 event channels
+  OK catalog: 164 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -536,23 +648,24 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 4043 checks, 0 failures
+  PASS 8481 checks, 0 failures
 ```
 
-Additional developer checks, not repository dependencies:
+Additional checks and limits:
 
-- PyYAML 6.0.3 parses all 22 YAML documents with a duplicate-key-rejecting
-  loader, and targeted structural assertions pass on the four changed
-  documents (`components.yaml`, `policy.yaml`, `cession.yaml`,
-  `retrocession.yaml`).
-- All eleven OpenAPI documents validate against the official OpenAPI 3.1
-  meta-schema (`https://spec.openapis.org/oas/3.1/schema/2022-10-07`) using the
-  `jsonschema` package in a throwaway environment.
-- The three JSON Schema documents pass `Draft202012Validator.check_schema`, and
-  the error and money examples validate.
+- The validator's own YAML parser rejects duplicate keys and unsupported
+  constructs; all 22 YAML documents parsed.
+- The JSON Schema documents are checked by the validator's schema subset and
+  their own examples; no external JSON Schema validator was installed for this
+  round.
+- No official OpenAPI or AsyncAPI meta-schema validator and no PyYAML run was
+  performed in this round, because the repository deliberately takes no
+  runtime dependency on either. A release engineer may run one additionally.
 - Negative checks were run on a throwaway copy: removing the required
-  `/api/v1/policies` path, corrupting the `Page` `$ref`, and renaming one
-  channel address each produce a non-zero exit and a specific failure message.
+  `/api/v1/policies/{policyId}/coverages` path, changing an implemented event
+  channel back to `x-status: planned` without updating the catalog, and
+  inventing an event in the catalog each produce a non-zero exit and a specific
+  failure message.
 
 ## Resolution policy
 

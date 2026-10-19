@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:party
 info:
   title: EIA Party events
-  version: 1.0.0
+  version: 1.1.0
   summary: Published domain event names for the Party vertical.
   description: >
     Event contract for the Party vertical. The authoritative event names are
@@ -14,9 +14,11 @@ info:
     signature (SPEC 7.5.1). A channel address is the logical routing key and
     equals the event name; it is not a broker topic.
 
-    No publisher or subscriber exists in the current codebase. Every channel
-    and operation in this document is therefore marked x-status planned. The
-    catalog and cross-vertical subscriptions live in event-catalog.yaml.
+    The Party expert publishes `party.party.created` and
+    `party.party.updated` through the transactional outbox; those channels and
+    operations are marked `x-status: implemented`. A status change is published
+    as `party.party.updated` with `changedFields: [status]`, so
+    `party.party.status-changed` and the other SPEC 11.1.9 names remain planned.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -36,13 +38,14 @@ channels:
     address: party.party.created
     title: party.party.created
     description: >
-      Declared domain event for this vertical (SPEC 11.1.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted by the Party expert when a party is persisted, in the same
+      transaction as the row. The payload carries the party identity, type,
+      status, and an initial empty `roles` array.
     x-event-type: party.party.created
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.1.9
+    x-implemented-by: repos/eia-party-expert/src/main/java/com/eia/party/expert/PartyEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -50,13 +53,14 @@ channels:
     address: party.party.updated
     title: party.party.updated
     description: >
-      Declared domain event for this vertical (SPEC 11.1.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when a party status changes. The payload carries
+      `changedFields: [status]`, `from`, `to`, the optional `reason`, and the
+      row version.
     x-event-type: party.party.updated
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.1.9
+    x-implemented-by: repos/eia-party-expert/src/main/java/com/eia/party/expert/PartyEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -165,20 +169,19 @@ operations:
       $ref: '#/channels/PartyPartyCreated'
     summary: Publish party.party.created
     description: >
-      Publishes party.party.created through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes party.party.created through the transactional outbox in the
+      same transaction as the party insert (SPEC 7.5.1).
     x-event-type: party.party.created
-    x-status: planned
+    x-status: implemented
   publishPartyPartyUpdated:
     action: send
     channel:
       $ref: '#/channels/PartyPartyUpdated'
     summary: Publish party.party.updated
     description: >
-      Publishes party.party.updated through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes party.party.updated when the party status changes.
     x-event-type: party.party.updated
-    x-status: planned
+    x-status: implemented
   publishPartyPartyStatusChanged:
     action: send
     channel:
@@ -285,14 +288,16 @@ components:
         t=<unix>,v1=<hex> (SPEC 7.5.1).
 x-vertical: party
 x-spec-section: SPEC 11.1.9
-x-status: planned
+x-status: partial
 x-implementation:
-  publisher: none
+  publisher: eia-party-expert
   subscriber: none
   notes: >
-    The current vertical slices emit no events; the outbox tables and the
-    dispatcher described in SPEC 7.5 are not implemented. This document is the
-    agreed event contract for the publisher that will be built.
+    `party.party.created` and `party.party.updated` are written to the
+    transactional outbox in the same transaction as the party write and
+    dispatched by the platform outbox dispatcher when `eia.outbox.enabled=true`.
+    The other SPEC 11.1.9 names remain planned. There is no subscriber, inbox,
+    or subscription registry yet.
 
 x-consumed-events:
   - policy.policy.issued

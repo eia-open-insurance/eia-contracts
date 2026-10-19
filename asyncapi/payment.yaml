@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:payment
 info:
   title: EIA Payment events
-  version: 1.0.0
+  version: 1.1.0
   summary: Published domain event names for the Payment vertical.
   description: >
     Event contract for the Payment vertical. The authoritative event names are
@@ -14,9 +14,13 @@ info:
     signature (SPEC 7.5.1). A channel address is the logical routing key and
     equals the event name; it is not a broker topic.
 
-    No publisher or subscriber exists in the current codebase. Every channel
-    and operation in this document is therefore marked x-status planned. The
-    catalog and cross-vertical subscriptions live in event-catalog.yaml.
+    The Payment expert now publishes `payment.payment.created`,
+    `payment.payment.updated`, and `payment.payment.status-changed` through the
+    transactional outbox; those channels and operations are marked
+    `x-status: implemented`. A status write emits `updated` and `status-changed`
+    together at the same aggregate version. The remaining SPEC 11.7.10 names
+    are planned. Payment is a shared financial service and the current API has
+    no book input, so these events are stamped DIRECT.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -32,17 +36,50 @@ servers:
       Each subscriber registers an HTTPS endpoint and signing key. The outbox
       posts one event per request and requires a 2xx acknowledgement.
 channels:
+  PaymentPaymentUpdated:
+    address: payment.payment.updated
+    title: payment.payment.updated
+    description: >
+      Coarse aggregate-change fact emitted with `status-changed` on a lifecycle
+      write, at the same aggregate version. The payload carries
+      `changedFields: [status]`, `from`, `to`, and the row version.
+    x-event-type: payment.payment.updated
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.7.10
+    x-implemented-by: repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PaymentPaymentStatusChanged:
+    address: payment.payment.status-changed
+    title: payment.payment.status-changed
+    description: >
+      Emitted on every accepted payment status transition. The payload carries
+      the new `status`, `version`, `from`, `to`, and the optional `reason`. It is
+      published together with `payment.payment.updated` at the same aggregate
+      version.
+    x-event-type: payment.payment.status-changed
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.7.10
+    x-implemented-by: repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
   PaymentPaymentCreated:
     address: payment.payment.created
     title: payment.payment.created
     description: >
-      Declared domain event for this vertical (SPEC 11.7.10). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted by the Payment expert when a payment is persisted, in the same
+      transaction as the row. The payload carries the payment identity, type,
+      status, amount, currency, payee, optional payment date, and the row
+      version.
     x-event-type: payment.payment.created
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.7.10
+    x-implemented-by: repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -263,10 +300,29 @@ operations:
       $ref: '#/channels/PaymentPaymentCreated'
     summary: Publish payment.payment.created
     description: >
-      Publishes payment.payment.created through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes payment.payment.created through the transactional outbox in the
+      same transaction as the payment insert (SPEC 7.5.1).
     x-event-type: payment.payment.created
-    x-status: planned
+    x-status: implemented
+  publishPaymentPaymentUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/PaymentPaymentUpdated'
+    summary: Publish payment.payment.updated
+    description: >
+      Publishes payment.payment.updated on every accepted lifecycle write.
+    x-event-type: payment.payment.updated
+    x-status: implemented
+  publishPaymentPaymentStatusChanged:
+    action: send
+    channel:
+      $ref: '#/channels/PaymentPaymentStatusChanged'
+    summary: Publish payment.payment.status-changed
+    description: >
+      Publishes payment.payment.status-changed on every accepted status
+      transition.
+    x-event-type: payment.payment.status-changed
+    x-status: implemented
   publishPaymentPaymentAuthorized:
     action: send
     channel:
@@ -453,14 +509,16 @@ components:
         t=<unix>,v1=<hex> (SPEC 7.5.1).
 x-vertical: payment
 x-spec-section: SPEC 11.7.10
-x-status: planned
+x-status: partial
 x-implementation:
-  publisher: none
+  publisher: eia-payment-expert
   subscriber: none
   notes: >
-    The current vertical slices emit no events; the outbox tables and the
-    dispatcher described in SPEC 7.5 are not implemented. This document is the
-    agreed event contract for the publisher that will be built.
+    Three implemented event names are written to the transactional outbox in
+    the same transaction as the payment write and dispatched by the platform
+    outbox dispatcher when `eia.outbox.enabled=true`. The other SPEC 11.7.10
+    names remain planned. There is no subscriber, inbox, or subscription
+    registry yet.
 
 x-consumed-events:
   - direct.claim.settlement-authorized

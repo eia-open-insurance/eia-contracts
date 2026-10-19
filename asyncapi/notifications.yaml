@@ -2,11 +2,11 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:notifications
 info:
   title: EIA Notifications events
-  version: 1.0.0
+  version: 1.1.0
   summary: Published domain event names for the Notifications vertical.
   description: >
-    Event contract for the Notifications vertical. The authoritative event names are
-    SPEC 11.8.9; the canonical envelope is
+    Event contract for the Notifications vertical. The authoritative event names
+    are SPEC 11.8.9; the canonical envelope is
     ../schemas/event-envelope.schema.json.
 
     There is no message broker (ADR-0004). The platform outbox delivers events
@@ -14,9 +14,12 @@ info:
     signature (SPEC 7.5.1). A channel address is the logical routing key and
     equals the event name; it is not a broker topic.
 
-    No publisher or subscriber exists in the current codebase. Every channel
-    and operation in this document is therefore marked x-status planned. The
-    catalog and cross-vertical subscriptions live in event-catalog.yaml.
+    The Notifications expert now publishes `notifications.notification.created`
+    and `notifications.notification.sent` through the transactional outbox;
+    those channels and operations are marked `x-status: implemented`. The
+    SPEC 11.8.9 verbs (`issued`, `delivered`, and so on) remain planned. The
+    shared event library requires the vertical segment to be `notifications`
+    (plural), which is why the implemented names use that prefix.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -32,6 +35,37 @@ servers:
       Each subscriber registers an HTTPS endpoint and signing key. The outbox
       posts one event per request and requires a 2xx acknowledgement.
 channels:
+  NotificationsNotificationCreated:
+    address: notifications.notification.created
+    title: notifications.notification.created
+    description: >
+      Emitted by the Notifications expert when a notification is drafted, in the
+      same transaction as the row. The payload carries the notification
+      identity, type, channel, status, recipient, optional template and schedule
+      details, and the row version.
+    x-event-type: notifications.notification.created
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.8.9
+    x-implemented-by: repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  NotificationsNotificationSent:
+    address: notifications.notification.sent
+    title: notifications.notification.sent
+    description: >
+      Emitted when a CREATED or QUEUED notification is issued and `sentAt` is
+      recorded, after the approved-template and schedule checks. The payload
+      carries `from`, `to`, `status`, `sentAt`, and the row version.
+    x-event-type: notifications.notification.sent
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.8.9
+    x-implemented-by: repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
   NotificationsNotificationIssued:
     address: notifications.notification.issued
     title: notifications.notification.issued
@@ -173,6 +207,26 @@ channels:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
 operations:
+  publishNotificationsNotificationCreated:
+    action: send
+    channel:
+      $ref: '#/channels/NotificationsNotificationCreated'
+    summary: Publish notifications.notification.created
+    description: >
+      Publishes notifications.notification.created through the transactional
+      outbox in the same transaction as the notification insert (SPEC 7.5.1).
+    x-event-type: notifications.notification.created
+    x-status: implemented
+  publishNotificationsNotificationSent:
+    action: send
+    channel:
+      $ref: '#/channels/NotificationsNotificationSent'
+    summary: Publish notifications.notification.sent
+    description: >
+      Publishes notifications.notification.sent when the notification is issued
+      and `sentAt` is recorded.
+    x-event-type: notifications.notification.sent
+    x-status: implemented
   publishNotificationsNotificationIssued:
     action: send
     channel:
@@ -309,14 +363,15 @@ components:
         t=<unix>,v1=<hex> (SPEC 7.5.1).
 x-vertical: notifications
 x-spec-section: SPEC 11.8.9
-x-status: planned
+x-status: partial
 x-implementation:
-  publisher: none
+  publisher: eia-notifications-expert
   subscriber: none
   notes: >
-    The current vertical slices emit no events; the outbox tables and the
-    dispatcher described in SPEC 7.5 are not implemented. This document is the
-    agreed event contract for the publisher that will be built.
+    Two implemented event names are written to the transactional outbox in the
+    same transaction as the notification write and dispatched by the platform
+    outbox dispatcher when `eia.outbox.enabled=true`. The SPEC 11.8.9 names
+    remain planned. There is no subscriber, inbox, or subscription registry yet.
 
 x-consumed-events: []
 x-consumed-events-note: >

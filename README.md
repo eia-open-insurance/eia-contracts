@@ -59,7 +59,9 @@ machine-readable status:
 |---|---|
 | `x-implementation.status: implemented` | The document was checked against the controller mappings in the named services. |
 | `x-implementation.verifiedAgainst` | Exact source files that were read to verify paths, methods, fields, and enums. |
-| `x-status` | Object-level status. `planned` means the object is agreed but not implemented; `implemented` marks a shared component that a vertical now uses. |
+| `x-status` | Object-level status. `planned` means the object is agreed but not implemented; `implemented` marks a component, channel, or operation that the current code emits or uses; `partial` means a document mixes implemented and planned objects. |
+| `x-implemented-by` | AsyncAPI only: the source file that emits an implemented event. |
+| `x-path-alias` | OpenAPI only: a second implemented path that serves the same operation with a different prefix (Assumed Claims). |
 | `x-planned-operations` | Routes declared by SPEC 11 but not implemented by the current slice. |
 | `x-planned-notes` | Known differences between the SPEC route shape and the implemented route shape. |
 | `x-compatibility` | Per-document compatibility classification: contract version, previous version, breaking changes, compatible changes. |
@@ -118,6 +120,32 @@ Cession and Retrocession changes are additive: optional response fields,
 optional request fields, and documentation of behaviour that was not previously
 described. The other seven vertical documents are unchanged in Round 2.
 
+### Round 5 compatibility notes (2026-10-19)
+
+Round 5 adds the second vertical-depth slice to Policy, Contract, Direct
+Claims, and Assumed Claims, and records the transactional-outbox event rollout.
+
+| Document | Version | Classification | Round 5 change |
+|---|---|---|---|
+| `openapi/policy.yaml` | 2.1.0 | Additive | Versions, coverage and limits, aggregate erosion, endorsements, insureds, locations, cancellations, and reinstatements; 422 and 428 responses; the second-slice schemas. |
+| `openapi/contract.yaml` | 2.0.0 | Breaking | Layers, participants, terms, security, cessions, bordereaux, commutations, bind-eligibility, and bind. `PATCH /status` to BOUND now returns 409 `BIND_REQUIRES_COMMAND`. |
+| `openapi/direct-claims.yaml` | 1.1.0 | Additive | Injuries, exposures, reserve history, coverage decision, litigation, settlements, recoveries, liens, and close; the full claim projection. |
+| `openapi/assumed-claims.yaml` | 1.1.0 | Additive | Loss advices, bordereaux, reserves, cash calls, recoveries, commutation, disputes, audit, financials, and close; 422 and 428 responses. |
+| `openapi/components.yaml` | 1.2.0 | Additive and documentation | `UnprocessableContent` (422) and `PreconditionRequired` (428) become shared responses; `Percent` becomes implemented; the page envelope covers the Policy second slice. |
+| `asyncapi/party.yaml` | 1.1.0 | Additive | `party.party.created` and `party.party.updated` become implemented. |
+| `asyncapi/cession.yaml` | 1.1.0 | Additive | Three implemented case events (`created`, `updated`, `handed-off`). |
+| `asyncapi/retrocession.yaml` | 1.1.0 | Additive | Three implemented case events (`created`, `updated`, `handed-off`). |
+| `asyncapi/document.yaml` | 1.1.0 | Additive | Three implemented document metadata events. |
+| `asyncapi/payment.yaml` | 1.1.0 | Additive | `created` becomes implemented; `updated` and `status-changed` are added. |
+| `asyncapi/notifications.yaml` | 1.1.0 | Additive | `created` and `sent` are added and implemented. |
+| `asyncapi/event-catalog.yaml` | 1.1.0 | Additive | The implemented subset is recorded per vertical; 13 new event names are published. |
+
+Contract is the only breaking Round 5 document. Reaching BOUND through
+`PATCH /status` bypassed the SPEC 11.3.8 bind preconditions; the guard is the
+canonical behaviour and the only consumer, the Contract web remote, is updated
+in the same release. The HTTP path stays `/api/v1/contracts`. The other three
+OpenAPI documents only add paths, schemas, and response codes.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -174,10 +202,11 @@ used with `application/problem+json`:
 Policy (domain and expert) now emits this shape and media type, but keeps its
 legacy code strings (`POLICY_NOT_FOUND`, `CONCURRENT_MODIFICATION`,
 `INVALID_STATUS_TRANSITION`, `IDEMPOTENCY_CONFLICT`, and so on) instead of the
-`EIA-XXX-NNNN` scheme. The code migration remains open. The other nine vertical
-documents still describe services that emit their own `ApiError` bodies; their
-`Problem` responses are the canonical target, and `MISMATCHES.md` M-02 and M-17
-list every variant.
+`EIA-XXX-NNNN` scheme. The code migration remains open. Assumed Claims also
+emits the RFC 9457 shape and media type, with `EIA-RNS-7xxx` codes. The other
+eight vertical documents still describe services that emit their own `ApiError`
+bodies; their `Problem` responses are the canonical target, and `MISMATCHES.md`
+M-02 and M-17 list every variant.
 
 ### Money
 
@@ -199,24 +228,29 @@ canonical `Money` object is M-12/M-13.
 
 Policy is the reference implementation:
 
-- `ETag: "<version>"` is returned on detail, create, and status responses.
-- `If-Match` on the status mutation performs optimistic concurrency. A stale
-  tag or body version is 409 `CONCURRENT_MODIFICATION` with
-  `meta.currentVersion`, `meta.expectedVersion`, and
-  `errors[0].code = STALE_VERSION`; a malformed header is 400
-  `INVALID_IF_MATCH`. The header is optional for backward compatibility and
-  takes precedence over the body `expectedVersion`.
-- `Idempotency-Key` on create is optional but recommended. A same-key replay of
-  an identical request returns 200 with `Idempotent-Replayed: true`; reusing the
-  key with a different request is 409 `IDEMPOTENCY_CONFLICT`; a duplicate
-  business key is 409 `DUPLICATE_POLICY_NUMBER`.
-- An illegal lifecycle transition is 409 `INVALID_STATUS_TRANSITION`.
+- `ETag: "<version>"` is returned on detail, create, status, and every
+  second-slice mutation response.
+- `If-Match` on a mutation performs optimistic concurrency. A stale tag or body
+  version is 409 `CONCURRENT_MODIFICATION` with `meta.currentVersion`,
+  `meta.expectedVersion`, and `errors[0].code = STALE_VERSION`; a malformed
+  header is 400 `INVALID_IF_MATCH`. The header is optional for backward
+  compatibility and takes precedence over the body `expectedVersion`.
+- `Idempotency-Key` on create and on every second-slice command is optional but
+  recommended. A same-key replay of an identical request returns 200 with
+  `Idempotent-Replayed: true`; reusing the key with a different request is 409
+  `IDEMPOTENCY_CONFLICT`; a duplicate business key is 409
+  `DUPLICATE_POLICY_NUMBER`, `DUPLICATE_COVERAGE_CODE`, or a similar code.
+- An illegal lifecycle transition is 409 `INVALID_STATUS_TRANSITION`; a domain
+  policy rejection is 422 `BUSINESS_RULE`; a missing approval is 428
+  `APPROVAL_REQUIRED`.
 
-No other vertical emits `ETag` or accepts `If-Match`/`Idempotency-Key`, and
-Cession/Retrocession still return 400 for an illegal lifecycle edge. Their
-FS-RI hand-off is a separate case: an FS-RI conflict is 409 `FSRI_CONFLICT`, an
-unusable FS-RI response is 502, and an FS-RI outage is 503. See
-`MISMATCHES.md` M-06, M-07, M-11, and M-21.
+No other vertical emits `ETag` or accepts `If-Match`/`Idempotency-Key`.
+Contract bind takes `expectedVersion` and `approvedBy`; the Direct Claims child
+PATCH commands take `expectedVersion`; Assumed Claims propagates the expert's
+409/422/428; Cession/Retrocession still return 400 for an illegal lifecycle
+edge. Their FS-RI hand-off is a separate case: an FS-RI conflict is 409
+`FSRI_CONFLICT`, an unusable FS-RI response is 502, and an FS-RI outage is 503.
+See `MISMATCHES.md` M-06, M-07, M-11, and M-21.
 
 ### Pagination and collections
 
@@ -224,13 +258,16 @@ The implemented Policy page envelope is `Page` in `openapi/components.yaml`:
 `{items, page, size, total, _links:{self, next, prev}}`, with `?page=` (default
 0) and `?size=` (default 20, maximum 100). `next` is omitted on the last page
 and `prev` on the first page; hrefs are relative. Both the public and the expert
-list operations return it, and `items` is narrowed to `Policy` in
-`policy.yaml`.
+list operations return it, and every Policy second-slice collection
+(versions, coverages, limits, aggregate state, endorsements, insureds,
+locations, cancellations, and reinstatements) returns the same envelope with
+`items` narrowed to its resource in `policy.yaml`.
 
-Every other vertical still returns a bare JSON array, with no page, total,
-cursor, or links. SPEC 7.6 and 12.2 specify a different, cursor-based envelope
+Every other vertical still returns a bare JSON array, including the Contract
+second-slice collections and the Direct Claims and Assumed Claims child
+collections. SPEC 7.6 and 12.2 specify a different, cursor-based envelope
 (`data`, `page:{size, hasMore, nextCursor, total?}`, `?page[size]` and
-`?page[after]`, default 25, maximum 200). The offset form is the Round 2
+`?page[after]`, default 25, maximum 200). The offset form is the implemented
 contract; the divergence and the migration choice are recorded in
 `MISMATCHES.md` M-04.
 
@@ -263,16 +300,21 @@ missing directory.
    Schema 2020-12 dialect, non-empty `paths`, operation IDs (unique per file and
    across the repository), summaries, tags, responses with a 2xx, request-body
    content types, internal-route security markers, the required shared
-   components (schemas, parameters, headers, and responses), and the complete
-   table of required paths and methods per vertical.
+   components (schemas, parameters, headers, and responses), the complete table
+   of required paths and methods per vertical (including the Round 5 second
+   slice), the required 422/409/428 response codes on the Round 5 mutations, and
+   agreement between `info.version` and `x-compatibility.contractVersion`.
 4. **AsyncAPI structure.** `asyncapi: 3.0.0`, channel addresses, `x-event-type`,
-   `x-status: planned`, one `send` operation per channel, and a `DomainEvent`
-   message on every channel.
+   `x-status: planned|implemented`, `x-implemented-by` on every implemented
+   channel, one `send` operation per channel, and a `DomainEvent` message on
+   every channel.
 5. **Event catalog cross-check.** The published set in `event-catalog.yaml`
    must equal the channel addresses in the matching vertical document, event
    names must be unique across the platform and must match
-   `{vertical}.{aggregate}.{verb}`, and every consumed event must have a
-   publisher.
+   `{vertical}.{aggregate}.{verb}`, every consumed event must have a publisher,
+   and the catalog `implemented` list must equal the channels marked
+   `x-status: implemented`. The Round 5 implemented event names are required
+   explicitly.
 6. **JSON Schema checks.** All three files parse as JSON, declare the 2020-12
    dialect and an `$id`, carry the required members, keep required properties
    defined, and validate their own examples against a small schema subset.
@@ -307,9 +349,9 @@ missing directory.
 
 ## Known deviations
 
-`MISMATCHES.md` is the authoritative list. The largest ones are:
+`MISMATCHES.md` is the authoritative list. The largest open ones are:
 
-- Policy now emits the canonical `Problem` body and media type with legacy code
+- Policy emits the canonical `Problem` body and media type with legacy code
   strings; the other nine verticals still emit their own `ApiError` bodies, and
   the `EIA-XXX-NNNN` code migration is open;
 - the Policy page envelope is offset-based (`items`, `page`, `size`, `total`,
@@ -318,10 +360,11 @@ missing directory.
 - `ETag`/`If-Match` and `Idempotency-Key` exist only in Policy; detail
   `_links` exist nowhere, and Cession/Retrocession still return 400 for an
   illegal lifecycle edge;
-- the Cession/Retrocession FS-RI hand-off is synchronous, with no outbox
+- the Cession/Retrocession FS-RI hand-off is synchronous, with no hand-off
   queue or hand-off resource (SPEC 7.18.3/HAND-05);
-- only the Party expert publishes an event, so the other AsyncAPI channels
-  remain planned.
+- six experts publish a subset of their events through the transactional
+  outbox, but there is no subscriber or inbox, and the implemented event names
+  differ from the SPEC catalog names.
 
 ## Repository standard
 

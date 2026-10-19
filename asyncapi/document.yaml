@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:document
 info:
   title: EIA Document events
-  version: 1.0.0
+  version: 1.1.0
   summary: Published domain event names for the Document vertical.
   description: >
     Event contract for the Document vertical. The authoritative event names are
@@ -14,9 +14,13 @@ info:
     signature (SPEC 7.5.1). A channel address is the logical routing key and
     equals the event name; it is not a broker topic.
 
-    No publisher or subscriber exists in the current codebase. Every channel
-    and operation in this document is therefore marked x-status planned. The
-    catalog and cross-vertical subscriptions live in event-catalog.yaml.
+    The Document expert now publishes `document.document.created`,
+    `document.document.updated`, and `document.document.status-changed` through
+    the transactional outbox; those channels and operations are marked
+    `x-status: implemented`. A status write emits `updated` and
+    `status-changed` together at the same aggregate version. The SPEC 11.6.9
+    names remain planned. Document metadata is shared by both books and the
+    current API has no book input, so these events are stamped DIRECT.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -32,6 +36,52 @@ servers:
       Each subscriber registers an HTTPS endpoint and signing key. The outbox
       posts one event per request and requires a 2xx acknowledgement.
 channels:
+  DocumentDocumentCreated:
+    address: document.document.created
+    title: document.document.created
+    description: >
+      Emitted by the Document expert when document metadata is registered, in
+      the same transaction as the row. The payload carries the document
+      identity, title, type, classification, status, optional retention date,
+      and the row version.
+    x-event-type: document.document.created
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.6.9
+    x-implemented-by: repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DocumentDocumentUpdated:
+    address: document.document.updated
+    title: document.document.updated
+    description: >
+      Coarse aggregate-change fact emitted with `status-changed` on a lifecycle
+      write, at the same aggregate version. The payload carries
+      `changedFields: [status]`, `from`, `to`, and the row version.
+    x-event-type: document.document.updated
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.6.9
+    x-implemented-by: repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DocumentDocumentStatusChanged:
+    address: document.document.status-changed
+    title: document.document.status-changed
+    description: >
+      Emitted on every accepted document status transition. The payload carries
+      the new `status`, `version`, `from`, and `to`. It is published together
+      with `document.document.updated` at the same aggregate version.
+    x-event-type: document.document.status-changed
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.6.9
+    x-implemented-by: repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
   DocumentDocumentRegistered:
     address: document.document.registered
     title: document.document.registered
@@ -243,6 +293,35 @@ channels:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
 operations:
+  publishDocumentDocumentCreated:
+    action: send
+    channel:
+      $ref: '#/channels/DocumentDocumentCreated'
+    summary: Publish document.document.created
+    description: >
+      Publishes document.document.created through the transactional outbox in
+      the same transaction as the document insert (SPEC 7.5.1).
+    x-event-type: document.document.created
+    x-status: implemented
+  publishDocumentDocumentUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/DocumentDocumentUpdated'
+    summary: Publish document.document.updated
+    description: >
+      Publishes document.document.updated on every accepted lifecycle write.
+    x-event-type: document.document.updated
+    x-status: implemented
+  publishDocumentDocumentStatusChanged:
+    action: send
+    channel:
+      $ref: '#/channels/DocumentDocumentStatusChanged'
+    summary: Publish document.document.status-changed
+    description: >
+      Publishes document.document.status-changed on every accepted status
+      transition.
+    x-event-type: document.document.status-changed
+    x-status: implemented
   publishDocumentDocumentRegistered:
     action: send
     channel:
@@ -429,14 +508,15 @@ components:
         t=<unix>,v1=<hex> (SPEC 7.5.1).
 x-vertical: document
 x-spec-section: SPEC 11.6.9
-x-status: planned
+x-status: partial
 x-implementation:
-  publisher: none
+  publisher: eia-document-expert
   subscriber: none
   notes: >
-    The current vertical slices emit no events; the outbox tables and the
-    dispatcher described in SPEC 7.5 are not implemented. This document is the
-    agreed event contract for the publisher that will be built.
+    Three implemented event names are written to the transactional outbox in
+    the same transaction as the document write and dispatched by the platform
+    outbox dispatcher when `eia.outbox.enabled=true`. The SPEC 11.6.9 names
+    remain planned. There is no subscriber, inbox, or subscription registry yet.
 
 x-consumed-events:
   - policy.policy.issued

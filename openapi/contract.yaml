@@ -1,21 +1,29 @@
 openapi: 3.1.0
 info:
   title: EIA Contract API
-  version: 1.0.0
+  version: 2.0.0
   summary: Assumed-book reinsurance contract administration and the Contract expert API.
   description: >
     This document describes the implemented public Contract domain API and the
     internal Contract expert API. The authoritative requirement is SPEC 11.3
-    and SPEC 12; the implemented surface is the first vertical slice.
+    and SPEC 12.
 
-    The Contract vertical is ASSUMED book only. The aggregate slice carries the
-    contract header, dates, currency, and lifecycle; layers, participants,
-    terms, cessions, bordereaux, accounts, and security from SPEC 11.3 are
-    planned and are listed under x-planned-operations.
+    The Contract vertical is ASSUMED book only. Round 5 adds the second slice:
+    layers, participants, terms, security, cessions, bordereaux, commutations,
+    and the bind command. The contract header, dates, currency, lifecycle,
+    layers, participants, terms, security, cessions, bordereaux, and
+    commutations are implemented; technical accounts, endorsement, renewal,
+    reinstatement, loss-aggregate, and lineage remain planned.
+
+    Bind is a command, not a status transition. `PATCH /status` to `BOUND` is
+    rejected with 409 `BIND_REQUIRES_COMMAND`; `POST /bind` enforces the tower,
+    share, term, security, and approval preconditions and is the only way to
+    reach `BOUND`. The eligibility snapshot is available from
+    `GET /bind-eligibility`.
 
     The implemented Contract services emit a compact `ApiError` body of
     `{code, message, details[]}` rather than the canonical Problem envelope;
-    see MISMATCHES.md.
+    see MISMATCHES.md. Money and percentages are decimal strings (SPEC 10.3).
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -126,6 +134,10 @@ paths:
       description: >
         Applies one transition from SPEC 11.3.6. `expectedVersion` is required
         and a mismatch returns 409 CONCURRENT_MODIFICATION.
+
+        `BOUND` is not reachable here. A request with `status: BOUND` is
+        rejected with 409 `BIND_REQUIRES_COMMAND`; use `POST /bind` so the
+        tower, share, term, security, and approval preconditions are enforced.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - name: contractId
@@ -155,6 +167,763 @@ paths:
           $ref: './components.yaml#/components/responses/Conflict'
         default:
           $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/{contractId}/layers:
+    get:
+      operationId: listContractLayers
+      tags:
+        - Contract
+      summary: List the layer tower.
+      description: >
+        Returns a bare array ordered by `layerNumber`. CTR-02 rejects an
+        overlapping tower and CTR-03 requires the aggregate limit to be at
+        least the layer limit.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Layers of the contract.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Layer'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createContractLayer
+      tags:
+        - Contract
+      summary: Record a layer.
+      description: >
+        `layerType`, `limitBasis`, `reinstatementType`, and `status` are closed
+        enumerations. The layer dates must fall inside the contract term and
+        `currency` must equal the contract currency; `attachmentAmount` is the
+        layer attachment and `limitAmount` must be greater than zero. A gap
+        between layers is accepted only when `note` explains it (CTR-02). An
+        overlap is 409 `LAYER_OVERLAP`; an unknown enumeration or a malformed
+        date range is 400.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLayerRequest'
+      responses:
+        '201':
+          description: Layer recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Layer'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/{contractId}/layers/summary:
+    get:
+      operationId: getContractLayerSummary
+      tags:
+        - Contract
+      summary: Get the tower summary.
+      description: >
+        `layerCount` counts live layers, `capacity` is their summed limit, and
+        `gaps` lists the documented gaps between consecutive layers.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Tower summary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TowerSummary'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/{contractId}/participants:
+    get:
+      operationId: listContractParticipants
+      tags:
+        - Contract
+      summary: List participations.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Participations of the contract.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Participant'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createContractParticipant
+      tags:
+        - Contract
+      summary: Record a participation.
+      description: >
+        `sharePct` is a percentage of 100 (six decimal places). CTR-01 requires
+        the active shares of a contract or of each layer to total 100 +/- 0.0001
+        before bind, and a share may not push the band above 100
+        (`SHARES_EXCEED_100`). `signedLinePct` may not exceed `sharePct`; a
+        LEAD participant requires `leadFlag`. A missing `partyId` or a share
+        outside 0..100 is 400.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateParticipantRequest'
+      responses:
+        '201':
+          description: Participation recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Participant'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/{contractId}/terms:
+    get:
+      operationId: listContractTerms
+      tags:
+        - Contract
+      summary: List contract terms.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Terms of the contract.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Term'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createContractTerm
+      tags:
+        - Contract
+      summary: Record a contract term.
+      description: >
+        `termCode` is one of the closed SPEC 11.3.4 financial-term codes and the
+        stored `termValue` is normalized to the code's value type (MONEY,
+        PERCENT, TEXT, DATE, INTEGER, BOOLEAN). The expert records one live term
+        per code; the required set depends on `contractType` and is reported by
+        `/terms/requirements`. An unknown code is 400.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTermRequest'
+      responses:
+        '201':
+          description: Term recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Term'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/{contractId}/terms/requirements:
+    get:
+      operationId: getContractTermRequirements
+      tags:
+        - Contract
+      summary: Get the required terms for the contract type.
+      description: >
+        Returns the full required set and the subset still missing. Bind fails
+        with `REQUIRED_TERMS_PRESENT` while `missing` is non-empty.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Required and missing term codes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TermRequirements'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/{contractId}/security:
+    get:
+      operationId: listContractSecurity
+      tags:
+        - Contract
+      summary: List security and collateral records.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Security records of the contract.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Security'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createContractSecurity
+      tags:
+        - Contract
+      summary: Record security or collateral.
+      description: >
+        `heldAmount` above the secured obligation requires `approvalRef` and
+        `approvedAt`; otherwise the excess is 409
+        `COLLATERAL_EXCEEDS_OBLIGATION`. `expiryDate` may not precede
+        `effectiveFrom`. A security row in status BREACH blocks new cessions
+        (CTR-11). `securityType`, `status`, and `collateralQuality` are closed
+        enumerations.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSecurityRequest'
+      responses:
+        '201':
+          description: Security recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Security'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/{contractId}/cessions:
+    get:
+      operationId: listContractCessions
+      tags:
+        - Contract
+      summary: List cessions recorded on the contract.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Cessions of the contract.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Cession'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createContractCession
+      tags:
+        - Contract
+      summary: Record a cession.
+      description: >
+        `sourceVertical` must be ASSUMED (the book wall; a DIRECT value is 400
+        `BOOK_WALL_VIOLATION`). `sourceType` is POLICY, CLAIM, or LOSS_ADVICE;
+        a CLAIM cession requires `claimRef` and a POLICY cession requires
+        `policyRef`. At least one of `cededPremiumAmount` and `cededLossAmount`
+        is required (`CES_AMOUNT_REQUIRED`). CTR-04 rejects a ceded loss above
+        the available contract or layer limit with
+        `CESSION_EXCEEDS_CONTRACT_LIMIT`; CTR-05 rejects active cessions above
+        100% per source with `CESSION_EXCEEDS_SOURCE_SHARE`. A cession requires
+        a BOUND or later contract (`CONTRACT_NOT_INCEPTED`) and no security in
+        breach.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCessionRequest'
+      responses:
+        '201':
+          description: Cession recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Cession'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/{contractId}/bordereaux:
+    get:
+      operationId: listContractBordereaux
+      tags:
+        - Contract
+      summary: List bordereaux.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Bordereaux of the contract.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Bordereau'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createContractBordereau
+      tags:
+        - Contract
+      summary: Record a bordereau header.
+      description: >
+        `bordereauType`, `sourceFormat`, and `status` are closed enumerations.
+        The period must be coherent (`periodTo` on or after `periodFrom`),
+        `validLineCount` may not exceed `lineCount`, and a `totalAmount` must be
+        in the contract currency (`BORDEREAU_CURRENCY_MISMATCH`). The bordereau
+        number is generated as BRD-{year}-{7 digits} when omitted and is unique
+        per tenant.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBordereauRequest'
+      responses:
+        '201':
+          description: Bordereau recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Bordereau'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/{contractId}/bordereaux/{bordereauId}:
+    get:
+      operationId: getContractBordereau
+      tags:
+        - Contract
+      summary: Get one bordereau.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: bordereauId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Bordereau detail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Bordereau'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/{contractId}/commutations:
+    get:
+      operationId: listContractCommutations
+      tags:
+        - Contract
+      summary: List commutations.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Commutations of the contract.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Commutation'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createContractCommutation
+      tags:
+        - Contract
+      summary: Propose a commutation.
+      description: >
+        `valuationDate` may not be after `effectiveDate`. A commutation can be
+        proposed from BOUND, SIGNED, IN_FORCE, ENDORSED, EXPIRED, or RUNOFF
+        (409 `COMMUTATION_NOT_PERMITTED` otherwise). `commutationType` and
+        `basis` are closed enumerations.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCommutationRequest'
+      responses:
+        '201':
+          description: Commutation proposed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Commutation'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/{contractId}/commutations/{commutationId}/approve:
+    post:
+      operationId: approveContractCommutation
+      tags:
+        - Contract
+      summary: Approve a proposed commutation.
+      description: >
+        `approvedBy` is required. Only a PROPOSED commutation can be approved;
+        any other status is 409 `COMMUTATION_NOT_PROPOSED`. COM-01 requires the
+        approval before execution.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: commutationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApproveCommutationRequest'
+      responses:
+        '200':
+          description: Commutation approved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Commutation'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/{contractId}/commutations/{commutationId}/execute:
+    post:
+      operationId: executeContractCommutation
+      tags:
+        - Contract
+      summary: Execute an approved commutation and close the contract.
+      description: >
+        Only an APPROVED commutation can be executed (409
+        `COMMUTATION_NOT_APPROVED`). CTR-12 requires a signed release: a
+        `releaseDocumentId` must be recorded, either on the commutation or in
+        the execute command. Execution releases the outstanding security,
+        records `releasedSecurities`, moves a FULL commutation through COMMUTED
+        to CLOSED, and sets `contractClosed`.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: commutationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExecuteCommutationRequest'
+      responses:
+        '200':
+          description: Commutation executed and the contract closed when applicable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommutationExecution'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/{contractId}/bind-eligibility:
+    get:
+      operationId: getContractBindEligibility
+      tags:
+        - Contract
+      summary: Evaluate the bind preconditions.
+      description: >
+        Returns `bindable` plus one `BindCheck` for each precondition:
+        `CONTRACT_PLACED`, `LAYERS_COHERENT`, `SHARES_BALANCED`,
+        `REQUIRED_TERMS_PRESENT`, and `SECURITY_NOT_BREACHED`. A failed check
+        carries a human-readable `detail`.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Bind readiness and the individual checks.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BindEligibility'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/{contractId}/bind:
+    post:
+      operationId: bindContract
+      tags:
+        - Contract
+      summary: Bind the contract.
+      description: >
+        Bind is a command, not a status transition. The contract must be PLACED;
+        every bind check must pass; and an underwriter approval (`approvedBy`)
+        is required (CTR-15). Bind is written atomically with the checks under a
+        row lock and returns the bound contract plus the eligibility snapshot
+        that authorised it. A failed check is 409 `BIND_PRECONDITION_FAILED`
+        with the failed check codes in `details[]`; a missing approver is 400
+        `BIND_APPROVAL_REQUIRED`.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BindRequest'
+      responses:
+        '200':
+          description: Contract bound plus the eligibility snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BindResult'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
   /internal/v1/contracts:
     get:
       operationId: expertListContracts
@@ -173,7 +942,7 @@ paths:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/Contract'
+                  $ref: '#/components/schemas/ContractExpert'
         '400':
           $ref: './components.yaml#/components/responses/BadRequest'
         default:
@@ -201,7 +970,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Contract'
+                $ref: '#/components/schemas/ContractExpert'
         '400':
           $ref: './components.yaml#/components/responses/BadRequest'
         '409':
@@ -230,7 +999,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Contract'
+                $ref: '#/components/schemas/ContractExpert'
         '400':
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
@@ -243,6 +1012,9 @@ paths:
       tags:
         - Contract internal
       summary: Advance a contract through its lifecycle (expert).
+      description: >
+        The expert enforces the same transition table and rejects `BOUND` with
+        409 `BIND_REQUIRES_COMMAND`; bind must go through the bind command.
       security: []
       x-internal-api: true
       parameters:
@@ -265,7 +1037,769 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Contract'
+                $ref: '#/components/schemas/ContractExpert'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/contracts/{contractId}/layers:
+    get:
+      operationId: expertListContractLayers
+      tags:
+        - Contract internal
+      summary: List layers (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Layers of the contract.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Layer'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertCreateContractLayer
+      tags:
+        - Contract internal
+      summary: Record a layer (expert).
+      description: >
+        The expert re-validates the layer and enforces the tower invariants;
+        the contract must still be editable (409 `CONTRACT_LOCKED` after
+        signature).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLayerRequest'
+      responses:
+        '201':
+          description: Layer recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Layer'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/contracts/{contractId}/layers/summary:
+    get:
+      operationId: expertGetContractLayerSummary
+      tags:
+        - Contract internal
+      summary: Get the tower summary (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Tower summary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TowerSummary'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/contracts/{contractId}/participants:
+    get:
+      operationId: expertListContractParticipants
+      tags:
+        - Contract internal
+      summary: List participations (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Participations of the contract.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Participant'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertCreateContractParticipant
+      tags:
+        - Contract internal
+      summary: Record a participation (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateParticipantRequest'
+      responses:
+        '201':
+          description: Participation recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Participant'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/contracts/{contractId}/terms:
+    get:
+      operationId: expertListContractTerms
+      tags:
+        - Contract internal
+      summary: List terms (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Terms of the contract.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Term'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertCreateContractTerm
+      tags:
+        - Contract internal
+      summary: Record a contract term (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTermRequest'
+      responses:
+        '201':
+          description: Term recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Term'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/contracts/{contractId}/terms/requirements:
+    get:
+      operationId: expertGetContractTermRequirements
+      tags:
+        - Contract internal
+      summary: Get the required terms (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Required and missing term codes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TermRequirements'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/contracts/{contractId}/security:
+    get:
+      operationId: expertListContractSecurity
+      tags:
+        - Contract internal
+      summary: List security (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Security records of the contract.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Security'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertCreateContractSecurity
+      tags:
+        - Contract internal
+      summary: Record security (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSecurityRequest'
+      responses:
+        '201':
+          description: Security recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Security'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/contracts/{contractId}/cessions:
+    get:
+      operationId: expertListContractCessions
+      tags:
+        - Contract internal
+      summary: List cessions (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Cessions of the contract.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Cession'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertCreateContractCession
+      tags:
+        - Contract internal
+      summary: Record a cession (expert).
+      description: >
+        The expert repeats the book wall, the source-share cap, and the tower
+        capacity checks. The response is the persisted cession with its
+        generated number.
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCessionRequest'
+      responses:
+        '201':
+          description: Cession recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Cession'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/contracts/{contractId}/bordereaux:
+    get:
+      operationId: expertListContractBordereaux
+      tags:
+        - Contract internal
+      summary: List bordereaux (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Bordereaux of the contract.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Bordereau'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertCreateContractBordereau
+      tags:
+        - Contract internal
+      summary: Record a bordereau (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBordereauRequest'
+      responses:
+        '201':
+          description: Bordereau recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Bordereau'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/contracts/{contractId}/bordereaux/{bordereauId}:
+    get:
+      operationId: expertGetContractBordereau
+      tags:
+        - Contract internal
+      summary: Get one bordereau (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: bordereauId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Bordereau detail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Bordereau'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/contracts/{contractId}/commutations:
+    get:
+      operationId: expertListContractCommutations
+      tags:
+        - Contract internal
+      summary: List commutations (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Commutations of the contract.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Commutation'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertCreateContractCommutation
+      tags:
+        - Contract internal
+      summary: Propose a commutation (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCommutationRequest'
+      responses:
+        '201':
+          description: Commutation proposed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Commutation'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/contracts/{contractId}/commutations/{commutationId}:
+    get:
+      operationId: expertGetContractCommutation
+      tags:
+        - Contract internal
+      summary: Get one commutation (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: commutationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Commutation detail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Commutation'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/contracts/{contractId}/commutations/{commutationId}/approve:
+    post:
+      operationId: expertApproveContractCommutation
+      tags:
+        - Contract internal
+      summary: Approve a commutation (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: commutationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApproveCommutationRequest'
+      responses:
+        '200':
+          description: Commutation approved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Commutation'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/contracts/{contractId}/commutations/{commutationId}/execute:
+    post:
+      operationId: expertExecuteContractCommutation
+      tags:
+        - Contract internal
+      summary: Execute a commutation (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: commutationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExecuteCommutationRequest'
+      responses:
+        '200':
+          description: Commutation executed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommutationExecution'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/contracts/{contractId}/bind-eligibility:
+    get:
+      operationId: expertGetContractBindEligibility
+      tags:
+        - Contract internal
+      summary: Evaluate the bind preconditions (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Bind readiness and the individual checks.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BindEligibility'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/contracts/{contractId}/bind:
+    post:
+      operationId: expertBindContract
+      tags:
+        - Contract internal
+      summary: Bind the contract (expert).
+      description: >
+        The expert locks the contract, evaluates every check, requires
+        `approvedBy`, and writes BOUND with `boundAt` and `boundBy` in one
+        transaction. A missing approver is 400 `BIND_APPROVAL_REQUIRED`; failed
+        checks are 409 `BIND_PRECONDITION_FAILED`.
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BindRequest'
+      responses:
+        '200':
+          description: Contract bound plus the eligibility snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BindResultExpert'
         '400':
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
@@ -284,9 +1818,9 @@ components:
         - $ref: './components.yaml#/components/schemas/AuditFields'
       type: object
       description: >
-        Contract projection. The SPEC 11.3.4 aggregate calls the start date
-        inceptionDate and carries treatyNumber, layers, participants, terms,
-        security, and mass-tort fields; those are planned.
+        Contract projection returned by the public API. The SPEC 11.3.4
+        aggregate calls the start date inceptionDate and carries treatyNumber,
+        accounts, and mass-tort fields; those are planned.
       required:
         - id
         - tenantId
@@ -327,6 +1861,26 @@ components:
           format: date
         currency:
           $ref: './components.yaml#/components/schemas/CurrencyCode'
+    ContractExpert:
+      allOf:
+        - $ref: '#/components/schemas/Contract'
+        - type: object
+          description: >
+            Expert projection adds the durable bind and commutation timestamps
+            that the public ContractDto does not expose.
+          properties:
+            boundAt:
+              type: [string, 'null']
+              format: date-time
+            boundBy:
+              type: [string, 'null']
+              format: uuid
+            commutedAt:
+              type: [string, 'null']
+              format: date-time
+            closedAt:
+              type: [string, 'null']
+              format: date-time
     ContractType:
       type: string
       description: Contract type from SPEC 11.3.5.
@@ -349,7 +1903,9 @@ components:
         - NON_PROPORTIONAL_TREATY
     ContractStatus:
       type: string
-      description: Contract lifecycle status from SPEC 11.3.6.
+      description: >
+        Contract lifecycle status from SPEC 11.3.6. BOUND is reachable only
+        through the bind command.
       enum:
         - DRAFT
         - QUOTED
@@ -440,7 +1996,9 @@ components:
           description: Optional initial status. Defaults to DRAFT.
     UpdateContractStatusRequest:
       type: object
-      description: Lifecycle transition command used by the public and expert APIs.
+      description: >
+        Lifecycle transition command used by the public and expert APIs.
+        `status: BOUND` is rejected with `BIND_REQUIRES_COMMAND`.
       required:
         - status
         - expectedVersion
@@ -450,31 +2008,1218 @@ components:
         expectedVersion:
           type: integer
           minimum: 0
+    Layer:
+      type: object
+      description: One layer of the assumed reinsurance tower.
+      required:
+        - id
+        - tenantId
+        - contractId
+        - layerNumber
+        - layerType
+        - attachmentAmount
+        - limitAmount
+        - currency
+        - limitBasis
+        - effectiveFrom
+        - effectiveTo
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        contractId:
+          type: string
+          format: uuid
+        sectionId:
+          type: [string, 'null']
+          format: uuid
+        layerNumber:
+          type: integer
+          minimum: 1
+          maximum: 999
+        layerType:
+          $ref: '#/components/schemas/LayerType'
+        attachmentAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        limitAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        limitBasis:
+          $ref: '#/components/schemas/LimitBasis'
+        aggregateLimitAmount:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        reinstatementCount:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 99
+        reinstatementType:
+          type: [string, 'null']
+          enum:
+            - NONE
+            - FREE
+            - PAID_PRO_RATA
+            - PAID_FULL_RATE
+            - PER_LOSS
+        note:
+          type: [string, 'null']
+          maxLength: 400
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+        status:
+          $ref: '#/components/schemas/LayerStatus'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    LayerType:
+      type: string
+      enum:
+        - PROPORTIONAL
+        - EXCESS_OF_LOSS
+        - AGGREGATE_EXCESS
+        - STOP_LOSS
+        - CATASTROPHE
+        - CLASH
+        - FACULTATIVE
+        - TOP_AND_DROP
+    LimitBasis:
+      type: string
+      enum:
+        - PER_OCCURRENCE
+        - PER_RISK
+        - PER_EVENT
+        - ANNUAL_AGGREGATE
+        - POLICY_YEAR
+        - PER_LOSS
+    LayerStatus:
+      type: string
+      enum:
+        - QUOTED
+        - BOUND
+        - IN_FORCE
+        - EXHAUSTED
+        - EXPIRED
+        - CANCELLED
+    Participant:
+      type: object
+      description: >
+        One participation in a layer or in the contract. `sharePct` and
+        `signedLinePct` are percentages of 100 with six decimal places.
+      required:
+        - id
+        - tenantId
+        - contractId
+        - partyId
+        - participantRole
+        - sharePct
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        contractId:
+          type: string
+          format: uuid
+        layerId:
+          type: [string, 'null']
+          format: uuid
+        partyId:
+          type: string
+          format: uuid
+        participantRole:
+          $ref: '#/components/schemas/ParticipantRole'
+        sharePct:
+          $ref: './components.yaml#/components/schemas/Percent'
+        signedLinePct:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,3}(?:\.[0-9]{1,6})?$'
+        orderNumber:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 999
+        leadFlag:
+          type: boolean
+        capacityAmount:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        securityRating:
+          type: [string, 'null']
+          maxLength: 8
+        collateralRequired:
+          type: boolean
+        signatureStatus:
+          $ref: '#/components/schemas/SignatureStatus'
+        signedAt:
+          type: [string, 'null']
+          format: date-time
+        authorizationRef:
+          type: [string, 'null']
+          maxLength: 64
+        effectiveFrom:
+          type: [string, 'null']
+          format: date
+        effectiveTo:
+          type: [string, 'null']
+          format: date
+        status:
+          type: string
+          enum:
+            - ACTIVE
+            - ENDED
+            - REPLACED
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ParticipantRole:
+      type: string
+      enum:
+        - REINSURER
+        - CEDENT
+        - LEAD
+        - FOLLOW
+        - FRONTING
+        - RETROCESSIONAIRE
+        - BROKER
+    SignatureStatus:
+      type: string
+      enum:
+        - PENDING
+        - SIGNED
+        - DECLINED
+        - WITHDRAWN
+    Term:
+      type: object
+      description: >
+        One key/value contract term. `valueType` is derived from `termCode`
+        (MONEY, PERCENT, TEXT, DATE, INTEGER, BOOLEAN).
+      required:
+        - id
+        - tenantId
+        - contractId
+        - termCode
+        - termValue
+        - valueType
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        contractId:
+          type: string
+          format: uuid
+        termCode:
+          $ref: '#/components/schemas/TermCode'
+        termValue:
+          type: string
+          maxLength: 400
+        valueType:
+          type: string
+          enum:
+            - MONEY
+            - PERCENT
+            - TEXT
+            - DATE
+            - INTEGER
+            - BOOLEAN
+        effectiveFrom:
+          type: [string, 'null']
+          format: date
+        effectiveTo:
+          type: [string, 'null']
+          format: date
+        sourceClause:
+          type: [string, 'null']
+          maxLength: 48
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    TermCode:
+      type: string
+      description: Canonical contract term codes from SPEC 11.3.4.
+      enum:
+        - CEDING_COMMISSION_PCT
+        - BROKERAGE_PCT
+        - PROFIT_COMMISSION_PCT
+        - FUNDS_WITHHELD_PCT
+        - LOSS_CORRIDOR_FROM_PCT
+        - LOSS_CORRIDOR_TO_PCT
+        - EXPERIENCE_ACCOUNT_RATE_PCT
+        - LOSS_RATIO_CAP_PCT
+        - DEPOSIT_PREMIUM_AMOUNT
+        - MINIMUM_PREMIUM_AMOUNT
+        - CASH_CALL_LIMIT_AMOUNT
+        - INCEPTION_BALANCE_AMOUNT
+        - GOVERNING_LAW
+        - SETTLEMENT_BASIS
+        - REINSTATEMENT_PROVISION
+        - ULTIMATE_NET_LOSS
+        - PORTFOLIO_SCHEDULE_REF
+        - ACTUARIAL_ASSUMPTIONS_REF
+        - DEVELOPMENT_PATTERN_REF
+        - CURRENCY_CLAUSE
+        - TAX_RESPONSIBILITY
+        - PROFIT_COMMISSION_BASIS
+        - SUNSET_DATE
+        - COMMUTATION_WINDOW_MONTHS
+        - PAYMENT_TERMS_DAYS
+        - OFFSET_ALLOWED
+        - CASH_CALL_ALLOWED
+        - AUDIT_RIGHTS
+        - EXPERIENCE_ACCOUNT_FLAG
+    Security:
+      type: object
+      description: Security or collateral held against the contract.
+      required:
+        - id
+        - tenantId
+        - contractId
+        - securityType
+        - requiredAmount
+        - currency
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        contractId:
+          type: string
+          format: uuid
+        securityType:
+          $ref: '#/components/schemas/SecurityType'
+        requiredAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        heldAmount:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        providerPartyId:
+          type: [string, 'null']
+          format: uuid
+        beneficiaryPartyId:
+          type: [string, 'null']
+          format: uuid
+        effectiveFrom:
+          type: [string, 'null']
+          format: date
+        effectiveTo:
+          type: [string, 'null']
+          format: date
+        expiryDate:
+          type: [string, 'null']
+          format: date
+        status:
+          $ref: '#/components/schemas/SecurityStatus'
+        collateralQuality:
+          type: [string, 'null']
+          enum:
+            - CASH
+            - GOVERNMENT_SECURITIES
+            - BANK_GUARANTEE
+            - CORPORATE_GUARANTEE
+            - OTHER
+        documentId:
+          type: [string, 'null']
+          format: uuid
+        releaseConditions:
+          type: [string, 'null']
+          maxLength: 400
+        approvalRef:
+          type: [string, 'null']
+          maxLength: 64
+        approvedAt:
+          type: [string, 'null']
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    SecurityType:
+      type: string
+      enum:
+        - LETTER_OF_CREDIT
+        - TRUST_FUND
+        - FUNDS_WITHHELD
+        - CASH_ADVANCE
+        - PARENT_GUARANTEE
+        - BANK_GUARANTEE
+        - SECURITIES
+    SecurityStatus:
+      type: string
+      enum:
+        - REQUIRED
+        - OUTSTANDING
+        - PARTIAL
+        - RELEASED
+        - EXPIRED
+        - BREACH
+    Cession:
+      type: object
+      description: >
+        A cession recorded on the contract. `sourceVertical` is fixed to
+        ASSUMED; `policyRef` and `claimRef` are business references, not UUIDs.
+      required:
+        - id
+        - tenantId
+        - contractId
+        - cessionNumber
+        - sourceType
+        - cessionType
+        - status
+        - recordedAt
+        - version
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        contractId:
+          type: string
+          format: uuid
+        layerId:
+          type: [string, 'null']
+          format: uuid
+        cessionNumber:
+          type: string
+          maxLength: 32
+        sourceVertical:
+          type: [string, 'null']
+          enum:
+            - ASSUMED
+        sourceType:
+          $ref: '#/components/schemas/SourceType'
+        policyRef:
+          type: [string, 'null']
+          maxLength: 64
+        claimRef:
+          type: [string, 'null']
+          maxLength: 64
+        cessionType:
+          $ref: '#/components/schemas/CessionType'
+        cessionPct:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,3}(?:\.[0-9]{1,6})?$'
+        cededPremiumAmount:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        cededLossAmount:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        currency:
+          type: [string, 'null']
+          pattern: '^[A-Z]{3}$'
+        effectiveFrom:
+          type: [string, 'null']
+          format: date
+        effectiveTo:
+          type: [string, 'null']
+          format: date
+        treatyYear:
+          type: [integer, 'null']
+          minimum: 1900
+          maximum: 2100
+        status:
+          $ref: '#/components/schemas/CessionStatus'
+        bordereauId:
+          type: [string, 'null']
+          format: uuid
+        recordedAt:
+          type: string
+          format: date-time
+        version:
+          type: integer
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    SourceType:
+      type: string
+      enum:
+        - POLICY
+        - CLAIM
+        - LOSS_ADVICE
+    CessionType:
+      type: string
+      enum:
+        - QUOTA_SHARE
+        - SURPLUS
+        - FACULTATIVE
+        - EXCESS_OF_LOSS
+        - AGGREGATE
+        - RETROCESSION
+    CessionStatus:
+      type: string
+      enum:
+        - RECORDED
+        - CONFIRMED
+        - REVERSED
+        - DISPUTED
+    Bordereau:
+      type: object
+      description: Bordereau header with line and exception counts.
+      required:
+        - id
+        - tenantId
+        - contractId
+        - bordereauNumber
+        - bordereauType
+        - periodFrom
+        - periodTo
+        - sourceFormat
+        - status
+        - lineCount
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        contractId:
+          type: string
+          format: uuid
+        bordereauNumber:
+          type: string
+          maxLength: 32
+        bordereauType:
+          $ref: '#/components/schemas/BordereauType'
+        periodFrom:
+          type: string
+          format: date
+        periodTo:
+          type: string
+          format: date
+        receivedAt:
+          type: [string, 'null']
+          format: date-time
+        sourceDocumentId:
+          type: [string, 'null']
+          format: uuid
+        sourceFormat:
+          $ref: '#/components/schemas/SourceFormat'
+        sourceReference:
+          type: [string, 'null']
+          maxLength: 128
+        status:
+          $ref: '#/components/schemas/BordereauStatus'
+        lineCount:
+          type: integer
+          minimum: 0
+        validLineCount:
+          type: [integer, 'null']
+          minimum: 0
+        exceptionCount:
+          type: [integer, 'null']
+          minimum: 0
+        totalAmount:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        currency:
+          type: [string, 'null']
+          pattern: '^[A-Z]{3}$'
+        checksum:
+          type: [string, 'null']
+          maxLength: 64
+        processedAt:
+          type: [string, 'null']
+          format: date-time
+        notes:
+          type: [string, 'null']
+          maxLength: 400
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    BordereauType:
+      type: string
+      enum:
+        - PREMIUM
+        - CLAIMS
+        - CESSION
+        - ACCOUNTING
+        - LOSS_DEVELOPMENT
+        - SECURITY
+        - CASH_LOSS
+    SourceFormat:
+      type: string
+      enum:
+        - CSV
+        - XLSX
+        - XML
+        - JSON
+        - MANUAL
+    BordereauStatus:
+      type: string
+      enum:
+        - RECEIVED
+        - PARSING
+        - VALIDATED
+        - PARTIALLY_POSTED
+        - POSTED
+        - REJECTED
+        - SUPERSEDED
+    Commutation:
+      type: object
+      description: >
+        A proposed, approved, or executed commutation. `agreedAmount` is the
+        negotiated consideration; `savingsAmount` is the estimated economic
+        benefit.
+      required:
+        - id
+        - tenantId
+        - contractId
+        - commutationNumber
+        - effectiveDate
+        - agreedAmount
+        - currency
+        - status
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        contractId:
+          type: string
+          format: uuid
+        commutationNumber:
+          type: string
+          maxLength: 32
+        commutationType:
+          type: [string, 'null']
+          enum:
+            - FULL
+            - PARTIAL
+            - LOSS_PORTFOLIO
+            - BUYOUT
+            - NOVATION
+        effectiveDate:
+          type: string
+          format: date
+        valuationDate:
+          type: [string, 'null']
+          format: date
+        agreedAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        basis:
+          type: [string, 'null']
+          enum:
+            - NEGOTIATED
+            - CONTRACTUAL
+            - INDUCED
+            - REGULATORY
+            - INSOLVENCY
+        status:
+          type: string
+          enum:
+            - PROPOSED
+            - APPROVED
+            - EXECUTED
+            - REJECTED
+        releaseDocumentId:
+          type: [string, 'null']
+          format: uuid
+        releaseDate:
+          type: [string, 'null']
+          format: date
+        paymentId:
+          type: [string, 'null']
+          format: uuid
+        savingsAmount:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        approvedBy:
+          type: [string, 'null']
+          format: uuid
+        approvedAt:
+          type: [string, 'null']
+          format: date-time
+        executedAt:
+          type: [string, 'null']
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    TowerSummary:
+      type: object
+      required:
+        - contractId
+        - layerCount
+        - capacity
+        - gaps
+      properties:
+        contractId:
+          type: string
+          format: uuid
+        layerCount:
+          type: integer
+          minimum: 0
+        capacity:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        gaps:
+          type: array
+          items:
+            type: string
+    TermRequirements:
+      type: object
+      required:
+        - contractType
+        - required
+        - missing
+      properties:
+        contractType:
+          $ref: '#/components/schemas/ContractType'
+        required:
+          type: array
+          items:
+            $ref: '#/components/schemas/TermCode'
+        missing:
+          type: array
+          items:
+            $ref: '#/components/schemas/TermCode'
+    BindCheck:
+      type: object
+      required:
+        - code
+        - passed
+        - detail
+      properties:
+        code:
+          type: string
+          enum:
+            - CONTRACT_PLACED
+            - LAYERS_COHERENT
+            - SHARES_BALANCED
+            - REQUIRED_TERMS_PRESENT
+            - SECURITY_NOT_BREACHED
+        passed:
+          type: boolean
+        detail:
+          type: string
+    BindEligibility:
+      type: object
+      required:
+        - contractId
+        - contractNumber
+        - status
+        - bindable
+        - checks
+      properties:
+        contractId:
+          type: string
+          format: uuid
+        contractNumber:
+          type: string
+        status:
+          $ref: '#/components/schemas/ContractStatus'
+        bindable:
+          type: boolean
+          description: True only when every check passed.
+        checks:
+          type: array
+          items:
+            $ref: '#/components/schemas/BindCheck'
+    BindResult:
+      type: object
+      required:
+        - contract
+        - eligibility
+      properties:
+        contract:
+          $ref: '#/components/schemas/Contract'
+        eligibility:
+          $ref: '#/components/schemas/BindEligibility'
+    BindResultExpert:
+      type: object
+      required:
+        - contract
+        - eligibility
+      properties:
+        contract:
+          $ref: '#/components/schemas/ContractExpert'
+        eligibility:
+          $ref: '#/components/schemas/BindEligibility'
+    CommutationExecution:
+      type: object
+      required:
+        - commutation
+        - contract
+        - releasedSecurities
+        - contractClosed
+      properties:
+        commutation:
+          $ref: '#/components/schemas/Commutation'
+        contract:
+          $ref: '#/components/schemas/Contract'
+        releasedSecurities:
+          type: integer
+          minimum: 0
+        contractClosed:
+          type: boolean
+    CreateLayerRequest:
+      type: object
+      description: Record a layer. Strings are normalized to upper case.
+      required:
+        - layerNumber
+        - layerType
+        - attachmentAmount
+        - limitAmount
+        - limitBasis
+      properties:
+        layerNumber:
+          type: integer
+          minimum: 1
+          maximum: 999
+        layerType:
+          $ref: '#/components/schemas/LayerType'
+        attachmentAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        limitAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        limitBasis:
+          $ref: '#/components/schemas/LimitBasis'
+        aggregateLimitAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        reinstatementCount:
+          type: integer
+          minimum: 0
+          maximum: 99
+        reinstatementType:
+          type: string
+          enum:
+            - NONE
+            - FREE
+            - PAID_PRO_RATA
+            - PAID_FULL_RATE
+            - PER_LOSS
+        note:
+          type: string
+          maxLength: 400
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+        status:
+          $ref: '#/components/schemas/LayerStatus'
+    CreateParticipantRequest:
+      type: object
+      required:
+        - partyId
+        - participantRole
+        - sharePct
+      properties:
+        layerId:
+          type: string
+          format: uuid
+        partyId:
+          type: string
+          format: uuid
+        participantRole:
+          $ref: '#/components/schemas/ParticipantRole'
+        sharePct:
+          type: string
+          pattern: '^[0-9]{1,3}(?:\.[0-9]{1,6})?$'
+        signedLinePct:
+          type: string
+          pattern: '^[0-9]{1,3}(?:\.[0-9]{1,6})?$'
+        orderNumber:
+          type: integer
+          minimum: 1
+          maximum: 999
+        leadFlag:
+          type: boolean
+        capacityAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        securityRating:
+          type: string
+          maxLength: 8
+        collateralRequired:
+          type: boolean
+        signatureStatus:
+          $ref: '#/components/schemas/SignatureStatus'
+        signedAt:
+          type: string
+          format: date-time
+        authorizationRef:
+          type: string
+          maxLength: 64
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+        status:
+          type: string
+          enum:
+            - ACTIVE
+            - ENDED
+            - REPLACED
+    CreateTermRequest:
+      type: object
+      required:
+        - termCode
+        - termValue
+      properties:
+        termCode:
+          $ref: '#/components/schemas/TermCode'
+        termValue:
+          type: string
+          maxLength: 400
+        valueType:
+          type: string
+          maxLength: 16
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+        sourceClause:
+          type: string
+          maxLength: 48
+    CreateSecurityRequest:
+      type: object
+      required:
+        - securityType
+        - requiredAmount
+      properties:
+        securityType:
+          $ref: '#/components/schemas/SecurityType'
+        requiredAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        heldAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        providerPartyId:
+          type: string
+          format: uuid
+        beneficiaryPartyId:
+          type: string
+          format: uuid
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+        expiryDate:
+          type: string
+          format: date
+        status:
+          $ref: '#/components/schemas/SecurityStatus'
+        collateralQuality:
+          type: string
+          enum:
+            - CASH
+            - GOVERNMENT_SECURITIES
+            - BANK_GUARANTEE
+            - CORPORATE_GUARANTEE
+            - OTHER
+        documentId:
+          type: string
+          format: uuid
+        releaseConditions:
+          type: string
+          maxLength: 400
+        approvalRef:
+          type: string
+          maxLength: 64
+        approvedAt:
+          type: string
+          format: date-time
+    CreateCessionRequest:
+      type: object
+      required:
+        - sourceType
+        - cessionType
+      properties:
+        layerId:
+          type: string
+          format: uuid
+        cessionNumber:
+          type: string
+          maxLength: 32
+        sourceVertical:
+          type: string
+          enum:
+            - ASSUMED
+          description: Optional; when present it must be ASSUMED (book wall).
+        sourceType:
+          $ref: '#/components/schemas/SourceType'
+        policyRef:
+          type: string
+          maxLength: 64
+        claimRef:
+          type: string
+          maxLength: 64
+        cessionType:
+          $ref: '#/components/schemas/CessionType'
+        cessionPct:
+          type: string
+          pattern: '^[0-9]{1,3}(?:\.[0-9]{1,6})?$'
+        cededPremiumAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        cededLossAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+        treatyYear:
+          type: integer
+          minimum: 1900
+          maximum: 2100
+        status:
+          $ref: '#/components/schemas/CessionStatus'
+        bordereauId:
+          type: string
+          format: uuid
+    CreateBordereauRequest:
+      type: object
+      required:
+        - bordereauType
+        - periodFrom
+        - periodTo
+        - sourceFormat
+      properties:
+        bordereauNumber:
+          type: string
+          maxLength: 32
+        bordereauType:
+          $ref: '#/components/schemas/BordereauType'
+        periodFrom:
+          type: string
+          format: date
+        periodTo:
+          type: string
+          format: date
+        receivedAt:
+          type: string
+          format: date-time
+        sourceDocumentId:
+          type: string
+          format: uuid
+        sourceFormat:
+          $ref: '#/components/schemas/SourceFormat'
+        sourceReference:
+          type: string
+          maxLength: 128
+        status:
+          $ref: '#/components/schemas/BordereauStatus'
+        lineCount:
+          type: integer
+          minimum: 0
+        validLineCount:
+          type: integer
+          minimum: 0
+        exceptionCount:
+          type: integer
+          minimum: 0
+        totalAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        checksum:
+          type: string
+          maxLength: 64
+        notes:
+          type: string
+          maxLength: 400
+    CreateCommutationRequest:
+      type: object
+      required:
+        - effectiveDate
+        - valuationDate
+        - agreedAmount
+      properties:
+        commutationNumber:
+          type: string
+          maxLength: 32
+        commutationType:
+          type: string
+          enum:
+            - FULL
+            - PARTIAL
+            - LOSS_PORTFOLIO
+            - BUYOUT
+            - NOVATION
+        effectiveDate:
+          type: string
+          format: date
+        valuationDate:
+          type: string
+          format: date
+        agreedAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        basis:
+          type: string
+          enum:
+            - NEGOTIATED
+            - CONTRACTUAL
+            - INDUCED
+            - REGULATORY
+            - INSOLVENCY
+        releaseDocumentId:
+          type: string
+          format: uuid
+        paymentId:
+          type: string
+          format: uuid
+        savingsAmount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+    ApproveCommutationRequest:
+      type: object
+      required:
+        - approvedBy
+      properties:
+        approvedBy:
+          type: string
+          format: uuid
+        note:
+          type: string
+          maxLength: 400
+    ExecuteCommutationRequest:
+      type: object
+      properties:
+        releaseDocumentId:
+          type: string
+          format: uuid
+        releaseDate:
+          type: string
+          format: date
+    BindRequest:
+      type: object
+      required:
+        - approvedBy
+        - expectedVersion
+      properties:
+        approvedBy:
+          type: string
+          format: uuid
+          description: Underwriter approval required by CTR-15.
+        expectedVersion:
+          type: integer
+          minimum: 0
 x-vertical: contract
 x-implementation:
   status: implemented
   verifiedAt: '2026-10-19'
   verifiedAgainst:
     - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/ContractController.java
-    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/ContractClient.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/ContractDetailController.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/ContractDetailClient.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/ContractResources.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/ContractCommands.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/ContractCommandRules.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/ContractStatus.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ContractController.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/bind/BindController.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/bind/ContractBindService.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/layer/LayerController.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/participant/ParticipantController.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/term/TermController.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/security/SecurityController.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/cession/CessionController.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/bordereau/BordereauController.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/commutation/CommutationController.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ContractGuard.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ApiExceptionHandler.java
+    - repos/eia-contract-domain/src/test/java/com/eia/contract/domain/ContractDetailControllerTest.java
+    - repos/eia-contract-domain/src/test/java/com/eia/contract/domain/ContractControllerTest.java
   errorEnvelope: >
     Vertical-specific ApiError {code, message, details[{field, message}]}.
     Not the canonical Problem envelope yet.
   notes: >
-    The public PATCH requires expectedVersion in the body. There is no ETag;
-    concurrency is body-based. effectiveDate is the implemented name for the
-    SPEC inception date.
+    Bind is a command; PATCH /status to BOUND is 409 BIND_REQUIRES_COMMAND.
+    Concurrency is body-based expectedVersion: there is no ETag and no
+    Idempotency-Key. effectiveDate is the implemented name for the SPEC
+    inception date. Cession source references are business strings, not UUIDs.
+    Percentages are points of 100, not decimal fractions.
+x-compatibility:
+  contractVersion: 2.0.0
+  previousContractVersion: 1.0.0
+  breaking:
+    - PATCH /api/v1/contracts/{contractId}/status no longer accepts BOUND; it returns 409 BIND_REQUIRES_COMMAND and bind must use POST /bind.
+  compatible:
+    - Adds the layers, participants, terms, security, cessions, bordereaux, commutations, bind-eligibility, and bind routes.
+    - Adds the expert routes that mirror the public second slice.
+  note: >
+    The bind guard is a deliberate breaking change for a client that used the
+    status endpoint to bind without approvals; it is the SPEC 11.3.8 command
+    contract. The HTTP path stays /api/v1/contracts.
 x-planned-operations:
   - method: PATCH
     path: /api/v1/contracts/{contractId}
     spec: SPEC 11.3.10
     note: Update a contract draft.
-  - method: POST
-    path: /api/v1/contracts/{contractId}/bind
-    spec: SPEC 11.3.10
-    note: Bind a contract.
   - method: POST
     path: /api/v1/contracts/{contractId}/endorse
     spec: SPEC 11.3.10
@@ -483,42 +3228,10 @@ x-planned-operations:
     path: /api/v1/contracts/{contractId}/renew
     spec: SPEC 11.3.10
     note: Renew a contract.
-  - method: POST
-    path: /api/v1/contracts/{contractId}/commute
-    spec: SPEC 11.3.10
-    note: Commute a contract.
-  - method: GET
-    path: /api/v1/contracts/{contractId}/layers
-    spec: SPEC 11.3.10
-    note: Contract layers.
-  - method: GET
-    path: /api/v1/contracts/{contractId}/participants
-    spec: SPEC 11.3.10
-    note: Participations.
-  - method: GET
-    path: /api/v1/contracts/{contractId}/terms
-    spec: SPEC 11.3.10
-    note: Financial terms.
-  - method: GET
-    path: /api/v1/contracts/{contractId}/cessions
-    spec: SPEC 11.3.10
-    note: Cessions recorded on the contract.
-  - method: POST
-    path: /api/v1/contracts/{contractId}/cessions
-    spec: SPEC 11.3.10
-    note: Record a cession.
-  - method: GET
-    path: /api/v1/contracts/{contractId}/bordereaux
-    spec: SPEC 11.3.10
-    note: Bordereaux.
   - method: GET
     path: /api/v1/contracts/{contractId}/accounts
     spec: SPEC 11.3.10
     note: Technical accounts.
-  - method: GET
-    path: /api/v1/contracts/{contractId}/security
-    spec: SPEC 11.3.10
-    note: Security and collateral.
   - method: GET
     path: /api/v1/contracts/{contractId}/loss-aggregate
     spec: SPEC 11.3.10
@@ -528,10 +3241,6 @@ x-planned-operations:
     spec: SPEC 11.3.10
     note: Lineage summary.
   - method: GET
-    path: /internal/v1/contracts/{contractId}/terms
+    path: /api/v1/contracts/{contractId}/documents
     spec: SPEC 11.3.10
-    note: Terms for Cession.
-  - method: POST
-    path: /internal/v1/contracts/{contractId}/cession
-    spec: SPEC 11.3.10
-    note: Record a cession for Cession.
+    note: Documents via the Document service.

@@ -161,6 +161,200 @@ REQUIRED_OPENAPI_PATHS = {
     ],
 }
 
+# Round 5 second-slice routes. They are listed separately so the table above
+# keeps its Round 2 meaning; every entry is still checked as mandatory.
+ROUND5_OPENAPI_PATHS = {
+    "policy": [
+        ("/api/v1/policies/{policyId}/versions", "get"),
+        ("/api/v1/policies/{policyId}/versions/current", "get"),
+        ("/api/v1/policies/{policyId}/versions/{versionId}", "get"),
+        ("/api/v1/policies/{policyId}/coverages", "get"),
+        ("/api/v1/policies/{policyId}/coverages", "post"),
+        ("/api/v1/policies/{policyId}/limits", "get"),
+        ("/api/v1/policies/{policyId}/aggregate-state", "get"),
+        ("/api/v1/policies/{policyId}/erosion", "post"),
+        ("/api/v1/policies/{policyId}/endorsements", "get"),
+        ("/api/v1/policies/{policyId}/endorsements", "post"),
+        ("/api/v1/policies/{policyId}/endorsements/{endorsementId}", "get"),
+        ("/api/v1/policies/{policyId}/insureds", "get"),
+        ("/api/v1/policies/{policyId}/insureds", "post"),
+        ("/api/v1/policies/{policyId}/locations", "get"),
+        ("/api/v1/policies/{policyId}/locations", "post"),
+        ("/api/v1/policies/{policyId}/cancellations", "get"),
+        ("/api/v1/policies/{policyId}/cancel", "post"),
+        ("/api/v1/policies/{policyId}/reinstatements", "get"),
+        ("/api/v1/policies/{policyId}/reinstate", "post"),
+        ("/internal/v1/policies/{policyId}/versions/current", "get"),
+        ("/internal/v1/policies/{policyId}/coverages", "post"),
+        ("/internal/v1/policies/{policyId}/erosion", "post"),
+        ("/internal/v1/policies/{policyId}/endorsements", "post"),
+        ("/internal/v1/policies/{policyId}/insureds", "post"),
+        ("/internal/v1/policies/{policyId}/locations", "post"),
+        ("/internal/v1/policies/{policyId}/cancel", "post"),
+        ("/internal/v1/policies/{policyId}/reinstate", "post"),
+    ],
+    "contract": [
+        ("/api/v1/contracts/{contractId}/layers", "get"),
+        ("/api/v1/contracts/{contractId}/layers", "post"),
+        ("/api/v1/contracts/{contractId}/layers/summary", "get"),
+        ("/api/v1/contracts/{contractId}/participants", "get"),
+        ("/api/v1/contracts/{contractId}/participants", "post"),
+        ("/api/v1/contracts/{contractId}/terms", "get"),
+        ("/api/v1/contracts/{contractId}/terms", "post"),
+        ("/api/v1/contracts/{contractId}/terms/requirements", "get"),
+        ("/api/v1/contracts/{contractId}/security", "get"),
+        ("/api/v1/contracts/{contractId}/security", "post"),
+        ("/api/v1/contracts/{contractId}/cessions", "get"),
+        ("/api/v1/contracts/{contractId}/cessions", "post"),
+        ("/api/v1/contracts/{contractId}/bordereaux", "get"),
+        ("/api/v1/contracts/{contractId}/bordereaux", "post"),
+        ("/api/v1/contracts/{contractId}/bordereaux/{bordereauId}", "get"),
+        ("/api/v1/contracts/{contractId}/commutations", "get"),
+        ("/api/v1/contracts/{contractId}/commutations", "post"),
+        ("/api/v1/contracts/{contractId}/commutations/{commutationId}/approve", "post"),
+        ("/api/v1/contracts/{contractId}/commutations/{commutationId}/execute", "post"),
+        ("/api/v1/contracts/{contractId}/bind-eligibility", "get"),
+        ("/api/v1/contracts/{contractId}/bind", "post"),
+        ("/internal/v1/contracts/{contractId}/layers", "post"),
+        ("/internal/v1/contracts/{contractId}/participants", "post"),
+        ("/internal/v1/contracts/{contractId}/terms/requirements", "get"),
+        ("/internal/v1/contracts/{contractId}/security", "post"),
+        ("/internal/v1/contracts/{contractId}/cessions", "post"),
+        ("/internal/v1/contracts/{contractId}/bordereaux/{bordereauId}", "get"),
+        ("/internal/v1/contracts/{contractId}/commutations/{commutationId}/execute", "post"),
+        ("/internal/v1/contracts/{contractId}/bind-eligibility", "get"),
+        ("/internal/v1/contracts/{contractId}/bind", "post"),
+    ],
+    "direct-claims": [
+        ("/api/v1/claims/{claimId}/close", "post"),
+        ("/api/v1/claims/{claimId}/injuries", "get"),
+        ("/api/v1/claims/{claimId}/injuries", "post"),
+        ("/api/v1/claims/{claimId}/injuries/{injuryId}", "patch"),
+        ("/api/v1/claims/{claimId}/exposures", "get"),
+        ("/api/v1/claims/{claimId}/exposures", "post"),
+        ("/api/v1/claims/{claimId}/exposures/{exposureId}", "patch"),
+        ("/api/v1/claims/{claimId}/reserves", "get"),
+        ("/api/v1/claims/{claimId}/reserves", "post"),
+        ("/api/v1/claims/{claimId}/coverage", "get"),
+        ("/api/v1/claims/{claimId}/coverage", "post"),
+        ("/api/v1/claims/{claimId}/litigation", "get"),
+        ("/api/v1/claims/{claimId}/litigation", "post"),
+        ("/api/v1/claims/{claimId}/litigation/{litigationId}", "patch"),
+        ("/api/v1/claims/{claimId}/settlements", "get"),
+        ("/api/v1/claims/{claimId}/settlements", "post"),
+        ("/api/v1/claims/{claimId}/settlements/{settlementId}/approve", "post"),
+        ("/api/v1/claims/{claimId}/settlements/{settlementId}/execute", "post"),
+        ("/api/v1/claims/{claimId}/recoveries", "get"),
+        ("/api/v1/claims/{claimId}/recoveries", "post"),
+        ("/api/v1/claims/{claimId}/recoveries/{recoveryId}", "patch"),
+        ("/api/v1/claims/{claimId}/liens", "get"),
+        ("/api/v1/claims/{claimId}/liens", "post"),
+        ("/api/v1/claims/{claimId}/liens/{lienId}", "patch"),
+        ("/internal/v1/claims/{claimId}/close", "post"),
+        ("/internal/v1/claims/{claimId}/injuries", "post"),
+        ("/internal/v1/claims/{claimId}/exposures", "post"),
+        ("/internal/v1/claims/{claimId}/reserves", "get"),
+        ("/internal/v1/claims/{claimId}/coverage", "post"),
+        ("/internal/v1/claims/{claimId}/litigation", "post"),
+        ("/internal/v1/claims/{claimId}/settlements/{settlementId}/execute", "post"),
+        ("/internal/v1/claims/{claimId}/recoveries", "post"),
+        ("/internal/v1/claims/{claimId}/liens", "post"),
+    ],
+    "assumed-claims": [
+        ("/api/v1/assumed-claims/{assumedClaimId}/close", "post"),
+        ("/api/v1/assumed-claims/{assumedClaimId}/financials", "get"),
+        ("/api/v1/assumed-claims/{assumedClaimId}/audit", "get"),
+        ("/api/v1/assumed-claims/{assumedClaimId}/advices", "get"),
+        ("/api/v1/assumed-claims/{assumedClaimId}/advices", "post"),
+        ("/api/v1/assumed-claims/{assumedClaimId}/advices/{adviceId}/accept", "post"),
+        ("/api/v1/assumed-claims/{assumedClaimId}/bordereaux", "get"),
+        ("/api/v1/assumed-claims/{assumedClaimId}/bordereaux", "post"),
+        ("/api/v1/assumed-claims/{assumedClaimId}/reserves", "get"),
+        ("/api/v1/assumed-claims/{assumedClaimId}/reserves", "post"),
+        ("/api/v1/assumed-claims/{assumedClaimId}/cash-calls", "get"),
+        ("/api/v1/assumed-claims/{assumedClaimId}/cash-calls", "post"),
+        ("/api/v1/assumed-claims/{assumedClaimId}/recoveries", "get"),
+        ("/api/v1/assumed-claims/{assumedClaimId}/recoveries", "post"),
+        ("/api/v1/assumed-claims/{assumedClaimId}/commutation", "get"),
+        ("/api/v1/assumed-claims/{assumedClaimId}/commute", "post"),
+        ("/api/v1/assumed-claims/{assumedClaimId}/disputes", "get"),
+        ("/api/v1/assumed-claims/{assumedClaimId}/disputes", "post"),
+        ("/api/v1/assumed-claims/{assumedClaimId}/disputes/{disputeId}/resolve", "post"),
+        ("/internal/v1/assumed-claims/{assumedClaimId}/close", "post"),
+        ("/internal/v1/assumed-claims/{assumedClaimId}/financials", "get"),
+        ("/internal/v1/assumed-claims/{assumedClaimId}/audit", "get"),
+        ("/internal/v1/assumed-claims/{assumedClaimId}/advices", "post"),
+        ("/internal/v1/assumed-claims/{assumedClaimId}/advices/{adviceId}/accept", "post"),
+        ("/internal/v1/assumed-claims/{assumedClaimId}/bordereaux", "post"),
+        ("/internal/v1/assumed-claims/{assumedClaimId}/reserves", "post"),
+        ("/internal/v1/assumed-claims/{assumedClaimId}/cash-calls", "post"),
+        ("/internal/v1/assumed-claims/{assumedClaimId}/recoveries", "post"),
+        ("/internal/v1/assumed-claims/{assumedClaimId}/commutation", "get"),
+        ("/internal/v1/assumed-claims/{assumedClaimId}/commute", "post"),
+        ("/internal/v1/assumed-claims/{assumedClaimId}/disputes", "post"),
+        ("/internal/v1/assumed-claims/{assumedClaimId}/disputes/{disputeId}/resolve", "post"),
+    ],
+}
+
+# Response codes the Round 5 contract relies on, keyed by vertical. Each tuple
+# is (path, method, required response codes).
+ROUND5_REQUIRED_RESPONSES = {
+    "policy": [
+        ("/api/v1/policies/{policyId}/coverages", "post", ("201", "422", "409")),
+        ("/api/v1/policies/{policyId}/endorsements", "post", ("201", "422", "428")),
+        ("/api/v1/policies/{policyId}/cancel", "post", ("201", "422", "428")),
+        ("/api/v1/policies/{policyId}/reinstate", "post", ("201", "422", "428")),
+        ("/api/v1/policies/{policyId}/erosion", "post", ("201", "422")),
+    ],
+    "contract": [
+        ("/api/v1/contracts/{contractId}/bind", "post", ("200", "409")),
+        ("/api/v1/contracts/{contractId}/status", "patch", ("200", "409")),
+    ],
+    "direct-claims": [
+        ("/api/v1/claims/{claimId}/close", "post", ("200", "409")),
+    ],
+    "assumed-claims": [
+        ("/api/v1/assumed-claims/{assumedClaimId}/cash-calls", "post", ("201", "422", "428")),
+        ("/api/v1/assumed-claims/{assumedClaimId}/commute", "post", ("201", "422", "428")),
+        ("/api/v1/assumed-claims/{assumedClaimId}/close", "post", ("200", "422")),
+    ],
+}
+
+
+# Event names the Round 5 outbox rollout actually emits. The catalog must list
+# each one as published and implemented, and the vertical document must expose
+# a channel for it.
+ROUND5_IMPLEMENTED_EVENTS = {
+    "party": [
+        "party.party.created",
+        "party.party.updated",
+    ],
+    "cession": [
+        "cession.cession.created",
+        "cession.cession.updated",
+        "cession.cession.handed-off",
+    ],
+    "retrocession": [
+        "retrocession.retrocession.created",
+        "retrocession.retrocession.updated",
+        "retrocession.retrocession.handed-off",
+    ],
+    "document": [
+        "document.document.created",
+        "document.document.updated",
+        "document.document.status-changed",
+    ],
+    "payment": [
+        "payment.payment.created",
+        "payment.payment.updated",
+        "payment.payment.status-changed",
+    ],
+    "notifications": [
+        "notifications.notification.created",
+        "notifications.notification.sent",
+    ],
+}
+
 REQUIRED_COMPONENTS = {
     "schemas": [
         "Problem",
@@ -196,6 +390,8 @@ REQUIRED_COMPONENTS = {
         "BadRequest",
         "NotFound",
         "Conflict",
+        "UnprocessableContent",
+        "PreconditionRequired",
         "BadGateway",
         "ServiceUnavailable",
         "Problem",
@@ -942,6 +1138,27 @@ def check_openapi(contracts: ContractSet, verbose: bool):
                 isinstance(path_item, dict) and required_method in path_item,
                 f"{relative}: required operation {required_method.upper()} {required_path} is missing",
             )
+        for required_path, required_method in ROUND5_OPENAPI_PATHS.get(vertical, []):
+            path_item = paths.get(required_path) if isinstance(paths, dict) else None
+            contracts.check(
+                isinstance(path_item, dict) and required_method in path_item,
+                f"{relative}: required Round 5 operation {required_method.upper()} {required_path} is missing",
+            )
+        for required_path, required_method, required_codes in ROUND5_REQUIRED_RESPONSES.get(vertical, []):
+            path_item = paths.get(required_path) if isinstance(paths, dict) else None
+            operation = path_item.get(required_method) if isinstance(path_item, dict) else None
+            responses = operation.get("responses") if isinstance(operation, dict) else None
+            for code in required_codes:
+                contracts.check(
+                    isinstance(responses, dict) and code in responses,
+                    f"{relative}: {required_method.upper()} {required_path} must document response {code}",
+                )
+        compatibility = document.get("x-compatibility") or {}
+        if isinstance(compatibility, dict) and compatibility.get("contractVersion"):
+            contracts.check(
+                compatibility.get("contractVersion") == doc_info.get("version"),
+                f"{relative}: x-compatibility.contractVersion must equal info.version",
+            )
         contracts.check_openapi_schemas(document, relative)
         if verbose:
             print(f"  OK {relative}  paths={len(paths)} operations={operation_count}")
@@ -987,6 +1204,7 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
         contracts.check(isinstance(operations, dict) and bool(operations), f"{relative}: operations must be non-empty")
 
         addresses = set()
+        implemented_addresses = set()
         for channel_key, channel in channels.items():
             where = f"{relative}: channel {channel_key}"
             contracts.check(isinstance(channel, dict), f"{where} must be a mapping")
@@ -998,7 +1216,17 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
                 addresses.add(address)
                 contracts.check(bool(EVENT_NAME_RE.fullmatch(address)), f"{where} address '{address}' is not a valid event name")
                 contracts.check(channel.get("x-event-type") == address, f"{where} x-event-type must equal the address")
-            contracts.check(channel.get("x-status") == "planned", f"{where} must be marked x-status: planned")
+                status = channel.get("x-status")
+                contracts.check(
+                    status in ("planned", "implemented"),
+                    f"{where} must be marked x-status: planned or x-status: implemented",
+                )
+                if status == "implemented":
+                    implemented_addresses.add(address)
+                    contracts.check(
+                        bool(channel.get("x-implemented-by")),
+                        f"{where} is implemented and must name the emitting source in x-implemented-by",
+                    )
             messages = channel.get("messages") or {}
             contracts.check("DomainEvent" in messages, f"{where} must reference the DomainEvent message")
 
@@ -1016,6 +1244,10 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
             if isinstance(channel_ref, str) and channel_ref.startswith("#/channels/"):
                 key = channel_ref.split("/")[-1].replace("~1", "/")
                 contracts.check(key in channels, f"{where} references unknown channel '{key}'")
+            contracts.check(
+                operation.get("x-status") in ("planned", "implemented"),
+                f"{where} must be marked x-status: planned or x-status: implemented",
+            )
 
         entry = catalog_entries.get(vertical) or {}
         published = entry.get("published") or []
@@ -1027,6 +1259,24 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
         contracts.check(
             set(published) == addresses,
             f"{relative}: channels {sorted(addresses)} do not match catalog published {sorted(published)}",
+        )
+        implemented = entry.get("implemented")
+        contracts.check(
+            isinstance(implemented, list),
+            f"event-catalog.yaml: {vertical}.implemented must be a list (use [] when none is emitted)",
+        )
+        implemented = implemented or []
+        contracts.check(
+            len(implemented) == len(set(implemented)),
+            f"event-catalog.yaml: {vertical}.implemented contains duplicate event names",
+        )
+        contracts.check(
+            set(implemented) <= set(published),
+            f"event-catalog.yaml: {vertical}.implemented must be a subset of published",
+        )
+        contracts.check(
+            set(implemented) == implemented_addresses,
+            f"{relative}: implemented channels {sorted(implemented_addresses)} do not match catalog implemented {sorted(implemented)}",
         )
         for event in published:
             contracts.check(bool(EVENT_NAME_RE.fullmatch(event)), f"event-catalog.yaml: {event} is not a valid event name")
@@ -1041,6 +1291,19 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
         overlap = all_events & names
         contracts.check(not overlap, f"event names published by more than one vertical: {sorted(overlap)}")
         all_events |= names
+
+    for vertical, expected_events in ROUND5_IMPLEMENTED_EVENTS.items():
+        entry = catalog_entries.get(vertical) or {}
+        implemented = set(entry.get("implemented") or [])
+        for event in expected_events:
+            contracts.check(
+                event in all_events,
+                f"event-catalog.yaml: Round 5 event '{event}' is not published by any vertical",
+            )
+            contracts.check(
+                event in implemented,
+                f"event-catalog.yaml: Round 5 event '{event}' must be listed in {vertical}.implemented",
+            )
 
     for vertical, entry in catalog_entries.items():
         if not isinstance(entry, dict):

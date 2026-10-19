@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:cession
 info:
   title: EIA Cession events
-  version: 1.0.0
+  version: 1.1.0
   summary: Published domain event names for the Cession vertical.
   description: >
     Event contract for the Cession vertical. The authoritative event names are
@@ -14,9 +14,13 @@ info:
     signature (SPEC 7.5.1). A channel address is the logical routing key and
     equals the event name; it is not a broker topic.
 
-    No publisher or subscriber exists in the current codebase. Every channel
-    and operation in this document is therefore marked x-status planned. The
-    catalog and cross-vertical subscriptions live in event-catalog.yaml.
+    The Cession expert now publishes `cession.cession.created`,
+    `cession.cession.updated`, and `cession.cession.handed-off` through the
+    transactional outbox in the same transaction as the cession write; those
+    channels and operations are marked `x-status: implemented`. The
+    SPEC 11.9.6 contract and hand-off names remain planned. There is still no
+    subscriber or inbox. The catalog and cross-vertical subscriptions live in
+    event-catalog.yaml.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -32,6 +36,54 @@ servers:
       Each subscriber registers an HTTPS endpoint and signing key. The outbox
       posts one event per request and requires a 2xx acknowledgement.
 channels:
+  CessionCessionCreated:
+    address: cession.cession.created
+    title: cession.cession.created
+    description: >
+      Emitted by the Cession expert when a cession case is persisted, in the
+      same transaction as the row. The payload carries the case identity, book,
+      policy and cession-contract references, status, ceded premium and loss,
+      currency, and the row version.
+    x-event-type: cession.cession.created
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.9.6
+    x-implemented-by: repos/eia-cession-expert/src/main/java/com/eia/cession/expert/CessionEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  CessionCessionUpdated:
+    address: cession.cession.updated
+    title: cession.cession.updated
+    description: >
+      Emitted when a cession status changes through the lifecycle endpoint. The
+      payload carries `changedFields: [status]`, `from`, `to`, and the row
+      version. `HANDOFF_PENDING` and `HANDED_OFF` are not reachable through the
+      status endpoint and use the hand-off channels instead.
+    x-event-type: cession.cession.updated
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.9.6
+    x-implemented-by: repos/eia-cession-expert/src/main/java/com/eia/cession/expert/CessionEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  CessionCessionHandedOff:
+    address: cession.cession.handed-off
+    title: cession.cession.handed-off
+    description: >
+      Emitted when the FS-RI acknowledgement is persisted and the case moves to
+      HANDED_OFF. The payload adds `fsriHandoffId`, `fsriStatus`, and
+      `fsriHandedOffAt`. The FS-RI call itself is still synchronous; the event
+      records the durable hand-off fact, it is not a hand-off queue.
+    x-event-type: cession.cession.handed-off
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.9.6
+    x-implemented-by: repos/eia-cession-expert/src/main/java/com/eia/cession/expert/CessionEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
   CessionContractCreated:
     address: cession.contract.created
     title: cession.contract.created
@@ -229,6 +281,35 @@ channels:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
 operations:
+  publishCessionCessionCreated:
+    action: send
+    channel:
+      $ref: '#/channels/CessionCessionCreated'
+    summary: Publish cession.cession.created
+    description: >
+      Publishes cession.cession.created through the transactional outbox in the
+      same transaction as the cession insert (SPEC 7.5.1).
+    x-event-type: cession.cession.created
+    x-status: implemented
+  publishCessionCessionUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/CessionCessionUpdated'
+    summary: Publish cession.cession.updated
+    description: >
+      Publishes cession.cession.updated when the cession status changes.
+    x-event-type: cession.cession.updated
+    x-status: implemented
+  publishCessionCessionHandedOff:
+    action: send
+    channel:
+      $ref: '#/channels/CessionCessionHandedOff'
+    summary: Publish cession.cession.handed-off
+    description: >
+      Publishes cession.cession.handed-off when the FS-RI acknowledgement is
+      persisted.
+    x-event-type: cession.cession.handed-off
+    x-status: implemented
   publishCessionContractCreated:
     action: send
     channel:
@@ -405,14 +486,16 @@ components:
         t=<unix>,v1=<hex> (SPEC 7.5.1).
 x-vertical: cession
 x-spec-section: SPEC 11.9.6
-x-status: planned
+x-status: partial
 x-implementation:
-  publisher: none
+  publisher: eia-cession-expert
   subscriber: none
   notes: >
-    The current vertical slices emit no events; the outbox tables and the
-    dispatcher described in SPEC 7.5 are not implemented. This document is the
-    agreed event contract for the publisher that will be built.
+    Three implemented event names are written to the transactional outbox in
+    the same transaction as the cession write and dispatched by the platform
+    outbox dispatcher when `eia.outbox.enabled=true`. The SPEC 11.9.6 contract
+    and hand-off names remain planned. There is no subscriber, inbox, or
+    subscription registry yet.
 
 x-consumed-events: []
 x-consumed-events-note: >

@@ -1,21 +1,30 @@
 openapi: 3.1.0
 info:
   title: EIA Direct Claims API
-  version: 1.0.0
+  version: 1.1.0
   summary: Direct-book claim administration and the Direct Claims expert API.
   description: >
     This document describes the implemented public Direct Claims domain API and
     the internal Direct Claims expert API. The authoritative requirement is
-    SPEC 11.4 and SPEC 12; the implemented surface is the first vertical slice.
+    SPEC 11.4 and SPEC 12.
 
     Direct Claims is fixed to the DIRECT book. The public API and the expert
     read/write routes treat a missing or different X-EIA-Book value as a 404,
     never a 403, so the response cannot confirm existence in the other book
     (SPEC 3.6.2, WALL-06).
 
-    The status transition on the public API carries `status` only; the domain
-    reads the current version and forwards it. The internal transition carries
-    `expectedVersion`. Neither route uses ETag/If-Match yet; see MISMATCHES.md.
+    Round 5 adds the second slice: injuries, exposures, append-only reserve
+    history, coverage decisions, litigation, settlements, recoveries, liens,
+    and claim closure. The public status transition carries `status` only; the
+    domain reads the current version and forwards it. The internal transition
+    carries an optional `expectedVersion`. Only the expert mutates a child
+    record's version; the public PATCH commands carry `expectedVersion` and the
+    domain requires it for every child update.
+
+    The public close transaction has no body requirement; an optional
+    `expectedVersion` may be supplied. The expert close applies the closure
+    preconditions (no unresolved lien, no open reserve, and a legal CLOSED
+    transition).
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -131,7 +140,9 @@ paths:
       description: >
         Applies one transition from SPEC 11.4.6. The domain service reads the
         current version and forwards it to the expert; the caller cannot supply
-        an expected version on the public route.
+        an expected version on the public route. Moving to OPEN requires a
+        final coverage decision that is not DENIED; moving to CLOSED requires
+        no unresolved lien and no open reserve.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
@@ -154,6 +165,915 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Claim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/close:
+    post:
+      operationId: closeClaim
+      tags:
+        - Direct Claims
+      summary: Close a direct claim.
+      description: >
+        Closure is a transaction, not a status write. The expert rejects it
+        while a lien is unresolved, while the current reserve is positive, or
+        when the current status cannot transition to CLOSED. The optional body
+        carries `expectedVersion`; a stale value is 409 CONFLICT.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CloseClaimRequest'
+      responses:
+        '200':
+          description: Claim closed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Claim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/injuries:
+    get:
+      operationId: listClaimInjuries
+      tags:
+        - Direct Claims
+      summary: List injury allegations.
+      description: Returns a bare array ordered by creation time.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Injuries of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Injury'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createClaimInjury
+      tags:
+        - Direct Claims
+      summary: Record an injury.
+      description: >
+        `claimantPartyId`, `injuryType`, and `severity` are required. Diagnosis
+        codes are ICD-10-style strings (`[A-Z0-9.-]{1,16}`, at most 20). The
+        expert normalizes the enums and returns the new row with `version: 1`.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InjuryRequest'
+      responses:
+        '201':
+          description: Injury recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Injury'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/injuries/{injuryId}:
+    patch:
+      operationId: updateClaimInjury
+      tags:
+        - Direct Claims
+      summary: Update an injury.
+      description: >
+        `expectedVersion` is required. A stale version is 409 CONFLICT at the
+        public surface; an unknown injury is 404.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: injuryId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InjuryRequest'
+      responses:
+        '200':
+          description: Injury after the update.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Injury'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/exposures:
+    get:
+      operationId: listClaimExposures
+      tags:
+        - Direct Claims
+      summary: List exposure allegations.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Exposures of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Exposure'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createClaimExposure
+      tags:
+        - Direct Claims
+      summary: Record an exposure.
+      description: >
+        `claimantPartyId`, `exposureType`, `jurisdiction`, and `exposureFrom`
+        are required. Exposure dates may not be after the claim report date and
+        `exposureTo` may not precede `exposureFrom`; a violation is 400.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExposureRequest'
+      responses:
+        '201':
+          description: Exposure recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Exposure'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/exposures/{exposureId}:
+    patch:
+      operationId: updateClaimExposure
+      tags:
+        - Direct Claims
+      summary: Update an exposure.
+      description: >
+        `expectedVersion` is required. When `exposureFrom` or `exposureTo` is
+        supplied, the domain re-reads the claim and validates the dates against
+        its report date before forwarding.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: exposureId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExposureRequest'
+      responses:
+        '200':
+          description: Exposure after the update.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Exposure'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/reserves:
+    get:
+      operationId: getClaimReserves
+      tags:
+        - Direct Claims
+      summary: Get the reserve position and history.
+      description: >
+        `components` carries one current balance per reserve component;
+        `totalCurrentAmount` is their sum and equals the claim's derived current
+        reserve. `history` is the full append-only history with `current`
+        marking the live row per component.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Reserve summary and history.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReserveSummary'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: changeClaimReserve
+      tags:
+        - Direct Claims
+      summary: Establish or change one reserve component.
+      description: >
+        The reserve history is append-only. `component`, `amount`,
+        `reasonCode`, and `expectedVersion` are required; `amount` is zero or
+        greater. The new row supersedes the current row for the same component
+        and increments its version. A stale `expectedVersion` is 409 at the
+        public surface.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReserveChangeRequest'
+      responses:
+        '201':
+          description: Reserve movement recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReserveHistoryEntry'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/coverage:
+    get:
+      operationId: getClaimCoverage
+      tags:
+        - Direct Claims
+      summary: Get the final coverage decision.
+      description: >
+        Returns 404 until a decision is recorded, so the workbench can show an
+        empty tab. Only one row per claim is FINAL; recording a new decision
+        supersedes the previous one.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Final coverage decision.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoverageDecision'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: decideClaimCoverage
+      tags:
+        - Direct Claims
+      summary: Record a final coverage decision.
+      description: >
+        `position` is COVERED, DENIED, or DEFENSE_ONLY; `basis`, `decisionDate`,
+        and `reviewerPartyId` are required. `allocationPct` is a fraction
+        between 0 and 1 and `allocationMethod` is one of the SPEC 11.4
+        methods. The previous FINAL row is superseded in the same transaction.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CoverageDecisionRequest'
+      responses:
+        '201':
+          description: Coverage decision recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoverageDecision'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/litigation:
+    get:
+      operationId: listClaimLitigation
+      tags:
+        - Direct Claims
+      summary: List litigation matters.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Litigation matters of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Litigation'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createClaimLitigation
+      tags:
+        - Direct Claims
+      summary: Record a litigation matter.
+      description: >
+        `matterType`, `jurisdiction`, `counselPartyId`, `filingDate`, and
+        `status` are required; `trialDate` may not precede `filingDate`.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LitigationRequest'
+      responses:
+        '201':
+          description: Litigation matter recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Litigation'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/litigation/{litigationId}:
+    patch:
+      operationId: updateClaimLitigation
+      tags:
+        - Direct Claims
+      summary: Update a litigation matter.
+      description: >
+        `expectedVersion` is required; a stale value is 409 at the public
+        surface.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: litigationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LitigationRequest'
+      responses:
+        '200':
+          description: Litigation matter after the update.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Litigation'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/settlements:
+    get:
+      operationId: listClaimSettlements
+      tags:
+        - Direct Claims
+      summary: List settlements.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Settlements of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Settlement'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: proposeClaimSettlement
+      tags:
+        - Direct Claims
+      summary: Propose a settlement.
+      description: >
+        A final coverage decision is required and a DENIED position blocks a
+        settlement (400). `amount` must be greater than zero and `structure` is
+        LUMP_SUM, STRUCTURED, ANNUITY, or MATRIX. The settlement number is
+        generated as SET-{year}-{7 digits} and the status starts at PROPOSED.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SettlementRequest'
+      responses:
+        '201':
+          description: Settlement proposed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Settlement'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/settlements/{settlementId}/approve:
+    post:
+      operationId: approveClaimSettlement
+      tags:
+        - Direct Claims
+      summary: Authorize a proposed settlement.
+      description: >
+        Only a PROPOSED settlement can be authorized. `approvalAuthority` and
+        `authorizedBy` are required and `expectedVersion` must match. DIR-08
+        caps the authorized amount at the claim settlement authority minus
+        amounts already committed by other authorized or executed settlements;
+        an excess is 400, a stale version is 409.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: settlementId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SettlementApprovalRequest'
+      responses:
+        '200':
+          description: Settlement authorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Settlement'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/settlements/{settlementId}/execute:
+    post:
+      operationId: executeClaimSettlement
+      tags:
+        - Direct Claims
+      summary: Execute an authorized settlement.
+      description: >
+        Only an AUTHORIZED settlement can be executed. `releaseDocumentId` is
+        required and payment instructions must be present (from the proposal or
+        this command). `expectedVersion` must match; a stale value is 409.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: settlementId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SettlementExecutionRequest'
+      responses:
+        '200':
+          description: Settlement executed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Settlement'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/recoveries:
+    get:
+      operationId: listClaimRecoveries
+      tags:
+        - Direct Claims
+      summary: List recoveries.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Recoveries of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Recovery'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createClaimRecovery
+      tags:
+        - Direct Claims
+      summary: Record a recovery.
+      description: >
+        `recoveryType`, a positive `amount`, and `source` are required. A
+        RECEIVED recovery requires `recoveryDate`. Received recoveries are
+        capped by the claim's paid loss in the expert; an excess is 400.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecoveryRequest'
+      responses:
+        '201':
+          description: Recovery recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Recovery'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/recoveries/{recoveryId}:
+    patch:
+      operationId: updateClaimRecovery
+      tags:
+        - Direct Claims
+      summary: Update a recovery status.
+      description: >
+        `expectedVersion` is required. A RECEIVED status requires
+        `recoveryDate`. A stale version is 409 at the public surface.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: recoveryId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecoveryRequest'
+      responses:
+        '200':
+          description: Recovery after the update.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Recovery'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/liens:
+    get:
+      operationId: listClaimLiens
+      tags:
+        - Direct Claims
+      summary: List liens.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Liens of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Lien'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createClaimLien
+      tags:
+        - Direct Claims
+      summary: Record a lien.
+      description: >
+        `lienType`, `lienholder`, and a zero-or-greater `amount` are required.
+        A terminal status (RESOLVED, WAIVED, PAID) requires a valid
+        `resolutionType` (PAID, NEGOTIATED, WAIVED, DEFERRED). An unresolved
+        lien blocks claim closure.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LienRequest'
+      responses:
+        '201':
+          description: Lien recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Lien'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/liens/{lienId}:
+    patch:
+      operationId: updateClaimLien
+      tags:
+        - Direct Claims
+      summary: Update a lien status and resolution.
+      description: >
+        `expectedVersion` is required. A terminal status requires
+        `resolutionType`; the expert sets `resolvedAt`.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: lienId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LienRequest'
+      responses:
+        '200':
+          description: Lien after the update.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Lien'
         '400':
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
@@ -255,6 +1175,7 @@ paths:
       description: >
         The tenant is taken from the X-EIA-Tenant header on this route, not from
         the query string, because the domain client sends it as a header.
+        Moving to OPEN requires a final coverage decision that is not DENIED.
       security: []
       x-internal-api: true
       parameters:
@@ -287,6 +1208,889 @@ paths:
           $ref: './components.yaml#/components/responses/Conflict'
         default:
           $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/claims/{claimId}/close:
+    post:
+      operationId: expertCloseClaim
+      tags:
+        - Direct Claims internal
+      summary: Close a direct claim (expert).
+      description: >
+        The expert enforces the closure preconditions: no unresolved lien, a
+        zero current reserve, and a legal transition to CLOSED.
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CloseClaimRequest'
+      responses:
+        '200':
+          description: Claim closed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Claim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/claims/{claimId}/injuries:
+    get:
+      operationId: expertListClaimInjuries
+      tags:
+        - Direct Claims internal
+      summary: List injuries (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Injuries of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Injury'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertCreateClaimInjury
+      tags:
+        - Direct Claims internal
+      summary: Record an injury (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InjuryRequest'
+      responses:
+        '201':
+          description: Injury recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Injury'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/claims/{claimId}/injuries/{injuryId}:
+    patch:
+      operationId: expertUpdateClaimInjury
+      tags:
+        - Direct Claims internal
+      summary: Update an injury (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: injuryId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InjuryRequest'
+      responses:
+        '200':
+          description: Injury after the update.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Injury'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/claims/{claimId}/exposures:
+    get:
+      operationId: expertListClaimExposures
+      tags:
+        - Direct Claims internal
+      summary: List exposures (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Exposures of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Exposure'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertCreateClaimExposure
+      tags:
+        - Direct Claims internal
+      summary: Record an exposure (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExposureRequest'
+      responses:
+        '201':
+          description: Exposure recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Exposure'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/claims/{claimId}/exposures/{exposureId}:
+    patch:
+      operationId: expertUpdateClaimExposure
+      tags:
+        - Direct Claims internal
+      summary: Update an exposure (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: exposureId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExposureRequest'
+      responses:
+        '200':
+          description: Exposure after the update.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Exposure'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/claims/{claimId}/reserves:
+    get:
+      operationId: expertGetClaimReserves
+      tags:
+        - Direct Claims internal
+      summary: Get the reserve summary (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Reserve summary and history.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReserveSummary'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertChangeClaimReserve
+      tags:
+        - Direct Claims internal
+      summary: Change a reserve component (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReserveChangeRequest'
+      responses:
+        '201':
+          description: Reserve movement recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReserveHistoryEntry'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/claims/{claimId}/coverage:
+    get:
+      operationId: expertGetClaimCoverage
+      tags:
+        - Direct Claims internal
+      summary: Get the coverage decision (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Final coverage decision.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoverageDecision'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertDecideClaimCoverage
+      tags:
+        - Direct Claims internal
+      summary: Record a coverage decision (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CoverageDecisionRequest'
+      responses:
+        '201':
+          description: Coverage decision recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoverageDecision'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/claims/{claimId}/litigation:
+    get:
+      operationId: expertListClaimLitigation
+      tags:
+        - Direct Claims internal
+      summary: List litigation (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Litigation matters of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Litigation'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertCreateClaimLitigation
+      tags:
+        - Direct Claims internal
+      summary: Record a litigation matter (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LitigationRequest'
+      responses:
+        '201':
+          description: Litigation matter recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Litigation'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/claims/{claimId}/litigation/{litigationId}:
+    patch:
+      operationId: expertUpdateClaimLitigation
+      tags:
+        - Direct Claims internal
+      summary: Update a litigation matter (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: litigationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LitigationRequest'
+      responses:
+        '200':
+          description: Litigation matter after the update.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Litigation'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/claims/{claimId}/settlements:
+    get:
+      operationId: expertListClaimSettlements
+      tags:
+        - Direct Claims internal
+      summary: List settlements (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Settlements of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Settlement'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertProposeClaimSettlement
+      tags:
+        - Direct Claims internal
+      summary: Propose a settlement (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SettlementRequest'
+      responses:
+        '201':
+          description: Settlement proposed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Settlement'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/claims/{claimId}/settlements/{settlementId}/approve:
+    post:
+      operationId: expertApproveClaimSettlement
+      tags:
+        - Direct Claims internal
+      summary: Authorize a settlement (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: settlementId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SettlementApprovalRequest'
+      responses:
+        '200':
+          description: Settlement authorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Settlement'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/claims/{claimId}/settlements/{settlementId}/execute:
+    post:
+      operationId: expertExecuteClaimSettlement
+      tags:
+        - Direct Claims internal
+      summary: Execute a settlement (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: settlementId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SettlementExecutionRequest'
+      responses:
+        '200':
+          description: Settlement executed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Settlement'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/claims/{claimId}/recoveries:
+    get:
+      operationId: expertListClaimRecoveries
+      tags:
+        - Direct Claims internal
+      summary: List recoveries (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Recoveries of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Recovery'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertCreateClaimRecovery
+      tags:
+        - Direct Claims internal
+      summary: Record a recovery (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecoveryRequest'
+      responses:
+        '201':
+          description: Recovery recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Recovery'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/claims/{claimId}/recoveries/{recoveryId}:
+    patch:
+      operationId: expertUpdateClaimRecovery
+      tags:
+        - Direct Claims internal
+      summary: Update a recovery (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: recoveryId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecoveryRequest'
+      responses:
+        '200':
+          description: Recovery after the update.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Recovery'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/claims/{claimId}/liens:
+    get:
+      operationId: expertListClaimLiens
+      tags:
+        - Direct Claims internal
+      summary: List liens (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Liens of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Lien'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertCreateClaimLien
+      tags:
+        - Direct Claims internal
+      summary: Record a lien (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LienRequest'
+      responses:
+        '201':
+          description: Lien recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Lien'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/claims/{claimId}/liens/{lienId}:
+    patch:
+      operationId: expertUpdateClaimLien
+      tags:
+        - Direct Claims internal
+      summary: Update a lien (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: lienId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LienRequest'
+      responses:
+        '200':
+          description: Lien after the update.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Lien'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
 components:
   securitySchemes:
     sessionCookie:
@@ -297,10 +2101,10 @@ components:
         - $ref: './components.yaml#/components/schemas/AuditFields'
       type: object
       description: >
-        Direct claim projection. The implemented slice carries causeCode and a
-        single reserve figure; the SPEC 11.4.4 claim detail (claimType,
-        tortCode, injury, exposure, reserves[], financials, _links) is planned.
-        reserveAmount is currently serialized by the expert as a JSON number.
+        Direct claim projection. `reserveAmount` is the reserve seeded at
+        registration; `currentReserveAmount` is derived from the current rows of
+        the reserve history and is never written back over the seed. Money is a
+        decimal string on every field.
       required:
         - id
         - tenantId
@@ -308,12 +2112,14 @@ components:
         - claimNumber
         - policyId
         - claimantPartyId
+        - claimType
         - status
         - lossDate
         - reportDate
-        - causeCode
         - reserveAmount
         - reserveCurrency
+        - litigationFlag
+        - currentReserveAmount
       properties:
         id:
           type: string
@@ -335,6 +2141,8 @@ components:
         claimantPartyId:
           type: string
           format: uuid
+        claimType:
+          $ref: '#/components/schemas/ClaimType'
         status:
           $ref: '#/components/schemas/ClaimStatus'
         lossDate:
@@ -351,6 +2159,39 @@ components:
           $ref: './components.yaml#/components/schemas/MoneyAmount'
         reserveCurrency:
           $ref: './components.yaml#/components/schemas/CurrencyCode'
+        settlementAuthorityAmount:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        settlementAuthorityCurrency:
+          type: [string, 'null']
+          pattern: '^[A-Z]{3}$'
+        litigationFlag:
+          type: boolean
+        currentReserveAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+    ClaimType:
+      type: string
+      description: Direct claim type from SPEC 11.4.
+      enum:
+        - BODILY_INJURY
+        - PROPERTY_DAMAGE
+        - PRODUCT_LIABILITY
+        - MASS_TORT
+        - ENVIRONMENTAL
+        - POLLUTION
+        - CONSTRUCTION_DEFECT
+        - AUTO_LIABILITY
+        - TRUCKING
+        - WORKERS_COMPENSATION
+        - EMPLOYERS_LIABILITY
+        - MEDICAL_MALPRACTICE
+        - PROFESSIONAL_LIABILITY
+        - DIRECTORS_AND_OFFICERS
+        - EMPLOYMENT_PRACTICES
+        - CLASS_ACTION
+        - MULTI_DISTRICT_LITIGATION
+        - SUBROGATION
+        - OTHER
     ClaimStatus:
       type: string
       description: Direct claim lifecycle status from SPEC 11.4.6.
@@ -373,6 +2214,615 @@ components:
         - BANKRUPTCY_TRUST
         - ON_APPEAL
         - REOPENED
+    Injury:
+      type: object
+      required:
+        - id
+        - tenantId
+        - claimId
+        - claimantPartyId
+        - injuryType
+        - severity
+        - version
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        claimId:
+          type: string
+          format: uuid
+        claimantPartyId:
+          type: string
+          format: uuid
+        injuryType:
+          type: string
+          maxLength: 32
+        bodyPart:
+          type: [string, 'null']
+          maxLength: 64
+        diagnosisCodes:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            maxLength: 16
+        description:
+          type: [string, 'null']
+          maxLength: 2000
+        severity:
+          type: string
+          enum:
+            - MILD
+            - MODERATE
+            - SEVERE
+            - CATASTROPHIC
+            - FATAL
+        diagnosisDate:
+          type: [string, 'null']
+          format: date
+        version:
+          type: integer
+          minimum: 1
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    Exposure:
+      type: object
+      required:
+        - id
+        - tenantId
+        - claimId
+        - claimantPartyId
+        - exposureType
+        - jurisdiction
+        - exposureFrom
+        - version
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        claimId:
+          type: string
+          format: uuid
+        claimantPartyId:
+          type: string
+          format: uuid
+        exposureType:
+          type: string
+          enum:
+            - PRODUCT
+            - SUBSTANCE
+            - SITE
+            - OCCUPATION
+            - ENVIRONMENT
+            - MEDICAL_DEVICE
+            - IMPLANT
+            - RADIATION
+        productName:
+          type: [string, 'null']
+          maxLength: 200
+        substanceName:
+          type: [string, 'null']
+          maxLength: 200
+        siteName:
+          type: [string, 'null']
+          maxLength: 200
+        employerPartyId:
+          type: [string, 'null']
+          format: uuid
+        jobTitle:
+          type: [string, 'null']
+          maxLength: 120
+        jurisdiction:
+          type: string
+          maxLength: 16
+        exposureFrom:
+          type: string
+          format: date
+        exposureTo:
+          type: [string, 'null']
+          format: date
+        intensity:
+          type: [string, 'null']
+          enum:
+            - LOW
+            - MEDIUM
+            - HIGH
+            - EXTREME
+            - UNKNOWN
+        version:
+          type: integer
+          minimum: 1
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ReserveHistoryEntry:
+      type: object
+      description: >
+        Append-only reserve movement. `current` marks the one live row per
+        claim/component; the claim's current reserve is the sum of the current
+        rows, never an overwritten claim field.
+      required:
+        - id
+        - tenantId
+        - claimId
+        - component
+        - amount
+        - currency
+        - effectiveDate
+        - reasonCode
+        - sequence
+        - current
+        - version
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        claimId:
+          type: string
+          format: uuid
+        component:
+          $ref: '#/components/schemas/ReserveComponent'
+        amount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        effectiveDate:
+          type: string
+          format: date
+        reasonCode:
+          $ref: '#/components/schemas/ReserveReason'
+        reasonText:
+          type: [string, 'null']
+          maxLength: 400
+        authority:
+          type: [string, 'null']
+          maxLength: 32
+        sequence:
+          type: integer
+          minimum: 1
+        current:
+          type: boolean
+        version:
+          type: integer
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+    ReserveComponent:
+      type: string
+      enum:
+        - INDEMNITY
+        - DEFENSE
+        - ALAE
+        - ULAE
+        - EXPENSE
+        - MEDICAL
+        - SUBROGATION
+        - RECOVERY
+        - IBNR
+        - IBNER
+    ReserveReason:
+      type: string
+      enum:
+        - INITIAL
+        - DEVELOPMENT
+        - NEW_INFORMATION
+        - SETTLEMENT_NEGOTIATION
+        - COVERAGE_CHANGE
+        - PAYMENT_APPLIED
+        - RECOVERY_APPLIED
+        - REVIEW
+        - CORRECTION
+        - CLOSE
+    ReserveComponentBalance:
+      type: object
+      required:
+        - component
+        - currentAmount
+        - currency
+      properties:
+        component:
+          $ref: '#/components/schemas/ReserveComponent'
+        currentAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+    ReserveSummary:
+      type: object
+      required:
+        - claimId
+        - currency
+        - totalCurrentAmount
+        - components
+        - history
+      properties:
+        claimId:
+          type: string
+          format: uuid
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        totalCurrentAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        components:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReserveComponentBalance'
+        history:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReserveHistoryEntry'
+    CoverageDecision:
+      type: object
+      required:
+        - id
+        - tenantId
+        - claimId
+        - position
+        - basis
+        - decisionDate
+        - reviewerPartyId
+        - status
+        - version
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        claimId:
+          type: string
+          format: uuid
+        position:
+          $ref: '#/components/schemas/CoveragePosition'
+        basis:
+          type: string
+          maxLength: 4000
+        policyProvisions:
+          type: [string, 'null']
+          maxLength: 2000
+        allocationMethod:
+          type: [string, 'null']
+          enum:
+            - ALL_SUMS
+            - PRO_RATA_TIME
+            - PRO_RATA_PREMIUM
+            - EQUAL
+            - CUSTOM
+        allocationPct:
+          $ref: './components.yaml#/components/schemas/Percent'
+        decisionDate:
+          type: string
+          format: date
+        reviewerPartyId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+            - DRAFT
+            - FINAL
+            - SUPERSEDED
+        version:
+          type: integer
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    CoveragePosition:
+      type: string
+      enum:
+        - COVERED
+        - DENIED
+        - DEFENSE_ONLY
+    Litigation:
+      type: object
+      required:
+        - id
+        - tenantId
+        - claimId
+        - matterType
+        - jurisdiction
+        - counselPartyId
+        - filingDate
+        - status
+        - version
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        claimId:
+          type: string
+          format: uuid
+        matterType:
+          type: string
+          enum:
+            - DEFENSE
+            - COVERAGE
+            - APPEAL
+            - BANKRUPTCY
+            - REGULATORY
+            - TRANSACTIONAL
+        jurisdiction:
+          type: string
+          maxLength: 16
+        counselPartyId:
+          type: string
+          format: uuid
+        filingDate:
+          type: string
+          format: date
+        trialDate:
+          type: [string, 'null']
+          format: date
+        status:
+          type: string
+          enum:
+            - ACTIVE
+            - STAYED
+            - DISMISSED
+            - SETTLED
+            - JUDGMENT
+            - ON_APPEAL
+            - CLOSED
+        caseNumber:
+          type: [string, 'null']
+          maxLength: 64
+        version:
+          type: integer
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    Settlement:
+      type: object
+      description: >
+        A settlement is PROPOSED, then AUTHORIZED against the claim's
+        settlement authority, then EXECUTED once the release and payment
+        instructions are recorded.
+      required:
+        - id
+        - tenantId
+        - claimId
+        - settlementNumber
+        - amount
+        - currency
+        - structure
+        - status
+        - version
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        claimId:
+          type: string
+          format: uuid
+        settlementNumber:
+          type: string
+          maxLength: 32
+        amount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        structure:
+          type: string
+          enum:
+            - LUMP_SUM
+            - STRUCTURED
+            - ANNUITY
+            - MATRIX
+        releaseScope:
+          type: [string, 'null']
+          enum:
+            - FULL
+            - PARTIAL
+            - CLAIMANT_SPECIFIC
+            - POLICY_YEAR
+        approvalAuthority:
+          type: [string, 'null']
+          maxLength: 120
+        paymentInstructions:
+          type: [string, 'null']
+          maxLength: 4000
+        releaseDocumentId:
+          type: [string, 'null']
+          format: uuid
+        status:
+          type: string
+          enum:
+            - PROPOSED
+            - AUTHORIZED
+            - EXECUTED
+            - REJECTED
+        authorizedBy:
+          type: [string, 'null']
+          format: uuid
+        authorizedAt:
+          type: [string, 'null']
+          format: date-time
+        executedAt:
+          type: [string, 'null']
+          format: date-time
+        version:
+          type: integer
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    Recovery:
+      type: object
+      description: >
+        A claim recovery. Received recoveries are capped by the claim's paid
+        loss.
+      required:
+        - id
+        - tenantId
+        - claimId
+        - recoveryType
+        - amount
+        - currency
+        - source
+        - status
+        - version
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        claimId:
+          type: string
+          format: uuid
+        recoveryType:
+          type: string
+          enum:
+            - SUBROGATION
+            - SALVAGE
+            - CONTRIBUTION
+            - ASSUMED
+            - OTHER_INSURANCE
+            - INDEMNITY
+            - TRUST
+            - GOVERNMENT
+            - OTHER
+        amount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        source:
+          type: string
+          maxLength: 200
+        status:
+          type: string
+          enum:
+            - IDENTIFIED
+            - PURSUING
+            - AGREED
+            - RECEIVED
+            - DENIED
+            - ABANDONED
+        recoveryDate:
+          type: [string, 'null']
+          format: date
+        version:
+          type: integer
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    Lien:
+      type: object
+      description: >
+        A claim lien. Resolution is recorded before a claim can close (DIR-11).
+      required:
+        - id
+        - tenantId
+        - claimId
+        - lienType
+        - lienholder
+        - amount
+        - currency
+        - status
+        - version
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        claimId:
+          type: string
+          format: uuid
+        lienType:
+          type: string
+          enum:
+            - MEDICARE
+            - MEDICAID
+            - WORKERS_COMPENSATION
+            - HOSPITAL
+            - PHYSICIAN
+            - ERISA
+            - CHILD_SUPPORT
+            - TAX
+            - VETERANS
+            - OTHER
+        lienholder:
+          type: string
+          maxLength: 200
+        amount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        status:
+          type: string
+          enum:
+            - IDENTIFIED
+            - VERIFIED
+            - NEGOTIATING
+            - RESOLVED
+            - WAIVED
+            - DISPUTED
+            - PAID
+        resolutionType:
+          type: [string, 'null']
+          enum:
+            - PAID
+            - NEGOTIATED
+            - WAIVED
+            - DEFERRED
+        resolvedAt:
+          type: [string, 'null']
+          format: date-time
+        version:
+          type: integer
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
     CreateClaimRequest:
       type: object
       description: Public FNOL command. The tenant comes from X-EIA-Tenant.
@@ -397,9 +2847,15 @@ components:
         causeCode:
           type: string
           maxLength: 24
+        claimType:
+          $ref: '#/components/schemas/ClaimType'
         reserveAmount:
           $ref: './components.yaml#/components/schemas/MoneyAmount'
         reserveCurrency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        settlementAuthorityAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        settlementAuthorityCurrency:
           $ref: './components.yaml#/components/schemas/CurrencyCode'
     CreateClaimRequestInternal:
       type: object
@@ -429,9 +2885,15 @@ components:
         causeCode:
           type: string
           maxLength: 24
+        claimType:
+          $ref: '#/components/schemas/ClaimType'
         reserveAmount:
           $ref: './components.yaml#/components/schemas/MoneyAmount'
         reserveCurrency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        settlementAuthorityAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        settlementAuthorityCurrency:
           $ref: './components.yaml#/components/schemas/CurrencyCode'
         status:
           type: string
@@ -459,71 +2921,444 @@ components:
           type: integer
           minimum: 0
           description: Optional. When omitted the expert compares against the current version.
+    CloseClaimRequest:
+      type: object
+      description: Optional optimistic-concurrency guard on claim closure.
+      properties:
+        expectedVersion:
+          type: integer
+          minimum: 0
+    InjuryRequest:
+      type: object
+      description: >
+        Record or update an injury. `expectedVersion` is required by PATCH and
+        ignored by create.
+      required:
+        - injuryType
+        - severity
+      properties:
+        claimantPartyId:
+          type: string
+          format: uuid
+        injuryType:
+          type: string
+          maxLength: 32
+        bodyPart:
+          type: string
+          maxLength: 64
+        diagnosisCodes:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            maxLength: 16
+        description:
+          type: string
+          maxLength: 2000
+        severity:
+          type: string
+          enum:
+            - MILD
+            - MODERATE
+            - SEVERE
+            - CATASTROPHIC
+            - FATAL
+        diagnosisDate:
+          type: string
+          format: date
+        expectedVersion:
+          type: integer
+          minimum: 0
+    ExposureRequest:
+      type: object
+      description: >
+        Record or update an exposure. `expectedVersion` is required by PATCH and
+        ignored by create.
+      required:
+        - exposureType
+        - jurisdiction
+        - exposureFrom
+      properties:
+        claimantPartyId:
+          type: string
+          format: uuid
+        exposureType:
+          type: string
+          enum:
+            - PRODUCT
+            - SUBSTANCE
+            - SITE
+            - OCCUPATION
+            - ENVIRONMENT
+            - MEDICAL_DEVICE
+            - IMPLANT
+            - RADIATION
+        productName:
+          type: string
+          maxLength: 200
+        substanceName:
+          type: string
+          maxLength: 200
+        siteName:
+          type: string
+          maxLength: 200
+        employerPartyId:
+          type: string
+          format: uuid
+        jobTitle:
+          type: string
+          maxLength: 120
+        jurisdiction:
+          type: string
+          maxLength: 16
+        exposureFrom:
+          type: string
+          format: date
+        exposureTo:
+          type: string
+          format: date
+        intensity:
+          type: string
+          enum:
+            - LOW
+            - MEDIUM
+            - HIGH
+            - EXTREME
+            - UNKNOWN
+        expectedVersion:
+          type: integer
+          minimum: 0
+    ReserveChangeRequest:
+      type: object
+      description: >
+        Establish or change one reserve component. `expectedVersion` is
+        required so a stale change cannot close the wrong current row.
+      required:
+        - component
+        - amount
+        - reasonCode
+        - expectedVersion
+      properties:
+        component:
+          $ref: '#/components/schemas/ReserveComponent'
+        amount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        effectiveDate:
+          type: string
+          format: date
+        reasonCode:
+          $ref: '#/components/schemas/ReserveReason'
+        reasonText:
+          type: string
+          maxLength: 400
+        authority:
+          type: string
+          maxLength: 32
+        expectedVersion:
+          type: integer
+          minimum: 0
+    CoverageDecisionRequest:
+      type: object
+      description: >
+        Record a final coverage decision. Recording a decision supersedes the
+        previous final position for the claim.
+      required:
+        - position
+        - basis
+        - decisionDate
+        - reviewerPartyId
+      properties:
+        position:
+          $ref: '#/components/schemas/CoveragePosition'
+        basis:
+          type: string
+          maxLength: 4000
+        policyProvisions:
+          type: string
+          maxLength: 2000
+        allocationMethod:
+          type: string
+          enum:
+            - ALL_SUMS
+            - PRO_RATA_TIME
+            - PRO_RATA_PREMIUM
+            - EQUAL
+            - CUSTOM
+        allocationPct:
+          $ref: './components.yaml#/components/schemas/Percent'
+        decisionDate:
+          type: string
+          format: date
+        reviewerPartyId:
+          type: string
+          format: uuid
+    LitigationRequest:
+      type: object
+      description: Record or update a litigation matter.
+      required:
+        - matterType
+        - jurisdiction
+        - counselPartyId
+        - filingDate
+        - status
+      properties:
+        matterType:
+          type: string
+          enum:
+            - DEFENSE
+            - COVERAGE
+            - APPEAL
+            - BANKRUPTCY
+            - REGULATORY
+            - TRANSACTIONAL
+        jurisdiction:
+          type: string
+          maxLength: 16
+        counselPartyId:
+          type: string
+          format: uuid
+        filingDate:
+          type: string
+          format: date
+        trialDate:
+          type: string
+          format: date
+        status:
+          type: string
+          enum:
+            - ACTIVE
+            - STAYED
+            - DISMISSED
+            - SETTLED
+            - JUDGMENT
+            - ON_APPEAL
+            - CLOSED
+        caseNumber:
+          type: string
+          maxLength: 64
+        expectedVersion:
+          type: integer
+          minimum: 0
+    SettlementRequest:
+      type: object
+      description: Propose a settlement. Amount is a decimal string in JSON.
+      required:
+        - amount
+        - structure
+      properties:
+        amount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        structure:
+          type: string
+          enum:
+            - LUMP_SUM
+            - STRUCTURED
+            - ANNUITY
+            - MATRIX
+        releaseScope:
+          type: string
+          enum:
+            - FULL
+            - PARTIAL
+            - CLAIMANT_SPECIFIC
+            - POLICY_YEAR
+        paymentInstructions:
+          type: string
+          maxLength: 4000
+    SettlementApprovalRequest:
+      type: object
+      description: >
+        Authorize a settlement. `approvalAuthority` names the authority that
+        approved the amount and is required.
+      required:
+        - approvalAuthority
+        - authorizedBy
+        - expectedVersion
+      properties:
+        approvalAuthority:
+          type: string
+          maxLength: 120
+        authorizedBy:
+          type: string
+          format: uuid
+        expectedVersion:
+          type: integer
+          minimum: 0
+    SettlementExecutionRequest:
+      type: object
+      description: >
+        Execute a settlement. A release document is required; payment
+        instructions may be supplied here or inherited from the proposal.
+      required:
+        - releaseDocumentId
+        - expectedVersion
+      properties:
+        releaseDocumentId:
+          type: string
+          format: uuid
+        paymentInstructions:
+          type: string
+          maxLength: 4000
+        expectedVersion:
+          type: integer
+          minimum: 0
+    RecoveryRequest:
+      type: object
+      description: >
+        Record a recovery, or advance an existing recovery's status.
+        `expectedVersion` is required by PATCH.
+      required:
+        - recoveryType
+        - amount
+        - source
+        - status
+      properties:
+        recoveryType:
+          type: string
+          enum:
+            - SUBROGATION
+            - SALVAGE
+            - CONTRIBUTION
+            - ASSUMED
+            - OTHER_INSURANCE
+            - INDEMNITY
+            - TRUST
+            - GOVERNMENT
+            - OTHER
+        amount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        source:
+          type: string
+          maxLength: 200
+        status:
+          type: string
+          enum:
+            - IDENTIFIED
+            - PURSUING
+            - AGREED
+            - RECEIVED
+            - DENIED
+            - ABANDONED
+        recoveryDate:
+          type: string
+          format: date
+        expectedVersion:
+          type: integer
+          minimum: 0
+    LienRequest:
+      type: object
+      description: Record a lien, or update its status and resolution.
+      required:
+        - lienType
+        - lienholder
+        - amount
+        - status
+      properties:
+        lienType:
+          type: string
+          enum:
+            - MEDICARE
+            - MEDICAID
+            - WORKERS_COMPENSATION
+            - HOSPITAL
+            - PHYSICIAN
+            - ERISA
+            - CHILD_SUPPORT
+            - TAX
+            - VETERANS
+            - OTHER
+        lienholder:
+          type: string
+          maxLength: 200
+        amount:
+          type: string
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        status:
+          type: string
+          enum:
+            - IDENTIFIED
+            - VERIFIED
+            - NEGOTIATING
+            - RESOLVED
+            - WAIVED
+            - DISPUTED
+            - PAID
+        resolutionType:
+          type: string
+          enum:
+            - PAID
+            - NEGOTIATED
+            - WAIVED
+            - DEFERRED
+        expectedVersion:
+          type: integer
+          minimum: 0
 x-vertical: direct-claims
 x-implementation:
   status: implemented
   verifiedAt: '2026-10-19'
   verifiedAgainst:
     - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimController.java
+    - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimDetailController.java
+    - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimDetailService.java
+    - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimCommands.java
+    - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimDetailDtos.java
     - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimClient.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimController.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/InjuryController.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ExposureController.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ReserveController.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/CoverageController.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/LitigationController.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/SettlementController.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/RecoveryController.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/LienController.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimService.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ApiExceptionHandler.java
+    - repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/DirectClaimsEndpointTest.java
   errorEnvelope: >
     Vertical-specific ApiError {timestamp, status, code, message, path,
     details[{field, message}]}. Not the canonical Problem envelope yet.
   notes: >
     The internal transition route takes the tenant from X-EIA-Tenant while the
-    other internal routes take ?tenantId=. The public transition has no
-    expectedVersion.
+    other internal GET routes take ?tenantId=; create and close take
+    X-EIA-Tenant. Every internal route requires X-EIA-Book: DIRECT and hides a
+    missing or different book as 404. The public transition has no
+    expectedVersion; every public child PATCH requires it.
+x-compatibility:
+  contractVersion: 1.1.0
+  previousContractVersion: 1.0.0
+  breaking: []
+  compatible:
+    - Adds the injury, exposure, reserve, coverage, litigation, settlement, recovery, lien, and close routes.
+    - Adds claimType, settlementAuthorityAmount, settlementAuthorityCurrency, litigationFlag, and currentReserveAmount to the claim projection.
+    - Corrects the claim money fields to decimal strings; the services already serialize them as strings.
+  note: >
+    The second Direct Claims slice is additive over 1.0.0. The HTTP path and the
+    error envelope are unchanged.
 x-planned-operations:
   - method: PATCH
     path: /api/v1/claims/{claimId}
     spec: SPEC 11.4.10
     note: Update non-financial claim fields.
   - method: GET
-    path: /api/v1/claims/{claimId}/injuries
-    spec: SPEC 11.4.10
-    note: Injuries.
-  - method: GET
-    path: /api/v1/claims/{claimId}/exposures
-    spec: SPEC 11.4.10
-    note: Exposures.
-  - method: GET
-    path: /api/v1/claims/{claimId}/coverage
-    spec: SPEC 11.4.10
-    note: Coverage position.
-  - method: GET
     path: /api/v1/claims/{claimId}/allocations
     spec: SPEC 11.4.10
     note: Policy-year allocations.
   - method: GET
-    path: /api/v1/claims/{claimId}/reserves
-    spec: SPEC 11.4.10
-    note: Reserve history.
-  - method: GET
-    path: /api/v1/claims/{claimId}/litigation
-    spec: SPEC 11.4.10
-    note: Litigation.
-  - method: GET
-    path: /api/v1/claims/{claimId}/settlements
-    spec: SPEC 11.4.10
-    note: Settlements.
-  - method: GET
-    path: /api/v1/claims/{claimId}/liens
-    spec: SPEC 11.4.10
-    note: Liens.
-  - method: GET
-    path: /api/v1/claims/{claimId}/recoveries
-    spec: SPEC 11.4.10
-    note: Recoveries.
-  - method: GET
     path: /api/v1/claims/{claimId}/financials
     spec: SPEC 11.4.10
     note: Financial summary.
-  - method: POST
-    path: /api/v1/claims/{claimId}/close
-    spec: SPEC 11.4.10
-    note: Close a claim (transaction).
   - method: POST
     path: /api/v1/claims/{claimId}/reopen
     spec: SPEC 11.4.10

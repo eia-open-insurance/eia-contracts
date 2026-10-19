@@ -1,27 +1,29 @@
 openapi: 3.1.0
 info:
   title: EIA Policy API
-  version: 2.0.0
+  version: 2.1.0
   summary: Direct-book policy administration and the Policy expert API.
   description: >
     This document describes the implemented public Policy domain API and the
     internal Policy expert API. The authoritative requirement is SPEC 11.2 and
-    SPEC 12; the implemented surface is the first vertical slice, hardened in
-    Round 2 as the platform reference.
+    SPEC 12; the implemented surface is the Round 2 first slice plus the Round 5
+    second slice: policy versions, coverage and limits, aggregate erosion,
+    endorsements, insureds, locations, cancellation, and reinstatement.
 
-    Round 2 changes that are visible on the wire:
+    Round 2 changes that remain on the wire:
 
     - Lists return the page envelope
       `{items, page, size, total, _links:{self, next, prev}}` with `?page=` and
-      `?size=` (default 20, maximum 100).
+      `?size=` (default 20, maximum 100). Every second-slice collection uses the
+      same envelope.
     - Errors use the canonical RFC 9457 `Problem` body with
       `application/problem+json`, including `type`, `title`, `status`,
       `detail`, `instance`, `code`, `category`, `retryable`, `errors`, `meta`,
       and `correlationId`. The vertical keeps its existing code strings
       (`POLICY_NOT_FOUND`, `CONCURRENT_MODIFICATION`, and so on); migration to
       the `EIA-XXX-NNNN` scheme is tracked in MISMATCHES.md.
-    - Detail, create, and status responses carry a strong `ETag`
-      (`"<version>"`). Status changes accept `If-Match`; a stale value is 409
+    - Detail, create, and mutation responses carry a strong `ETag`
+      (`"<version>"`). Mutations accept `If-Match`; a stale value is 409
       `CONCURRENT_MODIFICATION`.
     - Creates accept an optional `Idempotency-Key`. A same-key replay returns
       200 with `Idempotent-Replayed: true`; reusing the key with a different
@@ -29,11 +31,24 @@ info:
     - Illegal lifecycle transitions and duplicate policy numbers are 409
       conflicts, not 400 validation errors.
 
-    Money remains a flat pair today: `premiumAmount`/`premiumCurrency` and
-    `limitAmount`/`limitCurrency`, with the amount serialized as a decimal
-    string. The canonical Money object is defined in
-    schemas/money.schema.json; migration of the flat pairs is tracked in
-    MISMATCHES.md.
+    Round 5 adds the second slice. Documented behaviours:
+
+    - A policy version is immutable and is issued by bind, issue, endorsement,
+      cancellation, and reinstatement. `GET /versions/current` re-verifies the
+      canonical SHA-256 snapshot hash and reports `hashVerified`.
+    - Coverage grants carry their limit schedule, and the aggregate erosion
+      ledger is derived from idempotent facts keyed by
+      `(limitId, claimId, allocationId, sourceVersion)`.
+    - Business-rule rejections are 422 with `category: BUSINESS_RULE` and a
+      stable code; a missing approval is 428 with
+      `category: APPROVAL_REQUIRED`; stale state and version conflicts are 409.
+      Both new statuses are emitted by the domain unchanged from the expert.
+
+    Money remains a flat pair on the policy header (`premiumAmount`/
+    `premiumCurrency`, `limitAmount`/`limitCurrency`), while the second-slice
+    projections carry one `currency` per row with decimal-string amounts. The
+    canonical Money object is defined in schemas/money.schema.json; migration of
+    the flat pairs is tracked in MISMATCHES.md.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -197,7 +212,8 @@ paths:
 
         An illegal lifecycle edge, including a no-op transition to the current
         status, is 409 `INVALID_STATUS_TRANSITION` (SPEC 6.11 CONFLICT), not a
-        400 validation error.
+        400 validation error. `ISSUED` and `IN_FORCE` are rejected with 422
+        `NAMED_INSURED_REQUIRED` when the policy has no ACTIVE named insured.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - $ref: './components.yaml#/components/parameters/IfMatch'
@@ -229,6 +245,850 @@ paths:
           $ref: './components.yaml#/components/responses/NotFound'
         '409':
           $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/versions:
+    get:
+      operationId: listPolicyVersions
+      tags:
+        - Policy
+      summary: List the immutable policy versions.
+      description: >
+        Returns the page envelope ordered by version number. A version is issued
+        by bind, issue, endorsement, cancellation, and reinstatement and is
+        never updated afterwards; `effectiveTo` is set when a successor
+        supersedes it.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/PageParam'
+        - $ref: './components.yaml#/components/parameters/PageSizeParam'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: One page of policy versions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyVersionPage'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/versions/current:
+    get:
+      operationId: getCurrentPolicyVersion
+      tags:
+        - Policy
+      summary: Get the derived current policy version.
+      description: >
+        Returns the single ISSUED version plus `current` and `hashVerified`.
+        `hashVerified` is recomputed from the live policy snapshot on every
+        read. A stored hash that no longer matches the snapshot is 409
+        `VERSION_HASH_MISMATCH` (the expert's check, re-emitted by the domain
+        unchanged); `hashVerified` is false only while the current row is a
+        DRAFT version that has not been issued yet.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Current version and hash verification result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CurrentVersion'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/versions/{versionId}:
+    get:
+      operationId: getPolicyVersion
+      tags:
+        - Policy
+      summary: Get one policy version.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: versionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Policy version snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyVersion'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/coverages:
+    get:
+      operationId: listPolicyCoverages
+      tags:
+        - Policy
+      summary: List coverage grants with their limits and erosion state.
+      description: >
+        Each item is a `CoverageView`: the coverage grant, its limit schedule,
+        and the derived limit state. `state` is null only while the limit is
+        being created.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/PageParam'
+        - $ref: './components.yaml#/components/parameters/PageSizeParam'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: One page of coverage views.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoverageViewPage'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createPolicyCoverage
+      tags:
+        - Policy
+      summary: Add a coverage grant and its limit schedule.
+      description: >
+        The coverage window must fall inside the policy term and the limit
+        currency must equal the policy premium currency. Adding a coverage to an
+        issued policy also issues an endorsement and a policy version. A new
+        aggregate-limit row starts with the aggregate (or each-occurrence) amount
+        fully available.
+
+        Rejections: 400 for an unknown occurrence basis, coverage part, or
+        impact; 409 for a duplicate coverage code, a stale `If-Match`, or a
+        reused idempotency key; 422 for an invalid coverage range
+        (`INVALID_COVERAGE_RANGE`, `COVERAGE_OUTSIDE_POLICY_TERM`), an invalid
+        limit (`INVALID_PER_OCCURRENCE_LIMIT`, `INVALID_AGGREGATE_LIMIT`,
+        `LIMIT_EXCEEDS_AGGREGATE`, `DEDUCTIBLE_EXCEEDS_LIMIT`,
+        `SUBLIMIT_EXCEEDS_LIMIT`, `INVALID_COINSURANCE`,
+        `INVALID_EROSION_BASIS`), or `CURRENCY_MISMATCH`.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/IfMatch'
+        - $ref: './components.yaml#/components/parameters/IdempotencyKey'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCoverageRequest'
+      responses:
+        '201':
+          description: Coverage and limit created.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoverageView'
+        '200':
+          description: Idempotent replay of the same coverage command.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoverageView'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/limits:
+    get:
+      operationId: listPolicyLimits
+      tags:
+        - Policy
+      summary: List limit schedules.
+      description: >
+        Returns the page envelope ordered by coverage sequence. A null
+        `aggregateAmount` means the aggregate is explicitly NONE, not missing;
+        `erosionBasis` is the basis the derived state uses.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/PageParam'
+        - $ref: './components.yaml#/components/parameters/PageSizeParam'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: One page of limit schedules.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LimitPage'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/aggregate-state:
+    get:
+      operationId: listPolicyAggregateState
+      tags:
+        - Policy
+      summary: List the derived aggregate erosion state.
+      description: >
+        One state row per limit. `remainingAmount = originalAmount +
+        reinstatedAmount - incurredAmount + recoveredAmount` (SPEC POL-11);
+        `incurredAmount = paidAmount + reservedAmount`; `sourceVersion` is the
+        highest erosion fact version applied.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/PageParam'
+        - $ref: './components.yaml#/components/parameters/PageSizeParam'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: One page of limit states.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LimitStatePage'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/erosion:
+    post:
+      operationId: applyPolicyErosion
+      tags:
+        - Policy
+      summary: Apply one idempotent aggregate erosion fact.
+      description: >
+        Facts are unique by `(limitId, claimId, allocationId, sourceVersion)`.
+        The same fact replays with 200 and `Idempotent-Replayed: true`; an older
+        fact for a chain that already has a newer one is 409
+        `EROSION_STALE_VERSION`; a fact that would take the aggregate negative is
+        422 `LIMIT_EXCEEDED` with `meta.availableAmount` and `meta.currency`.
+        The response is the newly derived limit state and the policy ETag.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/IdempotencyKey'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ErosionRequest'
+      responses:
+        '201':
+          description: Erosion fact applied; derived state returned.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LimitState'
+        '200':
+          description: The same erosion fact or idempotency key replayed.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LimitState'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/endorsements:
+    get:
+      operationId: listPolicyEndorsements
+      tags:
+        - Policy
+      summary: List endorsements.
+      description: Returns the page envelope ordered by endorsement sequence.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/PageParam'
+        - $ref: './components.yaml#/components/parameters/PageSizeParam'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: One page of endorsements.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EndorsementPage'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createPolicyEndorsement
+      tags:
+        - Policy
+      summary: Endorse a policy.
+      description: >
+        Every endorsement issues an immutable policy version. The policy must
+        already be ISSUED or later (`POLICY_NOT_ISSUED` is 409). The effective
+        date must fall before policy expiration; a date before policy inception
+        is a backdate and requires `backdateReason` plus `approvedBy` and
+        `approvalRef`. A premium delta must use the policy currency.
+
+        Rejections: 400 for an unknown endorsement type or coverage change type;
+        409 for a policy that is not issued or a stale ETag; 422 for
+        `ENDORSEMENT_OUTSIDE_POLICY_TERM`, `BACKDATE_REASON_REQUIRED`,
+        `CURRENCY_MISMATCH`, `VERSION_REGRESSION`, or
+        `VERSION_OUTSIDE_POLICY_TERM`; 428 `APPROVAL_REQUIRED` when a backdated
+        change has no approval.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/IfMatch'
+        - $ref: './components.yaml#/components/parameters/IdempotencyKey'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEndorsementRequest'
+      responses:
+        '201':
+          description: Endorsement recorded and a policy version issued.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Endorsement'
+        '200':
+          description: Idempotent replay of the same endorsement command.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Endorsement'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        '428':
+          $ref: './components.yaml#/components/responses/PreconditionRequired'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/endorsements/{endorsementId}:
+    get:
+      operationId: getPolicyEndorsement
+      tags:
+        - Policy
+      summary: Get one endorsement.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: endorsementId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Endorsement detail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Endorsement'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/insureds:
+    get:
+      operationId: listPolicyInsureds
+      tags:
+        - Policy
+      summary: List insured parties.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/PageParam'
+        - $ref: './components.yaml#/components/parameters/PageSizeParam'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: One page of insured parties.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsuredPage'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createPolicyInsured
+      tags:
+        - Policy
+      summary: Add an insured party.
+      description: >
+        The insured window must fall inside the policy term. `insuredRole` is
+        one of the SPEC 11.2 roles. A duplicate party and role is 409
+        `DUPLICATE_INSURED`; an invalid window is 422
+        `INSURED_OUTSIDE_POLICY_TERM`. Adding an insured to an issued policy
+        issues an endorsement and a version.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/IfMatch'
+        - $ref: './components.yaml#/components/parameters/IdempotencyKey'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateInsuredRequest'
+      responses:
+        '201':
+          description: Insured party added.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Insured'
+        '200':
+          description: Idempotent replay of the same insured command.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Insured'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/locations:
+    get:
+      operationId: listPolicyLocations
+      tags:
+        - Policy
+      summary: List scheduled locations.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/PageParam'
+        - $ref: './components.yaml#/components/parameters/PageSizeParam'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: One page of locations.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LocationPage'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createPolicyLocation
+      tags:
+        - Policy
+      summary: Add a scheduled location.
+      description: >
+        `locationCode` is an upper-case code unique per policy;
+        `stateRegion` is an ISO 3166-2 code such as `US-OH`; `country` is an
+        ISO 3166-1 alpha-3 code. A duplicate code is 409
+        `DUPLICATE_LOCATION_CODE`; a window outside the policy term is 422
+        `LOCATION_OUTSIDE_POLICY_TERM`. Adding a location to an issued policy
+        issues an endorsement and a version.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/IfMatch'
+        - $ref: './components.yaml#/components/parameters/IdempotencyKey'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLocationRequest'
+      responses:
+        '201':
+          description: Location added.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Location'
+        '200':
+          description: Idempotent replay of the same location command.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Location'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/cancellations:
+    get:
+      operationId: listPolicyCancellations
+      tags:
+        - Policy
+      summary: List cancellations.
+      description: >
+        Returns the page envelope ordered by creation time. Each row carries the
+        computed term, remaining days, pro-rata percentage, earned premium, and
+        return premium.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/PageParam'
+        - $ref: './components.yaml#/components/parameters/PageSizeParam'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: One page of cancellations.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancellationPage'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/cancel:
+    post:
+      operationId: cancelPolicy
+      tags:
+        - Policy
+      summary: Cancel a policy and compute the return premium.
+      description: >
+        The policy must be ISSUED, IN_FORCE, or ENDORSED (409
+        `CANCELLATION_NOT_ALLOWED` otherwise). The effective date must fall
+        inside the policy term and a NON_PAYMENT cancellation needs at least ten
+        days of notice. Cancellation issues a CANCELLATION version and moves the
+        policy to CANCELLED.
+
+        Rejections: 400 for an unknown cancellation type; 409 for a
+        non-cancellable status or a stale ETag; 422 for
+        `CANCELLATION_OUTSIDE_POLICY_TERM`, `INVALID_CANCELLATION_NOTICE`, or
+        `INSUFFICIENT_CANCELLATION_NOTICE`; 428 `APPROVAL_REQUIRED` when a
+        backdated cancellation has no approval.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/IfMatch'
+        - $ref: './components.yaml#/components/parameters/IdempotencyKey'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelPolicyRequest'
+      responses:
+        '201':
+          description: Policy cancelled; computed return premium returned.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Cancellation'
+        '200':
+          description: Idempotent replay of the same cancellation command.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Cancellation'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        '428':
+          $ref: './components.yaml#/components/responses/PreconditionRequired'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/reinstatements:
+    get:
+      operationId: listPolicyReinstatements
+      tags:
+        - Policy
+      summary: List reinstatements.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/PageParam'
+        - $ref: './components.yaml#/components/parameters/PageSizeParam'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: One page of reinstatements.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReinstatementPage'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/reinstate:
+    post:
+      operationId: reinstatePolicy
+      tags:
+        - Policy
+      summary: Reinstate a cancelled policy.
+      description: >
+        The policy must be CANCELLED and have an ACTIVE cancellation record
+        (409 `POLICY_NOT_CANCELLED` otherwise). Approval (`approvedBy`,
+        `approvalRef`) and documented premium evidence are mandatory; the
+        evidence currency must equal the policy currency. Reinstatement issues a
+        REINSTATEMENT version, closes the active cancellation, and moves the
+        policy to REINSTATED.
+
+        Rejections: 409 for a policy that is not cancelled or a stale ETag; 422
+        for `PREMIUM_EVIDENCE_REQUIRED`, `REINSTATEMENT_OUTSIDE_POLICY_TERM`,
+        `REINSTATEMENT_BEFORE_CANCELLATION`, or `CURRENCY_MISMATCH`; 428
+        `APPROVAL_REQUIRED` when the approval or approver is missing.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/IfMatch'
+        - $ref: './components.yaml#/components/parameters/IdempotencyKey'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReinstatePolicyRequest'
+      responses:
+        '201':
+          description: Policy reinstated.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reinstatement'
+        '200':
+          description: Idempotent replay of the same reinstatement command.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reinstatement'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        '428':
+          $ref: './components.yaml#/components/responses/PreconditionRequired'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /internal/v1/policies:
@@ -355,7 +1215,8 @@ paths:
         the body `expectedVersion`. A stale version is 409
         `CONCURRENT_MODIFICATION`; an illegal edge is 409
         `INVALID_STATUS_TRANSITION`; a malformed header is 400
-        `INVALID_IF_MATCH`.
+        `INVALID_IF_MATCH`. Issuing or forcing a policy without a named insured
+        is 422 `NAMED_INSURED_REQUIRED`.
       security: []
       x-internal-api: true
       parameters:
@@ -389,6 +1250,807 @@ paths:
           $ref: './components.yaml#/components/responses/NotFound'
         '409':
           $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/policies/{policyId}/versions:
+    get:
+      operationId: expertListPolicyVersions
+      tags:
+        - Policy internal
+      summary: List the immutable policy versions (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/PageParam'
+        - $ref: './components.yaml#/components/parameters/PageSizeParam'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: One page of policy versions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyVersionPage'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/policies/{policyId}/versions/current:
+    get:
+      operationId: expertGetCurrentPolicyVersion
+      tags:
+        - Policy internal
+      summary: Get the derived current policy version (expert).
+      description: >
+        The expert recomputes the canonical SHA-256 snapshot hash. A stored hash
+        that no longer matches the snapshot is 409 `VERSION_HASH_MISMATCH`.
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Current version and hash verification result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CurrentVersion'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/policies/{policyId}/versions/{versionId}:
+    get:
+      operationId: expertGetPolicyVersion
+      tags:
+        - Policy internal
+      summary: Get one policy version (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: versionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Policy version snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyVersion'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/policies/{policyId}/coverages:
+    get:
+      operationId: expertListPolicyCoverages
+      tags:
+        - Policy internal
+      summary: List coverage grants (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/PageParam'
+        - $ref: './components.yaml#/components/parameters/PageSizeParam'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: One page of coverage views.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoverageViewPage'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertCreatePolicyCoverage
+      tags:
+        - Policy internal
+      summary: Add a coverage grant and limit schedule (expert).
+      description: >
+        Enforces the same coverage and limit invariants as the public route and
+        issues an endorsement plus a policy version when the policy is already
+        issued. Returns 422 for the coverage and limit business rules; a
+        coverage window before policy inception is rejected by the version
+        timeline rather than approved, because the coverage command carries no
+        backdate fields.
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/IfMatch'
+        - $ref: './components.yaml#/components/parameters/IdempotencyKey'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCoverageRequest'
+      responses:
+        '201':
+          description: Coverage and limit created.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoverageView'
+        '200':
+          description: Idempotent replay of the same coverage command.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CoverageView'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/policies/{policyId}/limits:
+    get:
+      operationId: expertListPolicyLimits
+      tags:
+        - Policy internal
+      summary: List limit schedules (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/PageParam'
+        - $ref: './components.yaml#/components/parameters/PageSizeParam'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: One page of limit schedules.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LimitPage'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/policies/{policyId}/aggregate-state:
+    get:
+      operationId: expertListPolicyAggregateState
+      tags:
+        - Policy internal
+      summary: List the derived aggregate erosion state (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/PageParam'
+        - $ref: './components.yaml#/components/parameters/PageSizeParam'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: One page of limit states.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LimitStatePage'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/policies/{policyId}/erosion:
+    post:
+      operationId: expertApplyPolicyErosion
+      tags:
+        - Policy internal
+      summary: Apply one idempotent erosion fact (expert).
+      description: >
+        Facts are keyed by `(limitId, claimId, allocationId, sourceVersion)`.
+        An older fact for a newer chain is 409 `EROSION_STALE_VERSION`; a fact
+        that would take the limit negative is 422 `LIMIT_EXCEEDED` with
+        `meta.availableAmount`.
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/IdempotencyKey'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ErosionRequest'
+      responses:
+        '201':
+          description: Erosion fact applied; derived state returned.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LimitState'
+        '200':
+          description: The same erosion fact or idempotency key replayed.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LimitState'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/policies/{policyId}/endorsements:
+    get:
+      operationId: expertListPolicyEndorsements
+      tags:
+        - Policy internal
+      summary: List endorsements (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/PageParam'
+        - $ref: './components.yaml#/components/parameters/PageSizeParam'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: One page of endorsements.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EndorsementPage'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertCreatePolicyEndorsement
+      tags:
+        - Policy internal
+      summary: Endorse a policy (expert).
+      description: >
+        The expert repeats the endorsement invariants and the backdate gate and
+        issues the immutable version. 422 `BACKDATE_REASON_REQUIRED` and 428
+        `APPROVAL_REQUIRED` are the approval-path failures.
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/IfMatch'
+        - $ref: './components.yaml#/components/parameters/IdempotencyKey'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEndorsementRequest'
+      responses:
+        '201':
+          description: Endorsement recorded and a policy version issued.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Endorsement'
+        '200':
+          description: Idempotent replay of the same endorsement command.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Endorsement'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        '428':
+          $ref: './components.yaml#/components/responses/PreconditionRequired'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/policies/{policyId}/endorsements/{endorsementId}:
+    get:
+      operationId: expertGetPolicyEndorsement
+      tags:
+        - Policy internal
+      summary: Get one endorsement (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: endorsementId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Endorsement detail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Endorsement'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/policies/{policyId}/insureds:
+    get:
+      operationId: expertListPolicyInsureds
+      tags:
+        - Policy internal
+      summary: List insured parties (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/PageParam'
+        - $ref: './components.yaml#/components/parameters/PageSizeParam'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: One page of insured parties.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsuredPage'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertCreatePolicyInsured
+      tags:
+        - Policy internal
+      summary: Add an insured party (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/IfMatch'
+        - $ref: './components.yaml#/components/parameters/IdempotencyKey'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateInsuredRequest'
+      responses:
+        '201':
+          description: Insured party added.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Insured'
+        '200':
+          description: Idempotent replay of the same insured command.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Insured'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/policies/{policyId}/locations:
+    get:
+      operationId: expertListPolicyLocations
+      tags:
+        - Policy internal
+      summary: List scheduled locations (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/PageParam'
+        - $ref: './components.yaml#/components/parameters/PageSizeParam'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: One page of locations.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LocationPage'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertCreatePolicyLocation
+      tags:
+        - Policy internal
+      summary: Add a scheduled location (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/IfMatch'
+        - $ref: './components.yaml#/components/parameters/IdempotencyKey'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLocationRequest'
+      responses:
+        '201':
+          description: Location added.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Location'
+        '200':
+          description: Idempotent replay of the same location command.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Location'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/policies/{policyId}/cancellations:
+    get:
+      operationId: expertListPolicyCancellations
+      tags:
+        - Policy internal
+      summary: List cancellations (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/PageParam'
+        - $ref: './components.yaml#/components/parameters/PageSizeParam'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: One page of cancellations.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancellationPage'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/policies/{policyId}/cancel:
+    post:
+      operationId: expertCancelPolicy
+      tags:
+        - Policy internal
+      summary: Cancel a policy and compute the return premium (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/IfMatch'
+        - $ref: './components.yaml#/components/parameters/IdempotencyKey'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelPolicyRequest'
+      responses:
+        '201':
+          description: Policy cancelled; computed return premium returned.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Cancellation'
+        '200':
+          description: Idempotent replay of the same cancellation command.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Cancellation'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        '428':
+          $ref: './components.yaml#/components/responses/PreconditionRequired'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/policies/{policyId}/reinstatements:
+    get:
+      operationId: expertListPolicyReinstatements
+      tags:
+        - Policy internal
+      summary: List reinstatements (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/PageParam'
+        - $ref: './components.yaml#/components/parameters/PageSizeParam'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: One page of reinstatements.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReinstatementPage'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/policies/{policyId}/reinstate:
+    post:
+      operationId: expertReinstatePolicy
+      tags:
+        - Policy internal
+      summary: Reinstate a cancelled policy (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/IfMatch'
+        - $ref: './components.yaml#/components/parameters/IdempotencyKey'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReinstatePolicyRequest'
+      responses:
+        '201':
+          description: Policy reinstated.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reinstatement'
+        '200':
+          description: Idempotent replay of the same reinstatement command.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Reinstatement'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        '428':
+          $ref: './components.yaml#/components/responses/PreconditionRequired'
         default:
           $ref: './components.yaml#/components/responses/Problem'
 components:
@@ -401,7 +2063,7 @@ components:
         - $ref: './components.yaml#/components/schemas/AuditFields'
       type: object
       description: >
-        Policy projection. Detail, create, and status responses carry a strong
+        Policy projection. Detail, create, and mutation responses carry a strong
         ETag derived from `version`; the body itself does not carry `_links`
         yet.
       required:
@@ -467,6 +2129,744 @@ components:
         - NON_RENEWED
         - REINSTATED
         - VOID
+    PolicyVersion:
+      type: object
+      description: >
+        Immutable policy version (SPEC 11.2.4 `policy_version`). A version is
+        never updated; `effectiveTo` is set when a successor supersedes it.
+        `immutableHash` is the canonical SHA-256 of the version snapshot.
+      required:
+        - id
+        - tenantId
+        - policyId
+        - versionNumber
+        - policyVersionNumber
+        - changeType
+        - status
+        - effectiveFrom
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        policyId:
+          type: string
+          format: uuid
+        versionNumber:
+          type: integer
+          minimum: 1
+        policyVersionNumber:
+          type: string
+          maxLength: 32
+        changeType:
+          $ref: '#/components/schemas/PolicyVersionChangeType'
+        status:
+          $ref: '#/components/schemas/PolicyVersionStatus'
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: [string, 'null']
+          format: date
+        issuedAt:
+          type: [string, 'null']
+          format: date-time
+        issuedBy:
+          type: [string, 'null']
+          format: uuid
+        approvedBy:
+          type: [string, 'null']
+          format: uuid
+        transactionId:
+          type: [string, 'null']
+          format: uuid
+        premiumDeltaAmount:
+          type: [string, 'null']
+          pattern: '^-?[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        premiumDeltaCurrency:
+          type: [string, 'null']
+          pattern: '^[A-Z]{3}$'
+        description:
+          type: [string, 'null']
+          maxLength: 2000
+        supersedesVersionId:
+          type: [string, 'null']
+          format: uuid
+        immutableHash:
+          type: [string, 'null']
+          pattern: '^[a-f0-9]{64}$'
+        createdAt:
+          type: string
+          format: date-time
+    PolicyVersionChangeType:
+      type: string
+      description: Why the version was issued (SPEC 11.2.4 change types).
+      enum:
+        - BIND
+        - ISSUE
+        - ENDORSEMENT
+        - RENEWAL
+        - CANCELLATION
+        - REINSTATEMENT
+        - CORRECTION
+        - PREMIUM_AUDIT
+        - VOID
+    PolicyVersionStatus:
+      type: string
+      enum:
+        - DRAFT
+        - ISSUED
+        - VOIDED
+        - SUPERSEDED
+    CurrentVersion:
+      type: object
+      description: >
+        The derived current version plus the snapshot hash verification result.
+      required:
+        - version
+        - current
+        - hashVerified
+      properties:
+        version:
+          $ref: '#/components/schemas/PolicyVersion'
+        current:
+          type: boolean
+          description: True when this is the single ISSUED version.
+        hashVerified:
+          type: boolean
+          description: True when the recomputed SHA-256 matches `immutableHash`.
+    Coverage:
+      type: object
+      description: Coverage grant projection (SPEC 11.2.4 `policy_coverage`).
+      required:
+        - id
+        - tenantId
+        - policyId
+        - coverageCode
+        - coverageName
+        - coveragePart
+        - occurrenceBasis
+        - effectiveFrom
+        - effectiveTo
+        - status
+        - sequence
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        policyId:
+          type: string
+          format: uuid
+        coverageCode:
+          type: string
+          maxLength: 32
+          pattern: '^[A-Z][A-Z0-9_]{1,31}$'
+        coverageName:
+          type: string
+          maxLength: 160
+        coveragePart:
+          $ref: '#/components/schemas/CoveragePart'
+        occurrenceBasis:
+          $ref: '#/components/schemas/OccurrenceBasis'
+        coinsurancePct:
+          $ref: './components.yaml#/components/schemas/Percent'
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+        status:
+          $ref: '#/components/schemas/CoverageStatus'
+        sequence:
+          type: integer
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+    CoveragePart:
+      type: string
+      description: Coverage part code.
+      enum:
+        - A
+        - B
+        - C
+        - D
+    OccurrenceBasis:
+      type: string
+      enum:
+        - OCCURRENCE
+        - CLAIMS_MADE
+        - CLAIMS_MADE_WITH_RETRO
+        - DISCOVERY
+    CoverageStatus:
+      type: string
+      enum:
+        - ACTIVE
+        - EXCLUDED
+        - ENDORSED
+        - EXPIRED
+    Limit:
+      type: object
+      description: >
+        Limit schedule for one coverage (SPEC 11.2.4 `policy_limit`). A null
+        `aggregateAmount` means the aggregate is explicitly NONE, and the
+        erosion ledger then starts from the each-occurrence amount.
+      required:
+        - id
+        - tenantId
+        - policyId
+        - coverageId
+        - perOccurrenceAmount
+        - currency
+        - effectiveFrom
+        - effectiveTo
+        - sequence
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        policyId:
+          type: string
+          format: uuid
+        coverageId:
+          type: string
+          format: uuid
+        perOccurrenceAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        aggregateAmount:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        aggregateBasis:
+          type: [string, 'null']
+          enum:
+            - PER_POLICY
+            - PER_COVERAGE
+        sublimitAmount:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        deductibleAmount:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        coinsurancePct:
+          type: [string, 'null']
+          pattern: '^0(?:\.[0-9]{1,6})?$|^1(?:\.0{1,6})?$'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        erosionBasis:
+          $ref: '#/components/schemas/ErosionBasis'
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+        sequence:
+          type: integer
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+    ErosionBasis:
+      type: string
+      enum:
+        - PAID
+        - INCURRED
+        - PAID_PLUS_RESERVED
+    LimitState:
+      type: object
+      description: >
+        Derived aggregate erosion ledger for a limit (SPEC 11.2.4
+        `policy_limit_state`). `remainingAmount = originalAmount +
+        reinstatedAmount - incurredAmount + recoveredAmount`.
+      required:
+        - id
+        - tenantId
+        - policyId
+        - limitId
+        - originalAmount
+        - paidAmount
+        - reservedAmount
+        - incurredAmount
+        - recoveredAmount
+        - remainingAmount
+        - erodedPct
+        - sourceVersion
+        - computedAt
+        - reconciliationStatus
+        - version
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        policyId:
+          type: string
+          format: uuid
+        limitId:
+          type: string
+          format: uuid
+        asOf:
+          type: string
+          format: date-time
+        originalAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        paidAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        reservedAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        incurredAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        recoveredAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        remainingAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        erodedPct:
+          $ref: './components.yaml#/components/schemas/Percent'
+        reinstatedAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        sourceVersion:
+          type: integer
+          minimum: 0
+          description: Highest erosion fact `sourceVersion` applied.
+        computedAt:
+          type: string
+          format: date-time
+        reconciliationStatus:
+          type: string
+          enum:
+            - CURRENT
+            - STALE
+            - DRIFT
+            - MANUAL_REVIEW
+        version:
+          type: integer
+          minimum: 0
+    CoverageView:
+      type: object
+      description: >
+        A coverage with its limit schedule and derived erosion state. `limit`
+        and `state` are null only in the moment a coverage is created.
+      required:
+        - coverage
+      properties:
+        coverage:
+          $ref: '#/components/schemas/Coverage'
+        limit:
+          oneOf:
+            - $ref: '#/components/schemas/Limit'
+            - type: 'null'
+        state:
+          oneOf:
+            - $ref: '#/components/schemas/LimitState'
+            - type: 'null'
+    Endorsement:
+      type: object
+      description: >
+        Endorsement projection (SPEC 11.2.4 `policy_endorsement`). Every
+        endorsement issues one policy version; a backdated endorsement records
+        the reason and approval that allowed it.
+      required:
+        - id
+        - tenantId
+        - policyId
+        - policyVersionId
+        - endorsementType
+        - effectiveDate
+        - description
+        - coverageImpact
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        policyId:
+          type: string
+          format: uuid
+        policyVersionId:
+          type: string
+          format: uuid
+        endorsementNumber:
+          type: [string, 'null']
+          maxLength: 32
+        sequence:
+          type: integer
+          minimum: 1
+        formNumber:
+          type: [string, 'null']
+          maxLength: 32
+        formEdition:
+          type: [string, 'null']
+          maxLength: 16
+        endorsementType:
+          $ref: '#/components/schemas/EndorsementType'
+        effectiveDate:
+          type: string
+          format: date
+        description:
+          type: string
+          maxLength: 2000
+        premiumDeltaAmount:
+          type: [string, 'null']
+          pattern: '^-?[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        premiumDeltaCurrency:
+          type: [string, 'null']
+          pattern: '^[A-Z]{3}$'
+        coverageImpact:
+          $ref: '#/components/schemas/CoverageImpact'
+        coverageChanges:
+          type: array
+          items:
+            $ref: '#/components/schemas/EndorsementCoverageChange'
+        manuscriptFlag:
+          type: boolean
+        backdateReason:
+          type: [string, 'null']
+          maxLength: 500
+        approvalRef:
+          type: [string, 'null']
+          format: uuid
+        approvedBy:
+          type: [string, 'null']
+          format: uuid
+        status:
+          $ref: '#/components/schemas/EndorsementStatus'
+        issuedAt:
+          type: [string, 'null']
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+    EndorsementType:
+      type: string
+      enum:
+        - COVERAGE
+        - LIMIT
+        - PARTY
+        - PREMIUM
+        - RETENTION
+        - EXCLUSION
+        - TERRITORY
+        - CANCELLATION
+        - REINSTATEMENT
+        - NON_RENEWAL
+        - CORRECTION
+        - MANUSCRIPT
+    EndorsementStatus:
+      type: string
+      enum:
+        - DRAFT
+        - ISSUED
+        - VOID
+    CoverageImpact:
+      type: string
+      enum:
+        - NONE
+        - BROADEN
+        - RESTRICT
+        - CLARIFY
+    EndorsementCoverageChange:
+      type: object
+      required:
+        - coverageCode
+        - changeType
+      properties:
+        coverageCode:
+          type: string
+          maxLength: 32
+        changeType:
+          type: string
+          enum:
+            - ADD
+            - REMOVE
+            - BROADEN
+            - RESTRICT
+            - CLARIFY
+        description:
+          type: [string, 'null']
+          maxLength: 500
+    Insured:
+      type: object
+      description: Insured party projection (SPEC 11.2.4 `policy_insured`).
+      required:
+        - id
+        - tenantId
+        - policyId
+        - partyId
+        - insuredRole
+        - displayName
+        - effectiveFrom
+        - effectiveTo
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        policyId:
+          type: string
+          format: uuid
+        partyId:
+          type: string
+          format: uuid
+        insuredRole:
+          $ref: '#/components/schemas/InsuredRole'
+        displayName:
+          type: string
+          maxLength: 300
+        certificateNumber:
+          type: [string, 'null']
+          maxLength: 32
+        scope:
+          type: [string, 'null']
+          maxLength: 120
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+        status:
+          type: string
+          enum:
+            - ACTIVE
+            - ENDORSED_OFF
+            - EXPIRED
+        createdAt:
+          type: string
+          format: date-time
+    InsuredRole:
+      type: string
+      enum:
+        - NAMED_INSURED
+        - ADDITIONAL_INSURED
+        - INSURED_ORGANIZATION
+        - LOSS_PAYEE
+        - MORTGAGEE
+        - LENDER
+        - CERTIFICATE_HOLDER
+    Location:
+      type: object
+      description: Scheduled insured location projection.
+      required:
+        - id
+        - tenantId
+        - policyId
+        - locationCode
+        - addressLine1
+        - city
+        - stateRegion
+        - country
+        - effectiveFrom
+        - effectiveTo
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        policyId:
+          type: string
+          format: uuid
+        locationCode:
+          type: string
+          maxLength: 32
+          pattern: '^[A-Z0-9][A-Z0-9_-]{0,31}$'
+        addressLine1:
+          type: string
+          maxLength: 200
+        addressLine2:
+          type: [string, 'null']
+          maxLength: 200
+        city:
+          type: string
+          maxLength: 120
+        stateRegion:
+          type: string
+          maxLength: 6
+          pattern: '^[A-Z]{2}-[A-Z0-9]{1,3}$'
+        postalCode:
+          type: [string, 'null']
+          maxLength: 20
+        country:
+          type: string
+          pattern: '^[A-Z]{3}$'
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+        status:
+          type: string
+          enum:
+            - ACTIVE
+            - ENDORSED_OFF
+            - EXPIRED
+        createdAt:
+          type: string
+          format: date-time
+    Cancellation:
+      type: object
+      description: >
+        Cancellation projection with the return premium computed at cancellation
+        time. `proRataPct` is the earned fraction of the term.
+      required:
+        - id
+        - tenantId
+        - policyId
+        - cancellationType
+        - reason
+        - effectiveDate
+        - termDays
+        - remainingDays
+        - proRataPct
+        - earnedPremiumAmount
+        - returnPremiumAmount
+        - premiumCurrency
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        policyId:
+          type: string
+          format: uuid
+        policyVersionId:
+          type: [string, 'null']
+          format: uuid
+        cancellationType:
+          $ref: '#/components/schemas/CancellationType'
+        reason:
+          type: string
+          maxLength: 200
+        effectiveDate:
+          type: string
+          format: date
+        noticeDays:
+          type: integer
+          minimum: 0
+        noticedAt:
+          type: [string, 'null']
+          format: date-time
+        termDays:
+          type: integer
+          minimum: 0
+        remainingDays:
+          type: integer
+          minimum: 0
+        proRataPct:
+          $ref: './components.yaml#/components/schemas/Percent'
+        earnedPremiumAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        returnPremiumAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        premiumCurrency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        approvalRef:
+          type: [string, 'null']
+          format: uuid
+        approvedBy:
+          type: [string, 'null']
+          format: uuid
+        status:
+          type: string
+          enum:
+            - ACTIVE
+            - REINSTATED
+            - VOID
+        createdAt:
+          type: string
+          format: date-time
+    CancellationType:
+      type: string
+      enum:
+        - FLAT
+        - PRO_RATA
+        - SHORT_RATE
+        - NON_PAYMENT
+        - VOID
+    Reinstatement:
+      type: object
+      description: >
+        Reinstatement projection backed by approval and premium evidence.
+      required:
+        - id
+        - tenantId
+        - policyId
+        - cancellationId
+        - effectiveDate
+        - reason
+        - approvalRef
+        - approvedBy
+        - premiumEvidenceRef
+        - premiumEvidenceAmount
+        - premiumEvidenceCurrency
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        policyId:
+          type: string
+          format: uuid
+        cancellationId:
+          type: string
+          format: uuid
+        policyVersionId:
+          type: [string, 'null']
+          format: uuid
+        effectiveDate:
+          type: string
+          format: date
+        reason:
+          type: string
+          maxLength: 500
+        approvalRef:
+          type: string
+          format: uuid
+        approvedBy:
+          type: string
+          format: uuid
+        premiumEvidenceRef:
+          type: string
+          maxLength: 64
+        premiumEvidenceAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        premiumEvidenceCurrency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        status:
+          type: string
+          enum:
+            - APPROVED
+            - REVOKED
+        createdAt:
+          type: string
+          format: date-time
     PolicyPage:
       type: object
       description: >
@@ -481,6 +2881,96 @@ components:
               type: array
               items:
                 $ref: '#/components/schemas/Policy'
+    PolicyVersionPage:
+      type: object
+      allOf:
+        - $ref: './components.yaml#/components/schemas/Page'
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/PolicyVersion'
+    CoverageViewPage:
+      type: object
+      allOf:
+        - $ref: './components.yaml#/components/schemas/Page'
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/CoverageView'
+    LimitPage:
+      type: object
+      allOf:
+        - $ref: './components.yaml#/components/schemas/Page'
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Limit'
+    LimitStatePage:
+      type: object
+      allOf:
+        - $ref: './components.yaml#/components/schemas/Page'
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/LimitState'
+    EndorsementPage:
+      type: object
+      allOf:
+        - $ref: './components.yaml#/components/schemas/Page'
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Endorsement'
+    InsuredPage:
+      type: object
+      allOf:
+        - $ref: './components.yaml#/components/schemas/Page'
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Insured'
+    LocationPage:
+      type: object
+      allOf:
+        - $ref: './components.yaml#/components/schemas/Page'
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Location'
+    CancellationPage:
+      type: object
+      allOf:
+        - $ref: './components.yaml#/components/schemas/Page'
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Cancellation'
+    ReinstatementPage:
+      type: object
+      allOf:
+        - $ref: './components.yaml#/components/schemas/Page'
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Reinstatement'
     CreatePolicyRequest:
       type: object
       description: >
@@ -603,98 +3093,372 @@ components:
         reason:
           type: string
           maxLength: 200
+    CreateCoverageRequest:
+      type: object
+      description: >
+        Add a coverage grant with its limit schedule. Dates must stay inside the
+        policy term and the limit currency must match the policy currency.
+      required:
+        - coverageCode
+        - coverageName
+        - coveragePart
+        - occurrenceBasis
+        - effectiveFrom
+        - effectiveTo
+        - limit
+      properties:
+        coverageCode:
+          type: string
+          maxLength: 32
+          pattern: '^[A-Z][A-Z0-9_]{1,31}$'
+        coverageName:
+          type: string
+          maxLength: 160
+        coveragePart:
+          $ref: '#/components/schemas/CoveragePart'
+        occurrenceBasis:
+          $ref: '#/components/schemas/OccurrenceBasis'
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+        coinsurancePct:
+          $ref: './components.yaml#/components/schemas/Percent'
+        limit:
+          $ref: '#/components/schemas/CoverageLimitRequest'
+    CoverageLimitRequest:
+      type: object
+      description: >
+        Limit schedule accepted with a coverage. `perOccurrenceAmount` is
+        required and greater than zero; `aggregateAmount` is optional and means
+        NONE when omitted.
+      required:
+        - perOccurrenceAmount
+        - currency
+      properties:
+        perOccurrenceAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        aggregateAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        aggregateBasis:
+          type: string
+          enum:
+            - PER_POLICY
+            - PER_COVERAGE
+        sublimitAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        deductibleAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        coinsurancePct:
+          $ref: './components.yaml#/components/schemas/Percent'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        erosionBasis:
+          $ref: '#/components/schemas/ErosionBasis'
+    ErosionRequest:
+      type: object
+      description: >
+        One idempotent erosion fact for a limit. Facts are unique by
+        `(limitId, claimId, allocationId, sourceVersion)`.
+      required:
+        - limitId
+        - claimId
+        - allocationId
+        - sourceVersion
+        - paidAmount
+        - reservedAmount
+      properties:
+        limitId:
+          type: string
+          format: uuid
+        claimId:
+          type: string
+          format: uuid
+        allocationId:
+          type: string
+          format: uuid
+        sourceVersion:
+          type: integer
+          minimum: 1
+        paidAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        reservedAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        recoveredAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        asOf:
+          type: string
+          format: date-time
+    CreateEndorsementRequest:
+      type: object
+      description: >
+        Endorse a policy. A backdated endorsement (effective before policy
+        inception) requires `backdateReason` and an `approvalRef`/`approvedBy`.
+      required:
+        - endorsementType
+        - effectiveDate
+        - description
+      properties:
+        endorsementNumber:
+          type: string
+          maxLength: 32
+        endorsementType:
+          $ref: '#/components/schemas/EndorsementType'
+        effectiveDate:
+          type: string
+          format: date
+        description:
+          type: string
+          maxLength: 2000
+        premiumDeltaAmount:
+          type: string
+          pattern: '^-?[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+        premiumDeltaCurrency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        coverageImpact:
+          $ref: '#/components/schemas/CoverageImpact'
+        coverageChanges:
+          type: array
+          items:
+            $ref: '#/components/schemas/EndorsementCoverageChangeRequest'
+        backdateReason:
+          type: string
+          maxLength: 500
+        approvedBy:
+          type: string
+          format: uuid
+        approvalRef:
+          type: string
+          format: uuid
+        formNumber:
+          type: string
+          maxLength: 32
+        formEdition:
+          type: string
+          maxLength: 16
+    EndorsementCoverageChangeRequest:
+      type: object
+      required:
+        - coverageCode
+        - changeType
+      properties:
+        coverageCode:
+          type: string
+          maxLength: 32
+        changeType:
+          type: string
+          enum:
+            - ADD
+            - REMOVE
+            - BROADEN
+            - RESTRICT
+            - CLARIFY
+        description:
+          type: string
+          maxLength: 500
+    CreateInsuredRequest:
+      type: object
+      description: Add an insured party to a policy.
+      required:
+        - partyId
+        - insuredRole
+        - displayName
+        - effectiveFrom
+        - effectiveTo
+      properties:
+        partyId:
+          type: string
+          format: uuid
+        insuredRole:
+          $ref: '#/components/schemas/InsuredRole'
+        displayName:
+          type: string
+          maxLength: 300
+        certificateNumber:
+          type: string
+          maxLength: 32
+        scope:
+          type: string
+          maxLength: 120
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+    CreateLocationRequest:
+      type: object
+      description: Add a scheduled location to a policy.
+      required:
+        - locationCode
+        - addressLine1
+        - city
+        - stateRegion
+        - country
+        - effectiveFrom
+        - effectiveTo
+      properties:
+        locationCode:
+          type: string
+          maxLength: 32
+          pattern: '^[A-Z0-9][A-Z0-9_-]{0,31}$'
+        addressLine1:
+          type: string
+          maxLength: 200
+        addressLine2:
+          type: string
+          maxLength: 200
+        city:
+          type: string
+          maxLength: 120
+        stateRegion:
+          type: string
+          pattern: '^[A-Z]{2}-[A-Z0-9]{1,3}$'
+        postalCode:
+          type: string
+          maxLength: 20
+        country:
+          type: string
+          pattern: '^[A-Z]{3}$'
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+    CancelPolicyRequest:
+      type: object
+      description: >
+        Cancel a policy. The cancellation type determines the return premium:
+        FLAT and VOID refund the full unearned premium, PRO_RATA and
+        NON_PAYMENT refund the unearned portion, and SHORT_RATE applies the
+        filed short-rate factor.
+      required:
+        - cancellationType
+        - reason
+        - effectiveDate
+      properties:
+        cancellationType:
+          $ref: '#/components/schemas/CancellationType'
+        reason:
+          type: string
+          maxLength: 200
+        effectiveDate:
+          type: string
+          format: date
+        noticeDays:
+          type: integer
+          minimum: 0
+        approvedBy:
+          type: string
+          format: uuid
+        approvalRef:
+          type: string
+          format: uuid
+    ReinstatePolicyRequest:
+      type: object
+      description: >
+        Reinstate a cancelled policy. Approval and premium evidence are
+        mandatory before coverage is restored.
+      required:
+        - effectiveDate
+        - reason
+        - approvedBy
+        - approvalRef
+        - premiumEvidenceRef
+        - premiumEvidenceAmount
+        - premiumEvidenceCurrency
+      properties:
+        effectiveDate:
+          type: string
+          format: date
+        reason:
+          type: string
+          maxLength: 500
+        approvedBy:
+          type: string
+          format: uuid
+        approvalRef:
+          type: string
+          format: uuid
+        premiumEvidenceRef:
+          type: string
+          maxLength: 64
+        premiumEvidenceAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        premiumEvidenceCurrency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
 x-vertical: policy
 x-implementation:
   status: implemented
   verifiedAt: '2026-10-19'
   verifiedAgainst:
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyController.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyContractController.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyContractService.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyService.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyClient.java
-    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyPage.java
-    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PageLinks.java
-    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/Pagination.java
-    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/EntityTags.java
-    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/IdempotencyKeys.java
-    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyLifecycle.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/ItemPage.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/Mutation.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/Problem.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/Problems.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/ApiExceptionHandler.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyController.java
-    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyService.java
-    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyPage.java
-    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PageLinks.java
-    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/Pagination.java
-    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/EntityTags.java
-    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/IdempotencyKeys.java
-    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/Problem.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyVersionController.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/CoverageController.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/EndorsementController.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/CancellationController.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyPartyController.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyErrors.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/Problems.java
-    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/ApiExceptionHandler.java
-    - repos/eia-policy-web/src/App.jsx
-    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/PolicyControllerTest.java
-    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/PolicyControllerTest.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/MutationGuard.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/PolicyContractControllerTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/CoverageControllerTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/EndorsementControllerTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/CancellationControllerTest.java
   errorEnvelope: >
     Canonical RFC 9457 Problem with content type application/problem+json, from
     both the Policy domain and the Policy expert. The vertical keeps its legacy
     code strings rather than the EIA-XXX-NNNN scheme; see MISMATCHES.md M-02.
   notes: >
-    Money fields remain flat string pairs. ETag is derived from the aggregate
-    version and formatted as a quoted decimal. If-Match and Idempotency-Key are
-    optional for backward compatibility even though SPEC 12.6 requires them.
-    The list envelope is offset-based (page/size) rather than the SPEC 7.6
-    cursor envelope; see MISMATCHES.md M-04.
+    Money fields remain flat pairs on the policy header and one `currency` per
+    second-slice row. ETag is derived from the aggregate version and formatted
+    as a quoted decimal. Every second-slice mutation returns the policy ETag and
+    accepts If-Match and Idempotency-Key, both optional for backward
+    compatibility. 422 and 428 are emitted by the expert and re-emitted by the
+    domain unchanged. The list envelope is offset-based (page/size) rather than
+    the SPEC 7.6 cursor envelope; see MISMATCHES.md M-04.
 x-compatibility:
-  contractVersion: 2.0.0
-  previousContractVersion: 1.0.0
-  breaking:
-    - List responses changed from a bare JSON array to the page envelope.
-    - Error bodies changed from the vertical ApiError to RFC 9457 Problem.
-    - Illegal transitions changed from 400 to 409 INVALID_STATUS_TRANSITION.
-    - Duplicate policy numbers changed to 409 DUPLICATE_POLICY_NUMBER.
+  contractVersion: 2.1.0
+  previousContractVersion: 2.0.0
+  breaking: []
   compatible:
-    - ETag, If-Match, Idempotency-Key, and Idempotent-Replayed are additive headers.
-    - The 200 idempotent replay response is additive; a fresh create still returns 201.
+    - Adds the 15 second-slice paths, their schemas, and the 422/428 responses.
+    - Adds the 422 and 428 statuses to existing mutation responses; no response shape changed.
+    - Adds no required request field and removes no response field.
   note: >
-    The HTTP path remains /api/v1/policies because the only consumer, the
-    Policy web remote, is updated in the same release. A future external
-    consumer that needs the old array or error shape requires a /v2 surface.
+    The second Policy slice is additive over 2.0.0. The HTTP path remains
+    /api/v1/policies and the existing ETag, If-Match, Idempotency-Key, page
+    envelope, and Problem schemas are unchanged.
 x-planned-operations:
-  - method: GET
-    path: /api/v1/policies/{policyId}/versions
-    spec: SPEC 11.2.10
-    note: Version history.
   - method: POST
     path: /api/v1/policies/{policyId}/bind
     spec: SPEC 11.2.10
-    note: Bind a quoted policy.
+    note: Bind a quoted policy; a lifecycle status transition is the only implemented path.
   - method: POST
     path: /api/v1/policies/{policyId}/issue
     spec: SPEC 11.2.10
-    note: Issue a bound policy.
+    note: Issue a bound policy through the status transition.
   - method: POST
     path: /api/v1/policies/{policyId}/endorse
     spec: SPEC 11.2.10
-    note: Endorse a policy.
-  - method: POST
-    path: /api/v1/policies/{policyId}/cancel
-    spec: SPEC 11.2.10
-    note: Cancel a policy.
-  - method: POST
-    path: /api/v1/policies/{policyId}/reinstate
-    spec: SPEC 11.2.10
-    note: Reinstate a policy.
+    note: The implemented endorsement command is POST /endorsements.
   - method: POST
     path: /api/v1/policies/{policyId}/renew
     spec: SPEC 11.2.10
     note: Renew a policy.
-  - method: GET
-    path: /api/v1/policies/{policyId}/coverages
-    spec: SPEC 11.2.10
-    note: Coverage parts and forms.
-  - method: GET
-    path: /api/v1/policies/{policyId}/limits
-    spec: SPEC 11.2.10
-    note: Limits and current state.
   - method: GET
     path: /api/v1/policies/{policyId}/premium
     spec: SPEC 11.2.10
@@ -716,10 +3480,6 @@ x-planned-operations:
     spec: SPEC 11.2.10
     note: Cession projection.
   - method: GET
-    path: /api/v1/policies/{policyId}/aggregate-state
-    spec: SPEC 11.2.10
-    note: Erosion state.
-  - method: GET
     path: /api/v1/programs
     spec: SPEC 11.2.10
     note: Mass tort programs.
@@ -731,7 +3491,3 @@ x-planned-operations:
     path: /internal/v1/policies/{policyId}/coverage-summary
     spec: SPEC 11.2.10
     note: Coverage summary for Direct Claims.
-  - method: POST
-    path: /internal/v1/policies/{policyId}/erosion
-    spec: SPEC 11.2.10
-    note: Apply aggregate erosion for Direct Claims.

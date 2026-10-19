@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA canonical shared API components
-  version: 1.1.0
+  version: 1.2.0
   summary: Shared error, money, paging, concurrency, idempotency, audit, and tenant/book components for every EIA API.
   description: >
     Shared OpenAPI 3.1 components referenced by the per-vertical contract
@@ -11,10 +11,14 @@ info:
     Vertical documents reference them with a relative file reference such as
     `./components.yaml#/components/schemas/Problem`.
 
-    Round 2 (contract 1.1.0) turns the Policy page envelope, ETag/If-Match, and
-    Idempotency-Key from planned components into implemented ones. The
-    remaining verticals still return bare arrays and their own error bodies;
-    the divergence is tracked in MISMATCHES.md.
+    Round 2 (contract 1.1.0) turned the Policy page envelope, ETag/If-Match, and
+    Idempotency-Key from planned components into implemented ones. Round 5
+    (contract 1.2.0) adds the 422 `UnprocessableContent` and 428
+    `PreconditionRequired` responses used by Policy and Assumed Claims, marks
+    `Percent` implemented, and records that the page envelope now also covers
+    the Policy second-slice collections. The remaining verticals still return
+    bare arrays and their own error bodies; the divergence is tracked in
+    MISMATCHES.md.
 
     Authority is SPEC.md sections 6.11, 7.6, 7.18-7.23, 10.3, 12.2, and 12.6.
     Where an implemented service deviates from a component, the deviation is
@@ -225,8 +229,11 @@ components:
       description: >
         Decimal fraction with up to six fraction digits, for example
         `0.150000` for fifteen percent (SPEC 10.3). Never a JSON number.
-        Planned: no implemented payload carries a Percent yet.
-      x-status: planned
+        Implemented by the Policy second slice (`coinsurancePct`, `proRataPct`,
+        `erodedPct`) and by the Contract second slice (`sharePct`,
+        `signedLinePct`, `cessionPct`), where the values are percentages of
+        100 rather than fractions.
+      x-status: implemented
       pattern: '^[0-9]{1,3}(?:\.[0-9]{1,6})?$'
       examples:
         - '0.150000'
@@ -260,12 +267,14 @@ components:
     Page:
       type: object
       description: >
-        Offset-paged collection envelope implemented by the Policy list
-        endpoints in Round 2: `items`, `page`, `size`, `total`, and `_links`.
-        A vertical document narrows `items` to its resource type. SPEC 7.6 and
-        12.2 describe a cursor envelope (`data`, `page.size`, `hasMore`,
-        `nextCursor`); the implemented offset form and the remaining cursor
-        divergence are recorded in MISMATCHES.md.
+        Offset-paged collection envelope used by the Policy list endpoints and
+        by every Policy second-slice collection (versions, coverages, limits,
+        aggregate state, endorsements, insureds, locations, cancellations, and
+        reinstatements): `items`, `page`, `size`, `total`, and `_links`. A
+        vertical or schema document narrows `items` to its resource type.
+        SPEC 7.6 and 12.2 describe a cursor envelope (`data`, `page.size`,
+        `hasMore`, `nextCursor`); the implemented offset form and the remaining
+        cursor divergence are recorded in MISMATCHES.md.
       allOf:
         - $ref: '#/components/schemas/PageMeta'
         - type: object
@@ -435,10 +444,14 @@ components:
   responses:
     BadRequest:
       description: >
-        400. The request is malformed or violates a validation rule. Codes
-        include VALIDATION_ERROR, MISSING_TENANT_HEADER,
-        INVALID_TENANT_HEADER, INVALID_IF_MATCH, INVALID_IDEMPOTENCY_KEY,
-        INVALID_STATUS, FSRI_VALIDATION, and FSRI_REJECTED.
+        400. The request is malformed or violates a validation rule. Policy
+        second-slice codes include VALIDATION_ERROR, INVALID_STATUS,
+        INVALID_INITIAL_STATUS, INVALID_IF_MATCH, INVALID_IDEMPOTENCY_KEY,
+        INVALID_OCCURRENCE_BASIS, INVALID_COVERAGE_IMPACT,
+        INVALID_ENDORSEMENT_TYPE, INVALID_COVERAGE_CHANGE,
+        INVALID_INSURED_ROLE, INVALID_CANCELLATION_TYPE, INVALID_CHANGE_TYPE,
+        and INVALID_PARAMETER. Other verticals add MISSING_TENANT_HEADER,
+        INVALID_TENANT_HEADER, FSRI_VALIDATION, and FSRI_REJECTED.
       content:
         application/problem+json:
           schema:
@@ -447,7 +460,9 @@ components:
       description: >
         404. The resource does not exist, is not visible in the caller's tenant
         or book scope, or the request used a book that the vertical hides as
-        404 `BOOK_SCOPE_VIOLATION` (SPEC 3.6.2).
+        404 `BOOK_SCOPE_VIOLATION` (SPEC 3.6.2). Policy second-slice not-found
+        codes are POLICY_NOT_FOUND, POLICY_VERSION_NOT_FOUND,
+        ENDORSEMENT_NOT_FOUND, LIMIT_NOT_FOUND, and LIMIT_STATE_NOT_FOUND.
       content:
         application/problem+json:
           schema:
@@ -457,17 +472,57 @@ components:
         409. A state or version conflict: `CONCURRENT_MODIFICATION` (stale
         ETag or expected version), `IDEMPOTENCY_CONFLICT` (the key was reused
         with a different request), a duplicate business key such as
-        `DUPLICATE_POLICY_NUMBER`, `INVALID_STATUS_TRANSITION` (illegal
-        lifecycle edge), or `FSRI_CONFLICT` (FS-RI rejected an immutable
-        hand-off).
+        `DUPLICATE_POLICY_NUMBER`, `DUPLICATE_COVERAGE_CODE`,
+        `DUPLICATE_ENDORSEMENT_NUMBER`, `DUPLICATE_INSURED`, or
+        `DUPLICATE_LOCATION_CODE`, `INVALID_STATUS_TRANSITION` (illegal
+        lifecycle edge), `POLICY_NOT_ISSUED`, `POLICY_NOT_CANCELLED`,
+        `CANCELLATION_NOT_ALLOWED`, `VERSION_RANGE_OVERLAP`,
+        `VERSION_ALREADY_ISSUED`, `VERSION_HASH_MISMATCH`, or
+        `EROSION_STALE_VERSION`. Contract adds `BIND_REQUIRES_COMMAND`,
+        `BIND_PRECONDITION_FAILED`, `CONTRACT_LOCKED`,
+        `CONTRACT_NOT_INCEPTED`, `LAYER_OVERLAP`, `SHARES_EXCEED_100`,
+        `CESSION_EXCEEDS_CONTRACT_LIMIT`, `COLLATERAL_EXCEEDS_OBLIGATION`,
+        `COMMUTATION_NOT_APPROVED`, and `COMMUTATION_NOT_PERMITTED`. FS-RI adds
+        `FSRI_CONFLICT`.
       content:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
     UnprocessableContent:
       description: >
-        422. The request is well formed but a domain policy rejects it. No
-        Policy operation returns 422 today.
+        422. The request is well formed but a domain policy rejects it. Policy
+        emits it with category BUSINESS_RULE for coverage and limit rules
+        (`INVALID_COVERAGE_RANGE`, `COVERAGE_OUTSIDE_POLICY_TERM`,
+        `INVALID_PER_OCCURRENCE_LIMIT`, `INVALID_AGGREGATE_LIMIT`,
+        `LIMIT_EXCEEDS_AGGREGATE`, `INVALID_DEDUCTIBLE`,
+        `DEDUCTIBLE_EXCEEDS_LIMIT`, `INVALID_SUBLIMIT`,
+        `SUBLIMIT_EXCEEDS_LIMIT`, `INVALID_COINSURANCE`, `INVALID_EROSION_BASIS`,
+        `INVALID_AGGREGATE_BASIS`, `LIMIT_EXCEEDED`, `CURRENCY_MISMATCH`),
+        endorsement rules (`ENDORSEMENT_OUTSIDE_POLICY_TERM`,
+        `BACKDATE_REASON_REQUIRED`, `VERSION_REGRESSION`,
+        `VERSION_OUTSIDE_POLICY_TERM`, `VERSION_BACKDATE_REASON_REQUIRED`),
+        party rules (`INSURED_OUTSIDE_POLICY_TERM`, `NAMED_INSURED_REQUIRED`,
+        `LOCATION_OUTSIDE_POLICY_TERM`), cancellation rules
+        (`CANCELLATION_OUTSIDE_POLICY_TERM`, `INVALID_CANCELLATION_NOTICE`,
+        `INSUFFICIENT_CANCELLATION_NOTICE`), and reinstatement rules
+        (`REINSTATEMENT_OUTSIDE_POLICY_TERM`,
+        `REINSTATEMENT_BEFORE_CANCELLATION`, `PREMIUM_EVIDENCE_REQUIRED`).
+        Assumed Claims emits it with category BUSINESS_RULE for
+        `EIA-RNS-7102`, `EIA-RNS-7204`, `EIA-RNS-7301`, `EIA-RNS-7401`,
+        `EIA-RNS-7502`, `EIA-RNS-7603`, and `EIA-RNS-7701`.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    PreconditionRequired:
+      description: >
+        428. A mandatory approval or precondition is missing; the request is
+        otherwise valid. The response uses category APPROVAL_REQUIRED and names
+        the missing evidence in `errors[]`. Policy emits `APPROVAL_REQUIRED`
+        for a backdated endorsement, a backdated cancellation, and a
+        reinstatement without `approvedBy`/`approvalRef`. Assumed Claims emits
+        `EIA-RNS-7203` (reserve approval), `EIA-RNS-7302` (cash-call approval),
+        and `EIA-RNS-7501` (commutation approval).
       content:
         application/problem+json:
           schema:
