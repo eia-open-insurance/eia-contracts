@@ -8,10 +8,9 @@ info:
     internal Cession expert API. The authoritative requirement is SPEC 11.9,
     SPEC 7.18, and SPEC 12; the implemented surface is the first vertical slice.
 
-    Cession is fixed to the DIRECT book. A missing or different X-EIA-Book value
-    currently returns 400 BOOK_REQUIRED or 400 BOOK_SCOPE_VIOLATION. SPEC 3.6.2
-    requires that a book mismatch be hidden as 404; the deviation is recorded
-    in MISMATCHES.md.
+    Cession is fixed to the DIRECT book. A missing X-EIA-Book returns 400
+    BOOK_REQUIRED; a different book is hidden as 404 BOOK_SCOPE_VIOLATION per
+    SPEC 3.6.2.
 
     The public transition body carries only `targetStatus`; the domain service
     reads the current version and sends it to the expert. The expert route is
@@ -474,3 +473,4 @@ x-planned-operations:
     note: Retry a hand-off.
 x-planned-notes:
   - The SPEC path base is /api/v1/cession but the implemented slice serves /api/v1/cessions.
+

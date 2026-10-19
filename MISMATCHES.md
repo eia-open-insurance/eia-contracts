@@ -33,19 +33,19 @@ a visible contract inconsistency, **L** = a naming or documentation difference.
 |---|---|---|
 | M-01 | Public base paths differ from the SPEC vertical tables | M |
 | M-02 | Five error-body shapes plus two extra variants | H |
-| M-03 | Money serialized as a JSON number by four services | H |
+| M-03 | Money serialized as a JSON number by four services — resolved 2026-10-19 | H |
 | M-04 | No cursor pagination; lists are bare arrays | H |
 | M-05 | No `_links` on detail resources | M |
 | M-06 | No `ETag`/`If-Match`; inconsistent `expectedVersion` | H |
 | M-07 | No `Idempotency-Key` enforcement | H |
 | M-08 | Tenant context is passed three different ways | M |
-| M-09 | Book mismatch is 404 in the claim verticals and 400 in the reinsurance verticals | H |
+| M-09 | Book mismatch is 404 in the claim verticals and 400 in the reinsurance verticals — resolved 2026-10-19 | H |
 | M-10 | Lifecycle operations use PATCH, POST, and PUT inconsistently | M |
 | M-11 | Illegal-transition status codes are inconsistent (400 vs 409 vs 422) | M |
 | M-12 | Resource models are narrower than the SPEC aggregates | M |
 | M-13 | Field names differ from the SPEC representations | L |
 | M-14 | No event publisher, dispatcher, or subscriber | M |
-| M-15 | Party domain has no exception mapping | H |
+| M-15 | Party domain has no exception mapping — resolved 2026-10-19 | H |
 | M-16 | Assumed Claims mounts two public path sets | L |
 | M-17 | Error content type is `application/json` in most services | M |
 | M-18 | SPEC 12.4 example envelope omits the book required by SPEC 3.6 | L |
@@ -142,10 +142,10 @@ services serialize the number as a JSON number.
 |---|---|---|---|
 | Policy | `premiumAmount`/`premiumCurrency`, `limitAmount`/`limitCurrency` | string (`@JsonFormat(shape = STRING)`) | `Money` object |
 | Payment | `amount`/`currency` | string (`@JsonFormat(shape = STRING)`) | `Money` object |
-| Direct Claims | `reserveAmount`/`reserveCurrency` | **number** (no `@JsonFormat`) | `Money` object |
-| Assumed Claims | `reserveAmount`/`reserveCurrency` | **number** | `Money` object |
-| Cession | `cededPremium`, `cededLoss`, `currency` | **number** | two `Money` objects |
-| Retrocession | `cededPremium`, `cededLoss`, `currency` | **number** | two `Money` objects |
+| Direct Claims | `reserveAmount`/`reserveCurrency` | string (`@JsonFormat(shape = STRING)`) | `Money` object |
+| Assumed Claims | `reserveAmount`/`reserveCurrency` | string (`@JsonFormat(shape = STRING)`) | `Money` object |
+| Cession | `cededPremium`, `cededLoss`, `currency` | string (`@JsonFormat(shape = STRING)`) | two `Money` objects |
+| Retrocession | `cededPremium`, `cededLoss`, `currency` | string (`@JsonFormat(shape = STRING)`) | two `Money` objects |
 
 Evidence:
 
@@ -232,13 +232,12 @@ internal tenant a header only, and remove `tenantId` from request bodies.
 |---|---|---|
 | Direct Claims (public and expert) | 404, `NOT_FOUND` | `RequestGuard.java:13-17`, `BookWall.java:11-15` |
 | Assumed Claims (public and expert) | 404, `EIA-RNS-7005` | `BookScopeFilter.java:36-43` in both services |
-| Cession | 400 `BOOK_REQUIRED` / 400 `BOOK_SCOPE_VIOLATION` | `RequestScope.java:28-35` |
-| Retrocession | 400 `BOOK_REQUIRED` / 400 `BOOK_SCOPE_VIOLATION` | `RequestScope.java:28-35` |
+| Cession | 400 `BOOK_REQUIRED`; 404 `BOOK_SCOPE_VIOLATION` | `RequestScope.java:28-35` |
+| Retrocession | 400 `BOOK_REQUIRED`; 404 `BOOK_SCOPE_VIOLATION` | `RequestScope.java:28-35` |
 
 SPEC 3.6.2 requires a mismatch to be returned as 404 so the response cannot
-confirm existence. Cession and Retrocession disclose the wall and must change.
-The contracts use the canonical 404 response for all four verticals and
-document the current 400 in the shared book parameter description.
+confirm existence. Cession and Retrocession now hide a wrong book as 404; a
+missing header still returns 400 `BOOK_REQUIRED`. The contracts document this.
 
 ## M-10 Lifecycle method inconsistency
 
@@ -326,12 +325,11 @@ and `asyncapi/event-catalog.yaml` marks `x-implementation.publisher: none`.
 
 ## M-15 Party domain exception handling
 
-`eia-party-domain` has no `@RestControllerAdvice`. `PartyClient` does not
-translate expert errors. A missing party therefore returns Spring's default
-500 body rather than 404, and a missing `X-EIA-Tenant` returns the default 400
-body. The canonical contract documents 400 and 404. The expert handler returns
-`{code, message}` for `NOT_FOUND` only
-(`eia-party-expert/.../ApiExceptionHandler.java:10-14`).
+Resolved 2026-10-19. `eia-party-domain` now has a `@RestControllerAdvice` and
+`PartyClient` translates expert 404 to 404 `NOT_FOUND`, other 4xx to 400 with
+the expert code, and 5xx/unreachable to 503 `EXPERT_UNAVAILABLE`. Missing or
+malformed `X-EIA-Tenant` returns structured 400 responses. The expert still
+returns `{code, message}` for `NOT_FOUND`.
 
 ## M-16 Assumed Claims path alias
 
@@ -442,3 +440,5 @@ Additional developer checks, not repository dependencies:
    updates the contract.
 3. A new deviation must be added here with the same evidence standard: source
    path and symbol or line, and the SPEC section it violates.
+
+
