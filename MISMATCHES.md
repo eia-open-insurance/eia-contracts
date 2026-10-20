@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-20 (Contract security/collateral).
+Status: open, reviewed 2026-10-20 (Direct Claims mass-tort allocation guard).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -49,7 +49,10 @@ where the running code does not meet it yet.
   domain security controller, service, client, projection, and command plus the
   expert public security controller, rules, view, request, entity, event
   factory, internal security controller, repository, exception handler,
-  `schema.sql`, and tests.
+  `schema.sql`, and tests. The Direct Claims mass-tort allocation guard pass
+  reads the domain claim detail controller and service, the Policy mass-tort
+  client, the guard exception, the domain exception handler, and the domain
+  tests.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -1405,27 +1408,39 @@ is breaking and needs an ADR and an EV-05 dual-publish window.
 
 ## M-31 Direct Claims allocation error codes are remapped at the public surface
 
-The canonical contract documents the Direct Claims expert's stable allocation
-error codes at the public surface:
+The canonical contract documents the Direct Claims allocation error codes at the
+public surface:
 
 | Status | Canonical code | Meaning |
 |---|---|---|
 | 400 | `POLICY_MISMATCH` | The requested `policyId` is not the claim's own policy. |
+| 400 | `MASS_TORT_YEAR_OUTSIDE_BLOCK` | The requested `policyYear` is outside the coverage block of a COMPLETE policy mass-tort profile. |
 | 409 | `ALLOCATION_EXCEEDS_100` | The allocation percentages already recorded for the claim plus the new one would exceed 1. |
 
-The expert emits both codes from `ApiExceptionHandler.java`. The Direct Claims
-domain receives them as an upstream `RestClientResponseException` and maps the
-status in its own `ApiExceptionHandler`:
+The expert emits `POLICY_MISMATCH` and `ALLOCATION_EXCEEDS_100` from
+`ApiExceptionHandler.java`. The Direct Claims domain receives them as an
+upstream `RestClientResponseException` and maps the status in its own
+`ApiExceptionHandler`:
 
 - an expert 400 becomes 400 `VALIDATION_ERROR` with the expert detail preserved;
 - an expert 409 becomes 409 `CONFLICT` unless the expert code is
   `EIA-DIR-4091`, the only code the domain preserves.
 
-The domain tests assert only the status and detail:
+`MASS_TORT_YEAR_OUTSIDE_BLOCK` is different: the public domain raises it
+itself. `ClaimDetailService.requireMassTortCoverageBlock` reads the policy's
+mass-tort profile before it forwards the create and throws
+`MassTortYearOutsideBlockException`, which the domain handler maps to 400
+`MASS_TORT_YEAR_OUTSIDE_BLOCK`. The code is preserved end to end and is not part
+of the upstream remap.
+
+The domain tests assert only the status and detail for the two expert codes:
 `ClaimDetailControllerTest.expertPolicyMismatchIsPreservedAs400` expects 400
 `VALIDATION_ERROR`, and `expertAllocationExceedsHundredIsPreservedAs409` does
-not assert the code. A public client therefore sees the right statuses and
-detail but not `POLICY_MISMATCH` or `ALLOCATION_EXCEEDS_100`.
+not assert the code. A third test,
+`allocationOutsideTheMassTortBlockIsA400`, asserts the mass-tort code. A public
+client therefore sees the right statuses and detail for the two expert codes but
+not `POLICY_MISMATCH` or `ALLOCATION_EXCEEDS_100`; it does see
+`MASS_TORT_YEAR_OUTSIDE_BLOCK`.
 
 Evidence:
 
@@ -1433,16 +1448,21 @@ Evidence:
   match and percentage-total guard).
 - `repos/eia-direct-claims-expert/.../ApiExceptionHandler.java:87-101`
   (`POLICY_MISMATCH`, `ALLOCATION_EXCEEDS_100`).
-- `repos/eia-direct-claims-domain/.../ApiExceptionHandler.java:75-100`
-  (400 -> `VALIDATION_ERROR`, 409 -> `CONFLICT`; `EIA-DIR-4091` preserved).
-- `repos/eia-direct-claims-domain/.../ClaimDetailControllerTest.java:342-389`
-  (the two remap tests).
+- `repos/eia-direct-claims-domain/.../ApiExceptionHandler.java:56-61,75-100`
+  (the mass-tort 400 mapping; 400 -> `VALIDATION_ERROR`, 409 -> `CONFLICT`;
+  `EIA-DIR-4091` preserved).
+- `repos/eia-direct-claims-domain/.../ClaimDetailService.java:181,189-212`
+  (the profile read and inclusive coverage-block guard) and
+  `MassTortYearOutsideBlockException.java` (the guard exception).
+- `repos/eia-direct-claims-domain/.../ClaimDetailControllerTest.java:342-435`
+  (the two remap tests and the mass-tort test).
 
 Resolution: preserve the two expert codes in the domain's upstream-error
 mapping, or amend this contract and SPEC 11.4.10 to the remapped codes. The
 contract keeps the stable expert codes because they are the only codes that
 distinguish the policy and percentage rules from generic validation and
-concurrency failures. The statuses and detail text already match.
+concurrency failures. The statuses and detail text already match, and the
+mass-tort code needs no remap.
 
 ## M-32 Policy mass tort profile is a narrow DRAFT/COMPLETE upsert
 
@@ -1468,6 +1488,21 @@ narrow one-per-policy profile:
 | Concurrency and idempotency | No `If-Match` or `Idempotency-Key`; `updatedAt` is informational; a concurrent write is 409 `CONCURRENT_MODIFICATION`, and a repeated PUT rewrites the profile and emits another event | SPEC 12.6 |
 | Book | `X-EIA-Book: DIRECT` when present; an absent header is accepted; another book is 404 `BOOK_SCOPE_VIOLATION` | The canonical contract requires DIRECT; `BookScope.requireDirectWhenPresent` accepts an absent header |
 | Event | `policy.mass-tort-profile.updated`; payload has the policy identity, status, tort, trigger, allocation method, and coverage-block dates; no profile id or notes | The name matches SPEC 11.2.9. The profile id is deliberately omitted because the policy is the aggregate; the notes are not part of the allocation context. |
+
+The Direct Claims allocation create consumes the profile.
+`ClaimDetailService.requireMassTortCoverageBlock` reads
+`GET /api/v1/policies/{policyId}/mass-tort-profile` and, when the profile is
+COMPLETE with both block dates, rejects a `policyYear` outside the inclusive
+start/end years with 400 `MASS_TORT_YEAR_OUTSIDE_BLOCK`. Both boundary years are
+allowed. A DRAFT profile, a COMPLETE profile without both dates, a policy
+without a profile (404), and an unavailable or unreadable Policy profile all
+allow the allocation: `PolicyMassTortClient.findProfile` turns every non-2xx and
+every transport or conversion failure into an empty result, so the profile read
+fails open and is never an availability dependency. The guard runs on the public
+create only; the expert allocation write does not re-read the profile. SPEC
+11.4.7 `DIR-15` and SPEC 11.2.7 `POL-14` require the year to be consistent with
+the policy terms, so the fail-open path can admit an inconsistent year during a
+Policy outage; M-31 records the preserved 400 code.
 
 Evidence:
 
@@ -1506,7 +1541,21 @@ Evidence:
   `completeRequiresNotesAndBothCoverageBlockDates`,
   `enforcesTheTenantWallOnReadsAndWrites`).
 - `openapi/policy.yaml` 2.6.0, `asyncapi/policy.yaml` 1.4.0, and
-  `asyncapi/event-catalog.yaml` 1.12.0 record the implemented shape.
+  `asyncapi/event-catalog.yaml` 1.12.0 record the implemented shape; and
+  `openapi/direct-claims.yaml` 1.9.0 records the allocation guard that consumes
+  the profile.
+- Direct Claims consumer: `repos/eia-direct-claims-domain/.../ClaimDetailService.java:164-212`
+  (`allocate` and `requireMassTortCoverageBlock`), `PolicyMassTortClient.java:40-79`
+  (profile read, 404/5xx/transport -> empty, COMPLETE and block test),
+  `MassTortYearOutsideBlockException.java`, and
+  `ApiExceptionHandler.java:56-61` (400 `MASS_TORT_YEAR_OUTSIDE_BLOCK`). Tests:
+  `ClaimDetailServiceTest` (`allocationInsideACompleteMassTortBlockIsCreated`,
+  `bothMassTortBlockBoundaryYearsAreCreated`,
+  `anAllocationOutsideTheMassTortBlockIsRejectedBeforeCreate`,
+  `aDraftMassTortProfileDoesNotRestrictThePolicyYear`,
+  `aCompleteMassTortProfileWithoutABlockDoesNotRestrictThePolicyYear`,
+  `anEmptyMassTortProfileAllowsTheAllocation`) and
+  `ClaimDetailControllerTest.allocationOutsideTheMassTortBlockIsA400`.
 
 Resolution: the narrow profile is canonical for now. Closing the gap means
 adding the SPEC `trigger_theory` and status vocabulary, the Appendix E tort
@@ -1890,7 +1939,7 @@ publishing the SPEC name alongside the implemented one is additive.
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-Policy installment dunning contract:
+Direct Claims mass-tort allocation guard contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -1929,7 +1978,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 11808 checks, 0 failures
+  PASS 11809 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -2066,7 +2115,11 @@ Additional checks and limits:
   `policy.dunning.sent` from the Policy catalog `implemented` list each fail
   with the specific missing operation, schema/nullability, notes-bound, or
   implemented-event message. All four were run on a throwaway copy and exited
-  non-zero (exit 1); the working copy was left unchanged.
+  non-zero (exit 1); the working copy was left unchanged. The Direct Claims
+  mass-tort allocation guard pass added one more: removing
+  `MASS_TORT_YEAR_OUTSIDE_BLOCK` from the allocation create 400 description
+  fails with the specific missing-code message. It was run on a throwaway copy
+  and exited non-zero (exit 1); the working copy was left unchanged.
 
 ## Resolution policy
 

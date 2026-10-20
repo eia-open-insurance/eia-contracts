@@ -785,6 +785,11 @@ ALLOCATION_MIN_POLICY_YEAR = 1900
 ALLOCATION_MAX_POLICY_YEAR = 2200
 ALLOCATION_MAX_LAYER = 32
 
+# The public create also consumes the Policy mass tort coverage block. A year
+# outside the block of a COMPLETE profile is a stable 400 code, alongside the
+# expert POLICY_MISMATCH code and the generic VALIDATION_ERROR.
+ALLOCATION_MASS_TORT_CODE = "MASS_TORT_YEAR_OUTSIDE_BLOCK"
+
 # Allocation policy erosion. The projection carries the optional limit, the
 # posting state, and the posting evidence. The public command is a bodyless
 # orchestration retry that reposts the stored limit; the posted state is
@@ -5251,6 +5256,10 @@ def check_direct_claim_allocations(contracts: ContractSet, document, relative: s
             contracts.check(
                 "POLICY_MISMATCH" in bad_request_text,
                 f"{where}: 400 must document POLICY_MISMATCH",
+            )
+            contracts.check(
+                ALLOCATION_MASS_TORT_CODE in bad_request_text,
+                f"{where}: 400 must document {ALLOCATION_MASS_TORT_CODE}",
             )
             conflict = responses.get("409") if isinstance(responses, dict) else None
             conflict_text = (

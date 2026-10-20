@@ -791,6 +791,30 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   M-22, and M-27.
 - `python scripts/validate_contracts.py` passes 11,808 checks with 0 failures.
 
+### Added in the Direct Claims mass-tort allocation guard contract (2026-10-20)
+
+- `openapi/direct-claims.yaml` is 1.9.0: `POST
+  /api/v1/claims/{claimId}/allocations` documents the policy mass-tort
+  coverage-block guard. When the policy's mass-tort profile is COMPLETE and
+  carries both `coverageBlockStart` and `coverageBlockEnd`, `policyYear` must
+  fall within the inclusive start/end years; a year outside the block is 400
+  `MASS_TORT_YEAR_OUTSIDE_BLOCK`, in addition to the existing 400
+  `POLICY_MISMATCH` and `VALIDATION_ERROR`, and writes nothing. A DRAFT
+  profile, a policy without a profile, and an unavailable or unreadable Policy
+  profile all allow the allocation, so the profile read is not an availability
+  dependency. The operation description, the 400 description, the
+  `CreateClaimAllocationRequest` schema, and its `policyYear` member document
+  the rule; the guard runs on the public create only and the expert allocation
+  write is unchanged. The change is additive.
+- `scripts/validate_contracts.py` requires `MASS_TORT_YEAR_OUTSIDE_BLOCK` in
+  the allocation create 400 description alongside `POLICY_MISMATCH`.
+- `README.md` records the guard semantics, the fail-open allow-list, the
+  SPEC 11.4.7 `DIR-15`/11.2.7 `POL-14` rationale, and the 1.9.0 additive
+  classification, and adds the code to the validator and known-deviation
+  coverage; `MISMATCHES.md` updates M-31 with the third public 400 code and
+  M-32 with the profile consumer, and updates the validation evidence.
+- `python scripts/validate_contracts.py` passes 11,809 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

@@ -994,6 +994,34 @@ Erosion semantics:
   allocation and the record-write failure and returns the pre-update allocation
   with 200. `MISMATCHES.md` M-36 records that divergence.
 
+### Direct Claims mass-tort allocation guard (2026-10-20)
+
+Direct Claims 1.9.0 documents the policy mass-tort guard on the allocation
+create. The change is additive: no path, request-body field, response-body
+field, or event changed; one 400 code is added to an existing operation.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/direct-claims.yaml` | 1.9.0 | Additive | `POST /api/v1/claims/{claimId}/allocations` documents the 400 `MASS_TORT_YEAR_OUTSIDE_BLOCK` guard: when the policy's mass-tort profile is COMPLETE with both coverage-block dates, `policyYear` must fall within the inclusive start/end years. A DRAFT profile, a policy without a profile, and an unavailable Policy profile allow the allocation. |
+
+An allocation is a policy-year split, so the year must be one the policy's
+mass-tort coverage block actually covers (SPEC 11.4.7 `DIR-15`, SPEC 11.2.7
+`POL-14`, and the `direct.claim.allocate` command's policy-trigger step). The
+public domain reads `GET /api/v1/policies/{policyId}/mass-tort-profile` before
+it forwards the create:
+
+- A COMPLETE profile with both `coverageBlockStart` and `coverageBlockEnd`
+  bounds the year to the inclusive start year through end year. A year outside
+  the block is 400 `MASS_TORT_YEAR_OUTSIDE_BLOCK`, and it writes no allocation,
+  no claim version bump, and no event. Both boundary years are allowed.
+- A DRAFT profile, a COMPLETE profile without both block dates, a policy
+  without a profile (404), and an unavailable or unreadable Policy profile all
+  allow the allocation. The profile read fails open so it never becomes an
+  availability dependency for claim allocation.
+- The guard runs on the public create only; the expert allocation write does
+  not re-read the profile. `MISMATCHES.md` M-31 records the stable code and
+  M-32 the narrow profile that supplies the block.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -1180,6 +1208,12 @@ Rules:
   limit the allocation erodes: the create attempts the policy posting and
   returns the resulting `POSTED` or `FAILED` state. A create without `limitId`
   stays `NOT_POSTED`.
+- The create also enforces the policy's mass-tort coverage block: when the
+  policy's mass-tort profile is COMPLETE with both block dates, `policyYear`
+  must fall within the inclusive start/end years or the request is 400
+  `MASS_TORT_YEAR_OUTSIDE_BLOCK`. A DRAFT profile, an absent profile, and an
+  unavailable Policy profile allow the allocation. Both block boundary years
+  are allowed, and a rejected year writes nothing.
 - The percentages already recorded for the claim plus the new one may not
   exceed 1. An excess is 409 `ALLOCATION_EXCEEDS_100` and writes no row and no
   event. `allocatedAmount` is a booking figure and is not capped by the current
@@ -1609,7 +1643,8 @@ missing directory.
    200/400/404/409 responses, the Direct Claims allocation operations, the
    `AllocationSummary`, `Allocation`, and `CreateClaimAllocationRequest`
    schemas with their field bounds, the 201/200 successes, the 400
-   `POLICY_MISMATCH` and 409 `ALLOCATION_EXCEEDS_100` documentation, the four
+   `POLICY_MISMATCH`/`MASS_TORT_YEAR_OUTSIDE_BLOCK` and 409
+   `ALLOCATION_EXCEEDS_100` documentation, the four
    erosion fields on `Allocation` and the optional create `limitId`, the
    `AllocationErosionStatus` enum, the
    `POST /api/v1/claims/{claimId}/allocations/{allocationId}/erosion` operation
@@ -1791,7 +1826,11 @@ missing directory.
   `direct.claim.allocation-created`, while SPEC 11.4.9 names the fact
   `direct.claim.allocated`. The domain also collapses the expert's stable 400
   `POLICY_MISMATCH` and 409 `ALLOCATION_EXCEEDS_100` to `VALIDATION_ERROR` and
-  `CONFLICT` at the public surface. Allocation erosion is a bodyless public
+  `CONFLICT` at the public surface, while the domain's own 400
+  `MASS_TORT_YEAR_OUTSIDE_BLOCK` coverage-block guard is preserved. The create
+  reads the policy mass-tort profile and fails open when the profile is DRAFT,
+  absent, or unavailable, so a Policy outage can let a year through that SPEC
+  11.4.7 `DIR-15` would reject (M-32). Allocation erosion is a bodyless public
   `POST .../{allocationId}/erosion` retry; the canonical contract documents 409
   `CONFLICT` when the retry would change an already-`POSTED` allocation and a
   200 with the recorded state, but the public domain currently catches the
