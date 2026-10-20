@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-20 (payment source linkage contract).
+Status: open, reviewed 2026-10-20 (claim command idempotency contract).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -51,7 +51,7 @@ removed per the resolution policy.
 | M-04 | Pagination: Policy uses an offset envelope, other lists are bare arrays | H |
 | M-05 | `_links` exist on Policy pages only; no detail links anywhere | M |
 | M-06 | `ETag`/`If-Match` exist only in Policy; other verticals use body versions | H |
-| M-07 | `Idempotency-Key` exists only on Policy create | H |
+| M-07 | `Idempotency-Key` covers Policy and claim task/note creates only | M |
 | M-08 | Tenant context is passed three different ways | M |
 | M-10 | Lifecycle operations use PATCH, POST, and PUT inconsistently | M |
 | M-11 | Illegal-transition status codes: Policy is 409, five verticals are 400 | M |
@@ -121,8 +121,8 @@ shapes.
 | Vertical | Implemented type | Emitted shape |
 |---|---|---|
 | Policy (domain and expert) | `com.eia.policy.*.Problem` | `{type, title, status, detail, instance, code, category, retryable, errors[{field, code, message}], meta, correlationId, transactionId}` with `application/problem+json` |
-| Direct Claims (domain and expert) | `com.eia.directclaims.*.ApiError` | `{timestamp, status, code, message, path, details[{field, message}]}` |
-| Payment (domain and expert) | `com.eia.payment.*.ApiError` | same as Direct Claims |
+| Direct Claims (domain and expert) | `com.eia.directclaims.*.ApiError` | `{timestamp, status, code, message, path, details[{field, message}]}` plus `category` on the idempotency-reuse 409 |
+| Payment (domain and expert) | `com.eia.payment.*.ApiError` | `{timestamp, status, code, message, path, details[{field, message}]}` |
 | Contract (domain and expert) | `com.eia.contract.*.ApiError` | `{code, message, details[{field, message}]}` |
 | Document (domain and expert) | `com.eia.document.*.ApiError` | `{code, message, details[{field, message}]}` |
 | Cession (domain and expert) | `com.eia.cession.*.ApiError` | `{code, message, details{field: message}}` |
@@ -312,51 +312,96 @@ same header on both the public and the expert route:
   hash the same), uppercases currencies, and defaults the initial status to
   DRAFT.
 - The header is optional for backward compatibility, even though SPEC 12.6
-  requires it on transaction submission. No other vertical accepts, validates,
-  persists, or replays an idempotency key, and `Idempotent-Replayed` is not
-  emitted elsewhere.
+  requires it on transaction submission. `Idempotent-Replayed` is not emitted
+  by any other vertical.
 
-Direct Claims and Assumed Claims task and note POSTs are the counter-example:
+The Direct Claims and Assumed Claims task and note POSTs are the second
+implementation. As of contract 1.4.0 they accept the same header in both
+verticals:
 
-- None of the Direct Claims or Assumed Claims task and note POSTs accepts an
-  `Idempotency-Key`, and neither the domains nor the experts store a request
-  hash or a dedupe row. The Direct Claims routes are
-  `POST /api/v1/claims/{claimId}/tasks` and `POST /api/v1/claims/{claimId}/notes`;
-  the Assumed Claims routes are
-  `POST /api/v1/assumed-claims/claims/{claimId}/tasks` and
-  `POST /api/v1/assumed-claims/claims/{claimId}/notes`.
-- Each expert assigns a fresh `TSK-{year}-{7 digits}` or
-  `NTE-{year}-{7 digits}` number and inserts a row on every accepted request. A
-  client retry after a timeout therefore opens a second task or appends a second
-  note; the duplicate is visible in the matching `GET .../tasks` or
-  `GET .../notes` collection.
-- The Direct Claims task write bumps the parent claim with an expected version,
-  so a concurrent parent-claim change is 409. The Assumed Claims task and note
-  writes bump the parent claim without a caller-supplied version; their task
-  `PATCH` is the version-checked write. A stale task version is 409
-  `EIA-RNS-7802` in Assumed Claims (Direct Claims uses its own conflict code),
-  and a command that repeats the current status returns the existing task and
-  writes no event.
-- Clients must not blind-retry the four POSTs; they should read the collection
-  and reconcile before retrying. No `Idempotent-Replayed` header is emitted.
+| Aspect | Direct Claims | Assumed Claims |
+|---|---|---|
+| Routes | `POST /api/v1/claims/{claimId}/tasks` and `/notes`, plus the `/internal/v1` expert equivalents | `POST /api/v1/assumed-claims/claims/{claimId}/tasks` and `/notes`; the domain calls the expert's `/internal/v1` alias |
+| Key bounds | 1-64 printable ASCII characters without spaces; a blank value is treated as absent | 1-64 characters after trimming; a blank value is 400 |
+| Invalid key | 400 `VALIDATION_ERROR`; no write | 400 `EIA-RNS-7004`, field `Idempotency-Key`, code `INVALID_IDEMPOTENCY_KEY`; no write |
+| Scope | tenant + command type (`TASK_CREATE` / `NOTE_CREATE`) + key | tenant + command type (`CLAIM_TASK_CREATE` / `CLAIM_NOTE_CREATE`) + key |
+| Store | `claim_command_idempotency`, primary key `(tenant_id, idempotency_key, command_type)` | `claim_command_idempotency`, primary key `(tenant_id, command_type, idempotency_key)` |
+| Replay | 201 original body, `Idempotent-Replay: true`, no second row, claim bump, or event | the same |
+| Fresh create | 201, `Idempotent-Replay: false` only when a non-blank key was supplied | 201, `Idempotent-Replay: false` on every create |
+| Reuse | 409 `EIA-DIR-4091`, category `IDEMPOTENCY_KEY_REUSED`, `retryable: false` | 409 `EIA-RNS-4091`, category `CONFLICT`, `errors[0].code = IDEMPOTENCY_KEY_REUSED` |
+| Concurrent first attempts | find-then-insert; see the race caveat below | atomic `INSERT ... ON CONFLICT DO NOTHING`, then replay the winner |
+
+Residual differences:
+
+- **Direct Claims reservation race.** `ClaimTaskService.create` and
+  `ClaimNoteService.add` call `ClaimCommandIdempotencyRepository.find` and, on a
+  miss, insert the dedupe row in the same transaction as the task or note. The
+  insert is not an atomic upsert. Two truly concurrent first attempts with the
+  same key can both miss the check; the second insert then violates the unique
+  primary key and the request fails as 400 `DATA_CONSTRAINT` instead of a replay
+  or 409. Sequential retries after the first commit replay correctly. A fix is
+  an `INSERT ... ON CONFLICT DO NOTHING` reservation like the Assumed Claims
+  one.
+- **Header spelling and replay status.** The claim responses use
+  `Idempotent-Replay` (no `d`) and keep the original 201 status on a replay;
+  Policy and SPEC 12.6 use `Idempotent-Replayed` and replay a create as 200.
+  The contract documents the implemented claim spelling.
+- **Error category.** Direct Claims emits `category: IDEMPOTENCY_KEY_REUSED` on
+  the 409, which is not one of the SPEC 6.11 categories (`CONFLICT` is).
+  Assumed Claims uses `CONFLICT` and carries `IDEMPOTENCY_KEY_REUSED` as
+  `errors[0].code`. The contract records the implemented Direct Claims value;
+  canonicalizing it is part of the M-02 error-envelope work.
+- **Blank-key handling.** Direct Claims treats a blank header as absent, while
+  Assumed Claims rejects it as 400. Both otherwise accept 1-64 character
+  values, except that Direct Claims also rejects non-printable ASCII and
+  embedded spaces.
+- **No TTL or purge.** Both implementations keep the idempotency row
+  indefinitely; SPEC 12.6 specifies a 24-hour scope for transaction-submission
+  idempotency but does not require a cleanup job for claim creates. Rows are
+  scoped by tenant and are never replayed across tenants.
+- **Coverage.** Contract, Cession, Retrocession, Document, Payment, and
+  Notifications create commands still accept no `Idempotency-Key` and emit no
+  replay marker. The header remains optional everywhere it exists, so a client
+  that omits it is unaffected.
 
 Evidence:
 
 - `repos/eia-direct-claims-domain/.../ClaimDetailController.java` (tasks and
   notes), `ClaimDetailService.addTask`/`addNote`,
-  `ClaimClient.addTask`/`changeTaskStatus`/`addNote`.
+  `ClaimClient.addTask`/`changeTaskStatus`/`addNote` (forwards the header and
+  reads `Idempotent-Replay`), `ClaimCommandResult.java`.
 - `repos/eia-direct-claims-expert/.../ClaimTaskController.java`,
   `ClaimTaskService.create`/`changeStatus`, `ClaimNoteController.java`,
-  `ClaimNoteService.add`.
+  `ClaimNoteService.add`, `IdempotencyKeys.java` (normalize, canonical hash),
+  `ClaimCommandIdempotencyRepository.java` (find and insert),
+  `IdempotencyKeyReusedException.java`,
+  `src/main/resources/schema.sql:344-357` (`claim_command_idempotency`,
+  primary key `(tenant_id, idempotency_key, command_type)`).
 - `repos/eia-assumed-claims-domain/.../ClaimTaskNoteController.java`,
   `ClaimTaskNoteService.addTask`/`changeTaskStatus`/`addNote`,
-  `AssumedClaimClient.addTask`/`changeTaskStatus`/`addNote`.
+  `IdempotencyKeys.java` (1-64 bounds), `AssumedClaimClient.addTask`/`addNote`
+  (forwards the header and reads `Idempotent-Replay`), `ApiException`.
 - `repos/eia-assumed-claims-expert/.../ClaimTaskController.java`,
   `ClaimTaskService.create`/`changeStatus`, `ClaimNoteController.java`,
-  `ClaimNoteService.add`, `ApiException.taskVersionConflict`.
-- `repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/ClaimTaskNoteEndpointTest.java`,
-  `repos/eia-assumed-claims-expert/src/test/java/com/eia/assumedclaims/expert/ClaimTaskNoteEndpointTest.java`.
-
+  `ClaimNoteService.add`, `IdempotencyKeys.java` (canonical hash),
+  `ClaimCommandIdempotency.java` (reserve/replay/complete),
+  `ClaimCommandIdempotencyRepository.java` (`INSERT ... ON CONFLICT DO
+  NOTHING`), `ApiException.idempotencyKeyReused` (`EIA-RNS-4091`),
+  `src/main/resources/schema.sql:326-345` (`claim_command_idempotency`).
+- Direct Claims expert tests: `ClaimTaskNoteIdempotencyIntegrationTest`
+  (`taskCreateReplaysTheOriginal201WithoutDuplicateRowOrEvent`,
+  `reusingATaskKeyWithADifferentBodyIs409AndWritesNothing`,
+  `taskKeyIsScopedByCommandSoTheSameKeyCanCreateANote`,
+  `anInvalidTaskKeyIsRejectedBeforeAnythingIsWritten`, and the note
+  equivalents); `ClaimTaskNoteEndpointTest`. Domain test:
+  `ClaimDetailControllerTest.expertIdempotencyKeyReuseIsPreservedAs409`.
+- Assumed Claims expert tests: `ClaimTaskNoteIdempotencyIntegrationTest`
+  (`taskReplayReturnsTheOriginalProjectionAndWritesNoDuplicateRowOrEvent`,
+  `taskKeyReusedWithADifferentBodyIs409AndWritesNothing`,
+  `aKeyIsScopedByCommandType`, `aKeyOutsideTheLengthBoundsIs400AndWritesNothing`,
+  and the note equivalents). Domain tests: `ClaimTaskNoteControllerTest`
+  (`forwardsAnIdempotencyKeyOnTaskCreate`, `rejectsAnIdempotencyKeyOutsideTheLengthBounds`,
+  `preservesTheExpertIdempotencyConflict`).
 - `repos/eia-policy-domain/.../IdempotencyKeys.java`,
   `PolicyController.java` (`Idempotency-Key` request header),
   `PolicyContractController.java` (second-slice header),
@@ -842,7 +887,7 @@ canonical Round 2 shape and amend SPEC 11.7.4 and the M-12 gap accordingly.
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-payment source linkage contract:
+claim command idempotency contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -881,7 +926,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 9411 checks, 0 failures
+  PASS 9470 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -913,7 +958,12 @@ Additional checks and limits:
   source pass added three more: removing `sourceId` from the `Payment` schema,
   adding `OTHER` to the classified-source `if` enum, and removing
   `sourceReference` from the `PaymentPaymentCreatedData` payload each fail with
-  the specific schema or rule message.
+  the specific schema or rule message. The claim idempotency pass added three
+  more: removing the `ClaimIdempotencyKey` parameter from
+  `POST /api/v1/claims/{claimId}/tasks`, changing the shared key schema
+  `maxLength` from 64 to 128, and removing the 409 response from an Assumed
+  Claims task POST each fail with the specific parameter, bounds, or response
+  message.
 
 ## Resolution policy
 

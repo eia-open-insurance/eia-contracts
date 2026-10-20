@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Assumed Claims API
-  version: 1.3.0
+  version: 1.4.0
   summary: Assumed-book reinsurance claim administration and the Assumed Claims expert API.
   description: >
     This document describes the implemented public Assumed Claims domain API
@@ -29,9 +29,13 @@ info:
 
     1.3.0 adds the claim task and note surface. Tasks are optimistic-concurrency
     records with an OPEN/COMPLETE/CANCELLED status; notes are append-only and
-    have no update or delete route. Neither POST accepts an Idempotency-Key, so
-    a retried create opens a second task or appends a second note
-    (MISMATCHES.md M-07).
+    have no update or delete route. 1.4.0 adds optional idempotent creation:
+    both POSTs accept `Idempotency-Key` (1-64 characters), a same-key retry of
+    an identical body replays the original 201 with `Idempotent-Replay: true`,
+    and a different body under the same key is 409 `EIA-RNS-4091`
+    (`IDEMPOTENCY_KEY_REUSED`). Assumed Claims always emits the
+    `Idempotent-Replay` header on a 201 create response and is race-safe
+    because the expert reserves the key with an atomic insert.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -1102,15 +1106,27 @@ paths:
         `title`, `dueDate`, and `priority` are required; `priority` is one of
         LOW, NORMAL, HIGH, or URGENT. The expert assigns the task number
         `TSK-{year}-{7 digits}`, the initial OPEN status, and task version 1.
-        The parent claim version is bumped in the same transaction. The POST
-        accepts no Idempotency-Key and is not idempotent: a retried request
-        opens a second task (MISMATCHES.md M-07).
+        The parent claim version is bumped in the same transaction.
+
+        `Idempotency-Key` is optional but recommended. The value is trimmed and
+        must be 1-64 characters; an empty (after trimming) or longer value is
+        400 `EIA-RNS-7004` with `errors[0].field = Idempotency-Key` and
+        `errors[0].code = INVALID_IDEMPOTENCY_KEY`, before any write. The key is
+        scoped to the tenant plus the task-create command. A retry with the same
+        key and an identical canonical body returns the original 201 task with
+        `Idempotent-Replay: true` and writes no second task or event; a fresh
+        create returns 201 with `Idempotent-Replay: false`. Reusing the key with
+        a different body is 409 `EIA-RNS-4091` with category `CONFLICT` and
+        `errors[0].code = IDEMPOTENCY_KEY_REUSED`; use a new key for a new
+        command. The header is optional for backward compatibility, but clients
+        SHOULD send a UUID per create.
       x-path-alias: /api/v1/assumed-claims/{claimId}/tasks
       security:
         - sessionCookie: []
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - $ref: './components.yaml#/components/parameters/ClaimIdempotencyKey'
         - name: claimId
           in: path
           required: true
@@ -1125,7 +1141,10 @@ paths:
               $ref: '#/components/schemas/TaskCreate'
       responses:
         '201':
-          description: Task opened.
+          description: Task opened, or the stored task replayed.
+          headers:
+            Idempotent-Replay:
+              $ref: './components.yaml#/components/headers/IdempotentReplay'
           content:
             application/json:
               schema:
@@ -1135,7 +1154,15 @@ paths:
         '404':
           $ref: './components.yaml#/components/responses/NotFound'
         '409':
-          $ref: './components.yaml#/components/responses/Conflict'
+          description: >
+            409. Same `Idempotency-Key` with a different task body:
+            `EIA-RNS-4091` with category `CONFLICT` and
+            `errors[0].code = IDEMPOTENCY_KEY_REUSED`. Use a new key for a new
+            command; the claim is unchanged.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /api/v1/assumed-claims/claims/{claimId}/tasks/{taskId}:
@@ -1239,15 +1266,27 @@ paths:
       description: >
         `noteType` is one of GENERAL, DIARY, COVERAGE, RESERVE, LITIGATION, or
         SETTLEMENT; `body` and `author` are required. The expert assigns the
-        note number `NTE-{year}-{7 digits}`. There is no update or delete
-        route. The POST accepts no Idempotency-Key and is not idempotent: a
-        retried request appends a second note (MISMATCHES.md M-07).
+        note number `NTE-{year}-{7 digits}`. There is no update or delete route.
+
+        `Idempotency-Key` is optional but recommended. The value is trimmed and
+        must be 1-64 characters; an empty (after trimming) or longer value is
+        400 `EIA-RNS-7004` with `errors[0].field = Idempotency-Key` and
+        `errors[0].code = INVALID_IDEMPOTENCY_KEY`, before any write. The key is
+        scoped to the tenant plus the note-create command. A retry with the same
+        key and an identical canonical body returns the original 201 note with
+        `Idempotent-Replay: true` and writes no second note or event; a fresh
+        append returns 201 with `Idempotent-Replay: false`. Reusing the key with
+        a different body is 409 `EIA-RNS-4091` with category `CONFLICT` and
+        `errors[0].code = IDEMPOTENCY_KEY_REUSED`; use a new key for a new
+        command. The header is optional for backward compatibility, but clients
+        SHOULD send a UUID per create.
       x-path-alias: /api/v1/assumed-claims/{claimId}/notes
       security:
         - sessionCookie: []
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - $ref: './components.yaml#/components/parameters/ClaimIdempotencyKey'
         - name: claimId
           in: path
           required: true
@@ -1262,7 +1301,10 @@ paths:
               $ref: '#/components/schemas/NoteCreate'
       responses:
         '201':
-          description: Note appended.
+          description: Note appended, or the stored note replayed.
+          headers:
+            Idempotent-Replay:
+              $ref: './components.yaml#/components/headers/IdempotentReplay'
           content:
             application/json:
               schema:
@@ -1272,7 +1314,15 @@ paths:
         '404':
           $ref: './components.yaml#/components/responses/NotFound'
         '409':
-          $ref: './components.yaml#/components/responses/Conflict'
+          description: >
+            409. Same `Idempotency-Key` with a different note body:
+            `EIA-RNS-4091` with category `CONFLICT` and
+            `errors[0].code = IDEMPOTENCY_KEY_REUSED`. Use a new key for a new
+            command; the claim is unchanged.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /internal/v1/assumed-claims:
@@ -3552,6 +3602,7 @@ x-implementation:
     - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/DisputeController.java
     - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/ClaimTaskNoteController.java
     - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/ClaimTaskNoteService.java
+    - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/IdempotencyKeys.java
     - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/ClaimTaskDto.java
     - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/ClaimNoteDto.java
     - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/CreateTaskCommand.java
@@ -3569,6 +3620,10 @@ x-implementation:
     - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/DisputeController.java
     - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/ClaimTaskController.java
     - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/ClaimTaskService.java
+    - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/ClaimCommandIdempotency.java
+    - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/ClaimCommandIdempotencyRepository.java
+    - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/ClaimCommandIdempotencyRecord.java
+    - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/IdempotencyKeys.java
     - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/ClaimTask.java
     - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/CreateTaskRequest.java
     - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/TaskStatusChangeRequest.java
@@ -3582,6 +3637,7 @@ x-implementation:
     - repos/eia-assumed-claims-expert/src/test/java/com/eia/assumedclaims/expert/SecondSliceControllerTest.java
     - repos/eia-assumed-claims-expert/src/test/java/com/eia/assumedclaims/expert/ClaimTaskNoteEndpointTest.java
     - repos/eia-assumed-claims-expert/src/test/java/com/eia/assumedclaims/expert/ClaimTaskNoteOutboxIntegrationTest.java
+    - repos/eia-assumed-claims-expert/src/test/java/com/eia/assumedclaims/expert/ClaimTaskNoteIdempotencyIntegrationTest.java
   errorEnvelope: Canonical RFC 9457 Problem envelope (SPEC 6.11).
   notes: >
     Both public path forms are implemented by the same controller methods; the
@@ -3593,22 +3649,32 @@ x-implementation:
     and all second-slice expert reads take the tenant from X-EIA-Tenant. The
     domain preserves the expert's 409, 422, and 428 statuses and EIA-RNS codes;
     task validation is 400 `EIA-RNS-7004`, an unknown task is 404
-    `EIA-RNS-7801`, and a stale task version is 409 `EIA-RNS-7802`.
+    `EIA-RNS-7801`, and a stale task version is 409 `EIA-RNS-7802`. The task and
+    note POSTs accept an optional `Idempotency-Key`: the domain validates the
+    1-64 character bounds before the expert call, and the expert reserves the
+    key with an atomic insert, so concurrent first attempts either create once
+    or replay. A same-key retry of an identical body returns the stored 201 with
+    `Idempotent-Replay: true`; a different body is 409 `EIA-RNS-4091` category
+    `CONFLICT` with `errors[0].code = IDEMPOTENCY_KEY_REUSED`.
 x-compatibility:
-  contractVersion: 1.3.0
-  previousContractVersion: 1.2.0
+  contractVersion: 1.4.0
+  previousContractVersion: 1.3.0
   breaking: []
   compatible:
+    - Adds the optional ClaimIdempotencyKey parameter (Idempotency-Key, 1-64 characters) to POST /api/v1/assumed-claims/claims/{claimId}/tasks and POST /api/v1/assumed-claims/claims/{claimId}/notes.
+    - Documents the 201 Idempotent-Replay header, true for a stored-response replay and false for a fresh create.
+    - Documents 400 EIA-RNS-7004 INVALID_IDEMPOTENCY_KEY for an invalid key and 409 EIA-RNS-4091 IDEMPOTENCY_KEY_REUSED for the same key with a different body.
     - Adds GET/POST /api/v1/assumed-claims/claims/{claimId}/tasks, PATCH /api/v1/assumed-claims/claims/{claimId}/tasks/{taskId}, and GET/POST /api/v1/assumed-claims/claims/{claimId}/notes.
     - Adds the Task, TaskCreate, TaskStatusChange, Note, and NoteCreate schemas.
     - Adds GET /api/v1/assumed-claims/search (alias /api/v1/assumed-claims/claims/search) returning the shared SearchResponse envelope.
     - Adds advices, bordereaux, reserves, cash calls, recoveries, commutation, disputes, financials, audit, and close.
     - Adds the 422 and 428 responses to the new mutation operations.
   note: >
-    Tasks and notes are additive over 1.2.0: no existing path, request field, or
-    response field changed. The HTTP path alias and the Problem envelope are
-    unchanged. The task and note POSTs accept no Idempotency-Key; see
-    MISMATCHES.md M-07.
+    Idempotency on the task and note POSTs is additive over 1.3.0: the header is
+    optional, no existing path, request body field, or response body field
+    changed, and a caller that omits the key keeps the previous create
+    behaviour. The only observable change without a key is the always-present
+    `Idempotent-Replay: false` response header.
 x-planned-operations:
   - method: GET
     path: /api/v1/assumed-claims/claims/{assumedClaimId}/allocations

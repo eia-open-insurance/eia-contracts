@@ -30,7 +30,7 @@ standard).
 
 | Path | Contents |
 |---|---|
-| `openapi/components.yaml` | Shared parameters, headers, responses, and schemas: canonical `Problem` error envelope, money, offset page envelope, global-search envelope, ETag/If-Match, Idempotency-Key, audit fields, entity references, tenant and book headers. |
+| `openapi/components.yaml` | Shared parameters, headers, responses, and schemas: canonical `Problem` error envelope, money, offset page envelope, global-search envelope, ETag/If-Match, Idempotency-Key (Policy and the claim task/note creates), audit fields, entity references, tenant and book headers. |
 | `openapi/party.yaml` … `openapi/notifications.yaml` | One OpenAPI 3.1 document per vertical. Ten documents, each covering `/api/v1/**` and `/internal/v1/**`. |
 | `asyncapi/event-catalog.yaml` | Authoritative catalog of the published event names, their publisher, and the subscribers named in SPEC 11. |
 | `asyncapi/{vertical}.yaml` | Published event channels for one vertical. One channel and one `send` operation per event name. |
@@ -210,14 +210,18 @@ missing or different book is hidden as 404. Task `PATCH` is version-checked
 and an illegal transition is 400. A status command that repeats the current
 status is a no-op that returns the task and writes no event.
 
-**Idempotency caveat.** Neither `POST /tasks` nor `POST /notes` accepts an
-`Idempotency-Key`. The expert assigns a new `TSK-...` or `NTE-...` number and
-inserts a row on every accepted request, so a retried POST after a timeout
-creates a duplicate task or note. Clients must not blind-retry these two POSTs;
-read the collection and reconcile first. A concurrent parent-claim version bump
-is 409. Task `PATCH` is safe to retry with the same version because a repeated
-status is a no-op, but the POSTs have no natural key. `MISMATCHES.md` M-07
-records the deviation.
+**Idempotent creation (1.4.0).** Both `POST /tasks` and `POST /notes` accept an
+optional `Idempotency-Key` (1-64 printable ASCII characters without spaces). A
+retry with the same key and an identical canonical body replays the original 201
+task or note with `Idempotent-Replay: true` and writes no second row or event; a
+fresh create with a key returns 201 with `Idempotent-Replay: false`. Reusing the
+key with a different body is 409 `EIA-DIR-4091` with category
+`IDEMPOTENCY_KEY_REUSED`; a key longer than 64 characters or containing a
+character outside printable ASCII is 400 `VALIDATION_ERROR` (a blank key is
+treated as absent). A concurrent parent-claim version bump is also 409. The
+Direct Claims expert reserves the key with a find-then-insert rather than an
+atomic upsert, so two truly concurrent first attempts with the same key can
+race; `MISMATCHES.md` M-07 records that caveat.
 
 ### Assumed Claims task and note contract (2026-10-20)
 
@@ -241,14 +245,20 @@ status is a no-op that returns the task and writes no event. Task creation and
 note append each bump the parent claim version and write their event in the same
 transaction.
 
-**Idempotency caveat.** Neither `POST .../tasks` nor `POST .../notes` accepts an
-`Idempotency-Key`. The expert assigns a new `TSK-...` or `NTE-...` number and
-inserts a row on every accepted request, so a retried POST after a timeout
-creates a duplicate task or note. Clients must not blind-retry these two POSTs;
-read the collection and reconcile first. Task `PATCH` is the only
-version-checked write in this slice: a stale task version is 409, and a repeated
-status is a no-op, so `PATCH` is retry-safe. The POSTs have no natural key.
-`MISMATCHES.md` M-07 records the deviation.
+**Idempotent creation (1.4.0).** Both `POST .../tasks` and `POST .../notes`
+accept an optional `Idempotency-Key` (1-64 characters). A retry with the same key
+and an identical canonical body replays the original 201 task or note with
+`Idempotent-Replay: true` and writes no second row or event; a fresh create
+returns 201 with `Idempotent-Replay: false` (the header is always present on an
+Assumed Claims task or note 201). Reusing the key with a different body is 409
+`EIA-RNS-4091` with category `CONFLICT` and `errors[0].code =
+IDEMPOTENCY_KEY_REUSED`. A key that is empty after trimming or longer than 64
+characters is 400 `EIA-RNS-7004` with field `Idempotency-Key` and code
+`INVALID_IDEMPOTENCY_KEY`, before any write. The domain validates the bounds and
+the expert reserves the key with an atomic insert, so concurrent first attempts
+either create once or replay. Task `PATCH` remains the only version-checked
+write in this slice: a stale task version is 409, and a repeated status is a
+no-op.
 
 ### Payment source linkage (2026-10-20)
 
@@ -267,6 +277,46 @@ the shell, the queue, and the record subtitle render and link the source claim o
 policy without an N+1 lookup against the Direct Claims, Assumed Claims, or Policy
 API. The payment still does not embed the source object and does not verify that
 the source exists (M-12, M-24).
+
+### Claim task and note idempotency (2026-10-20)
+
+Direct Claims and Assumed Claims 1.4.0 make task and note creation retry-safe
+with an optional `Idempotency-Key`. The change is additive: the header is
+optional, no existing path, request body field, or response body field changed,
+and a caller that omits the key keeps the previous create behaviour.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/components.yaml` | 1.4.0 | Additive | `ClaimIdempotencyKey` (`Idempotency-Key`, 1-64 characters) and the `IdempotentReplay` (`true`/`false`) 201 header; the shared 400 and 409 descriptions name the invalid-key and reuse codes. |
+| `openapi/direct-claims.yaml` | 1.4.0 | Additive | The public and expert `POST /tasks` and `POST /notes` accept the key, document the 201 `Idempotent-Replay` header, 400 `VALIDATION_ERROR` for an invalid key, and 409 `EIA-DIR-4091` `IDEMPOTENCY_KEY_REUSED`. |
+| `openapi/assumed-claims.yaml` | 1.4.0 | Additive | The public `POST .../tasks` and `POST .../notes` accept the key, always emit `Idempotent-Replay` on 201, and document 400 `EIA-RNS-7004` `INVALID_IDEMPOTENCY_KEY` and 409 `EIA-RNS-4091` with `errors[0].code = IDEMPOTENCY_KEY_REUSED`. |
+
+Semantics:
+
+- The key is trimmed and must be 1-64 characters. Assumed Claims rejects an
+  empty (after trimming) or longer value as 400; Direct Claims rejects a value
+  longer than 64 characters or containing a character outside printable ASCII
+  or a space as 400, and treats a blank value as absent.
+- The scope is tenant + command type + key. The same key may be used once for a
+  task and once for a note because the command type is part of the stored key.
+- A retry with the same key and an identical canonical body replays the original
+  201 task or note with `Idempotent-Replay: true` and writes no second row or
+  event. A fresh create returns 201; Direct Claims emits
+  `Idempotent-Replay: false` when a non-blank key was supplied, and Assumed
+  Claims emits it on every task or note 201.
+- Reusing the key with a different body is 409. Direct Claims uses code
+  `EIA-DIR-4091` and category `IDEMPOTENCY_KEY_REUSED`; Assumed Claims uses
+  `EIA-RNS-4091` with category `CONFLICT` and the `IDEMPOTENCY_KEY_REUSED`
+  field-error code. Both are non-retryable; use a new key for a new command.
+- The header spelling is `Idempotent-Replay` (not Policy's
+  `Idempotent-Replayed`), and a replay keeps the original 201 status. Both
+  differences are recorded in `MISMATCHES.md` M-07.
+- Direct Claims reserves the key with a find-then-insert rather than an atomic
+  upsert. Two truly concurrent first attempts with the same key can both miss
+  the check and one then violates the unique constraint, which the service maps
+  to 400 rather than a replay or 409. Retrying sequentially after the first
+  commit replays correctly. Assumed Claims uses `INSERT ... ON CONFLICT DO
+  NOTHING` and is race-safe. This is the remaining M-07 idempotency caveat.
 
 ### Compatibility matrix
 
@@ -366,7 +416,7 @@ Policy is the reference implementation:
   policy rejection is 422 `BUSINESS_RULE`; a missing approval is 428
   `APPROVAL_REQUIRED`.
 
-No other vertical emits `ETag` or accepts `If-Match`/`Idempotency-Key`.
+No other vertical emits `ETag` or accepts `If-Match`.
 Contract bind takes `expectedVersion` and `approvedBy`; the Direct Claims child
 PATCH commands take `expectedVersion`; Assumed Claims propagates the expert's
 409/422/428; Cession/Retrocession still return 400 for an illegal lifecycle
@@ -374,10 +424,18 @@ edge. Their FS-RI hand-off is a separate case: an FS-RI conflict is 409
 `FSRI_CONFLICT`, an unusable FS-RI response is 502, and an FS-RI outage is 503.
 See `MISMATCHES.md` M-06, M-07, M-11, and M-21.
 
-The Direct Claims and Assumed Claims task and note POSTs are the exception on
-that side: they accept no `Idempotency-Key` and are not replay-safe, so a
-retried POST creates a second task or note. Task `PATCH` is version-checked, and
-a repeated status is a no-op, so it is retry-safe. The caveat is part of M-07.
+The Direct Claims and Assumed Claims task and note POSTs are the second
+idempotency implementation. They accept the optional `Idempotency-Key`
+(1-64 characters), replay an identical canonical body as 201 with
+`Idempotent-Replay: true`, and return 409 `EIA-DIR-4091` or `EIA-RNS-4091`
+(`IDEMPOTENCY_KEY_REUSED`) when the key is reused with a different body. Unlike
+Policy they keep the original 201 status on replay, spell the marker
+`Idempotent-Replay`, and Direct Claims only emits it when a key was supplied.
+Assumed Claims always emits it on a task or note 201. The Direct Claims
+find-then-insert reservation has a narrow concurrent-first-attempt race; the
+Assumed Claims reservation is atomic. Task `PATCH` remains version-checked, and
+a repeated status is a no-op, so it is retry-safe. The residual differences are
+part of M-07.
 
 ### Pagination and collections
 
@@ -533,7 +591,10 @@ missing directory.
    components (schemas, parameters, headers, and responses), the complete table
    of required paths and methods per vertical (including the Round 5 second
    slice, the Direct Claims and Assumed Claims task and note routes, and the ten
-   global-search routes), the task/note schemas, the search operations' shared
+   global-search routes), the task/note schemas, the claim task/note idempotency
+   header parameter, the 201 `Idempotent-Replay` header, the shared 400
+   invalid-key documentation, and the 409 code on all six create operations,
+   the search operations' shared
    parameters and `SearchResponse`/400/404 responses, the `SearchResponse` and
    `SearchItem` keys, the required 422/409/428 response codes on the Round 5
    mutations, the payment source fields and their create rules, and agreement
@@ -592,10 +653,12 @@ missing directory.
 - the Policy page envelope is offset-based (`items`, `page`, `size`, `total`,
   `_links`) rather than the cursor envelope in SPEC 7.6/12.2, and the other
   verticals still return bare arrays;
-- `ETag`/`If-Match` and `Idempotency-Key` exist only in Policy; the Direct
-  Claims and Assumed Claims task and note POSTs are not idempotent (M-07);
-  detail `_links` exist nowhere, and Cession/Retrocession still return 400 for
-  an illegal lifecycle edge;
+- `ETag`/`If-Match` exist only in Policy. `Idempotency-Key` covers Policy plus
+  the Direct Claims and Assumed Claims task/note creates; the remaining vertical
+  creates do not accept it, the claim task/note responses spell the marker
+  `Idempotent-Replay`, and the Direct Claims reservation has a narrow concurrent
+  first-attempt race (M-07). Detail `_links` exist nowhere, and
+  Cession/Retrocession still return 400 for an illegal lifecycle edge;
 - the Cession/Retrocession FS-RI hand-off is synchronous, with no hand-off
   queue or hand-off resource (SPEC 7.18.3/HAND-05);
 - the ten global-search routes are implemented under the short

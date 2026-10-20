@@ -224,6 +224,36 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   existence check.
 - `python scripts/validate_contracts.py` passes 9,411 checks with 0 failures.
 
+### Added in the claim command idempotency contract (2026-10-20)
+
+- `openapi/components.yaml` is 1.4.0: adds the optional
+  `ClaimIdempotencyKey` parameter (`Idempotency-Key`, 1-64 characters) and the
+  `IdempotentReplay` response header (`true`/`false`) used by claim task and
+  note creates, and documents the invalid-key 400 (`INVALID_IDEMPOTENCY_KEY`)
+  and the `EIA-DIR-4091`/`EIA-RNS-4091` (`IDEMPOTENCY_KEY_REUSED`) 409 in the
+  shared BadRequest and Conflict descriptions.
+- `openapi/direct-claims.yaml` is 1.4.0: the public and expert task and note
+  POSTs accept the optional header, document the 201 `Idempotent-Replay` header,
+  400 `VALIDATION_ERROR` for a key that is too long or contains a non-printable
+  character, and 409 `EIA-DIR-4091` with category `IDEMPOTENCY_KEY_REUSED` for
+  the same key with a different body. A concurrent parent-claim change remains
+  a 409.
+- `openapi/assumed-claims.yaml` is 1.4.0: the public task and note POSTs accept
+  the optional header, always emit `Idempotent-Replay` on a 201, and document
+  400 `EIA-RNS-7004` with field code `INVALID_IDEMPOTENCY_KEY` and 409
+  `EIA-RNS-4091` with category `CONFLICT` and
+  `errors[0].code = IDEMPOTENCY_KEY_REUSED`.
+- `scripts/validate_contracts.py` requires the shared 1-64 character
+  `ClaimIdempotencyKey` parameter, the shared `IdempotentReplay` header, the
+  201 `Idempotent-Replay` header, the shared 400 invalid-key description, and
+  the 409 code and Problem schema on all six claim task and note POST
+  operations in both documents.
+- `README.md` records the additive versions, the request and response
+  semantics, and the remaining Direct Claims reservation race;
+  `MISMATCHES.md` M-07 is narrowed to the remaining coverage gap plus the
+  Direct Claims race and the `Idempotent-Replay` spelling difference.
+- `python scripts/validate_contracts.py` passes 9,470 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

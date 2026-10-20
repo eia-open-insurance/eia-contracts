@@ -378,6 +378,30 @@ TASK_NOTE_REQUIRED_SCHEMAS = {
 }
 
 
+# Idempotent task and note creation. Every listed operation must declare the
+# shared 1-64 character header parameter, a 201 response with the
+# `Idempotent-Replay` header, and the vertical's 409 idempotency-reuse code.
+# Each tuple is (path, method). The value is (409 code, operations).
+TASK_NOTE_IDEMPOTENCY_POSTS = {
+    "direct-claims": (
+        "EIA-DIR-4091",
+        [
+            ("/api/v1/claims/{claimId}/tasks", "post"),
+            ("/api/v1/claims/{claimId}/notes", "post"),
+            ("/internal/v1/claims/{claimId}/tasks", "post"),
+            ("/internal/v1/claims/{claimId}/notes", "post"),
+        ],
+    ),
+    "assumed-claims": (
+        "EIA-RNS-4091",
+        [
+            ("/api/v1/assumed-claims/claims/{claimId}/tasks", "post"),
+            ("/api/v1/assumed-claims/claims/{claimId}/notes", "post"),
+        ],
+    ),
+}
+
+
 # Event names the transactional-outbox rollout actually emits. The catalog must
 # list each one as published and implemented, and the vertical document must
 # expose a channel for it. Round 5 covered the first six verticals; the rollout
@@ -486,11 +510,13 @@ REQUIRED_COMPONENTS = {
         "SearchLimit",
         "CorrelationId",
         "IdempotencyKey",
+        "ClaimIdempotencyKey",
         "IfMatch",
     ],
     "headers": [
         "ETag",
         "IdempotentReplayed",
+        "IdempotentReplay",
     ],
     "responses": [
         "BadRequest",
@@ -1376,6 +1402,55 @@ def check_openapi(contracts: ContractSet, verbose: bool):
         f"components.yaml: SearchType.enum is missing {sorted(expected_search_types - search_types)}",
     )
 
+    # Claim task and note idempotency: the shared parameter, response header,
+    # and 400/409 descriptions that both claim documents reference.
+    claim_key = (component_sections.get("parameters") or {}).get("ClaimIdempotencyKey") or {}
+    claim_key_schema = claim_key.get("schema") or {}
+    contracts.check(
+        claim_key.get("name") == "Idempotency-Key",
+        "components.yaml: ClaimIdempotencyKey.name must be Idempotency-Key",
+    )
+    contracts.check(
+        claim_key.get("in") == "header",
+        "components.yaml: ClaimIdempotencyKey.in must be header",
+    )
+    contracts.check(
+        claim_key.get("required") is False,
+        "components.yaml: ClaimIdempotencyKey must stay optional",
+    )
+    contracts.check(
+        (
+            claim_key_schema.get("type"),
+            claim_key_schema.get("minLength"),
+            claim_key_schema.get("maxLength"),
+        ) == ("string", 1, 64),
+        "components.yaml: ClaimIdempotencyKey must be a 1-64 character string",
+    )
+    replay_header = (component_sections.get("headers") or {}).get("IdempotentReplay") or {}
+    replay_schema = replay_header.get("schema") or {}
+    contracts.check(
+        replay_schema.get("type") == "string"
+        and set(replay_schema.get("enum") or []) == {"true", "false"},
+        "components.yaml: IdempotentReplay must be a string enum of true and false",
+    )
+    contracts.check(
+        "Idempotent-Replay" in str(replay_header.get("description") or ""),
+        "components.yaml: IdempotentReplay must name the Idempotent-Replay header",
+    )
+    shared_bad_request = (component_sections.get("responses") or {}).get("BadRequest") or {}
+    bad_request_text = str(shared_bad_request.get("description") or "")
+    contracts.check(
+        "INVALID_IDEMPOTENCY_KEY" in bad_request_text and "Idempotency-Key" in bad_request_text,
+        "components.yaml: BadRequest must document the invalid Idempotency-Key 400",
+    )
+    shared_conflict = (component_sections.get("responses") or {}).get("Conflict") or {}
+    conflict_text = str(shared_conflict.get("description") or "")
+    for code in ("EIA-DIR-4091", "EIA-RNS-4091"):
+        contracts.check(
+            code in conflict_text,
+            f"components.yaml: Conflict must document {code}",
+        )
+
     operation_ids = {}
     for vertical in VERTICAL_FILES:
         path = OPENAPI_DIR / f"{vertical}.yaml"
@@ -1480,6 +1555,70 @@ def check_openapi(contracts: ContractSet, verbose: bool):
                 schema_name in document_schemas,
                 f"{relative}: required task/note schema {schema_name} is missing",
             )
+        idempotency_entry = TASK_NOTE_IDEMPOTENCY_POSTS.get(vertical)
+        if idempotency_entry:
+            reuse_code, idempotency_posts = idempotency_entry
+            for post_path, post_method in idempotency_posts:
+                path_item = paths.get(post_path) if isinstance(paths, dict) else None
+                operation = path_item.get(post_method) if isinstance(path_item, dict) else None
+                where = f"{relative}: {post_method.upper()} {post_path}"
+                contracts.check(
+                    isinstance(operation, dict),
+                    f"{where}: idempotent task/note create operation is missing",
+                )
+                if not isinstance(operation, dict):
+                    continue
+                parameter_refs = [
+                    str(parameter.get("$ref")).rsplit("/", 1)[-1]
+                    for parameter in operation.get("parameters") or []
+                    if isinstance(parameter, dict) and parameter.get("$ref")
+                ]
+                contracts.check(
+                    "ClaimIdempotencyKey" in parameter_refs,
+                    f"{where}: must document the shared ClaimIdempotencyKey header parameter",
+                )
+                responses = operation.get("responses") or {}
+                created = responses.get("201") if isinstance(responses, dict) else None
+                created_headers = created.get("headers") if isinstance(created, dict) else None
+                replay = (
+                    created_headers.get("Idempotent-Replay")
+                    if isinstance(created_headers, dict)
+                    else None
+                )
+                contracts.check(
+                    isinstance(replay, dict)
+                    and str(replay.get("$ref", "")).endswith("/headers/IdempotentReplay"),
+                    f"{where}: 201 must declare the shared Idempotent-Replay header",
+                )
+                conflict = responses.get("409") if isinstance(responses, dict) else None
+                conflict_text = (
+                    str(conflict.get("description") or "")
+                    if isinstance(conflict, dict)
+                    else ""
+                )
+                contracts.check(
+                    bool(conflict_text),
+                    f"{where}: 409 must be documented with a description",
+                )
+                contracts.check(
+                    reuse_code in conflict_text,
+                    f"{where}: 409 must document {reuse_code}",
+                )
+                contracts.check(
+                    "IDEMPOTENCY_KEY_REUSED" in conflict_text,
+                    f"{where}: 409 must document IDEMPOTENCY_KEY_REUSED",
+                )
+                conflict_content = conflict.get("content") if isinstance(conflict, dict) else None
+                problem_schema = (
+                    ((conflict_content or {}).get("application/problem+json") or {}).get("schema")
+                    if isinstance(conflict_content, dict)
+                    else None
+                )
+                contracts.check(
+                    isinstance(problem_schema, dict)
+                    and str(problem_schema.get("$ref", "")).endswith("/schemas/Problem"),
+                    f"{where}: 409 must document the shared Problem schema",
+                )
         for required_path, required_method, required_codes in ROUND5_REQUIRED_RESPONSES.get(vertical, []):
             path_item = paths.get(required_path) if isinstance(paths, dict) else None
             operation = path_item.get(required_method) if isinstance(path_item, dict) else None

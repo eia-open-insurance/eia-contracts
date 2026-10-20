@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA canonical shared API components
-  version: 1.3.0
+  version: 1.4.0
   summary: Shared error, money, paging, global-search, concurrency, idempotency, audit, and tenant/book components for every EIA API.
   description: >
     Shared OpenAPI 3.1 components referenced by the per-vertical contract
@@ -25,6 +25,14 @@ info:
     `SearchQuery` and `SearchLimit` parameters used by the ten public
     `GET /api/v1/{resource}/search` operations. The addition is compatible: it
     changes no existing page, response, or error component.
+
+    The 2026-10-20 claim command idempotency contract (1.4.0) adds the
+    `ClaimIdempotencyKey` request parameter and the `IdempotentReplay` response
+    header used by the Direct Claims and Assumed Claims task and note create
+    operations, and documents `INVALID_IDEMPOTENCY_KEY` in the shared 400
+    response. The addition is compatible: it adds one optional request header
+    and one response header to six POST operations and changes no request or
+    response body.
 
     Authority is SPEC.md sections 6.11, 7.6, 7.18-7.23, 10.3, 12.2, and 12.6.
     Where an implemented service deviates from a component, the deviation is
@@ -196,6 +204,30 @@ components:
         type: string
         minLength: 1
         maxLength: 255
+    ClaimIdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: >
+        Optional idempotency key for a Direct Claims or Assumed Claims task or
+        note create request. The key is trimmed and must be 1-64 characters; a
+        value outside those bounds is 400 (`INVALID_IDEMPOTENCY_KEY` in Assumed
+        Claims). The key is scoped to the tenant plus the command type, so the
+        same key may be used once for a task and once for a note. A retry with
+        the same key and an identical canonical request replays the original
+        201 task or note with `Idempotent-Replay: true` and writes no second row
+        or event; a new create returns 201 with `Idempotent-Replay: false`.
+        Reusing the key with a different request is 409 `EIA-DIR-4091` (Direct
+        Claims) or `EIA-RNS-4091` (Assumed Claims) with the stable marker
+        `IDEMPOTENCY_KEY_REUSED`. The header is optional for backward
+        compatibility, but clients SHOULD send a UUID per create; see
+        MISMATCHES.md M-07 for the remaining coverage and Direct Claims race
+        caveats.
+      x-status: implemented
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
     IfMatch:
       name: If-Match
       in: header
@@ -227,6 +259,21 @@ components:
         `true` when the response replays an earlier request that carried the
         same `Idempotency-Key`, `false` when a new resource was created.
         Emitted by the Policy create responses.
+      schema:
+        type: string
+        enum:
+          - 'true'
+          - 'false'
+    IdempotentReplay:
+      description: >
+        `true` when the 201 response replays the stored response of an earlier
+        request that carried the same `Idempotency-Key`, `false` when a new
+        task or note was created. Direct Claims emits the header only when the
+        request supplied a non-blank key; Assumed Claims emits `false` on every
+        fresh 201 and `true` on a replay. The spelling is `Idempotent-Replay`,
+        not the Policy and SPEC 12.6 `Idempotent-Replayed`; the difference is
+        recorded in MISMATCHES.md M-07.
+      x-status: implemented
       schema:
         type: string
         enum:
@@ -571,7 +618,12 @@ components:
         INVALID_TENANT_HEADER, FSRI_VALIDATION, and FSRI_REJECTED. The ten
         global-search operations use this response for a missing or malformed
         tenant, a missing or invalid book header, and an out-of-range `limit`;
-        the field error names `limit`.
+        the field error names `limit`. The Direct Claims and Assumed Claims task
+        and note creates use it for an `Idempotency-Key` outside 1-64
+        characters (and, in Direct Claims, a key with a non-printable or space
+        character); Assumed Claims names the field `Idempotency-Key` with code
+        `INVALID_IDEMPOTENCY_KEY`, while Direct Claims reports
+        `VALIDATION_ERROR`.
       content:
         application/problem+json:
           schema:
@@ -603,7 +655,10 @@ components:
         `CONTRACT_NOT_INCEPTED`, `LAYER_OVERLAP`, `SHARES_EXCEED_100`,
         `CESSION_EXCEEDS_CONTRACT_LIMIT`, `COLLATERAL_EXCEEDS_OBLIGATION`,
         `COMMUTATION_NOT_APPROVED`, and `COMMUTATION_NOT_PERMITTED`. FS-RI adds
-        `FSRI_CONFLICT`.
+        `FSRI_CONFLICT`. Claim task and note creates add `EIA-DIR-4091` and
+        `EIA-RNS-4091` (`IDEMPOTENCY_KEY_REUSED`) for a key reused with a
+        different request; Direct Claims uses that marker as the category and
+        Assumed Claims carries it in `errors[0].code`.
       content:
         application/problem+json:
           schema:
