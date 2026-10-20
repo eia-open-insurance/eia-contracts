@@ -683,27 +683,31 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   `limitId`, `erosionMessage`, and `erosionPostedAt` fields and the required
   `erosionStatus` enum (`NOT_POSTED`, `POSTED`, `FAILED`);
   `CreateClaimAllocationRequest` gains the optional `limitId` UUID; and
-  `POST /api/v1/claims/{claimId}/allocations/{allocationId}/erosion` records the
-  `AllocationErosionRequest` (`status` POSTED or FAILED; optional
-  4000-character `message`). The operation requires `X-EIA-Tenant` and
+  `POST /api/v1/claims/{claimId}/allocations/{allocationId}/erosion` is a
+  bodyless orchestration retry. It loads the allocation, requires the stored
+  `limitId`, reposts the limit to the Policy domain, and records the resulting
+  `POSTED` or `FAILED` state. The operation requires `X-EIA-Tenant` and
   `X-EIA-Book: DIRECT`, returns 200 `Allocation`, and documents 400
-  `VALIDATION_ERROR`, 404, and 409 `ALLOCATION_ALREADY_POSTED`. A same-status
-  record is a 200 no-op that keeps the stored message and instant; `POSTED` is
-  terminal. A create that supplies `limitId` attempts the policy posting and
-  returns `POSTED` or `FAILED`; a create without a limit stays `NOT_POSTED`.
-  Adds the `AllocationErosionStatus` and `AllocationErosionRequest` schemas.
-  The command records an outcome and writes no event.
+  `VALIDATION_ERROR` for a missing stored limit, 404, and 409 `CONFLICT` when
+  the retry would change an already-`POSTED` allocation. A Policy rejection or
+  outage is recorded as `FAILED` and still returns 200. A create that supplies
+  `limitId` also attempts the posting and returns `POSTED` or `FAILED`; a
+  create without a limit stays `NOT_POSTED`. Adds the `AllocationErosionStatus`
+  enum. No public `AllocationErosionRequest` schema and no public request body;
+  the retry writes no event.
 - `scripts/validate_contracts.py` requires the four erosion projection fields
   and the required status, the nullable field shapes, the optional create
-  `limitId`, the two schemas and their bounds and enums, the erosion operation
-  with its tenant and DIRECT book parameters, the required
-  `AllocationErosionRequest` body, the 200 `Allocation`, the 400/404/409
-  responses, the `VALIDATION_ERROR` and `ALLOCATION_ALREADY_POSTED`
-  documentation, and the absence of the path from `x-planned-operations`.
-- `README.md` records the erosion fields, command, state rules, and additive
-  1.8.0 classification; `MISMATCHES.md` adds M-36 for the bodyless public domain
-  POST and the expert `CONFLICT` code, and updates the validation evidence.
-- `python scripts/validate_contracts.py` passes 11,540 checks with 0 failures.
+  `limitId`, the `AllocationErosionStatus` enum, the bodyless erosion retry
+  with its tenant and DIRECT book parameters, the 200 `Allocation`, the
+  400/404/409 responses, the 400 stored-limit and `VALIDATION_ERROR`
+  documentation, the 409 `CONFLICT` documentation, the rejection of a public
+  `AllocationErosionRequest` schema, and the absence of the path from
+  `x-planned-operations`.
+- `README.md` records the erosion fields, bodyless retry, state rules, and
+  additive 1.8.0 classification; `MISMATCHES.md` updates M-36 for the public
+  domain swallowing the expert 409 and the record-write failure, and updates the
+  validation evidence.
+- `python scripts/validate_contracts.py` passes 11,527 checks with 0 failures.
 
 ### Notes
 

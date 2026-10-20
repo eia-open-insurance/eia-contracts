@@ -851,11 +851,11 @@ Filter semantics:
 Direct Claims 1.8.0 records the policy-limit erosion of an allocation. The
 change is additive: the new response fields are nullable except
 `erosionStatus`, which starts at `NOT_POSTED`, the create `limitId` is optional,
-and the erosion command is a new path.
+and the erosion retry is a new bodyless path.
 
 | Document | Version | Classification | Change |
 |---|---|---|---|
-| `openapi/direct-claims.yaml` | 1.8.0 | Additive | `Allocation` gains `limitId`, `erosionStatus` (`NOT_POSTED`, `POSTED`, `FAILED`), `erosionMessage`, and `erosionPostedAt`; `CreateClaimAllocationRequest` gains optional `limitId`; adds `POST /api/v1/claims/{claimId}/allocations/{allocationId}/erosion` with `AllocationErosionRequest` and the `AllocationErosionStatus` enum. |
+| `openapi/direct-claims.yaml` | 1.8.0 | Additive | `Allocation` gains `limitId`, `erosionStatus` (`NOT_POSTED`, `POSTED`, `FAILED`), `erosionMessage`, and `erosionPostedAt`; `CreateClaimAllocationRequest` gains optional `limitId`; adds the bodyless `POST /api/v1/claims/{claimId}/allocations/{allocationId}/erosion` orchestration retry and the `AllocationErosionStatus` enum. |
 
 Erosion semantics:
 
@@ -863,27 +863,27 @@ Erosion semantics:
   `limitId` names the policy limit the allocation erodes; the create attempts
   the posting and returns the resulting `POSTED` or `FAILED` state, while an
   allocation without a limit keeps a null `limitId` and stays unposted.
-- `POST .../{allocationId}/erosion` records `POSTED` or `FAILED` with an
-  optional message of at most 4000 characters. `POSTED` stamps
-  `erosionPostedAt`; `FAILED` stores the message with a null instant so the
-  posting can be retried. `status` is trimmed and upper-cased.
-- Repeating the stored status is an idempotent 200 no-op that keeps the stored
-  message and instant. Once `POSTED`, the state is terminal and a different
-  status is 409 `ALLOCATION_ALREADY_POSTED`. A missing or blank status and an
-  over-long message are 400 `VALIDATION_ERROR`; an unknown claim or allocation,
-  a foreign tenant, and a missing or non-DIRECT book are 404.
+- `POST .../{allocationId}/erosion` is an orchestration retry with **no request
+  body**. It loads the tenant-scoped allocation, requires the stored `limitId`,
+  reposts the limit to the Policy domain, and records the resulting `POSTED` or
+  `FAILED` state. A Policy rejection or an unavailable Policy service is
+  recorded as `FAILED` and returned with 200, not as a 5xx.
+- A missing stored `limitId` is 400 `VALIDATION_ERROR`; an unknown claim or
+  allocation, a foreign tenant, and a missing or non-DIRECT book are 404. Once
+  `POSTED`, the state is terminal: a retry that computes the same `POSTED` state
+  is an idempotent 200 no-op, while a retry that would record a different state
+  is 409 `CONFLICT`.
 - The validator requires the four new `Allocation` fields, the optional create
-  `limitId`, the `AllocationErosionStatus` and `AllocationErosionRequest`
-  schemas and their bounds, the erosion path with its required body and the
-  200/400/404/409 responses, and the 409 `ALLOCATION_ALREADY_POSTED`
-  documentation.
-- The expert already implements the command as
-  `PATCH /internal/v1/claims/{claimId}/allocations/{allocationId}/erosion`
-  with the same body. The running public domain POST is bodyless and posts the
-  allocation's limit to the Policy domain itself; the canonical public command
-  carries the caller-supplied outcome, and the expert emits 409 `CONFLICT`
-  rather than the canonical code. `MISMATCHES.md` M-36 records both
-  differences.
+  `limitId`, the `AllocationErosionStatus` enum, the erosion path with no
+  request body and the 200/400/404/409 responses, the 400 stored-limit
+  documentation, and the 409 `CONFLICT` terminal guard. It also rejects a public
+  `AllocationErosionRequest` schema.
+- The expert implements the outcome write as
+  `PATCH /internal/v1/claims/{claimId}/allocations/{allocationId}/erosion` with
+  `{status, message?}`. The public domain retry calls it after the Policy
+  posting, but currently catches the expert 409 for a terminal `POSTED`
+  allocation and the record-write failure and returns the pre-update allocation
+  with 200. `MISMATCHES.md` M-36 records that divergence.
 
 ### Compatibility matrix
 
@@ -1043,7 +1043,7 @@ erode a policy limit:
 |---|---|---|---|
 | List allocations | `GET /api/v1/claims/{claimId}/allocations` | 200 `AllocationSummary` | 400, 404 |
 | Record allocation | `POST /api/v1/claims/{claimId}/allocations` | 201 `Allocation` | 400, 404, 409 |
-| Record erosion | `POST /api/v1/claims/{claimId}/allocations/{allocationId}/erosion` | 200 `Allocation` | 400, 404, 409 |
+| Retry erosion | `POST /api/v1/claims/{claimId}/allocations/{allocationId}/erosion` | 200 `Allocation` | 400, 404, 409 |
 
 The summary is `{items, totalPct, totalAmount}`; `items` is ordered oldest
 first and `totalPct`/`totalAmount` sum the claim's rows. An allocation is
@@ -1073,16 +1073,15 @@ Rules:
   exceed 1. An excess is 409 `ALLOCATION_EXCEEDS_100` and writes no row and no
   event. `allocatedAmount` is a booking figure and is not capped by the current
   reserve.
-- The erosion command body is `AllocationErosionRequest`: `status` is required
-  and must be `POSTED` or `FAILED`; `message` is optional, at most 4000
-  characters, and is stored as null when blank. `status` is trimmed and
-  upper-cased. `POSTED` stamps `erosionPostedAt`; `FAILED` stores the message
-  with a null instant so a later retry can post. Repeating the stored status is
-  an idempotent 200 no-op that keeps the stored message and instant. Once
-  `POSTED`, the state is terminal and a different status is 409
-  `ALLOCATION_ALREADY_POSTED`. An unknown status or an over-long message is 400
+- `POST .../{allocationId}/erosion` is an orchestration retry with no request
+  body. It loads the allocation, requires its stored `limitId`, reposts the
+  limit to the Policy domain, and records the resulting `POSTED` or `FAILED`
+  state. A Policy rejection or an unavailable Policy service is recorded as
+  `FAILED` and returned with 200. A missing stored `limitId` is 400
   `VALIDATION_ERROR`; an unknown claim or allocation, a foreign tenant, and a
-  missing or non-DIRECT book are 404.
+  missing or non-DIRECT book are 404. Once `POSTED`, the state is terminal: a
+  retry that computes the same `POSTED` state is an idempotent 200 no-op, while
+  a retry that would record a different state is 409 `CONFLICT`.
 - The create bumps the parent claim version and writes
   `direct.claim.allocation-created` in the same transaction. The payload
   carries the claim identity and number, the allocation fields, and the claim's
@@ -1092,14 +1091,13 @@ Rules:
   the public `allocationId`. The public error codes for the create are the
   expert's stable `POLICY_MISMATCH` and `ALLOCATION_EXCEEDS_100`, but the domain
   currently collapses them to `VALIDATION_ERROR` and `CONFLICT` (M-31).
-- Erosion is implemented on the expert as
+- Erosion is written on the expert as
   `PATCH /internal/v1/claims/{claimId}/allocations/{allocationId}/erosion` with
-  the same `{status, message?}` body. The running public domain POST takes no
-  body, posts the allocation's limit to the Policy domain itself, and records
-  the computed `POSTED`/`FAILED` outcome through that expert PATCH. The
-  canonical public command instead carries the caller-supplied status and
-  message, and the expert emits 409 `CONFLICT` rather than
-  `ALLOCATION_ALREADY_POSTED`; M-36 records both differences.
+  `{status, message?}`. The public domain retry calls it after posting the
+  stored limit to Policy. The domain currently catches the expert 409 for a
+  terminal `POSTED` allocation and the expert record-write failure and returns
+  the pre-update allocation with 200; M-36 records the difference from the
+  canonical 409 and the "recorded state" contract.
 
 ### Pagination and collections
 
@@ -1441,12 +1439,12 @@ missing directory.
    schemas with their field bounds, the 201/200 successes, the 400
    `POLICY_MISMATCH` and 409 `ALLOCATION_EXCEEDS_100` documentation, the four
    erosion fields on `Allocation` and the optional create `limitId`, the
-   `AllocationErosionStatus` and `AllocationErosionRequest` schemas with their
-   enums and 4000-character message cap, the
+   `AllocationErosionStatus` enum, the
    `POST /api/v1/claims/{claimId}/allocations/{allocationId}/erosion` operation
-   with its required body, tenant and DIRECT book parameters, 200 `Allocation`,
-   400 `VALIDATION_ERROR`, 404, and 409 `ALLOCATION_ALREADY_POSTED`
-   documentation, and the removal of the implemented allocations paths from
+   with no request body, its tenant and DIRECT book parameters, 200 `Allocation`,
+   400 `VALIDATION_ERROR` with the stored-limit guard, 404, and 409 `CONFLICT`
+   documentation, the rejection of a public `AllocationErosionRequest` schema,
+   and the removal of the implemented allocations paths from
    `x-planned-operations`,
    the `claimantPartyId` filter on the public and expert Direct Claims lists
    with its optional UUID query schema, tenant and DIRECT book parameters,
@@ -1601,11 +1599,12 @@ missing directory.
   `direct.claim.allocation-created`, while SPEC 11.4.9 names the fact
   `direct.claim.allocated`. The domain also collapses the expert's stable 400
   `POLICY_MISMATCH` and 409 `ALLOCATION_EXCEEDS_100` to `VALIDATION_ERROR` and
-  `CONFLICT` at the public surface. Allocation erosion is canonical on the
-  public `POST .../{allocationId}/erosion` command with a `{status, message?}`
-  body, but the running public domain POST is bodyless and computes the outcome
-  from the Policy domain, and the expert emits 409 `CONFLICT` rather than
-  `ALLOCATION_ALREADY_POSTED` (M-22, M-31, M-36);
+  `CONFLICT` at the public surface. Allocation erosion is a bodyless public
+  `POST .../{allocationId}/erosion` retry; the canonical contract documents 409
+  `CONFLICT` when the retry would change an already-`POSTED` allocation and a
+  200 with the recorded state, but the public domain currently catches the
+  expert 409 and the expert record-write failure and returns the pre-update
+  allocation with 200 (M-22, M-31, M-36);
 - Policy billing is implemented under `/api/v1/policies/{policyId}/billing`
   with the flat `BillingPlan`/`Installment` projection, while SPEC 11.2.13 names
   the route `/installments` and defines the plan event as

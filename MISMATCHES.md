@@ -106,7 +106,7 @@ removed per the resolution policy.
 | M-33 | Direct Claims list claimant filter is exact-match with no party reference check | L |
 | M-34 | Contract cash calls add a SPEC-less route, lifecycle, and event names and omit the cash-call limit gate | L |
 | M-35 | Payment allocations add a SPEC-less POST route and event name | L |
-| M-36 | Direct Claims allocation erosion command shape and conflict code differ from the contract | M |
+| M-36 | Direct Claims allocation erosion retry swallows the expert conflict and record failure | M |
 
 ## M-01 Public base paths
 
@@ -1638,27 +1638,28 @@ EV-05 dual-publish window before it can replace a SPEC name; renaming the route
 or event is breaking and needs an ADR and a `/v2` or dual-mount period. A
 `paymentId` outside the caller's tenant stays 404 `PAYMENT_NOT_FOUND`.
 
-## M-36 Direct Claims allocation erosion command shape and conflict code differ
+## M-36 Direct Claims allocation erosion retry swallows the expert conflict and record failure
 
 The 2026-10-20 contract adds the optional allocation `limitId`, the
-`NOT_POSTED`/`POSTED`/`FAILED` erosion state, and the public command
-`POST /api/v1/claims/{claimId}/allocations/{allocationId}/erosion` with an
-`AllocationErosionRequest` body (`status` POSTED or FAILED; optional `message`,
-at most 4000 characters). The expert command and the persisted projection
-already exist. The create with `limitId` also matches the contract: the domain
-posts the limit to Policy and returns the resulting `POSTED` or `FAILED` state.
-The public command shape and the conflict code differ:
+`NOT_POSTED`/`POSTED`/`FAILED` erosion state, and the public
+`POST /api/v1/claims/{claimId}/allocations/{allocationId}/erosion`
+orchestration retry. The contract now matches the implemented public shape: the
+retry has **no request body**, loads the tenant-scoped allocation, requires its
+stored `limitId`, reposts the limit to the Policy domain, and records the
+computed `POSTED` or `FAILED` outcome through the expert. The create with
+`limitId`, the missing-limit 400, the 404 scope, and the "Policy failure becomes
+`FAILED` with 200" behaviour also match. The remaining difference is the
+terminal-conflict and record-failure handling:
 
 | Area | Canonical contract | Implementation |
 |---|---|---|
-| Public command | `POST .../erosion` with `{status, message?}`; the caller records the outcome | `ClaimDetailController.retryAllocationErosion` takes no request body and calls `ClaimDetailService.retryErosion`, which reads the allocation, requires a non-null `limitId`, posts the limit to Policy, and records the computed `POSTED` or `FAILED` |
-| Policy posting | The command records an outcome; the policy posting is not part of this command | `PolicyErosionClient.postErosion` calls `POST /api/v1/policies/{policyId}/erosion` with the allocation id as `Idempotency-Key` and the allocation amount as `reservedAmount`; a policy rejection or transport failure becomes `FAILED` with a message instead of failing the request |
-| Missing limit | A create without `limitId` is valid and stays `NOT_POSTED`; the erosion command records an outcome (or 409 once posted) | A public erosion retry without a stored `limitId` is 400 `VALIDATION_ERROR` (`limitId is required to retry erosion...`); a create without `limitId` leaves the allocation `NOT_POSTED` |
-| 400 | Missing, blank, or unknown `status`, an over-long message, a malformed path, or a missing tenant | The public controller declares no request body, so a supplied body is ignored and `status`/`message` are never validated; the only 400 is the missing `limitId` retry guard (plus the usual path, tenant, and book checks) |
+| Public command | Bodyless orchestration retry; no request body and no public `AllocationErosionRequest` schema | `ClaimDetailController.retryAllocationErosion` takes no body and calls `ClaimDetailService.retryErosion`, which reads the allocation, requires a non-null `limitId`, posts the limit to Policy, and records the computed `POSTED` or `FAILED` |
+| Policy posting | A Policy rejection or an unavailable Policy service is recorded as `FAILED` and returned with 200, not a 5xx | `PolicyErosionClient.postErosion` calls `POST /api/v1/policies/{policyId}/erosion` with the allocation id as `Idempotency-Key` and the allocation amount as `reservedAmount`; its result becomes `POSTED` or `FAILED`, and the failure message is stored on the allocation |
+| Missing limit | 400 `VALIDATION_ERROR` | `ClaimDetailService.retryErosion` throws `DomainValidationException` (`limitId is required to retry erosion for allocation ...`), mapped to 400 `VALIDATION_ERROR` |
 | 404 | Unknown claim or allocation, foreign tenant, missing/non-DIRECT book | `ClaimDetailService.findAllocation` reads the tenant-scoped list and maps an absent id to `AllocationNotFoundException` (404 `NOT_FOUND`); the controller enforces the DIRECT book wall |
-| 409 | A different status after `POSTED` is 409 `ALLOCATION_ALREADY_POSTED`; the posted state is terminal | The expert `ClaimAllocationService.updateErosion` throws `ClaimConflictException` (409 `CONFLICT`) for a different status after `POSTED`; repeating `POSTED` is a 200 no-op. The public bodyless command recomputes and can return 200 even for an already-POSTED allocation |
-| Message | Trimmed, at most 4000 characters, blank becomes null, and stored on the allocation | The expert `Vocab.optionalText` trims, caps at 4000, and stores null for blank; the public domain records the Policy problem `detail`/`message` (capped at 4000) or `Policy erosion service is unavailable` |
-| Expert update failure | A recorded outcome is returned; a failure to record is an error | `ClaimDetailService.postErosion` catches `RestClientException` from the expert record call, logs it, and returns the pre-update allocation, so a successful Policy posting whose state write failed can still be reported as `NOT_POSTED` or `FAILED` |
+| 409 | A retry that would record a different state after `POSTED` is 409 `CONFLICT`; the posted state is terminal | The expert `ClaimAllocationService.updateErosion` throws `ClaimConflictException` (409 `CONFLICT`) for a different status after `POSTED`, but `ClaimDetailService.postErosion` catches the resulting `RestClientException` from `updateAllocationErosion`, logs it, and returns the **pre-update** allocation. The public caller therefore sees 200, never the documented 409 |
+| Record failure | The 200 body is the allocation with the newly recorded state | The same catch also swallows a transport/5xx failure of the expert record call: a successful Policy posting whose state write failed is returned as `NOT_POSTED` or `FAILED`, not as the recorded state, with 200 |
+| Same-state retry | A retry that computes the same `POSTED` state is an idempotent 200 no-op | The expert returns the stored allocation and instant; the public path returns 200 with the stored state, matching |
 
 Evidence:
 
@@ -1673,7 +1674,7 @@ Evidence:
   `ApiExceptionHandler.java:39-42,51-53,81-102` (404, 400, and 409 mappings).
 - `repos/eia-direct-claims-expert/.../ClaimAllocationController.java:61-69`
   (`PATCH .../erosion` on both prefixes), `AllocationErosionRequest.java:10-15`
-  (`@NotBlank status`, optional `message`), `ClaimAllocation.java:18-38`
+  (`@NotBlank status`, optional `message`; expert-only), `ClaimAllocation.java:18-38`
   (projection), and `ClaimAllocationService.java:115-162` (normalization,
   4000-character message cap, same-status no-op, terminal `POSTED` conflict).
 - `repos/eia-direct-claims-expert/.../ApiExceptionHandler.java:78-101` (409
@@ -1684,26 +1685,25 @@ Evidence:
   (`marksAnAllocationErosionPosted`, `recordsAFailedErosion...`,
   `repeatingTheCurrentErosionStatusIsA200NoOp`, terminal-conflict cases),
   `ClaimAllocationIntegrationTest` (projection, posting instant, retry,
-  tenant and claim walls), `ClaimDetailControllerTest.retriesAllocationErosion`,
-  and `PolicyErosionClientTest`.
+  tenant and claim walls), `ClaimDetailControllerTest.retriesAllocationErosion`
+  (200 only), and `PolicyErosionClientTest`.
 - `openapi/direct-claims.yaml` 1.8.0 and the README allocation-erosion section
   record the canonical shape.
 
-Why the contract keeps its shape: the public command is the only place a client
-can state a posting outcome explicitly, and `ALLOCATION_ALREADY_POSTED` is the
-stable code a client can branch on. The bodyless retry combines a Policy write
-with a state write and cannot carry the caller's status or message, so it is a
-different operation from the canonical command. A future fix can accept the
-body at the public edge and record it through the expert PATCH (posting to
-Policy only when the caller omits a status), or relax the contract to the retry
-shape. Until then the contract is canonical and this entry records the
-difference.
+Why the contract keeps its shape: the retry's job is to record the Policy
+outcome, so returning the pre-update state after a failed expert write hides
+whether the allocation was posted; and a terminal `POSTED` allocation that
+would be re-marked `FAILED` is a real conflict a client must see. A future fix
+maps the expert 409 to a public 409 `CONFLICT` and stops swallowing the expert
+record failure (or returns it as a 5xx), while keeping the missing-limit 400 and
+the Policy-failure-as-`FAILED` 200. Until then the contract is canonical and
+this entry records the difference.
 
-Resolution: make the public domain POST accept `AllocationErosionRequest` and
-record the supplied status and message through the expert, or amend this
-contract and SPEC 11.4.10 to the bodyless retry. Preserve the two expert create
-codes as M-31 requires. Renaming the route or the `ALLOCATION_ALREADY_POSTED`
-code is breaking for a generated client and needs an ADR.
+Resolution: surface the expert conflict as 409 `CONFLICT` and the record-write
+failure as an error instead of returning the pre-update allocation with 200, or
+amend this contract and SPEC 11.4.10 to the 200/stale-state behaviour. Preserve
+the two expert create codes as M-31 requires. Renaming the route or the
+`CONFLICT` code is breaking for a generated client and needs an ADR.
 
 ## Validation evidence
 
@@ -1747,7 +1747,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 11540 checks, 0 failures
+  PASS 11527 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -1863,14 +1863,12 @@ Additional checks and limits:
   operation, schema, conflict-code documentation, or implemented-event message.
   All four were run on a throwaway copy and exited non-zero (exit 1); the
   working copy was left unchanged. The Direct Claims allocation-erosion pass
-  added four more: renaming the
-  `/api/v1/claims/{claimId}/allocations/{allocationId}/erosion` path, removing
-  `erosionStatus` from the required `Allocation` keys, removing `FAILED` from
-  the `AllocationErosionRequest.status` enum, and replacing
-  `ALLOCATION_ALREADY_POSTED` in the 409 description each fail with the specific
-  missing operation, required-field, enum, or conflict-code message. All four
-  were run on a throwaway copy and exited non-zero (exit 1); the working copy
-  was left unchanged.
+  added four more: adding a `requestBody` to the erosion retry, removing
+  `erosionStatus` from the required `Allocation` keys, changing the 409 code to
+  `STATE_CONFLICT`, and re-adding a public `AllocationErosionRequest` schema
+  each fail with the specific request-body, required-field, conflict-code, or
+  public-schema message. All four were run on a throwaway copy and exited
+  non-zero (exit 1); the working copy was left unchanged.
 
 ## Resolution policy
 
