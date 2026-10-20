@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:direct-claims
 info:
   title: EIA Direct Claims events
-  version: 1.2.0
+  version: 1.3.0
   summary: Published domain event names for the Direct Claims vertical.
   description: >
     Event contract for the Direct Claims vertical. The authoritative event names are
@@ -15,15 +15,17 @@ info:
     equals the event name; it is not a broker topic.
 
     The Direct Claims expert now publishes `direct.claim.registered`,
-    `direct.claim.updated`, `direct.claim.coverage-assessed`,
-    `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`,
-    `direct.claim.task-created`, `direct.claim.task-completed`,
-    `direct.claim.task-updated`, `direct.claim.note-added`, and
-    `direct.claim.closed` through the transactional outbox; those channels and
-    operations are marked `x-status: implemented`. The task and note names are
-    new in this contract and have no SPEC 11.4.9 equivalent (MISMATCHES.md
-    M-22); every other implemented name already exists in the SPEC. The other
-    SPEC 11.4.9 names are planned.
+    `direct.claim.updated`, `direct.claim.assigned`,
+    `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`,
+    `direct.claim.settlement-authorized`, `direct.claim.task-created`,
+    `direct.claim.task-completed`, `direct.claim.task-updated`,
+    `direct.claim.note-added`, and `direct.claim.closed` through the
+    transactional outbox; those channels and operations are marked
+    `x-status: implemented`. The task and note names are new in this contract
+    and have no SPEC 11.4.9 equivalent (MISMATCHES.md M-22);
+    `direct.claim.assigned` is also new and has no SPEC 11.4.9 equivalent. Every
+    other implemented name already exists in the SPEC. The other SPEC 11.4.9
+    names are planned.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -63,6 +65,26 @@ channels:
       `changedFields: [status]`, `from`, `to`, and the claim identity,
       status, row version, and reserve context.
     x-event-type: direct.claim.updated
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.4.9
+    x-implemented-by: repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimAssigned:
+    address: direct.claim.assigned
+    title: direct.claim.assigned
+    description: >
+      Emitted when a claim is assigned or reassigned to a different adjuster or
+      team, in the same transaction as the claim version bump and the assignment
+      audit entry. The payload carries the claim identity and row version, the
+      new `assignedAdjuster`, `assignedTeam`, and `assignedAt`, and the acting
+      identity as `assignedBy` (the `X-EIA-Actor` header, defaulting to the
+      assigned adjuster). A same-assignment retry at the current version is a
+      no-op and emits nothing. This name is new in this contract and has no
+      SPEC 11.4.9 equivalent (MISMATCHES.md M-22).
+    x-event-type: direct.claim.assigned
     x-event-version: 1
     x-status: implemented
     x-spec-section: SPEC 11.4.9
@@ -416,6 +438,16 @@ operations:
       Publishes direct.claim.updated on every accepted claim status change.
     x-event-type: direct.claim.updated
     x-status: implemented
+  publishDirectClaimAssigned:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimAssigned'
+    summary: Publish direct.claim.assigned
+    description: >
+      Publishes direct.claim.assigned through the transactional outbox in the
+      same transaction as a real assignment change and its audit entry.
+    x-event-type: direct.claim.assigned
+    x-status: implemented
   publishDirectClaimCoverageAssessed:
     action: send
     channel:
@@ -676,12 +708,12 @@ x-implementation:
   publisher: eia-direct-claims-expert
   subscriber: none
   notes: >
-    Ten Direct Claims events are written to the transactional outbox in the
+    Eleven Direct Claims events are written to the transactional outbox in the
     same transaction as the aggregate or child write: `registered`, `updated`,
-    `coverage-assessed`, `reserve-changed`, `settlement-authorized`,
-    `task-created`, `task-completed`, `task-updated`, `note-added`, and
-    `closed`. The other SPEC 11.4.9 names remain planned. There is no business
-    subscriber or subscription registry yet.
+    `assigned`, `coverage-assessed`, `reserve-changed`,
+    `settlement-authorized`, `task-created`, `task-completed`, `task-updated`,
+    `note-added`, and `closed`. The other SPEC 11.4.9 names remain planned.
+    There is no business subscriber or subscription registry yet.
 
 x-consumed-events:
   - policy.policy.issued

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Assumed Claims API
-  version: 1.4.0
+  version: 1.5.0
   summary: Assumed-book reinsurance claim administration and the Assumed Claims expert API.
   description: >
     This document describes the implemented public Assumed Claims domain API
@@ -36,6 +36,21 @@ info:
     (`IDEMPOTENCY_KEY_REUSED`). Assumed Claims always emits the
     `Idempotent-Replay` header on a 201 create response and is race-safe
     because the expert reserves the key with an atomic insert.
+
+    Assignment (`PATCH /api/v1/assumed-claims/claims/{claimId}/assignment`,
+    also served under the short `/api/v1/assumed-claims/{claimId}/assignment`
+    alias) replaces the claim's current ownership. `assignedAdjuster` is
+    required and trimmed, `assignedTeam` is optional, and `expectedVersion` is
+    the claim version the caller observed: a stale value is 409 and never
+    overwrites a concurrent change. The expert fixes `assignedAt` at the change
+    instant, records the optional `X-EIA-Actor` identity as `assignedBy` and in
+    the audit trail, and defaults the actor to the assigned adjuster when the
+    header is absent. Repeating the current assignment at the current version is
+    a no-op (no version bump, no audit entry, no event). A real change bumps the
+    claim version and emits `assumed.claim.assigned` in the same transaction.
+    The `AssumedClaim` projection exposes `assignedAdjuster`, `assignedTeam`,
+    and `assignedAt` as nullable fields; a claim that has never been assigned
+    returns null for all three.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -1058,6 +1073,58 @@ paths:
           $ref: './components.yaml#/components/responses/UnprocessableContent'
         default:
           $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/assumed-claims/claims/{claimId}/assignment:
+    patch:
+      operationId: assignAssumedClaim
+      tags:
+        - Assumed Claims
+      summary: Assign or reassign an assumed claim.
+      description: >
+        Replaces the claim's current adjuster and team. `assignedAdjuster` is
+        required (1-128 characters after trimming) and `assignedTeam` is
+        optional (at most 64 characters). `expectedVersion` is the claim version
+        the caller observed and is required; a stale value is 409 CONFLICT and
+        nothing is written. Repeating the current assignment at the current
+        version is a no-op that returns the current claim without a version
+        bump, audit entry, or event. A real change fixes `assignedAt`, bumps the
+        claim version, appends the assignment audit entry, records the optional
+        `X-EIA-Actor` identity as `assignedBy` (defaulting to the assigned
+        adjuster), and emits `assumed.claim.assigned` in the same transaction.
+        A missing or non-ASSUMED book is hidden as 404 EIA-RNS-7005 (SPEC 3.6.2,
+        WALL-06). The operation is also served under the short
+        `/api/v1/assumed-claims/{claimId}/assignment` alias.
+      x-path-alias: /api/v1/assumed-claims/{claimId}/assignment
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - $ref: './components.yaml#/components/parameters/ActorHeader'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssignClaimRequest'
+      responses:
+        '200':
+          description: Assumed claim after the assignment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssumedClaim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
   /api/v1/assumed-claims/claims/{claimId}/tasks:
     get:
       operationId: listAssumedClaimTasks
@@ -1446,6 +1513,54 @@ paths:
           $ref: './components.yaml#/components/responses/Conflict'
         '422':
           $ref: './components.yaml#/components/responses/UnprocessableContent'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/assumed-claims/{claimId}/assignment:
+    patch:
+      operationId: expertAssignAssumedClaim
+      tags:
+        - Assumed Claims internal
+      summary: Assign or reassign an assumed claim (expert).
+      description: >
+        Expert assignment used by the Assumed Claims domain. The tenant is taken
+        from `X-EIA-Tenant` and the book wall still applies. The body and the
+        guarantees are the same as the public route: a stale `expectedVersion`
+        is 409 `EIA-RNS-7006`, a repeated assignment is a no-op, and a real
+        change bumps the claim version, appends the assignment audit entry, and
+        writes `assumed.claim.assigned` in the same transaction. The optional
+        `X-EIA-Actor` header is the acting identity and defaults to the assigned
+        adjuster.
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - $ref: './components.yaml#/components/parameters/ActorHeader'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssignClaimRequest'
+      responses:
+        '200':
+          description: Assumed claim after the assignment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssumedClaim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /internal/v1/assumed-claims/{assumedClaimId}/close:
@@ -2183,6 +2298,23 @@ components:
           $ref: './components.yaml#/components/schemas/MoneyAmount'
         reserveCurrency:
           $ref: './components.yaml#/components/schemas/CurrencyCode'
+        assignedAdjuster:
+          type: [string, 'null']
+          maxLength: 128
+          description: >
+            Current assigned adjuster, or null when the claim has never been
+            assigned. Set by the assignment command, not by claim creation.
+        assignedTeam:
+          type: [string, 'null']
+          maxLength: 64
+          description: Optional team of the current assignment; null when unset.
+        assignedAt:
+          type: [string, 'null']
+          format: date-time
+          description: >
+            Instant of the last real assignment change. A same-assignment no-op
+            keeps the previous value; null when the claim has never been
+            assigned.
     AssumedClaimStatus:
       type: string
       description: Assumed claim lifecycle status from SPEC 11.5.6.
@@ -3041,6 +3173,32 @@ components:
           $ref: './components.yaml#/components/schemas/MoneyAmount'
         reserveCurrency:
           $ref: './components.yaml#/components/schemas/CurrencyCode'
+    AssignClaimRequest:
+      type: object
+      description: >
+        Command to assign or reassign an assumed claim at the observed claim
+        version. `assignedAdjuster` is required and trimmed; `assignedTeam` is
+        optional and trimmed. A stale `expectedVersion` is 409; repeating the
+        current assignment at the current version is a no-op.
+      required:
+        - assignedAdjuster
+        - expectedVersion
+      properties:
+        assignedAdjuster:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Adjuster reference that receives the claim.
+        assignedTeam:
+          type: [string, 'null']
+          maxLength: 64
+          description: Optional team reference for the assignment.
+        expectedVersion:
+          type: integer
+          minimum: 0
+          description: >
+            Claim version the caller last observed. A value that does not match
+            the current version is 409 EIA-RNS-7006.
     ChangeAssumedClaimStatusRequest:
       type: object
       description: Public lifecycle transition command.
@@ -3591,6 +3749,8 @@ x-implementation:
   verifiedAt: '2026-10-20'
   verifiedAgainst:
     - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/AssumedClaimController.java
+    - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/AssumedClaimDto.java
+    - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/AssignClaimCommand.java
     - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/AssumedClaimSearchResponse.java
     - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/AssumedClaimService.java
     - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/BookScopeFilter.java
@@ -3612,6 +3772,10 @@ x-implementation:
     - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/ApiException.java
     - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/ApiExceptionHandler.java
     - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/AssumedClaimController.java
+    - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/AssumedClaimAssignmentController.java
+    - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/ClaimAssignmentRequest.java
+    - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/AssumedClaim.java
+    - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/AssumedClaimRepository.java
     - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/LossAdviceController.java
     - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/ReserveController.java
     - repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/CashCallController.java
@@ -3638,6 +3802,9 @@ x-implementation:
     - repos/eia-assumed-claims-expert/src/test/java/com/eia/assumedclaims/expert/ClaimTaskNoteEndpointTest.java
     - repos/eia-assumed-claims-expert/src/test/java/com/eia/assumedclaims/expert/ClaimTaskNoteOutboxIntegrationTest.java
     - repos/eia-assumed-claims-expert/src/test/java/com/eia/assumedclaims/expert/ClaimTaskNoteIdempotencyIntegrationTest.java
+    - repos/eia-assumed-claims-expert/src/test/java/com/eia/assumedclaims/expert/AssumedClaimAssignmentEndpointTest.java
+    - repos/eia-assumed-claims-expert/src/test/java/com/eia/assumedclaims/expert/AssumedClaimAssignmentServiceTest.java
+    - repos/eia-assumed-claims-expert/src/test/java/com/eia/assumedclaims/expert/AssumedClaimAssignmentOutboxIntegrationTest.java
   errorEnvelope: Canonical RFC 9457 Problem envelope (SPEC 6.11).
   notes: >
     Both public path forms are implemented by the same controller methods; the
@@ -3655,12 +3822,26 @@ x-implementation:
     key with an atomic insert, so concurrent first attempts either create once
     or replay. A same-key retry of an identical body returns the stored 201 with
     `Idempotent-Replay: true`; a different body is 409 `EIA-RNS-4091` category
-    `CONFLICT` with `errors[0].code = IDEMPOTENCY_KEY_REUSED`.
+    `CONFLICT` with `errors[0].code = IDEMPOTENCY_KEY_REUSED`. Assignment is
+    implemented on the `/claims` route, the short alias, and the internal expert
+    alias. The expert accepts `X-EIA-Actor` only; when it is absent the assigned
+    adjuster is recorded as the actor. `assignedBy` is stored and audited but is
+    not returned in the public `AssumedClaim` projection. The assignment event
+    name has no SPEC 11.5.9 equivalent (MISMATCHES.md M-22). The domain
+    `AssignClaimCommand` still requires `assignedTeam` while the expert accepts
+    it as optional, so the contract's optional team is not reachable through the
+    public route yet; M-25 records that gap.
 x-compatibility:
-  contractVersion: 1.4.0
-  previousContractVersion: 1.3.0
+  contractVersion: 1.5.0
+  previousContractVersion: 1.4.0
   breaking: []
   compatible:
+    - Adds PATCH /api/v1/assumed-claims/claims/{claimId}/assignment (alias /api/v1/assumed-claims/{claimId}/assignment) and the /internal/v1/assumed-claims/{claimId}/assignment expert route.
+    - Adds the AssignClaimRequest schema (assignedAdjuster required, max 128; assignedTeam optional, max 64; expectedVersion required, integer zero or greater).
+    - Adds the optional X-EIA-Actor request header to the assignment operations.
+    - Adds the nullable assignedAdjuster, assignedTeam, and assignedAt fields to the AssumedClaim projection.
+    - Documents 200/400/404/409 problem responses, the stale-version 409 EIA-RNS-7006, and the same-assignment no-op.
+    - Documents the assumed.claim.assigned event published in the same transaction as a real assignment change.
     - Adds the optional ClaimIdempotencyKey parameter (Idempotency-Key, 1-64 characters) to POST /api/v1/assumed-claims/claims/{claimId}/tasks and POST /api/v1/assumed-claims/claims/{claimId}/notes.
     - Documents the 201 Idempotent-Replay header, true for a stored-response replay and false for a fresh create.
     - Documents 400 EIA-RNS-7004 INVALID_IDEMPOTENCY_KEY for an invalid key and 409 EIA-RNS-4091 IDEMPOTENCY_KEY_REUSED for the same key with a different body.
@@ -3675,6 +3856,13 @@ x-compatibility:
     changed, and a caller that omits the key keeps the previous create
     behaviour. The only observable change without a key is the always-present
     `Idempotent-Replay: false` response header.
+
+    Assignment is additive over 1.4.0: it adds one public operation (with the
+    short alias and the internal expert route), the optional actor header, and
+    nullable response fields. A claim that is never assigned keeps null
+    assignment fields and emits no assignment event, so existing consumers see
+    no change. The optional `assignedTeam` in the contract is not yet accepted by
+    the domain command; M-25 records the gap.
 x-planned-operations:
   - method: GET
     path: /api/v1/assumed-claims/claims/{assumedClaimId}/allocations

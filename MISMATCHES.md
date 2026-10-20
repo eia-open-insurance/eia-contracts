@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-20 (claim command idempotency contract).
+Status: open, reviewed 2026-10-20 (claim assignment contract).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -67,6 +67,7 @@ removed per the resolution policy.
 | M-22 | Implemented outbox event names differ from the SPEC catalog names | M |
 | M-23 | Global search paths and validation differ from the SPEC naming and canonical limit rules | M |
 | M-24 | Payment source link is a flat triple, not the SPEC claim projection | M |
+| M-25 | Claim assignment contract gaps: assumed team required in the domain, direct negative version is 409, actor-header alias | M |
 
 ## M-01 Public base paths
 
@@ -570,8 +571,8 @@ ten publishing verticals now emit a subset:
 | Party | `party.party.created`, `party.party.updated` | `repos/eia-party-expert/.../PartyEvents.java` |
 | Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated` | `repos/eia-policy-expert/.../PolicyEvents.java` |
 | Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded` | `repos/eia-contract-expert/.../ContractEvents.java` |
-| Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.closed` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
-| Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted`, `assumed.claim.task-created`, `assumed.claim.task-completed`, `assumed.claim.task-updated`, `assumed.claim.note-added` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
+| Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.assigned`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.closed`, `direct.claim.task-created`, `direct.claim.task-completed`, `direct.claim.task-updated`, `direct.claim.note-added` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
+| Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.assigned`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted`, `assumed.claim.task-created`, `assumed.claim.task-completed`, `assumed.claim.task-updated`, `assumed.claim.note-added` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
 | Cession | `cession.cession.created`, `cession.cession.updated`, `cession.cession.handed-off` | `repos/eia-cession-expert/.../CessionEvents.java` |
 | Retrocession | `retrocession.retrocession.created`, `retrocession.retrocession.updated`, `retrocession.retrocession.handed-off` | `repos/eia-retrocession-expert/.../RetrocessionEvents.java` |
 | Document | `document.document.created`, `document.document.updated`, `document.document.status-changed` | `repos/eia-document-expert/.../DocumentEvents.java` |
@@ -718,8 +719,8 @@ planned name |
 |---|---|---|
 | Policy | `policy.policy.created` / `.updated` | No SPEC name: SPEC 11.2.9 starts at `policy.policy.quoted`. `version-issued`, `endorsed`, `cancelled`, and `reinstated` match SPEC. |
 | Contract | `contract.contract.updated` | No SPEC name: SPEC 11.3.9 lists lifecycle verbs only. `created`, `bound`, `commuted`, and `cession.recorded` match SPEC. |
-| Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC name: SPEC 11.4.9 defines no task or note event. `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and `closed` match SPEC. |
-| Assumed Claims | `assumed.claim.updated`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no task or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
+| Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned` | No SPEC names: SPEC 11.4.9 defines no assignment, task, or note event. `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and `closed` match SPEC. |
+| Assumed Claims | `assumed.claim.updated`; `assumed.claim.assigned`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no assignment, task, or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
 | Cession | `cession.cession.created` / `.updated` / `.handed-off` | `cession.case.created`, `cession.handoff.sent`/`.acknowledged` |
 | Retrocession | `retrocession.retrocession.created` / `.updated` / `.handed-off` | `retrocession.case.created`, `retrocession.handoff.sent`/`.acknowledged` |
 | Document | `document.document.created` / `.updated` / `.status-changed` | `document.document.registered`, plus the SPEC lifecycle verbs |
@@ -884,10 +885,97 @@ validate `sourceId` against the source vertical before create or authorize, and
 add the contract/settlement context, or accept the generic source triple as the
 canonical Round 2 shape and amend SPEC 11.7.4 and the M-12 gap accordingly.
 
+## M-25 Claim assignment contract gaps
+
+Claim assignment is implemented on both claim verticals:
+
+| Aspect | Direct Claims | Assumed Claims |
+|---|---|---|
+| Public route | `PATCH /api/v1/claims/{claimId}/assignment` | `PATCH /api/v1/assumed-claims/claims/{claimId}/assignment`, alias `/api/v1/assumed-claims/{claimId}/assignment` |
+| Expert route | `PATCH /internal/v1/claims/{claimId}/assignment` | `PATCH /internal/v1/assumed-claims/{claimId}/assignment` |
+| Body | `assignedAdjuster` required (max 128), `assignedTeam` optional (max 64), `expectedVersion` required | the same |
+| Projection | nullable `assignedAdjuster`, `assignedTeam`, `assignedAt` on `Claim` | the same on `AssumedClaim` |
+| Event | `direct.claim.assigned` | `assumed.claim.assigned` |
+| Actor header | `X-EIA-Actor`; the expert also accepts `X-EIA-User` | `X-EIA-Actor` only |
+
+The ownership semantics are the same on both verticals. The claim version is the
+optimistic token: a stale `expectedVersion` is 409 and writes nothing.
+`assignedAt` is the instant of the last real change, and a same-assignment retry
+at the current version is a no-op that keeps the previous `assignedAt`, version,
+audit trail, and event stream. A real change bumps the claim version, appends
+the assignment audit entry, and writes the assignment event in the same
+transaction. The acting identity is the optional `X-EIA-Actor` header, recorded
+as `assigned_by` and in the audit entry, and defaults to the assigned adjuster
+when the header is absent or blank. `assignedBy` is deliberately not returned in
+the public `Claim`/`AssumedClaim` projection (M-20); it appears only in the
+event payload and the audit trail.
+
+Residual differences:
+
+- **Assumed Claims requires a team at the domain edge.** The contract and the
+  Assumed Claims expert allow `assignedTeam` to be omitted, but
+  `repos/eia-assumed-claims-domain/.../AssignClaimCommand.java:16-17` declares
+  it `@NotBlank`. A teamless assignment through the public route is therefore a
+  400 before the expert call, while the same body sent directly to the expert is
+  accepted with a null team (`AssumedClaimAssignmentEndpointTest.aTeamIsOptional...`).
+  Direct Claims accepts a teamless assignment on both surfaces.
+- **Direct Claims returns 409 for a negative expected version.** The contract
+  requires an integer `>= 0` and a 400 for a violation. The Assumed Claims
+  expert enforces `@PositiveOrZero`, but
+  `repos/eia-direct-claims-expert/.../ClaimAssignmentRequest.java:14-18` only
+  annotates `expectedVersion` with `@NotNull`, so `-1` reaches the service and
+  is answered with 409 as a stale version rather than 400. The stale-version 409
+  itself is correct.
+- **Actor header alias.** The contract documents the shared optional
+  `X-EIA-Actor` header. The Direct Claims expert controller also accepts
+  `X-EIA-User` and lets it win when both are present; the Direct Claims domain
+  public controller forwards only `X-EIA-Actor`. Assumed Claims accepts only
+  `X-EIA-Actor`. A client that sends `X-EIA-Actor` behaves identically on every
+  route, so the alias is additive rather than breaking.
+- **Book wall.** Both public routes hide a missing or different book as 404
+  (`BOOK_SCOPE_VIOLATION` in Direct Claims, `EIA-RNS-7005` in Assumed Claims),
+  consistent with the other claim routes and SPEC 3.6.2/WALL-06, not the
+  canonical 400 for a missing header that M-23 records for search.
+- **Event names.** `direct.claim.assigned` and `assumed.claim.assigned` have no
+  SPEC 11.4.9 or 11.5.9 equivalent; M-22 records that naming gap. The events are
+  additive under EV-05.
+
+Evidence:
+
+- `repos/eia-direct-claims-domain/.../ClaimController.java:62-70` (public route
+  and `X-EIA-Actor`), `ClaimService.assign`, `ClaimClient.assign`,
+  `ClaimCommands.Assignment`, `ClaimDto.java:27-29`.
+- `repos/eia-direct-claims-expert/.../ClaimAssignmentController.java:36-49`
+  (`X-EIA-User`/`X-EIA-Actor`), `ClaimAssignmentRequest.java:14-18`,
+  `ClaimService.assign:157-185`, `ClaimRepository.assign`,
+  `ClaimEvents.assigned:199-206`.
+- `repos/eia-assumed-claims-domain/.../AssumedClaimController.java:73-80`
+  (public route and actor), `AssumedClaimService.assign:89-91`,
+  `AssumedClaimClient.assign`, `AssignClaimCommand.java:12-21`,
+  `AssumedClaimDto.java:25-27`.
+- `repos/eia-assumed-claims-expert/.../AssumedClaimAssignmentController.java:29-49`
+  (all three routes and `X-EIA-Actor`), `ClaimAssignmentRequest.java:18-27`,
+  `AssumedClaimService.assign:160-190`, `AssumedClaimRepository.assign`,
+  `AssumedClaimEvents.assigned:99-118`.
+- Tests: `ClaimAssignmentControllerTest`, `ClaimAssignmentIntegrationTest`,
+  `AssumedClaimAssignmentEndpointTest`, `AssumedClaimAssignmentServiceTest`,
+  `AssumedClaimAssignmentOutboxIntegrationTest`, and
+  `AssumedClaimAssignmentControllerTest` / `AssumedClaimAssignmentClientTest`
+  on the domain side.
+
+Resolution: drop `@NotBlank` from the Assumed Claims domain
+`AssignClaimCommand.assignedTeam` (and the corresponding domain test
+expectation), add `@PositiveOrZero` to the Direct Claims expert
+`ClaimAssignmentRequest.expectedVersion`, and decide whether the `X-EIA-User`
+alias is promoted into the shared contract or removed from the Direct Claims
+expert. The contract documents the agreement (optional team, `expectedVersion >=
+0`, shared `X-EIA-Actor`); the service fixes should follow in their own
+repositories.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-claim command idempotency contract:
+claim assignment contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -899,8 +987,8 @@ OpenAPI 3.1 documents
   OK openapi/party.yaml  5 paths, 7 operations
   OK openapi/policy.yaml  37 paths, 47 operations
   OK openapi/contract.yaml  36 paths, 52 operations
-  OK openapi/direct-claims.yaml  45 paths, 67 operations
-  OK openapi/assumed-claims.yaml  39 paths, 56 operations
+  OK openapi/direct-claims.yaml  47 paths, 69 operations
+  OK openapi/assumed-claims.yaml  41 paths, 58 operations
   OK openapi/cession.yaml  9 paths, 11 operations
   OK openapi/retrocession.yaml  9 paths, 11 operations
   OK openapi/document.yaml  7 paths, 9 operations
@@ -911,14 +999,14 @@ AsyncAPI 3 documents
   OK asyncapi/party.yaml  9 event channels
   OK asyncapi/policy.yaml  20 event channels
   OK asyncapi/contract.yaml  21 event channels
-  OK asyncapi/direct-claims.yaml  24 event channels
-  OK asyncapi/assumed-claims.yaml  20 event channels
+  OK asyncapi/direct-claims.yaml  25 event channels
+  OK asyncapi/assumed-claims.yaml  21 event channels
   OK asyncapi/cession.yaml  17 event channels
   OK asyncapi/retrocession.yaml  17 event channels
   OK asyncapi/document.yaml  18 event channels
   OK asyncapi/payment.yaml  18 event channels
   OK asyncapi/notifications.yaml  12 event channels
-  OK catalog: 176 unique published events across 10 verticals
+  OK catalog: 178 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -926,7 +1014,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 9470 checks, 0 failures
+  PASS 9656 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -963,7 +1051,12 @@ Additional checks and limits:
   `POST /api/v1/claims/{claimId}/tasks`, changing the shared key schema
   `maxLength` from 64 to 128, and removing the 409 response from an Assumed
   Claims task POST each fail with the specific parameter, bounds, or response
-  message.
+  message. The claim assignment pass added four more: renaming the
+  `/api/v1/claims/{claimId}/assignment` path, removing `assignedAt` from the
+  `AssumedClaim` schema, making `assignedTeam` required in
+  `AssignClaimRequest`, and dropping `direct.claim.assigned` from the Direct
+  Claims `implemented` list each fail with the specific path, schema, field, or
+  implemented-event message.
 
 ## Resolution policy
 

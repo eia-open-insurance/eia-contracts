@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Direct Claims API
-  version: 1.4.0
+  version: 1.5.0
   summary: Direct-book claim administration and the Direct Claims expert API.
   description: >
     This document describes the implemented public Direct Claims domain API and
@@ -36,6 +36,20 @@ info:
     (`IDEMPOTENCY_KEY_REUSED`). Clients SHOULD send a UUID key per create. The
     header is optional for backward compatibility; see MISMATCHES.md M-07 for
     the reservation race and the `Idempotent-Replay` spelling difference.
+
+    Assignment (`PATCH /api/v1/claims/{claimId}/assignment`) replaces the
+    claim's current ownership. `assignedAdjuster` is required and trimmed,
+    `assignedTeam` is optional, and `expectedVersion` is the claim version the
+    caller observed: a stale value is 409 and never overwrites a concurrent
+    change. The expert fixes `assignedAt` at the change instant, records the
+    optional `X-EIA-Actor` identity as `assignedBy` and in the audit trail, and
+    defaults the actor to the assigned adjuster when the header is absent.
+    Repeating the current assignment at the current version is a no-op (no
+    version bump, no audit entry, no event). A real change bumps the claim
+    version and emits `direct.claim.assigned` in the same transaction. The
+    `Claim` projection exposes `assignedAdjuster`, `assignedTeam`, and
+    `assignedAt` as nullable fields; a claim that has never been assigned
+    returns null for all three.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -176,6 +190,56 @@ paths:
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
           $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/assignment:
+    patch:
+      operationId: assignClaim
+      tags:
+        - Direct Claims
+      summary: Assign or reassign a direct claim.
+      description: >
+        Replaces the claim's current adjuster and team. `assignedAdjuster` is
+        required (1-128 characters after trimming) and `assignedTeam` is
+        optional (at most 64 characters). `expectedVersion` is the claim version
+        the caller observed and is required; a stale value is 409 CONFLICT and
+        nothing is written. Repeating the current assignment at the current
+        version is a no-op that returns the current claim without a version
+        bump, audit entry, or event. A real change fixes `assignedAt`, bumps the
+        claim version, records the optional `X-EIA-Actor` identity as
+        `assignedBy` (defaulting to the assigned adjuster), appends the
+        assignment audit entry, and emits `direct.claim.assigned` in the same
+        transaction. A missing or non-DIRECT book is hidden as 404 (SPEC 3.6.2,
+        WALL-06).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - $ref: './components.yaml#/components/parameters/ActorHeader'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssignClaimRequest'
+      responses:
+        '200':
+          description: Claim after the assignment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Claim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /api/v1/claims/{claimId}/status:
@@ -1458,6 +1522,53 @@ paths:
           $ref: './components.yaml#/components/responses/NotFound'
         default:
           $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/claims/{claimId}/assignment:
+    patch:
+      operationId: expertAssignClaim
+      tags:
+        - Direct Claims internal
+      summary: Assign or reassign a direct claim (expert).
+      description: >
+        Expert assignment used by the Direct Claims domain. The tenant is taken
+        from `X-EIA-Tenant` and the book wall still applies. The body and the
+        guarantees are the same as the public route: a stale `expectedVersion`
+        is 409, a repeated assignment is a no-op, and a real change bumps the
+        claim version and writes `direct.claim.assigned` in the same
+        transaction. The expert also accepts the canonical `X-EIA-User` header
+        as an alias for `X-EIA-Actor`; `X-EIA-User` wins when both are present.
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - $ref: './components.yaml#/components/parameters/ActorHeader'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssignClaimRequest'
+      responses:
+        '200':
+          description: Claim after the assignment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Claim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
   /internal/v1/claims/{claimId}/status:
     patch:
       operationId: expertChangeClaimStatus
@@ -2686,6 +2797,23 @@ components:
           pattern: '^[A-Z]{3}$'
         litigationFlag:
           type: boolean
+        assignedAdjuster:
+          type: [string, 'null']
+          maxLength: 128
+          description: >
+            Current assigned adjuster, or null when the claim has never been
+            assigned. Set by the assignment command, not by claim registration.
+        assignedTeam:
+          type: [string, 'null']
+          maxLength: 64
+          description: Optional team of the current assignment; null when unset.
+        assignedAt:
+          type: [string, 'null']
+          format: date-time
+          description: >
+            Instant of the last real assignment change. A same-assignment no-op
+            keeps the previous value; null when the claim has never been
+            assigned.
         currentReserveAmount:
           $ref: './components.yaml#/components/schemas/MoneyAmount'
     ClaimType:
@@ -3420,6 +3548,32 @@ components:
             - DRAFT
             - REGISTERED
           description: Optional initial status. Defaults to REGISTERED.
+    AssignClaimRequest:
+      type: object
+      description: >
+        Command to assign or reassign a claim at the observed claim version.
+        `assignedAdjuster` is required and trimmed; `assignedTeam` is optional
+        and trimmed. A stale `expectedVersion` is 409; repeating the current
+        assignment at the current version is a no-op.
+      required:
+        - assignedAdjuster
+        - expectedVersion
+      properties:
+        assignedAdjuster:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Adjuster reference that receives the claim.
+        assignedTeam:
+          type: [string, 'null']
+          maxLength: 64
+          description: Optional team reference for the assignment.
+        expectedVersion:
+          type: integer
+          minimum: 0
+          description: >
+            Claim version the caller last observed. A value that does not match
+            the current version is 409 CONFLICT.
     ChangeClaimStatusRequest:
       type: object
       description: Public lifecycle transition command.
@@ -4005,6 +4159,7 @@ x-implementation:
   verifiedAt: '2026-10-20'
   verifiedAgainst:
     - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimController.java
+    - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimDto.java
     - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimSearchResponse.java
     - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimService.java
     - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/RequestGuard.java
@@ -4015,6 +4170,10 @@ x-implementation:
     - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimClient.java
     - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimCommandResult.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimController.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimAssignmentController.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimAssignmentRequest.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/Claim.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimRepository.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/InjuryController.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ExposureController.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ReserveController.java
@@ -4043,6 +4202,8 @@ x-implementation:
     - repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/DirectClaimsEndpointTest.java
     - repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/ClaimTaskNoteEndpointTest.java
     - repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/ClaimTaskNoteIdempotencyIntegrationTest.java
+    - repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/ClaimAssignmentControllerTest.java
+    - repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/ClaimAssignmentIntegrationTest.java
   errorEnvelope: >
     Vertical-specific ApiError {timestamp, status, code, message, path,
     details[{field, message}]}. Not the canonical Problem envelope yet.
@@ -4060,12 +4221,24 @@ x-implementation:
     absent, and Direct Claims restricts the key to printable ASCII without
     spaces. The Direct Claims expert reserves the key with a find-then-insert
     rather than an atomic upsert, so two truly concurrent first attempts can
-    race; see MISMATCHES.md M-07.
+    race; see MISMATCHES.md M-07. Assignment is implemented on the public route
+    and the internal expert alias. The expert accepts `X-EIA-Actor` and the
+    canonical `X-EIA-User` alias (the latter wins when both are present); the
+    contract documents the shared `X-EIA-Actor` header. `assignedBy` is persisted
+    and audited but is not part of the public `Claim` projection. The assignment
+    event name has no SPEC 11.4.9 equivalent (MISMATCHES.md M-22); the
+    implementation gaps are recorded in M-25.
 x-compatibility:
-  contractVersion: 1.4.0
-  previousContractVersion: 1.3.0
+  contractVersion: 1.5.0
+  previousContractVersion: 1.4.0
   breaking: []
   compatible:
+    - Adds PATCH /api/v1/claims/{claimId}/assignment and the /internal/v1/claims/{claimId}/assignment expert route.
+    - Adds the AssignClaimRequest schema (assignedAdjuster required, max 128; assignedTeam optional, max 64; expectedVersion required, integer zero or greater).
+    - Adds the optional X-EIA-Actor request header to the assignment operations.
+    - Adds the nullable assignedAdjuster, assignedTeam, and assignedAt fields to the Claim projection.
+    - Documents 200/400/404/409 problem responses, the stale-version 409, and the same-assignment no-op.
+    - Documents the direct.claim.assigned event published in the same transaction as a real assignment change.
     - Adds the optional ClaimIdempotencyKey parameter (Idempotency-Key, 1-64 characters) to POST /api/v1/claims/{claimId}/tasks, POST /api/v1/claims/{claimId}/notes, and their internal expert equivalents.
     - Documents the 201 Idempotent-Replay header, true for a stored-response replay and false for a fresh create.
     - Documents 400 VALIDATION_ERROR for an invalid Idempotency-Key and 409 EIA-DIR-4091 IDEMPOTENCY_KEY_REUSED for the same key with a different body.
@@ -4081,6 +4254,13 @@ x-compatibility:
     changed, and a caller that omits the key keeps the previous behaviour. The
     header spelling `Idempotent-Replay` and the Direct Claims reservation race
     are recorded in MISMATCHES.md M-07.
+
+    Assignment is additive over 1.4.0: the new path and fields are optional in
+    the sense that a claim that is never assigned keeps null assignment fields
+    and no emitted assignment event, and no existing request or response field
+    changed. The optional actor header is ignored by clients that do not send
+    it. The X-EIA-User alias accepted by the Direct Claims expert and the
+    negative-version handling difference are recorded in MISMATCHES.md M-25.
 x-planned-operations:
   - method: PATCH
     path: /api/v1/claims/{claimId}

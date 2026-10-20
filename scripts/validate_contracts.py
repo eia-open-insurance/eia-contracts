@@ -402,6 +402,49 @@ TASK_NOTE_IDEMPOTENCY_POSTS = {
 }
 
 
+# Claim assignment. Each tuple is
+# (path, method, claim schema name, book header component). The public and the
+# internal expert routes are both mandatory because the domain calls the expert
+# alias. Every operation must document the tenant and book headers, the optional
+# shared ActorHeader, an AssignClaimRequest body, the updated claim on 200, and
+# a problem+json 400/404/409.
+ASSIGNMENT_OPENAPI_PATHS = {
+    "direct-claims": [
+        ("/api/v1/claims/{claimId}/assignment", "patch", "Claim", "BookHeaderDirect"),
+        ("/internal/v1/claims/{claimId}/assignment", "patch", "Claim", "BookHeaderDirect"),
+    ],
+    "assumed-claims": [
+        (
+            "/api/v1/assumed-claims/claims/{claimId}/assignment",
+            "patch",
+            "AssumedClaim",
+            "BookHeaderAssumed",
+        ),
+        (
+            "/internal/v1/assumed-claims/{claimId}/assignment",
+            "patch",
+            "AssumedClaim",
+            "BookHeaderAssumed",
+        ),
+    ],
+}
+
+ASSIGNMENT_REQUIRED_SCHEMAS = {
+    "direct-claims": "Claim",
+    "assumed-claims": "AssumedClaim",
+}
+
+# Field -> maxLength for the nullable assignment fields on the claim projection.
+ASSIGNMENT_CLAIM_FIELDS = {
+    "assignedAdjuster": 128,
+    "assignedTeam": 64,
+    "assignedAt": None,
+}
+
+ASSIGNMENT_MAX_ADJUSTER = 128
+ASSIGNMENT_MAX_TEAM = 64
+
+
 # Event names the transactional-outbox rollout actually emits. The catalog must
 # list each one as published and implemented, and the vertical document must
 # expose a channel for it. Round 5 covered the first six verticals; the rollout
@@ -430,6 +473,7 @@ IMPLEMENTED_EVENTS = {
     "direct-claims": [
         "direct.claim.registered",
         "direct.claim.updated",
+        "direct.claim.assigned",
         "direct.claim.coverage-assessed",
         "direct.claim.reserve-changed",
         "direct.claim.settlement-authorized",
@@ -442,6 +486,7 @@ IMPLEMENTED_EVENTS = {
     "assumed-claims": [
         "assumed.claim.registered",
         "assumed.claim.updated",
+        "assumed.claim.assigned",
         "assumed.claim.closed",
         "assumed.claim.reopened",
         "assumed.claim.loss-advice-posted",
@@ -1324,6 +1369,18 @@ def check_payment_asyncapi_sources(contracts: ContractSet, document, relative: s
 # ---------------------------------------------------------------------------
 
 
+def _schema_types(schema) -> set:
+    """Return the declared JSON types of a schema, flattening a type list."""
+    if not isinstance(schema, dict):
+        return set()
+    declared = schema.get("type")
+    if isinstance(declared, str):
+        return {declared}
+    if isinstance(declared, list):
+        return {value for value in declared if isinstance(value, str)}
+    return set()
+
+
 def check_openapi(contracts: ContractSet, verbose: bool):
     print("\nOpenAPI 3.1 documents")
     expected = {"components"} | set(VERTICAL_FILES)
@@ -1425,6 +1482,27 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             claim_key_schema.get("maxLength"),
         ) == ("string", 1, 64),
         "components.yaml: ClaimIdempotencyKey must be a 1-64 character string",
+    )
+    actor_header = (component_sections.get("parameters") or {}).get("ActorHeader") or {}
+    actor_header_schema = actor_header.get("schema") or {}
+    contracts.check(
+        actor_header.get("name") == "X-EIA-Actor",
+        "components.yaml: ActorHeader.name must be X-EIA-Actor",
+    )
+    contracts.check(
+        actor_header.get("in") == "header",
+        "components.yaml: ActorHeader.in must be header",
+    )
+    contracts.check(
+        actor_header.get("required") is False,
+        "components.yaml: ActorHeader must stay optional",
+    )
+    contracts.check(
+        (
+            actor_header_schema.get("type"),
+            actor_header_schema.get("maxLength"),
+        ) == ("string", ASSIGNMENT_MAX_ADJUSTER),
+        "components.yaml: ActorHeader must be a string of at most 128 characters",
     )
     replay_header = (component_sections.get("headers") or {}).get("IdempotentReplay") or {}
     replay_schema = replay_header.get("schema") or {}
@@ -1619,6 +1697,155 @@ def check_openapi(contracts: ContractSet, verbose: bool):
                     and str(problem_schema.get("$ref", "")).endswith("/schemas/Problem"),
                     f"{where}: 409 must document the shared Problem schema",
                 )
+        # Claim assignment: the public and expert operations, the command
+        # schema, the nullable ownership fields, and the actor header.
+        assignment_schema_name = ASSIGNMENT_REQUIRED_SCHEMAS.get(vertical)
+        if assignment_schema_name:
+            assignment_request = document_schemas.get("AssignClaimRequest") or {}
+            assignment_properties = assignment_request.get("properties") or {}
+            assignment_required = assignment_request.get("required") or []
+            contracts.check(
+                isinstance(assignment_request, dict) and assignment_request.get("type") == "object",
+                f"{relative}: AssignClaimRequest must be an object schema",
+            )
+            contracts.check(
+                "assignedAdjuster" in assignment_required
+                and "expectedVersion" in assignment_required,
+                f"{relative}: AssignClaimRequest must require assignedAdjuster and expectedVersion",
+            )
+            contracts.check(
+                "assignedTeam" not in assignment_required,
+                f"{relative}: AssignClaimRequest.assignedTeam must stay optional",
+            )
+            adjuster_schema = assignment_properties.get("assignedAdjuster") or {}
+            contracts.check(
+                (
+                    adjuster_schema.get("type"),
+                    adjuster_schema.get("maxLength"),
+                ) == ("string", ASSIGNMENT_MAX_ADJUSTER),
+                f"{relative}: AssignClaimRequest.assignedAdjuster must be a string of at most "
+                f"{ASSIGNMENT_MAX_ADJUSTER} characters",
+            )
+            team_schema = assignment_properties.get("assignedTeam") or {}
+            contracts.check(
+                _schema_types(team_schema) == {"string", "null"}
+                and team_schema.get("maxLength") == ASSIGNMENT_MAX_TEAM,
+                f"{relative}: AssignClaimRequest.assignedTeam must be a nullable string of at most "
+                f"{ASSIGNMENT_MAX_TEAM} characters",
+            )
+            expected_schema = assignment_properties.get("expectedVersion") or {}
+            contracts.check(
+                (
+                    expected_schema.get("type"),
+                    expected_schema.get("minimum"),
+                ) == ("integer", 0),
+                f"{relative}: AssignClaimRequest.expectedVersion must be an integer >= 0",
+            )
+
+            claim_schema = document_schemas.get(assignment_schema_name) or {}
+            claim_properties = claim_schema.get("properties") or {}
+            for field, maximum in ASSIGNMENT_CLAIM_FIELDS.items():
+                field_schema = claim_properties.get(field)
+                contracts.check(
+                    isinstance(field_schema, dict),
+                    f"{relative}: {assignment_schema_name}.{field} is required",
+                )
+                if not isinstance(field_schema, dict):
+                    continue
+                contracts.check(
+                    _schema_types(field_schema) == {"string", "null"},
+                    f"{relative}: {assignment_schema_name}.{field} must be a nullable string",
+                )
+                if maximum is None:
+                    contracts.check(
+                        field_schema.get("format") == "date-time",
+                        f"{relative}: {assignment_schema_name}.{field} must be a date-time",
+                    )
+                else:
+                    contracts.check(
+                        field_schema.get("maxLength") == maximum,
+                        f"{relative}: {assignment_schema_name}.{field} maxLength must be {maximum}",
+                    )
+
+            for assignment_path, assignment_method, claim_schema, book_parameter in (
+                ASSIGNMENT_OPENAPI_PATHS.get(vertical, [])
+            ):
+                path_item = paths.get(assignment_path) if isinstance(paths, dict) else None
+                operation = (
+                    path_item.get(assignment_method)
+                    if isinstance(path_item, dict)
+                    else None
+                )
+                where = f"{relative}: {assignment_method.upper()} {assignment_path}"
+                contracts.check(
+                    isinstance(operation, dict),
+                    f"{where}: required assignment operation is missing",
+                )
+                if not isinstance(operation, dict):
+                    continue
+                parameter_refs = []
+                inline_names = []
+                for parameter in operation.get("parameters") or []:
+                    if not isinstance(parameter, dict):
+                        continue
+                    reference = parameter.get("$ref")
+                    if isinstance(reference, str):
+                        parameter_refs.append(reference.rsplit("/", 1)[-1])
+                    if isinstance(parameter.get("name"), str):
+                        inline_names.append(parameter["name"])
+                for required_parameter in (
+                    "TenantHeader",
+                    book_parameter,
+                    "ActorHeader",
+                ):
+                    contracts.check(
+                        required_parameter in parameter_refs,
+                        f"{where}: must document the shared {required_parameter} parameter",
+                    )
+                contracts.check(
+                    "claimId" in inline_names,
+                    f"{where}: must declare the claimId path parameter",
+                )
+                request_body = operation.get("requestBody") or {}
+                request_schema = (
+                    ((request_body.get("content") or {}).get("application/json") or {})
+                    .get("schema")
+                    if isinstance(request_body, dict)
+                    else None
+                )
+                contracts.check(
+                    isinstance(request_schema, dict)
+                    and str(request_schema.get("$ref", "")).endswith(
+                        "/schemas/AssignClaimRequest"
+                    ),
+                    f"{where}: request body must use the AssignClaimRequest schema",
+                )
+                responses = operation.get("responses") or {}
+                ok_response = responses.get("200") if isinstance(responses, dict) else None
+                ok_schema = (
+                    ((ok_response.get("content") or {}).get("application/json") or {})
+                    .get("schema")
+                    if isinstance(ok_response, dict)
+                    else None
+                )
+                contracts.check(
+                    isinstance(ok_schema, dict)
+                    and str(ok_schema.get("$ref", "")).endswith(
+                        f"/schemas/{claim_schema}"
+                    ),
+                    f"{where}: 200 must return the {claim_schema} schema",
+                )
+                for code, suffix in (
+                    ("400", "/responses/BadRequest"),
+                    ("404", "/responses/NotFound"),
+                    ("409", "/responses/Conflict"),
+                ):
+                    response = responses.get(code) if isinstance(responses, dict) else None
+                    contracts.check(
+                        isinstance(response, dict)
+                        and str(response.get("$ref", "")).endswith(suffix),
+                        f"{where}: {code} must reference the shared {suffix.rsplit('/', 1)[-1]} response",
+                    )
         for required_path, required_method, required_codes in ROUND5_REQUIRED_RESPONSES.get(vertical, []):
             path_item = paths.get(required_path) if isinstance(paths, dict) else None
             operation = path_item.get(required_method) if isinstance(path_item, dict) else None

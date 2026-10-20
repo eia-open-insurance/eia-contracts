@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: EIA canonical shared API components
-  version: 1.4.0
-  summary: Shared error, money, paging, global-search, concurrency, idempotency, audit, and tenant/book components for every EIA API.
+  version: 1.5.0
+  summary: Shared error, money, paging, global-search, concurrency, idempotency, actor, audit, and tenant/book components for every EIA API.
   description: >
     Shared OpenAPI 3.1 components referenced by the per-vertical contract
     documents in this directory. The components are the canonical definitions
@@ -33,6 +33,16 @@ info:
     response. The addition is compatible: it adds one optional request header
     and one response header to six POST operations and changes no request or
     response body.
+
+    The 2026-10-20 claim assignment contract (1.5.0) adds the optional
+    `X-EIA-Actor` request parameter used by the Direct Claims and Assumed Claims
+    assignment operations. The addition is compatible: the header is optional,
+    it carries the acting identity that the experts already record in
+    `assignedBy` and the claim audit trail, and it changes no request or response
+    body. When the header is absent the assigned adjuster is recorded as the
+    actor. The Direct Claims expert also accepts `X-EIA-User` as an alias for
+    the same identity; the shared parameter names only `X-EIA-Actor`, which both
+    verticals accept (MISMATCHES.md M-25).
 
     Authority is SPEC.md sections 6.11, 7.6, 7.18-7.23, 10.3, 12.2, and 12.6.
     Where an implemented service deviates from a component, the deviation is
@@ -228,6 +238,23 @@ components:
         type: string
         minLength: 1
         maxLength: 64
+    ActorHeader:
+      name: X-EIA-Actor
+      in: header
+      required: false
+      description: >
+        Optional acting identity for a claim assignment or reassignment, for
+        example an adjuster or supervisor reference. Both claim verticals record
+        it as `assignedBy` and in the claim audit trail; when the header is
+        absent or blank the assigned adjuster is recorded as the actor. The
+        Direct Claims expert also accepts the canonical `X-EIA-User` alias, which
+        takes precedence when both are supplied; Assumed Claims accepts
+        `X-EIA-Actor` only. The header is additive and optional, so a client that
+        omits it keeps the previous behaviour (MISMATCHES.md M-25).
+      x-status: implemented
+      schema:
+        type: string
+        maxLength: 128
     IfMatch:
       name: If-Match
       in: header

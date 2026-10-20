@@ -254,6 +254,47 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   Direct Claims race and the `Idempotent-Replay` spelling difference.
 - `python scripts/validate_contracts.py` passes 9,470 checks with 0 failures.
 
+### Added in the claim assignment contract (2026-10-20)
+
+- `openapi/components.yaml` is 1.5.0: adds the optional shared `ActorHeader`
+  (`X-EIA-Actor`, at most 128 characters) used by the claim assignment
+  operations, and documents the default-to-adjuster and audit/`assignedBy`
+  semantics.
+- `openapi/direct-claims.yaml` is 1.5.0: adds `PATCH
+  /api/v1/claims/{claimId}/assignment` and the `/internal/v1` expert route, the
+  `AssignClaimRequest` schema (`assignedAdjuster` required, max 128;
+  `assignedTeam` optional, max 64; `expectedVersion` required, integer >= 0),
+  the optional `X-EIA-Actor` header, and the nullable `assignedAdjuster`,
+  `assignedTeam`, and `assignedAt` fields on `Claim`. The operations document
+  the 200/400/404/409 problem responses, the stale-version 409, the
+  same-assignment no-op, and the `direct.claim.assigned` event.
+- `openapi/assumed-claims.yaml` is 1.5.0: adds `PATCH
+  /api/v1/assumed-claims/claims/{claimId}/assignment` (alias
+  `/api/v1/assumed-claims/{claimId}/assignment`) and the `/internal/v1` expert
+  route, the `AssignClaimRequest` schema, the optional `X-EIA-Actor` header, and
+  the nullable assignment fields on `AssumedClaim`, with the same 200/400/404/409
+  and no-op semantics and the `assumed.claim.assigned` event.
+- `asyncapi/direct-claims.yaml` is 1.3.0 and `asyncapi/assumed-claims.yaml` is
+  1.3.0: adds implemented channels and `send` operations for
+  `direct.claim.assigned` and `assumed.claim.assigned`, each naming its
+  `*ClaimEvents.java` emitter and describing the payload, the actor, and the
+  no-op rule.
+- `asyncapi/event-catalog.yaml` is 1.5.0: the two assignment names are added to
+  the Direct Claims and Assumed Claims published and implemented lists (178
+  published in total).
+- `scripts/validate_contracts.py` requires the public and expert assignment
+  paths on both claim verticals, the `AssignClaimRequest` schema and its field
+  bounds (including the optional nullable team), the nullable
+  `assignedAdjuster`/`assignedTeam`/`assignedAt` projection fields, the shared
+  optional `ActorHeader`, the assignment 200/400/404/409 responses, and the two
+  implemented event names.
+- `README.md` records the assignment ownership and actor semantics, the route
+  and version table, and the validator coverage; `MISMATCHES.md` adds M-25 for
+  the Assumed Claims domain team requirement, the Direct Claims negative-version
+  409, and the `X-EIA-User` alias, and updates M-14 and M-22 with the two new
+  event names.
+- `python scripts/validate_contracts.py` passes 9,656 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

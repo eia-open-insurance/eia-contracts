@@ -30,7 +30,7 @@ standard).
 
 | Path | Contents |
 |---|---|
-| `openapi/components.yaml` | Shared parameters, headers, responses, and schemas: canonical `Problem` error envelope, money, offset page envelope, global-search envelope, ETag/If-Match, Idempotency-Key (Policy and the claim task/note creates), audit fields, entity references, tenant and book headers. |
+| `openapi/components.yaml` | Shared parameters, headers, responses, and schemas: canonical `Problem` error envelope, money, offset page envelope, global-search envelope, ETag/If-Match, Idempotency-Key (Policy and the claim task/note creates), the optional `X-EIA-Actor` header, audit fields, entity references, tenant and book headers. |
 | `openapi/party.yaml` … `openapi/notifications.yaml` | One OpenAPI 3.1 document per vertical. Ten documents, each covering `/api/v1/**` and `/internal/v1/**`. |
 | `asyncapi/event-catalog.yaml` | Authoritative catalog of the published event names, their publisher, and the subscribers named in SPEC 11. |
 | `asyncapi/{vertical}.yaml` | Published event channels for one vertical. One channel and one `send` operation per event name. |
@@ -318,6 +318,47 @@ Semantics:
   commit replays correctly. Assumed Claims uses `INSERT ... ON CONFLICT DO
   NOTHING` and is race-safe. This is the remaining M-07 idempotency caveat.
 
+### Claim assignment contract (2026-10-20)
+
+Direct Claims and Assumed Claims 1.5.0 add claim ownership assignment. The
+change is additive: the two PATCH operations are new, the three response fields
+are nullable and default to null for an unassigned claim, and the actor header
+is optional.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/components.yaml` | 1.5.0 | Additive | The optional shared `ActorHeader` (`X-EIA-Actor`, at most 128 characters). |
+| `openapi/direct-claims.yaml` | 1.5.0 | Additive | `PATCH /api/v1/claims/{claimId}/assignment`, its `/internal/v1` expert route, the `AssignClaimRequest` schema, the nullable `assignedAdjuster`/`assignedTeam`/`assignedAt` claim fields, and the optional actor header. |
+| `openapi/assumed-claims.yaml` | 1.5.0 | Additive | `PATCH /api/v1/assumed-claims/claims/{claimId}/assignment` (alias `/api/v1/assumed-claims/{claimId}/assignment`), its `/internal/v1` expert route, the `AssignClaimRequest` schema, the nullable assignment fields on `AssumedClaim`, and the optional actor header. |
+| `asyncapi/direct-claims.yaml` | 1.3.0 | Additive | The implemented `direct.claim.assigned` channel and operation. |
+| `asyncapi/assumed-claims.yaml` | 1.3.0 | Additive | The implemented `assumed.claim.assigned` channel and operation. |
+| `asyncapi/event-catalog.yaml` | 1.5.0 | Additive | The two assignment names are published and implemented (178 published in total). |
+
+Ownership semantics:
+
+- The command replaces the claim's current adjuster and, optionally, team. Both
+  values are trimmed; `assignedAdjuster` is required (1-128 characters) and
+  `assignedTeam` is optional (at most 64 characters). `assignedAt` is the
+  instant of the last real change; a claim that has never been assigned returns
+  null for all three fields.
+- `expectedVersion` is the claim version the caller observed and is required. A
+  stale value is 409 `CONFLICT` and writes nothing. Repeating the current
+  assignment at the current version is a no-op: the claim, its version,
+  `assignedAt`, audit trail, and event stream are unchanged. A real change bumps
+  the claim version, appends the assignment audit entry, and writes
+  `direct.claim.assigned` or `assumed.claim.assigned` in the same transaction.
+- The acting identity is the optional `X-EIA-Actor` header. It is recorded as
+  `assignedBy` and in the audit entry, and defaults to the assigned adjuster
+  when the header is absent or blank. `assignedBy` is not returned in the public
+  claim projection, matching the other audit actor fields (M-20).
+- A missing or different book is hidden as 404 (`BOOK_SCOPE_VIOLATION` in
+  Direct Claims, `EIA-RNS-7005` in Assumed Claims), consistent with every other
+  claim route and SPEC 3.6.2/WALL-06.
+- The two event names are new and have no SPEC 11.4.9 or 11.5.9 equivalent
+  (M-22). The Direct Claims expert also accepts `X-EIA-User` as an actor alias,
+  and the Assumed Claims domain still requires a team that the contract and
+  expert make optional; both differences are recorded in M-25.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -351,6 +392,7 @@ Every request carries a resolved tenant; no request body may override it.
 |---|---|---|
 | `X-EIA-Tenant` | All public routes and some internal routes | Required, UUID. Missing or malformed is a 400. |
 | `X-EIA-Book` | Direct Claims, Assumed Claims, Cession, Retrocession | Required and fixed to the vertical's book. A different book is hidden as 404 `BOOK_SCOPE_VIOLATION` in all four, so the response cannot confirm existence (SPEC 3.6.2, WALL-06). A missing header is still a 400 `BOOK_REQUIRED` in Cession and Retrocession; that is a validation error, not a book mismatch. |
+| `X-EIA-Actor` | Claim assignment (`PATCH .../assignment`) | Optional acting identity, at most 128 characters. Recorded as `assignedBy` and in the claim audit trail; defaults to the assigned adjuster when absent or blank. The Direct Claims expert also accepts `X-EIA-User` as an alias (M-25). |
 | `?tenantId=` | Most internal expert routes | The expert is network-restricted and receives the tenant resolved by its domain service. |
 
 Each operation documents the exact parameter it accepts. Internal routes are
@@ -436,6 +478,30 @@ find-then-insert reservation has a narrow concurrent-first-attempt race; the
 Assumed Claims reservation is atomic. Task `PATCH` remains version-checked, and
 a repeated status is a no-op, so it is retry-safe. The residual differences are
 part of M-07.
+
+### Claim assignment
+
+Claim assignment is the ownership command for both claim verticals:
+
+| Vertical | Public route | Expert route | Book |
+|---|---|---|---|
+| Direct Claims | `PATCH /api/v1/claims/{claimId}/assignment` | `PATCH /internal/v1/claims/{claimId}/assignment` | `DIRECT` |
+| Assumed Claims | `PATCH /api/v1/assumed-claims/claims/{claimId}/assignment` (alias `/api/v1/assumed-claims/{claimId}/assignment`) | `PATCH /internal/v1/assumed-claims/{claimId}/assignment` | `ASSUMED` |
+
+The body is `AssignClaimRequest`: `assignedAdjuster` (required, at most 128
+characters), `assignedTeam` (optional, at most 64), and `expectedVersion`
+(required integer, zero or greater). The response is the updated claim with
+nullable `assignedAdjuster`, `assignedTeam`, and `assignedAt`.
+
+The claim version is the concurrency token. A stale `expectedVersion` is 409 and
+nothing is written; repeating the current assignment at the current version is a
+no-op that keeps the previous `assignedAt`, version, audit entry, and event. A
+real reassignment bumps the version, appends the audit entry, and publishes
+`direct.claim.assigned` or `assumed.claim.assigned` in the same transaction. The
+optional `X-EIA-Actor` header supplies the acting identity (defaulting to the
+assigned adjuster); it is stored as `assignedBy` and is deliberately not part of
+the public claim projection. A missing or wrong book is hidden as 404, and a
+same-tenant claim that does not exist is 404.
 
 ### Pagination and collections
 
@@ -594,7 +660,10 @@ missing directory.
    global-search routes), the task/note schemas, the claim task/note idempotency
    header parameter, the 201 `Idempotent-Replay` header, the shared 400
    invalid-key documentation, and the 409 code on all six create operations,
-   the search operations' shared
+   the claim assignment paths on both claim verticals, the `AssignClaimRequest`
+   schema and its field bounds, the nullable assignment fields on `Claim` and
+   `AssumedClaim`, the optional shared `ActorHeader`, the assignment
+   200/400/404/409 responses, the search operations' shared
    parameters and `SearchResponse`/400/404 responses, the `SearchResponse` and
    `SearchItem` keys, the required 422/409/428 response codes on the Round 5
    mutations, the payment source fields and their create rules, and agreement
@@ -610,7 +679,8 @@ missing directory.
    `{vertical}.{aggregate}.{verb}`, every consumed event must have a publisher,
    and the catalog `implemented` list must equal the channels marked
    `x-status: implemented`. The implemented event names for all ten publishing
-   verticals are required explicitly.
+   verticals are required explicitly, including `direct.claim.assigned` and
+   `assumed.claim.assigned`.
 6. **JSON Schema checks.** All three files parse as JSON, declare the 2020-12
    dialect and an `$id`, carry the required members, keep required properties
    defined, and validate their own examples against a small schema subset.
@@ -670,6 +740,12 @@ missing directory.
 - a payment carries a flat `sourceType`/`sourceId`/`sourceReference` link rather
   than the SPEC 11.7.4 `claim_vertical`/`claim_id`/`claim_number` projection, and
   the source is neither resolved nor checked for existence (M-12, M-24);
+- claim assignment is implemented on both claim verticals but has no SPEC 11.4.10
+  or 11.5.10 route or SPEC 11.4.9/11.5.9 event name. The Assumed Claims domain
+  still requires a team the contract and expert make optional, the Direct Claims
+  expert returns 409 instead of 400 for a negative `expectedVersion`, and the
+  Direct Claims expert accepts `X-EIA-User` as an extra actor alias (M-22,
+  M-25);
 - ten experts publish a subset of their events through the transactional
   outbox into the platform `event-ingest` inbox, but no vertical consumes
   another vertical's events, there is no subscription registry or gap

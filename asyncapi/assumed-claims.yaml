@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:assumed-claims
 info:
   title: EIA Assumed Claims events
-  version: 1.2.0
+  version: 1.3.0
   summary: Published domain event names for the Assumed Claims vertical.
   description: >
     Event contract for the Assumed Claims vertical. The authoritative event names are
@@ -15,7 +15,8 @@ info:
     equals the event name; it is not a broker topic.
 
     The Assumed Claims expert now publishes `assumed.claim.registered`,
-    `assumed.claim.updated`, `assumed.claim.closed`, `assumed.claim.reopened`,
+    `assumed.claim.updated`, `assumed.claim.assigned`,
+    `assumed.claim.closed`, `assumed.claim.reopened`,
     `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`,
     `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`,
     `assumed.claim.commuted`, `assumed.claim.task-created`,
@@ -23,8 +24,9 @@ info:
     `assumed.claim.note-added` through the transactional outbox; those channels
     and operations are marked `x-status: implemented`. `assumed.claim.updated`
     is additive: the catalog had no generic update fact. The four task and note
-    names are new in this slice and have no SPEC 11.5.9 equivalent
-    (MISMATCHES.md M-22). The other SPEC 11.5.9 names are planned.
+    names and `assumed.claim.assigned` are new in this slice and have no
+    SPEC 11.5.9 equivalent (MISMATCHES.md M-22). The other SPEC 11.5.9 names are
+    planned.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -307,6 +309,27 @@ channels:
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
+  AssumedClaimAssigned:
+    address: assumed.claim.assigned
+    title: assumed.claim.assigned
+    description: >
+      Emitted when an assumed claim is assigned or reassigned to a different
+      adjuster or team, in the same transaction as the claim version bump and
+      the assignment audit entry. The payload carries the assumed claim identity
+      and row version, the new `assignedAdjuster`, `assignedTeam`, and
+      `assignedAt`, the acting identity as `assignedBy` (the `X-EIA-Actor`
+      header, defaulting to the assigned adjuster), the previous adjuster and
+      team, and `changedFields`. A same-assignment retry at the current version
+      is a no-op and emits nothing. This name is new in this contract and has no
+      SPEC 11.5.9 equivalent (MISMATCHES.md M-22).
+    x-event-type: assumed.claim.assigned
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.5.9
+    x-implemented-by: repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/AssumedClaimEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
   AssumedClaimClosed:
     address: assumed.claim.closed
     title: assumed.claim.closed
@@ -520,6 +543,16 @@ operations:
       HTTPS (SPEC 7.5). Planned.
     x-event-type: assumed.claim.dispute-resolved
     x-status: planned
+  publishAssumedClaimAssigned:
+    action: send
+    channel:
+      $ref: '#/channels/AssumedClaimAssigned'
+    summary: Publish assumed.claim.assigned
+    description: >
+      Publishes assumed.claim.assigned through the transactional outbox in the
+      same transaction as a real assignment change and its audit entry.
+    x-event-type: assumed.claim.assigned
+    x-status: implemented
   publishAssumedClaimClosed:
     action: send
     channel:
@@ -629,13 +662,13 @@ x-implementation:
   publisher: eia-assumed-claims-expert
   subscriber: none
   notes: >
-    Thirteen Assumed Claims events are written to the transactional outbox in
+    Fourteen Assumed Claims events are written to the transactional outbox in
     the same transaction as the aggregate or child write: `registered`,
-    `updated`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`,
-    `cash-call-requested`, `recovery-recorded`, `commuted`, `task-created`,
-    `task-completed`, `task-updated`, and `note-added`. The other SPEC 11.5.9
-    names remain planned. There is no business subscriber or subscription
-    registry yet.
+    `updated`, `assigned`, `closed`, `reopened`, `loss-advice-posted`,
+    `reserve-changed`, `cash-call-requested`, `recovery-recorded`, `commuted`,
+    `task-created`, `task-completed`, `task-updated`, and `note-added`. The
+    other SPEC 11.5.9 names remain planned. There is no business subscriber or
+    subscription registry yet.
 
 x-consumed-events:
   - contract.contract.bound
