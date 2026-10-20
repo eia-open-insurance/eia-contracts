@@ -580,6 +580,59 @@ Technical-account semantics:
   equivalent (M-22, M-29). The envelope uses the account id and its lifecycle
   version (1, 2, 3) while the outbox partition key stays the contract id.
 
+### Contract period bordereaux (2026-10-20)
+
+Contract 3.0.0 replaces the public bordereau header with the period-bordereau
+financial slice. The public path stays
+`/api/v1/contracts/{contractId}/bordereaux`; the legacy source-document ingest
+header moves to the internal-only `/internal/v1` surface on the same table. The
+change is breaking for a generated client of the old public header shape; the
+running service and the gateway already use the period projection.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/contract.yaml` | 3.0.0 | Breaking | `GET/POST /api/v1/contracts/{contractId}/bordereaux` now use the period `Bordereau`, `CreateBordereauRequest`, and `BordereauStatus`; adds `PATCH .../bordereaux/{bordereauId}/status` with `UpdateBordereauStatusRequest`; keeps the legacy `BordereauHeader`, `BordereauHeaderStatus`, and `CreateBordereauHeaderRequest` on the internal ingest routes. |
+| `asyncapi/contract.yaml` | 1.3.0 | Additive | `contract.bordereau.received` becomes implemented; `contract.bordereau.processed` and `contract.bordereau.failed` are added as implemented child-aggregate channels. |
+| `asyncapi/event-catalog.yaml` | 1.10.0 | Additive | The two terminal names are published and implemented, and `received` joins the Contract implemented subset (188 published in total; Contract 26 published and 11 implemented). |
+
+Semantics:
+
+- `GET .../bordereaux` returns a bare array ordered by `periodStart` descending,
+  then `periodEnd` and `createdAt` descending. Only period rows are returned;
+  the legacy ingest headers are invisible to the public list.
+- `POST .../bordereaux` creates the row in RECEIVED. `periodStart` must be
+  before `periodEnd`; `receivedDate` and an uppercase ISO 4217 `currency` are
+  required; the four declared amounts and `lineCount` are required and
+  non-negative. `bordereauNumber` is generated as `BRD-{year}-{sequence}` and
+  `status` starts at RECEIVED; neither is accepted from the caller. The exact
+  `(tenant, contract, periodStart, periodEnd)` period is unique, so a duplicate
+  is 409 `DUPLICATE_BORDEREAU_PERIOD`.
+- `PATCH .../bordereaux/{bordereauId}/status` applies only
+  `RECEIVED -> PROCESSED` or `RECEIVED -> FAILED`. The request enum is
+  `PROCESSED` or `FAILED`; `RECEIVED` is 400 `INVALID_STATUS`, and a skipped or
+  repeated edge is 409 `INVALID_STATUS_TRANSITION`. Processing creates or reuses
+  the DRAFT technical account for the same contract period and links it through
+  `technicalAccountId`; failing creates no account. Both terminal states are
+  immutable.
+- The public projection is `{bordereauId, bordereauNumber, contractId,
+  periodStart, periodEnd, receivedDate, currency, premiumAmount, lossAmount,
+  commissionAmount, otherChargesAmount, lineCount, notes, status,
+  technicalAccountId, createdAt}`. The expert's row id is serialized as `id`
+  internally and remapped to `bordereauId` by the domain; `tenantId` is not part
+  of the public projection. Money fields are decimal strings (SPEC 10.3).
+- `X-EIA-Tenant` is required. The canonical contract requires
+  `X-EIA-Book: ASSUMED`; another book is hidden as 404
+  `BOOK_SCOPE_VIOLATION`. The domain currently accepts an absent header for
+  compatibility with the other Contract proxy routes, which M-30 records.
+- The three facts are child-aggregate events: the envelope uses the bordereau id
+  and aggregate version 1 (received) or 2 (processed or failed), while the
+  outbox partition key stays the contract id. `contract.bordereau.processed` and
+  `.failed` are new names; SPEC 11.3.9 publishes `contract.bordereau.posted` and
+  `.rejected` instead, and those names remain planned (M-22, M-30).
+- The SPEC `bordereau_line` and `bordereau_exception` staging, duplicate-line
+  detection, reconciliation to a declared total, the exception report, and the
+  SPEC single-bordereau `GET` remain gaps (M-30).
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -616,6 +669,7 @@ Every request carries a resolved tenant; no request body may override it.
 | `X-EIA-Book` | Policy billing | Optional for compatibility with the other Policy proxy routes, but a supplied value must be DIRECT; another book is hidden as 404 `BOOK_SCOPE_VIOLATION`. An absent header is accepted. The guard runs before the expert call. |
 | `X-EIA-Book` | Policy renewal | Required and fixed to `DIRECT`. The contract makes a missing header a 400 and hides another book as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header, which M-28 records. |
 | `X-EIA-Book` | Contract technical accounts | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-29 records. |
+| `X-EIA-Book` | Contract period bordereaux | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-30 records. |
 | `X-EIA-Actor` | Claim assignment (`PATCH .../assignment`) | Optional acting identity, at most 128 characters. Recorded as `assignedBy` and in the claim audit trail; defaults to the assigned adjuster when absent or blank. The Direct Claims expert also accepts `X-EIA-User` as an alias (M-25). |
 | `?tenantId=` | Most internal expert routes | The expert is network-restricted and receives the tenant resolved by its domain service. |
 
@@ -739,9 +793,9 @@ locations, cancellations, and reinstatements) returns the same envelope with
 `items` narrowed to its resource in `policy.yaml`.
 
 Every other vertical still returns a bare JSON array, including the Contract
-second-slice collections, the technical-account list, and the Direct Claims and
-Assumed Claims child collections. SPEC 7.6 and 12.2 specify a different,
-cursor-based envelope
+second-slice collections, the period-bordereau and technical-account lists, and
+the Direct Claims and Assumed Claims child collections. SPEC 7.6 and 12.2
+specify a different, cursor-based envelope
 (`data`, `page:{size, hasMore, nextCursor, total?}`, `?page[size]` and
 `?page[after]`, default 25, maximum 200). The offset form is the implemented
 contract; the divergence and the migration choice are recorded in
@@ -990,8 +1044,14 @@ missing directory.
    `TenantHeader` and `BookHeaderDirect` parameters, the `RenewPolicyRequest`
    required/optional field split, the 201 successor `Policy` with the shared
    `ETag`, the 400/404/409 responses with `RENEWAL_NOT_ALLOWED` on the 409, the
-   nullable `Policy.renewedFromPolicyId` lineage field, and agreement between
-   `info.version` and `x-compatibility.contractVersion`.
+   nullable `Policy.renewedFromPolicyId` lineage field, the three public
+   period-bordereau operations with their required `TenantHeader` and
+   `BookHeaderAssumed` parameters, the `Bordereau`, `BordereauStatus`,
+   `CreateBordereauRequest`, and `UpdateBordereauStatusRequest` schemas and
+   their field types, the nullability of `notes`/`technicalAccountId`, the
+   `PROCESSED`/`FAILED` request enum, the 201/200 successes, and the
+   400/404/409 responses, and agreement between `info.version` and
+   `x-compatibility.contractVersion`.
 4. **AsyncAPI structure.** `asyncapi: 3.0.0`, channel addresses, `x-event-type`,
    `x-status: planned|implemented`, `x-implemented-by` on every implemented
    channel, one `send` operation per channel, a `DomainEvent` message on
@@ -1006,8 +1066,9 @@ missing directory.
    verticals are required explicitly, including `direct.claim.assigned`,
    `assumed.claim.assigned`, `document.link.added`,
    `document.link.removed`, `policy.policy.renewed`,
-   `policy.billing-plan.created`, `policy.installment.paid`, and
-   `policy.installment.waived`.
+   `policy.billing-plan.created`, `policy.installment.paid`,
+   `policy.installment.waived`, `contract.bordereau.received`,
+   `contract.bordereau.processed`, and `contract.bordereau.failed`.
 6. **JSON Schema checks.** All three files parse as JSON, declare the 2020-12
    dialect and an `$id`, carry the required members, keep required properties
    defined, and validate their own examples against a small schema subset.
@@ -1092,6 +1153,13 @@ missing directory.
   omitted `effectiveDate`, the domain accepts an absent book header, and the
   domain emits `Idempotent-Replayed: false` without accepting a key (M-06, M-07,
   M-28);
+- contract period bordereaux keep the implemented `RECEIVED -> PROCESSED|FAILED`
+  lifecycle and the `contract.bordereau.processed`/`.failed` event names, while
+  SPEC 11.3.9 publishes `contract.bordereau.posted`/`.rejected`; the line and
+  exception staging, duplicate-line detection, reconciliation to a declared
+  total, the exception report, and the SPEC single-bordereau `GET` remain gaps.
+  The domain also accepts an absent `X-EIA-Book` and the expert has no book
+  check of its own (M-22, M-30);
 - ten experts publish a subset of their events through the transactional
   outbox into the platform `event-ingest` inbox, but no vertical consumes
   another vertical's events, there is no subscription registry or gap

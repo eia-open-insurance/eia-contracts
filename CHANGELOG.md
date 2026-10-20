@@ -440,6 +440,49 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   with the new slice and event names.
 - `python scripts/validate_contracts.py` passes 10,406 checks with 0 failures.
 
+### Added in the contract period-bordereaux contract (2026-10-20)
+
+- `openapi/contract.yaml` is 3.0.0: the public
+  `GET/POST /api/v1/contracts/{contractId}/bordereaux` operations now use the
+  period-bordereau `Bordereau`, `CreateBordereauRequest`, and `BordereauStatus`
+  schemas. The projection is `{bordereauId, bordereauNumber, contractId,
+  periodStart, periodEnd, receivedDate, currency, premiumAmount, lossAmount,
+  commissionAmount, otherChargesAmount, lineCount, notes, status,
+  technicalAccountId, createdAt}`; the create command owns the period,
+  received date, currency, four non-negative amounts, line count, and optional
+  note, while the number and initial RECEIVED status are server-owned. Adds
+  `PATCH /api/v1/contracts/{contractId}/bordereaux/{bordereauId}/status` with
+  `UpdateBordereauStatusRequest` (`status` PROCESSED or FAILED, optional
+  `notes`), the RECEIVED -> PROCESSED|FAILED transition table, the
+  technical-account linkage on PROCESSED, and the 201/200, 400, 404, and 409
+  responses. The public bordereau list is a bare array, newest period first.
+  The legacy source-document ingest header moves to the internal
+  `BordereauHeader`, `BordereauHeaderStatus`, and
+  `CreateBordereauHeaderRequest` schemas on the `/internal/v1` routes. The
+  public projection change is breaking, so the contract takes a major version.
+- `asyncapi/contract.yaml` is 1.3.0: `contract.bordereau.received` becomes
+  implemented and adds the `ContractBordereauData` payload schema;
+  `contract.bordereau.processed` and `contract.bordereau.failed` are added as
+  implemented child-aggregate channels and `send` operations, both naming
+  `ContractEvents.java`. Aggregate version is 1 for received and 2 for a
+  terminal fact; the outbox partition key stays the contract id. The SPEC
+  `contract.bordereau.posted` and `.rejected` channels remain planned.
+- `asyncapi/event-catalog.yaml` is 1.10.0: `contract.bordereau.processed` and
+  `contract.bordereau.failed` are published, and `received`, `processed`, and
+  `failed` join the Contract implemented subset (188 published in total;
+  Contract 26 published and 11 implemented).
+- `scripts/validate_contracts.py` requires the three public period-bordereau
+  operations, the `TenantHeader` and `BookHeaderAssumed` parameters, the
+  201/200, 400, 404, and 409 responses, the `Bordereau`, `BordereauStatus`,
+  `CreateBordereauRequest`, and `UpdateBordereauStatusRequest` schemas with
+  their field types and enums, and the three implemented bordereau events.
+- `README.md` records the period-bordereau route, projection, create and status
+  rules, technical-account linkage, book rule, events, and breaking 3.0.0
+  classification; `MISMATCHES.md` adds M-30 for the status-vocabulary, event
+  naming, absent-book, and line/exception gaps, and updates M-12, M-14, and
+  M-22.
+- `python scripts/validate_contracts.py` passes 10,593 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

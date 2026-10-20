@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:contract
 info:
   title: EIA Contract events
-  version: 1.2.0
+  version: 1.3.0
   summary: Published domain event names for the Contract vertical.
   description: >
     Event contract for the Contract vertical. The authoritative event names are
@@ -16,16 +16,22 @@ info:
 
     The Contract expert now publishes `contract.contract.created`,
     `contract.contract.updated`, `contract.contract.bound`,
-    `contract.contract.commuted`, `contract.cession.recorded`, and the three
+    `contract.contract.commuted`, `contract.cession.recorded`, the three
     technical-account facts `contract.technical-account.created`, `.issued`,
-    and `.settled` through the transactional outbox; those channels and
-    operations are marked `x-status: implemented`. `contract.contract.updated`
-    is additive: the catalog had no generic update fact. A status write that
-    targets a catalog lifecycle state can also emit the already-cataloged
-    `signed`, `endorsed`, `expired`, or `cancelled` name; those names remain
-    published and are not part of the implemented subset recorded here. The
-    remaining SPEC 11.3.9 names are planned. The technical-account names are
-    new child-aggregate facts with no SPEC 11.3.9 equivalent (M-22, M-29).
+    and `.settled`, and the three period-bordereau facts
+    `contract.bordereau.received`, `.processed`, and `.failed` through the
+    transactional outbox; those channels and operations are marked
+    `x-status: implemented`. `contract.contract.updated` is additive: the
+    catalog had no generic update fact. A status write that targets a catalog
+    lifecycle state can also emit the already-cataloged `signed`, `endorsed`,
+    `expired`, or `cancelled` name; those names remain published and are not
+    part of the implemented subset recorded here. The remaining SPEC 11.3.9
+    names are planned. The technical-account names are new child-aggregate
+    facts with no SPEC 11.3.9 equivalent (M-22, M-29). The bordereau
+    `processed` and `failed` names are new terminal facts; SPEC 11.3.9 publishes
+    `contract.bordereau.posted` and `contract.bordereau.rejected` instead, so
+    both spellings are published and only the implemented ones are recorded
+    (M-22, M-30).
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -253,23 +259,65 @@ channels:
     address: contract.bordereau.received
     title: contract.bordereau.received
     description: >
-      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when a period bordereau is recorded, in the same transaction as
+      the row. The bordereau is a child aggregate: the envelope uses the
+      bordereau id and aggregate version 1 while the outbox partition key
+      remains the contract id. The payload carries the contract and bordereau
+      identities, the period, the currency, the RECEIVED status, and the four
+      declared amounts.
     x-event-type: contract.bordereau.received
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.3.9
+    x-implemented-by: repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ContractEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
+      ContractBordereauData:
+        $ref: '#/components/messages/ContractBordereauData'
+  ContractBordereauProcessed:
+    address: contract.bordereau.processed
+    title: contract.bordereau.processed
+    description: >
+      Emitted when a RECEIVED period bordereau is processed. The technical
+      account for the same contract period is created or reused and linked
+      through `technicalAccountId`; the account fact and this bordereau fact
+      share the transaction. The bordereau aggregate version is 2.
+    x-event-type: contract.bordereau.processed
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.3.9
+    x-implemented-by: repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ContractEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      ContractBordereauData:
+        $ref: '#/components/messages/ContractBordereauData'
+  ContractBordereauFailed:
+    address: contract.bordereau.failed
+    title: contract.bordereau.failed
+    description: >
+      Emitted when a RECEIVED period bordereau is failed. No technical account
+      is created or linked. The bordereau aggregate version is 2, and both
+      terminal states are immutable.
+    x-event-type: contract.bordereau.failed
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.3.9
+    x-implemented-by: repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ContractEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      ContractBordereauData:
+        $ref: '#/components/messages/ContractBordereauData'
   ContractBordereauPosted:
     address: contract.bordereau.posted
     title: contract.bordereau.posted
     description: >
       Declared domain event for this vertical (SPEC 11.3.9). No publisher is
       implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      the shared event envelope. The implemented terminal facts are
+      `contract.bordereau.processed` and `.failed` (M-30).
     x-event-type: contract.bordereau.posted
     x-event-version: 1
     x-status: planned
@@ -283,7 +331,8 @@ channels:
     description: >
       Declared domain event for this vertical (SPEC 11.3.9). No publisher is
       implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      the shared event envelope. The implemented terminal facts are
+      `contract.bordereau.processed` and `.failed` (M-30).
     x-event-type: contract.bordereau.rejected
     x-event-version: 1
     x-status: planned
@@ -538,10 +587,31 @@ operations:
       $ref: '#/channels/ContractBordereauReceived'
     summary: Publish contract.bordereau.received
     description: >
-      Publishes contract.bordereau.received through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes contract.bordereau.received through the transactional outbox in
+      the same transaction as the bordereau insert (SPEC 7.5.1).
     x-event-type: contract.bordereau.received
-    x-status: planned
+    x-status: implemented
+  publishContractBordereauProcessed:
+    action: send
+    channel:
+      $ref: '#/channels/ContractBordereauProcessed'
+    summary: Publish contract.bordereau.processed
+    description: >
+      Publishes contract.bordereau.processed when a RECEIVED bordereau is
+      processed, in the same transaction as the status update and the linked
+      technical account.
+    x-event-type: contract.bordereau.processed
+    x-status: implemented
+  publishContractBordereauFailed:
+    action: send
+    channel:
+      $ref: '#/channels/ContractBordereauFailed'
+    summary: Publish contract.bordereau.failed
+    description: >
+      Publishes contract.bordereau.failed when a RECEIVED bordereau is failed,
+      in the same transaction as the status update.
+    x-event-type: contract.bordereau.failed
+    x-status: implemented
   publishContractBordereauPosted:
     action: send
     channel:
@@ -549,7 +619,8 @@ operations:
     summary: Publish contract.bordereau.posted
     description: >
       Publishes contract.bordereau.posted through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      HTTPS (SPEC 7.5). Planned; the implemented terminal facts are
+      contract.bordereau.processed and .failed.
     x-event-type: contract.bordereau.posted
     x-status: planned
   publishContractBordereauRejected:
@@ -559,7 +630,8 @@ operations:
     summary: Publish contract.bordereau.rejected
     description: >
       Publishes contract.bordereau.rejected through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      HTTPS (SPEC 7.5). Planned; the implemented terminal facts are
+      contract.bordereau.processed and .failed.
     x-event-type: contract.bordereau.rejected
     x-status: planned
   publishContractAccountIssued:
@@ -766,6 +838,78 @@ components:
               - DRAFT
               - ISSUED
               - SETTLED
+    ContractBordereauData:
+      name: ContractBordereauData
+      title: contract.bordereau.* data
+      summary: >
+        Minimal schema for the envelope data object of a period-bordereau fact.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - contractId
+          - bordereauId
+          - bordereauNumber
+          - periodStart
+          - periodEnd
+          - currency
+          - status
+        properties:
+          contractId:
+            type: string
+            format: uuid
+          contractNumber:
+            type: string
+          bordereauId:
+            type: string
+            format: uuid
+          bordereauNumber:
+            type: string
+            maxLength: 32
+          period:
+            type: object
+            additionalProperties: true
+            properties:
+              start:
+                type: string
+                format: date
+              end:
+                type: string
+                format: date
+          periodStart:
+            type: string
+            format: date
+          periodEnd:
+            type: string
+            format: date
+          currency:
+            type: string
+            pattern: '^[A-Z]{3}$'
+          status:
+            type: string
+            enum:
+              - RECEIVED
+              - PROCESSED
+              - FAILED
+          technicalAccountId:
+            type: [string, 'null']
+            format: uuid
+          premiumAmount:
+            type: string
+            pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+          lossAmount:
+            type: string
+            pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+          commissionAmount:
+            type: string
+            pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+          otherChargesAmount:
+            type: string
+            pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+          lineCount:
+            type: integer
+            minimum: 0
   securitySchemes:
     outboxSignature:
       type: httpApiKey
@@ -781,17 +925,21 @@ x-implementation:
   publisher: eia-contract-expert
   subscriber: none
   notes: >
-    Eight Contract events are written to the transactional outbox in the same
+    Eleven Contract events are written to the transactional outbox in the same
     transaction as the aggregate write: `created`, `updated`, `bound`,
     `commuted`, `cession.recorded`, `technical-account.created`,
-    `technical-account.issued`, and `technical-account.settled`. The three
-    technical-account facts are child-aggregate events that use the account id
-    and its lifecycle version while the outbox partition key stays the contract
-    id. A status write that targets a catalog lifecycle state can additionally
-    emit the cataloged `signed`, `endorsed`, `expired`, or `cancelled` name;
-    those names remain published and are not part of the implemented subset
-    recorded here. The remaining SPEC 11.3.9 names are planned. There is no
-    business subscriber or subscription registry yet.
+    `technical-account.issued`, `technical-account.settled`,
+    `bordereau.received`, `bordereau.processed`, and `bordereau.failed`. The
+    three technical-account facts are child-aggregate events that use the
+    account id and its lifecycle version while the outbox partition key stays
+    the contract id. The three bordereau facts are child-aggregate events that
+    use the bordereau id and version 1 (received) or 2 (processed or failed)
+    while the partition key stays the contract id. A status write that targets
+    a catalog lifecycle state can additionally emit the cataloged `signed`,
+    `endorsed`, `expired`, or `cancelled` name; those names remain published
+    and are not part of the implemented subset recorded here. The remaining
+    SPEC 11.3.9 names are planned. There is no business subscriber or
+    subscription registry yet.
 
 x-consumed-events:
   - policy.policy.issued

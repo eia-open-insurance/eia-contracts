@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Contract API
-  version: 2.2.0
+  version: 3.0.0
   summary: Assumed-book reinsurance contract administration and the Contract expert API.
   description: >
     This document describes the implemented public Contract domain API and the
@@ -9,11 +9,19 @@ info:
     and SPEC 12.
 
     The Contract vertical is ASSUMED book only. Round 5 adds the second slice:
-    layers, participants, terms, security, cessions, bordereaux, commutations,
-    and the bind command. The contract header, dates, currency, lifecycle,
-    layers, participants, terms, security, cessions, bordereaux, commutations,
-    and technical accounts are implemented; endorsement, renewal, reinstatement,
-    loss-aggregate, and lineage remain planned.
+    layers, participants, terms, security, cessions, commutations, and the bind
+    command; the period-bordereau and technical-account slices follow. The
+    contract header, dates, currency, lifecycle, layers, participants, terms,
+    security, cessions, period bordereaux, commutations, and technical accounts
+    are implemented; endorsement, renewal, reinstatement, loss-aggregate, and
+    lineage remain planned.
+
+    A period bordereau is the cedent's financial schedule for one contract
+    period. It is created in RECEIVED with the declared premium, loss,
+    commission, and other-charge totals, and is then either PROCESSED (which
+    creates or reuses the technical account for the same period and links it)
+    or FAILED. Both terminal states are immutable. The legacy source-document
+    ingest header remains an internal expert surface on the same table.
 
     A technical account is the periodic financial statement of the treaty. The
     expert generates `accountNumber` as `TA-{year}-{sequence}`, derives
@@ -634,9 +642,19 @@ paths:
       operationId: listContractBordereaux
       tags:
         - Contract
-      summary: List bordereaux.
+      summary: List the period bordereaux of a contract.
+      description: >
+        Returns a bare array ordered by `periodStart` descending, then
+        `periodEnd` and `createdAt` descending. Only period bordereaux are
+        returned; the legacy source-document ingest header is internal. The
+        tenant comes from `X-EIA-Tenant`. The Contract vertical is ASSUMED-only,
+        so `X-EIA-Book` must be ASSUMED; another book is hidden as 404
+        `BOOK_SCOPE_VIOLATION` (SPEC 3.6.2). A missing tenant is 400; an unknown
+        contract, another tenant's contract, or a contract in another book is
+        404.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
         - name: contractId
           in: path
           required: true
@@ -645,7 +663,7 @@ paths:
             format: uuid
       responses:
         '200':
-          description: Bordereaux of the contract.
+          description: Period bordereaux of the contract, newest period first.
           content:
             application/json:
               schema:
@@ -662,16 +680,20 @@ paths:
       operationId: createContractBordereau
       tags:
         - Contract
-      summary: Record a bordereau header.
+      summary: Record a received period bordereau.
       description: >
-        `bordereauType`, `sourceFormat`, and `status` are closed enumerations.
-        The period must be coherent (`periodTo` on or after `periodFrom`),
-        `validLineCount` may not exceed `lineCount`, and a `totalAmount` must be
-        in the contract currency (`BORDEREAU_CURRENCY_MISMATCH`). The bordereau
-        number is generated as BRD-{year}-{7 digits} when omitted and is unique
-        per tenant.
+        Creates the bordereau in RECEIVED. `periodStart` must be before
+        `periodEnd`, `receivedDate` and `currency` are required (uppercase ISO
+        4217), and the four declared amounts plus `lineCount` are required and
+        non-negative. `bordereauNumber` is generated as
+        `BRD-{year}-{sequence}` and `status` starts at RECEIVED; neither is
+        accepted from the caller. The exact `(tenant, contract, periodStart,
+        periodEnd)` period is unique, so a duplicate is 409
+        `DUPLICATE_BORDEREAU_PERIOD`. The write and its
+        `contract.bordereau.received` outbox event share one transaction.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
         - name: contractId
           in: path
           required: true
@@ -686,7 +708,7 @@ paths:
               $ref: '#/components/schemas/CreateBordereauRequest'
       responses:
         '201':
-          description: Bordereau recorded.
+          description: Bordereau recorded in RECEIVED.
           content:
             application/json:
               schema:
@@ -696,17 +718,35 @@ paths:
         '404':
           $ref: './components.yaml#/components/responses/NotFound'
         '409':
-          $ref: './components.yaml#/components/responses/Conflict'
+          description: >
+            409. `DUPLICATE_BORDEREAU_PERIOD` when a period bordereau already
+            exists for the exact tenant, contract, and period.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
         default:
           $ref: './components.yaml#/components/responses/Problem'
-  /api/v1/contracts/{contractId}/bordereaux/{bordereauId}:
-    get:
-      operationId: getContractBordereau
+  /api/v1/contracts/{contractId}/bordereaux/{bordereauId}/status:
+    patch:
+      operationId: updateContractBordereauStatus
       tags:
         - Contract
-      summary: Get one bordereau.
+      summary: Record the terminal outcome of a period bordereau.
+      description: >
+        Applies only RECEIVED -> PROCESSED or RECEIVED -> FAILED. The request
+        accepts `PROCESSED` or `FAILED`; `RECEIVED` is the creation state and is
+        400 `INVALID_STATUS`. Processing creates or reuses the DRAFT technical
+        account for the same contract period and links it through
+        `technicalAccountId`; failing records that the bordereau could not be
+        processed and creates no account. Both terminal states are immutable,
+        so a skipped or repeated edge is 409 `INVALID_STATUS_TRANSITION`. The
+        row update, the technical-account write when one is needed, and the
+        `contract.bordereau.processed` or `contract.bordereau.failed` outbox
+        event share one transaction.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
         - name: contractId
           in: path
           required: true
@@ -719,9 +759,15 @@ paths:
           schema:
             type: string
             format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateBordereauStatusRequest'
       responses:
         '200':
-          description: Bordereau detail.
+          description: Bordereau after the terminal transition.
           content:
             application/json:
               schema:
@@ -730,6 +776,15 @@ paths:
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
           $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            409. `INVALID_STATUS_TRANSITION` when the bordereau is already
+            terminal, when the requested edge is not RECEIVED -> PROCESSED or
+            RECEIVED -> FAILED, or when a concurrent change won the update.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /api/v1/contracts/{contractId}/commutations:
@@ -1640,7 +1695,11 @@ paths:
       operationId: expertListContractBordereaux
       tags:
         - Contract internal
-      summary: List bordereaux (expert).
+      summary: List bordereau ingest headers (expert).
+      description: >
+        Legacy source-document ingest slice on the shared `contract_bordereau`
+        table. It lists only the rows without a financial period; the public
+        period-bordereau API is disjoint.
       security: []
       x-internal-api: true
       parameters:
@@ -1653,13 +1712,13 @@ paths:
             format: uuid
       responses:
         '200':
-          description: Bordereaux of the contract.
+          description: Bordereau ingest headers of the contract.
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/Bordereau'
+                  $ref: '#/components/schemas/BordereauHeader'
         '400':
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
@@ -1670,7 +1729,14 @@ paths:
       operationId: expertCreateContractBordereau
       tags:
         - Contract internal
-      summary: Record a bordereau (expert).
+      summary: Record a bordereau ingest header (expert).
+      description: >
+        `bordereauType`, `sourceFormat`, and `status` are closed enumerations.
+        The period must be coherent (`periodTo` on or after `periodFrom`),
+        `validLineCount` may not exceed `lineCount`, and a `totalAmount` must be
+        in the contract currency (`BORDEREAU_CURRENCY_MISMATCH`). The bordereau
+        number is generated as BRD-{year}-{7 digits} when omitted and is unique
+        per tenant.
       security: []
       x-internal-api: true
       parameters:
@@ -1686,14 +1752,14 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateBordereauRequest'
+              $ref: '#/components/schemas/CreateBordereauHeaderRequest'
       responses:
         '201':
-          description: Bordereau recorded.
+          description: Bordereau ingest header recorded.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Bordereau'
+                $ref: '#/components/schemas/BordereauHeader'
         '400':
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
@@ -1707,7 +1773,7 @@ paths:
       operationId: expertGetContractBordereau
       tags:
         - Contract internal
-      summary: Get one bordereau (expert).
+      summary: Get one bordereau ingest header (expert).
       security: []
       x-internal-api: true
       parameters:
@@ -1726,11 +1792,11 @@ paths:
             format: uuid
       responses:
         '200':
-          description: Bordereau detail.
+          description: Bordereau ingest header detail.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Bordereau'
+                $ref: '#/components/schemas/BordereauHeader'
         '400':
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
@@ -2677,7 +2743,91 @@ components:
         - DISPUTED
     Bordereau:
       type: object
-      description: Bordereau header with line and exception counts.
+      description: >
+        Public projection of a period bordereau: the cedent's financial schedule
+        for one contract period. The expert generates `bordereauNumber` as
+        `BRD-{year}-{sequence}` and the row starts in RECEIVED. Money fields are
+        decimal strings (SPEC 10.3). `notes` is null until a note is supplied,
+        and `technicalAccountId` is null until the bordereau is PROCESSED and
+        linked to the technical account created or reused for the period.
+      required:
+        - bordereauId
+        - bordereauNumber
+        - contractId
+        - periodStart
+        - periodEnd
+        - receivedDate
+        - currency
+        - premiumAmount
+        - lossAmount
+        - commissionAmount
+        - otherChargesAmount
+        - lineCount
+        - notes
+        - status
+        - technicalAccountId
+        - createdAt
+      properties:
+        bordereauId:
+          type: string
+          format: uuid
+        bordereauNumber:
+          type: string
+          maxLength: 32
+        contractId:
+          type: string
+          format: uuid
+        periodStart:
+          type: string
+          format: date
+        periodEnd:
+          type: string
+          format: date
+        receivedDate:
+          type: string
+          format: date
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        premiumAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        lossAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        commissionAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        otherChargesAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        lineCount:
+          type: integer
+          minimum: 0
+          maximum: 10000000
+        notes:
+          type: [string, 'null']
+          maxLength: 4000
+        status:
+          $ref: '#/components/schemas/BordereauStatus'
+        technicalAccountId:
+          type: [string, 'null']
+          format: uuid
+          description: Set when the bordereau is processed and linked to its account.
+        createdAt:
+          type: string
+          format: date-time
+    BordereauStatus:
+      type: string
+      description: >
+        Period-bordereau lifecycle. RECEIVED is the creation state; PROCESSED
+        and FAILED are terminal and immutable.
+      enum:
+        - RECEIVED
+        - PROCESSED
+        - FAILED
+    BordereauHeader:
+      type: object
+      description: >
+        Internal legacy source-document ingest header (SPEC 11.3.4
+        `contract_bordereau`). It shares the table with the period bordereau
+        but carries the source format, line/exception counts, and declared
+        total instead of the financial period.
       required:
         - id
         - tenantId
@@ -2724,7 +2874,7 @@ components:
           type: [string, 'null']
           maxLength: 128
         status:
-          $ref: '#/components/schemas/BordereauStatus'
+          $ref: '#/components/schemas/BordereauHeaderStatus'
         lineCount:
           type: integer
           minimum: 0
@@ -2773,8 +2923,9 @@ components:
         - XML
         - JSON
         - MANUAL
-    BordereauStatus:
+    BordereauHeaderStatus:
       type: string
+      description: Legacy ingest-header status vocabulary (internal only).
       enum:
         - RECEIVED
         - PARSING
@@ -3344,6 +3495,70 @@ components:
           format: uuid
     CreateBordereauRequest:
       type: object
+      description: >
+        Create payload for a period bordereau. The bordereau number and the
+        initial RECEIVED status are server-owned. Amounts are decimal strings
+        and must not be negative (SPEC 10.3).
+      required:
+        - periodStart
+        - periodEnd
+        - receivedDate
+        - currency
+        - premiumAmount
+        - lossAmount
+        - commissionAmount
+        - otherChargesAmount
+        - lineCount
+      properties:
+        periodStart:
+          type: string
+          format: date
+        periodEnd:
+          type: string
+          format: date
+        receivedDate:
+          type: string
+          format: date
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        premiumAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        lossAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        commissionAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        otherChargesAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        lineCount:
+          type: integer
+          minimum: 0
+          maximum: 10000000
+        notes:
+          type: [string, 'null']
+          maxLength: 4000
+    UpdateBordereauStatusRequest:
+      type: object
+      description: >
+        Terminal status payload for a period bordereau. Only PROCESSED and
+        FAILED can be requested; RECEIVED is the creation state. When `notes` is
+        omitted the stored note is kept.
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - PROCESSED
+            - FAILED
+        notes:
+          type: [string, 'null']
+          maxLength: 4000
+    CreateBordereauHeaderRequest:
+      type: object
+      description: >
+        Create payload for the legacy internal source-document ingest header.
+        `bordereauNumber` is generated when omitted and `status` defaults to
+        RECEIVED.
       required:
         - bordereauType
         - periodFrom
@@ -3373,7 +3588,7 @@ components:
           type: string
           maxLength: 128
         status:
-          $ref: '#/components/schemas/BordereauStatus'
+          $ref: '#/components/schemas/BordereauHeaderStatus'
         lineCount:
           type: integer
           minimum: 0
@@ -3496,7 +3711,19 @@ x-implementation:
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/security/SecurityController.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/cession/CessionController.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/bordereau/BordereauController.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/bordereau/BordereauHeaderController.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/bordereau/ContractBordereau.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/bordereau/ContractBordereauHeader.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/bordereau/BordereauRules.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/bordereau/BordereauRepository.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/bordereau/BordereauStatus.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/commutation/CommutationController.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/BordereauController.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/BordereauService.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/BordereauClient.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/Bordereau.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/CreateBordereauCommand.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/UpdateBordereauStatusCommand.java
     - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/TechnicalAccountController.java
     - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/TechnicalAccountService.java
     - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/TechnicalAccountClient.java
@@ -3522,26 +3749,34 @@ x-implementation:
     Percentages are points of 100, not decimal fractions. Technical accounts
     are projected with accountId (the expert row id) and exclude tenantId; the
     expert generates accountNumber and the balance, and the only statuses are
-    DRAFT, ISSUED, and SETTLED. The domain accepts an absent X-EIA-Book on the
+    DRAFT, ISSUED, and SETTLED. Period bordereaux are projected with
+    bordereauId (the expert row id is remapped by the domain) and exclude
+    tenantId; the expert generates bordereauNumber, the lifecycle is RECEIVED ->
+    PROCESSED|FAILED, and PROCESSED links or creates the technical account for
+    the period. The domain accepts an absent X-EIA-Book on the bordereau and
     technical-account routes even though the canonical contract requires
-    ASSUMED (M-29).
+    ASSUMED (M-29, M-30).
 x-compatibility:
-  contractVersion: 2.2.0
-  previousContractVersion: 2.1.0
+  contractVersion: 3.0.0
+  previousContractVersion: 2.2.0
   breaking:
     - PATCH /api/v1/contracts/{contractId}/status no longer accepts BOUND (since 2.0.0); it returns 409 BIND_REQUIRES_COMMAND and bind must use POST /bind.
+    - The public GET/POST /api/v1/contracts/{contractId}/bordereaux operations now use the period-bordereau Bordereau projection. The legacy source-document ingest header moved to the internal-only BordereauHeader schema and /internal/v1 routes; a client generated from the old public BordereauHeader shape must move to the period-bordereau fields.
   compatible:
     - Adds GET /api/v1/contracts/search returning the shared SearchResponse envelope.
-    - Adds the layers, participants, terms, security, cessions, bordereaux, commutations, bind-eligibility, and bind routes.
+    - Adds the layers, participants, terms, security, cessions, commutations, bind-eligibility, and bind routes.
     - Adds the expert routes that mirror the public second slice.
+    - Adds PATCH /api/v1/contracts/{contractId}/bordereaux/{bordereauId}/status with the UpdateBordereauStatusRequest schema and the BordereauStatus lifecycle.
     - Adds GET/POST /api/v1/contracts/{contractId}/technical-accounts and PATCH /api/v1/contracts/{contractId}/technical-accounts/{accountId}/status with the TechnicalAccount, CreateTechnicalAccountRequest, UpdateTechnicalAccountStatusRequest, and TechnicalAccountStatus schemas.
   note: >
-    Search is additive over 2.0.0 and changes no existing path or schema.
-    Technical accounts are additive over 2.1.0: three new operations, four new
-    schemas, and no change to an existing path or field. The bind guard is a
-    deliberate breaking change introduced in 2.0.0 for a client that used the
-    status endpoint to bind without approvals; it is the SPEC 11.3.8 command
-    contract. The HTTP path stays /api/v1/contracts.
+    Search and technical accounts are additive. The period-bordereau slice
+    replaces the previously documented public bordereau header with the
+    financial period projection, so the contract takes a major version even
+    though the HTTP path is unchanged; the legacy ingest header stays available
+    on the internal expert surface. The bind guard is a deliberate breaking
+    change introduced in 2.0.0 for a client that used the status endpoint to
+    bind without approvals; it is the SPEC 11.3.8 command contract. The HTTP base
+    path stays /api/v1/contracts.
 x-planned-operations:
   - method: PATCH
     path: /api/v1/contracts/{contractId}

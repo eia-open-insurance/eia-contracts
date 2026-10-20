@@ -209,7 +209,7 @@ ROUND5_OPENAPI_PATHS = {
         ("/api/v1/contracts/{contractId}/cessions", "post"),
         ("/api/v1/contracts/{contractId}/bordereaux", "get"),
         ("/api/v1/contracts/{contractId}/bordereaux", "post"),
-        ("/api/v1/contracts/{contractId}/bordereaux/{bordereauId}", "get"),
+        ("/api/v1/contracts/{contractId}/bordereaux/{bordereauId}/status", "patch"),
         ("/api/v1/contracts/{contractId}/commutations", "get"),
         ("/api/v1/contracts/{contractId}/commutations", "post"),
         ("/api/v1/contracts/{contractId}/commutations/{commutationId}/approve", "post"),
@@ -424,6 +424,78 @@ CONTRACT_TECHNICAL_ACCOUNT_STATUSES = ("DRAFT", "ISSUED", "SETTLED")
 CONTRACT_TECHNICAL_ACCOUNT_REQUEST_STATUSES = ("ISSUED", "SETTLED")
 
 
+# Contract period bordereaux. Each tuple is
+# (method, path, success status, success schema, request schema or None). All
+# three public operations must document the tenant header, the ASSUMED book
+# header, the path parameters, and the 400/404 problem responses; the two
+# mutations also document 409.
+CONTRACT_BORDEREAU_PATHS = [
+    (
+        "get",
+        "/api/v1/contracts/{contractId}/bordereaux",
+        "200",
+        "Bordereau",
+        None,
+    ),
+    (
+        "post",
+        "/api/v1/contracts/{contractId}/bordereaux",
+        "201",
+        "Bordereau",
+        "CreateBordereauRequest",
+    ),
+    (
+        "patch",
+        "/api/v1/contracts/{contractId}/bordereaux/{bordereauId}/status",
+        "200",
+        "Bordereau",
+        "UpdateBordereauStatusRequest",
+    ),
+]
+
+CONTRACT_BORDEREAU_FIELDS = (
+    "bordereauId",
+    "bordereauNumber",
+    "contractId",
+    "periodStart",
+    "periodEnd",
+    "receivedDate",
+    "currency",
+    "premiumAmount",
+    "lossAmount",
+    "commissionAmount",
+    "otherChargesAmount",
+    "lineCount",
+    "notes",
+    "status",
+    "technicalAccountId",
+    "createdAt",
+)
+
+CONTRACT_BORDEREAU_MONEY_FIELDS = (
+    "premiumAmount",
+    "lossAmount",
+    "commissionAmount",
+    "otherChargesAmount",
+)
+
+CONTRACT_BORDEREAU_CREATE_FIELDS = (
+    "periodStart",
+    "periodEnd",
+    "receivedDate",
+    "currency",
+    "premiumAmount",
+    "lossAmount",
+    "commissionAmount",
+    "otherChargesAmount",
+    "lineCount",
+)
+
+CONTRACT_BORDEREAU_STATUSES = ("RECEIVED", "PROCESSED", "FAILED")
+CONTRACT_BORDEREAU_REQUEST_STATUSES = ("PROCESSED", "FAILED")
+CONTRACT_BORDEREAU_NOTES_MAX_LENGTH = 4000
+
+
 # Direct Claims and Assumed Claims task and note schemas. The public projection
 # and command shapes are the ones the domains serialize, so the names are
 # mandatory alongside the five public routes above.
@@ -629,6 +701,9 @@ IMPLEMENTED_EVENTS = {
         "contract.technical-account.created",
         "contract.technical-account.issued",
         "contract.technical-account.settled",
+        "contract.bordereau.received",
+        "contract.bordereau.processed",
+        "contract.bordereau.failed",
     ],
     "direct-claims": [
         "direct.claim.registered",
@@ -2588,6 +2663,249 @@ def check_contract_technical_accounts(contracts: ContractSet, document, relative
 
 
 # ---------------------------------------------------------------------------
+# Contract period-bordereau checks
+# ---------------------------------------------------------------------------
+
+
+def check_contract_bordereaux(contracts: ContractSet, document, relative: str):
+    """Require the period-bordereau operations, schemas, and field rules."""
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    for method, bordereau_path, success_status, response_schema_name, request_schema_name in (
+        CONTRACT_BORDEREAU_PATHS
+    ):
+        path_item = paths.get(bordereau_path) if isinstance(paths, dict) else None
+        operation = path_item.get(method) if isinstance(path_item, dict) else None
+        where = f"{relative}: {method.upper()} {bordereau_path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required period-bordereau operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+
+        parameter_refs, inline_names = _parameter_names(operation)
+        contracts.check(
+            "TenantHeader" in parameter_refs,
+            f"{where}: must document the shared TenantHeader parameter",
+        )
+        contracts.check(
+            "BookHeaderAssumed" in parameter_refs,
+            f"{where}: must document the shared BookHeaderAssumed parameter",
+        )
+        contracts.check(
+            "contractId" in inline_names,
+            f"{where}: must declare the contractId path parameter",
+        )
+        if method == "patch":
+            contracts.check(
+                "bordereauId" in inline_names,
+                f"{where}: must declare the bordereauId path parameter",
+            )
+
+        responses = operation.get("responses") or {}
+        for code in ("400", "404"):
+            contracts.check(
+                code in responses,
+                f"{where}: must document the {code} response",
+            )
+        if method in ("post", "patch"):
+            contracts.check(
+                "409" in responses,
+                f"{where}: must document the 409 response",
+            )
+
+        if method == "get":
+            ok_schema = _response_schema(operation, "200")
+            contracts.check(
+                isinstance(ok_schema, dict)
+                and ok_schema.get("type") == "array"
+                and str((ok_schema.get("items") or {}).get("$ref", "")).endswith(
+                    "/schemas/Bordereau"
+                ),
+                f"{where}: 200 must return an array of Bordereau",
+            )
+        else:
+            request_body = operation.get("requestBody") or {}
+            contracts.check(
+                isinstance(request_body, dict) and request_body.get("required") is True,
+                f"{where}: request body must be required",
+            )
+            request_schema = (
+                ((request_body.get("content") or {}).get("application/json") or {})
+                .get("schema")
+                if isinstance(request_body, dict)
+                else None
+            )
+            contracts.check(
+                isinstance(request_schema, dict)
+                and str(request_schema.get("$ref", "")).endswith(
+                    f"/schemas/{request_schema_name}"
+                ),
+                f"{where}: request body must use the {request_schema_name} schema",
+            )
+            success_schema = _response_schema(operation, success_status)
+            contracts.check(
+                isinstance(success_schema, dict)
+                and str(success_schema.get("$ref", "")).endswith(
+                    f"/schemas/{response_schema_name}"
+                ),
+                f"{where}: {success_status} must return the {response_schema_name} schema",
+            )
+
+    bordereau = schemas.get("Bordereau") or {}
+    properties = bordereau.get("properties") or {}
+    required = set(bordereau.get("required") or [])
+    contracts.check(
+        isinstance(bordereau, dict) and bordereau.get("type") == "object",
+        f"{relative}: Bordereau must be an object schema",
+    )
+    for field in CONTRACT_BORDEREAU_FIELDS:
+        contracts.check(
+            field in properties,
+            f"{relative}: Bordereau.properties.{field} is required",
+        )
+        contracts.check(
+            field in required,
+            f"{relative}: Bordereau.required must list {field}",
+        )
+    for field in ("bordereauId", "contractId"):
+        contracts.check(
+            (properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: Bordereau.{field} must be a uuid",
+        )
+    for field in ("periodStart", "periodEnd", "receivedDate"):
+        contracts.check(
+            (properties.get(field) or {}).get("format") == "date",
+            f"{relative}: Bordereau.{field} must be a date",
+        )
+    contracts.check(
+        str((properties.get("currency") or {}).get("$ref", "")).endswith(
+            "/schemas/CurrencyCode"
+        ),
+        f"{relative}: Bordereau.currency must reference CurrencyCode",
+    )
+    for field in CONTRACT_BORDEREAU_MONEY_FIELDS:
+        contracts.check(
+            str((properties.get(field) or {}).get("$ref", "")).endswith(
+                "/schemas/MoneyAmount"
+            ),
+            f"{relative}: Bordereau.{field} must reference MoneyAmount",
+        )
+    contracts.check(
+        (properties.get("lineCount") or {}).get("type") == "integer"
+        and (properties.get("lineCount") or {}).get("minimum") == 0
+        and (properties.get("lineCount") or {}).get("maximum") == 10_000_000,
+        f"{relative}: Bordereau.lineCount must be an integer between 0 and 10000000",
+    )
+    notes = properties.get("notes") or {}
+    contracts.check(
+        _schema_types(notes) == {"string", "null"}
+        and notes.get("maxLength") == CONTRACT_BORDEREAU_NOTES_MAX_LENGTH,
+        f"{relative}: Bordereau.notes must be a nullable string of at most "
+        f"{CONTRACT_BORDEREAU_NOTES_MAX_LENGTH} characters",
+    )
+    contracts.check(
+        str((properties.get("status") or {}).get("$ref", "")).endswith(
+            "/schemas/BordereauStatus"
+        ),
+        f"{relative}: Bordereau.status must reference BordereauStatus",
+    )
+    account_id = properties.get("technicalAccountId") or {}
+    contracts.check(
+        _schema_types(account_id) == {"string", "null"}
+        and account_id.get("format") == "uuid",
+        f"{relative}: Bordereau.technicalAccountId must be a nullable uuid",
+    )
+    contracts.check(
+        (properties.get("createdAt") or {}).get("format") == "date-time",
+        f"{relative}: Bordereau.createdAt must be a date-time",
+    )
+
+    bordereau_status = schemas.get("BordereauStatus") or {}
+    contracts.check(
+        bordereau_status.get("type") == "string",
+        f"{relative}: BordereauStatus must be a string enum",
+    )
+    contracts.check(
+        set(bordereau_status.get("enum") or []) == set(CONTRACT_BORDEREAU_STATUSES),
+        f"{relative}: BordereauStatus must enumerate "
+        f"{list(CONTRACT_BORDEREAU_STATUSES)}",
+    )
+
+    create = schemas.get("CreateBordereauRequest") or {}
+    create_properties = create.get("properties") or {}
+    create_required = set(create.get("required") or [])
+    contracts.check(
+        isinstance(create, dict) and create.get("type") == "object",
+        f"{relative}: CreateBordereauRequest must be an object schema",
+    )
+    contracts.check(
+        create_required == set(CONTRACT_BORDEREAU_CREATE_FIELDS),
+        f"{relative}: CreateBordereauRequest must require "
+        f"{list(CONTRACT_BORDEREAU_CREATE_FIELDS)}",
+    )
+    for field in ("periodStart", "periodEnd", "receivedDate"):
+        contracts.check(
+            (create_properties.get(field) or {}).get("format") == "date",
+            f"{relative}: CreateBordereauRequest.{field} must be a date",
+        )
+    contracts.check(
+        str((create_properties.get("currency") or {}).get("$ref", "")).endswith(
+            "/schemas/CurrencyCode"
+        ),
+        f"{relative}: CreateBordereauRequest.currency must reference CurrencyCode",
+    )
+    for field in CONTRACT_BORDEREAU_MONEY_FIELDS:
+        contracts.check(
+            str((create_properties.get(field) or {}).get("$ref", "")).endswith(
+                "/schemas/MoneyAmount"
+            ),
+            f"{relative}: CreateBordereauRequest.{field} must reference MoneyAmount",
+        )
+    create_line_count = create_properties.get("lineCount") or {}
+    contracts.check(
+        create_line_count.get("type") == "integer"
+        and create_line_count.get("minimum") == 0
+        and create_line_count.get("maximum") == 10_000_000,
+        f"{relative}: CreateBordereauRequest.lineCount must be an integer between 0 and 10000000",
+    )
+    create_notes = create_properties.get("notes") or {}
+    contracts.check(
+        _schema_types(create_notes) == {"string", "null"}
+        and create_notes.get("maxLength") == CONTRACT_BORDEREAU_NOTES_MAX_LENGTH,
+        f"{relative}: CreateBordereauRequest.notes must be an optional nullable string of at most "
+        f"{CONTRACT_BORDEREAU_NOTES_MAX_LENGTH} characters",
+    )
+
+    update = schemas.get("UpdateBordereauStatusRequest") or {}
+    update_properties = update.get("properties") or {}
+    update_required = set(update.get("required") or [])
+    contracts.check(
+        isinstance(update, dict) and update.get("type") == "object",
+        f"{relative}: UpdateBordereauStatusRequest must be an object schema",
+    )
+    contracts.check(
+        update_required == {"status"},
+        f"{relative}: UpdateBordereauStatusRequest must require only status",
+    )
+    contracts.check(
+        set((update_properties.get("status") or {}).get("enum") or [])
+        == set(CONTRACT_BORDEREAU_REQUEST_STATUSES),
+        f"{relative}: UpdateBordereauStatusRequest.status must enumerate "
+        f"{list(CONTRACT_BORDEREAU_REQUEST_STATUSES)}",
+    )
+    update_notes = update_properties.get("notes") or {}
+    contracts.check(
+        _schema_types(update_notes) == {"string", "null"}
+        and update_notes.get("maxLength") == CONTRACT_BORDEREAU_NOTES_MAX_LENGTH,
+        f"{relative}: UpdateBordereauStatusRequest.notes must be an optional nullable string of at most "
+        f"{CONTRACT_BORDEREAU_NOTES_MAX_LENGTH} characters",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
 
@@ -3185,6 +3503,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_policy_renewal_openapi(contracts, document, relative)
         if vertical == "contract":
             check_contract_technical_accounts(contracts, document, relative)
+            check_contract_bordereaux(contracts, document, relative)
         contracts.check_openapi_schemas(document, relative)
         if verbose:
             print(f"  OK {relative}  paths={len(paths)} operations={operation_count}")

@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-20 (Contract technical accounts).
+Status: open, reviewed 2026-10-20 (Contract period bordereaux).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -20,7 +20,10 @@ where the running code does not meet it yet.
   services, their query repositories, and the shell's `GlobalSearch.jsx`. The
   Contract technical-account pass reads the domain controller, service, client,
   and projection plus the expert controller, rules, repository, status enum,
-  event factory, and `schema.sql`.
+  event factory, and `schema.sql`. The Contract period-bordereau pass reads the
+  domain controller, service, client, projection, and command rules plus the
+  expert period controller, legacy header controller, rules, repositories,
+  status enum, event factory, and `schema.sql`.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -75,6 +78,7 @@ removed per the resolution policy.
 | M-27 | Policy billing routes, event names, and status vocabulary differ from SPEC 11.2.13 | L |
 | M-28 | Policy renewal creates a successor instead of transitioning the source, and the route/body are narrower than SPEC 11.2.6/11.2.10 | L |
 | M-29 | Contract technical accounts use the `/technical-accounts` path, a narrow status set, and no period-overlap/window check | L |
+| M-30 | Contract period bordereaux use a PROCESSED/FAILED vocabulary and event names, omit the SPEC line/exception staging, and accept an absent book header | L |
 
 ## M-01 Public base paths
 
@@ -529,13 +533,17 @@ unimplemented fields and list the missing operations under
 - Contract: no `treatyNumber`, `contractBasis`, inception-date naming,
   `contract_section`, `contract_version`, `contract_sliding_scale`,
   `contract_premium`, `contract_reinstatement`, `contract_wording`,
-  `bordereau_line`, loss-aggregate, or mass-tort profile. Round 5 adds layers,
-  participants, terms, security, cessions, bordereaux, commutations, and bind,
-  so those are no longer gaps. The technical-account slice adds the periodic
-  statement (`accountNumber`, period, the four financial components, derived
-  balance, and DRAFT/ISSUED/SETTLED); the SPEC `technical_account_line`
-  breakdown, the AGREED/DISPUTED/SUPERSEDED statuses, and the `/accounts` path
-  remain gaps (M-29).
+  loss-aggregate, or mass-tort profile. Round 5 adds layers, participants,
+  terms, security, cessions, commutations, and bind, so those are no longer
+  gaps. The period-bordereau slice adds the cedent financial schedule and its
+  RECEIVED -> PROCESSED|FAILED lifecycle; the legacy ingest header remains an
+  internal surface. The SPEC `bordereau_line` and `bordereau_exception`
+  staging, duplicate-line detection, reconciliation to a declared total, the
+  exception report, and the SPEC single-bordereau `GET` remain gaps (M-30). The
+  technical-account slice adds the periodic statement (`accountNumber`, period,
+  the four financial components, derived balance, and DRAFT/ISSUED/SETTLED);
+  the SPEC `technical_account_line` breakdown, the AGREED/DISPUTED/SUPERSEDED
+  statuses, and the `/accounts` path remain gaps (M-29).
 - Direct Claims: no `tortCode` (the implemented name is `causeCode`),
   `claimant` object, policy-year allocations, financial summary, reopen,
   documents, lineage, or work queues. Round 5 adds injuries, exposures,
@@ -599,7 +607,7 @@ ten publishing verticals now emit a subset:
 |---|---|---|
 | Party | `party.party.created`, `party.party.updated` | `repos/eia-party-expert/.../PartyEvents.java` |
 | Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.billing-plan.created`, `policy.installment.paid`, `policy.installment.waived` | `repos/eia-policy-expert/.../PolicyEvents.java` |
-| Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded`, `contract.technical-account.created`, `contract.technical-account.issued`, `contract.technical-account.settled` | `repos/eia-contract-expert/.../ContractEvents.java` |
+| Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded`, `contract.technical-account.created`, `contract.technical-account.issued`, `contract.technical-account.settled`, `contract.bordereau.received`, `contract.bordereau.processed`, `contract.bordereau.failed` | `repos/eia-contract-expert/.../ContractEvents.java` |
 | Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.assigned`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.closed`, `direct.claim.task-created`, `direct.claim.task-completed`, `direct.claim.task-updated`, `direct.claim.note-added` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
 | Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.assigned`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted`, `assumed.claim.task-created`, `assumed.claim.task-completed`, `assumed.claim.task-updated`, `assumed.claim.note-added` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
 | Cession | `cession.cession.created`, `cession.cession.updated`, `cession.cession.handed-off` | `repos/eia-cession-expert/.../CessionEvents.java` |
@@ -644,11 +652,15 @@ The Contract expert's generic status command can additionally emit the
 already-cataloged `contract.contract.signed`, `.endorsed`, `.expired`, and
 `.cancelled` names when the target status matches. Those names remain published
 and are not part of the implemented subset recorded in this change; the catalog
-declares only the eight Contract events listed above. The three
+declares only the eleven Contract events listed above. The three
 technical-account facts are child-aggregate events: the envelope uses the
 account id and its lifecycle version (1 for created, 2 for issued, 3 for
 settled) while the outbox partition key stays the contract id. They have no
-SPEC 11.3.9 equivalent (M-22, M-29).
+SPEC 11.3.9 equivalent (M-22, M-29). The three bordereau facts are also
+child-aggregate events: the envelope uses the bordereau id and version 1 for
+received and 2 for processed or failed, with the contract id as the partition
+key. `received` matches SPEC; `processed` and `failed` replace the SPEC
+`posted`/`rejected` names, which remain planned (M-22, M-30).
 
 Live evidence (2026-10-20): the running `eia-event-ingest` pod reported 14
 events, all processed, and the recent types included `policy.policy.created`,
@@ -756,7 +768,7 @@ tables. The differences are:
 planned name |
 |---|---|---|
 | Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created`; `policy.installment.paid` / `.waived` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name. `version-issued`, `endorsed`, `cancelled`, `reinstated`, and `renewed` match SPEC. |
-| Contract | `contract.contract.updated`; `contract.technical-account.created` / `.issued` / `.settled` | No SPEC name for updated or the technical-account facts: SPEC 11.3.9 lists lifecycle verbs and the contract-level `contract.account.issued` / `.agreed` facts only. `created`, `bound`, `commuted`, and `cession.recorded` match SPEC. |
+| Contract | `contract.contract.updated`; `contract.technical-account.created` / `.issued` / `.settled`; `contract.bordereau.processed` / `.failed` | No SPEC name for updated, the technical-account facts, or the two terminal bordereau facts: SPEC 11.3.9 lists lifecycle verbs, the contract-level `contract.account.issued` / `.agreed` facts, and `contract.bordereau.posted` / `.rejected` instead. `created`, `bound`, `commuted`, `cession.recorded`, and `contract.bordereau.received` match SPEC. |
 | Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned` | No SPEC names: SPEC 11.4.9 defines no assignment, task, or note event. `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and `closed` match SPEC. |
 | Assumed Claims | `assumed.claim.updated`; `assumed.claim.assigned`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no assignment, task, or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
 | Cession | `cession.cession.created` / `.updated` / `.handed-off` | `cession.case.created`, `cession.handoff.sent`/`.acknowledged` |
@@ -1226,8 +1238,8 @@ Evidence:
   (unique exact period, non-negative amounts, currency pattern, status check).
 - `repos/eia-contract-expert/.../ContractEvents.java:54-56,195-246`
   (event names, child-aggregate id/version, contract partition key).
-- `openapi/contract.yaml` 2.2.0 and the README section record the implemented
-  shape.
+- `openapi/contract.yaml` (introduced in 2.2.0, now 3.0.0) and the README
+  technical-account section record the implemented shape.
 
 Resolution: the implemented slice is documented as canonical for now. Closing
 the gap means adding the SPEC `/accounts` alias (or amending SPEC 11.3.10),
@@ -1237,10 +1249,67 @@ event names follow EV-05: keep publishing the implemented names and add a SPEC
 name only through a dual-publish window. Renaming the path or statuses is
 breaking and needs an ADR and a `/v2` or dual-mount period.
 
+## M-30 Contract period bordereaux use a narrower lifecycle and omit line staging
+
+SPEC 11.3.4 defines `contract_bordereau` with `bordereau_type`,
+`period_from`/`period_to`, `received_at`, source metadata, the seven-value ingest
+status (`RECEIVED`, `PARSING`, `VALIDATED`, `PARTIALLY_POSTED`, `POSTED`,
+`REJECTED`, `SUPERSEDED`), counts, total, and checksum, plus the separate
+`bordereau_line` and `bordereau_exception` tables. SPEC 11.3.8 `contract.bordereau`
+parses, validates, reconciles, posts, and emits `contract.bordereau.posted`;
+SPEC 11.3.9 also names `contract.bordereau.rejected`. The 2026-10-20 slice
+implements a narrower financial period bordereau on the shared table:
+
+| Area | Implemented | SPEC / gap |
+|---|---|---|
+| Routes | `GET/POST /api/v1/contracts/{contractId}/bordereaux` and `PATCH .../bordereaux/{bordereauId}/status` (the M-01 short form) | SPEC 11.3.10 also has `GET /api/v1/contract/bordereaux/{bordereauId}`; the public API has no single-bordereau GET. |
+| Projection | Flat financial period: number, period, received date, currency, four amounts, line count, notes, status, technical account, createdAt | The ingest fields `bordereauType`, `sourceFormat`, `sourceReference`, `checksum`, `validLineCount`, `exceptionCount`, `totalAmount`, and `processedAt` remain only on the internal `BordereauHeader`; the public projection is the domain DTO, which remaps the expert's `id` to `bordereauId` and drops `tenantId`. |
+| Status | `RECEIVED`, `PROCESSED`, `FAILED`; only `RECEIVED -> PROCESSED|FAILED`, both terminal | SPEC also names `PARSING`, `VALIDATED`, `PARTIALLY_POSTED`, `POSTED`, `REJECTED`, and `SUPERSEDED`. Processing is a terminal success rather than a staged posting, so there is no partial posting or supersession. |
+| Lines and exceptions | None; one header row per period | No `bordereau_line` or `bordereau_exception` persistence, duplicate-line detection, reconciliation to a declared total, exception report, or partial posting. CTR-09 and CTR-10 and the SPEC 11.3.11 staging contract are not met. |
+| Period and currency | `periodStart < periodEnd`; exact `(tenant, contract, periodStart, periodEnd)` unique; uppercase ISO 4217 currency required | No period-overlap rejection, no contract-window check, and no currency reconciliation against the contract; a currency that differs from the contract is accepted. |
+| Technical account | `PROCESSED` creates or reuses the DRAFT account for the same period and links `technicalAccountId`; the account lifecycle is DRAFT/ISSUED/SETTLED | The SPEC account paths, the AGREED/DISPUTED/SUPERSEDED statuses, and the line breakdown remain M-29 gaps. |
+| Book | Canonical contract requires `X-EIA-Book: ASSUMED`; another book is 404 `BOOK_SCOPE_VIOLATION` | The domain's `requireAssumedBookWhenPresent` accepts an absent header, and the expert checks no book at all; the tenant is a header on the domain and a header or `tenantId` query on the expert (M-08). |
+| Events | `contract.bordereau.received`, `.processed`, `.failed` | SPEC 11.3.9 publishes `.received`, `.posted`, and `.rejected`. `received` matches; the two terminal names are new and `posted`/`rejected` remain planned (M-22). |
+
+Evidence:
+
+- `repos/eia-contract-domain/.../BordereauController.java:38-67` (tenant
+  header, optional ASSUMED book guard, list/create/status routes) and
+  `ContractCommandRules.java:151-184` (domain create and status validation).
+- `repos/eia-contract-domain/.../BordereauClient.java:32-104` (public path,
+  `tenantId` query, forwarded `ASSUMED` header, status path) and
+  `Bordereau.java:23-40` (`@JsonAlias("id")` remap and the flat projection).
+- `repos/eia-contract-expert/.../bordereau/BordereauController.java:52-144`
+  (public period controller, tenant resolution, technical-account reuse, outbox).
+- `repos/eia-contract-expert/.../bordereau/BordereauRules.java:33-102`
+  (period order, currency, non-negative amounts, status parsing and transitions).
+- `repos/eia-contract-expert/.../bordereau/BordereauRepository.java:61-132`
+  (period-row filter, newest-first order, unique-period conflict,
+  compare-and-set status).
+- `repos/eia-contract-expert/.../bordereau/BordereauStatus.java:11-33`
+  (RECEIVED/PROCESSED/FAILED and versions 1/2) and
+  `ContractBordereauHeader.java:18-57` (legacy ingest header).
+- `repos/eia-contract-expert/.../ContractEvents.java:218-287` (bordereau event
+  names, child aggregate id/version, nested and flat period, contract partition
+  key).
+- `repos/eia-contract-expert/src/main/resources/schema.sql:255-369`
+  (`contract_bordereau` columns, status check with both vocabularies, period
+  unique index, non-negative financial amounts).
+- `openapi/contract.yaml` 3.0.0 and the README period-bordereau section record
+  the implemented shape.
+
+Resolution: document the implemented period slice as canonical for now. Closing
+the gap means adding the line and exception staging with duplicate detection,
+reconciliation, and an exception report; enforcing period overlap, the contract
+window, and contract-currency equality; exposing the SPEC single-bordereau GET;
+and either enforcing `X-EIA-Book: ASSUMED` at the domain edge and in the expert
+or relaxing the contract. Renaming the statuses or the two terminal event names
+is breaking and needs an ADR and an EV-05 dual-publish window.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-Contract technical accounts contract:
+Contract period-bordereaux contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -1263,7 +1332,7 @@ OpenAPI 3.1 documents
 AsyncAPI 3 documents
   OK asyncapi/party.yaml  9 event channels
   OK asyncapi/policy.yaml  23 event channels
-  OK asyncapi/contract.yaml  24 event channels
+  OK asyncapi/contract.yaml  26 event channels
   OK asyncapi/direct-claims.yaml  25 event channels
   OK asyncapi/assumed-claims.yaml  21 event channels
   OK asyncapi/cession.yaml  17 event channels
@@ -1271,7 +1340,7 @@ AsyncAPI 3 documents
   OK asyncapi/document.yaml  20 event channels
   OK asyncapi/payment.yaml  18 event channels
   OK asyncapi/notifications.yaml  12 event channels
-  OK catalog: 186 unique published events across 10 verticals
+  OK catalog: 188 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -1279,7 +1348,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 10406 checks, 0 failures
+  PASS 10593 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -1347,7 +1416,14 @@ Additional checks and limits:
   `UpdateTechnicalAccountStatusRequest.status` enum, and removing
   `contract.technical-account.created` from the catalog `published` list each
   fail with the specific missing operation, schema, enum, or event message. All
-  four were run on a throwaway copy and exited non-zero.
+  four were run on a throwaway copy and exited non-zero. The Contract
+  period-bordereau pass added four more: renaming the
+  `/api/v1/contracts/{contractId}/bordereaux/{bordereauId}/status` path,
+  renaming the `Bordereau` schema, adding `RECEIVED` to the
+  `UpdateBordereauStatusRequest.status` enum, and dropping
+  `contract.bordereau.received` from the catalog `implemented` list each fail
+  with the specific missing operation, schema, enum, or implemented-event
+  message. All four were run on a throwaway copy and exited non-zero.
 
 ## Resolution policy
 
