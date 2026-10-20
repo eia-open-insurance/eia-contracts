@@ -323,6 +323,35 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   DOC-09 check, and updates M-14 and M-22 with the two new event names.
 - `python scripts/validate_contracts.py` passes 9,865 checks with 0 failures.
 
+### Added in the Policy billing contract (2026-10-20)
+
+- `openapi/policy.yaml` is 2.3.0: adds `GET/POST
+  /api/v1/policies/{policyId}/billing` and `PATCH
+  /api/v1/policies/{policyId}/billing/installments/{installmentId}`, the flat
+  `BillingPlan` and `Installment` projections, the `CreateBillingPlanRequest`
+  (`installmentCount` 1..24, `frequency` enum, `firstDueDate`) and
+  `UpdateInstallmentRequest` (`status` PAID or WAIVED, optional `paymentId`)
+  commands, and the 200/201/400/404/409 responses. A policy has at most one
+  ACTIVE plan; the premium split preserves the total exactly at scale 4.
+- `openapi/components.yaml` is 1.6.0: adds the optional
+  `BookHeaderDirectOptional` parameter (`X-EIA-Book`; DIRECT when present, an
+  absent header accepted for compatibility, another book hidden as 404
+  `BOOK_SCOPE_VIOLATION`).
+- `asyncapi/policy.yaml` is 1.2.0: adds implemented channels and `send`
+  operations for `policy.billing-plan.created`, `policy.installment.paid`, and
+  `policy.installment.waived`, each naming `PolicyEvents.java`.
+- `asyncapi/event-catalog.yaml` is 1.7.0: the three billing names are published
+  and implemented (183 published in total).
+- `scripts/validate_contracts.py` requires the three billing paths, the optional
+  shared book parameter, the `BillingPlan`, `Installment`,
+  `CreateBillingPlanRequest`, and `UpdateInstallmentRequest` schemas with their
+  bounds and enums, and the three implemented billing events.
+- `README.md` records the billing routes, projection, split and settlement
+  semantics, the DIRECT book rule, and the additive versions; `MISMATCHES.md`
+  updates M-06, M-07, M-12, M-14, and M-22 and adds M-27 for the SPEC 11.2.13
+  route, event-name, and status-vocabulary differences.
+- `python scripts/validate_contracts.py` passes 10,105 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

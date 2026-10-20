@@ -445,6 +445,76 @@ ASSIGNMENT_MAX_ADJUSTER = 128
 ASSIGNMENT_MAX_TEAM = 64
 
 
+# Policy billing (SPEC 11.2.13). The public domain routes proxy the expert's
+# billing service; the expert's /internal/v1 alias is an implementation detail
+# and is not part of the public contract. Every operation requires the tenant
+# header and accepts an optional X-EIA-Book that must be DIRECT when present.
+# Each tuple is (method, path, response schema, request schema or None).
+BILLING_OPENAPI_PATHS = [
+    ("get", "/api/v1/policies/{policyId}/billing", "BillingPlan", None),
+    (
+        "post",
+        "/api/v1/policies/{policyId}/billing",
+        "BillingPlan",
+        "CreateBillingPlanRequest",
+    ),
+    (
+        "patch",
+        "/api/v1/policies/{policyId}/billing/installments/{installmentId}",
+        "Installment",
+        "UpdateInstallmentRequest",
+    ),
+]
+
+BILLING_PLAN_FIELDS = (
+    "planId",
+    "planNumber",
+    "policyId",
+    "totalPremium",
+    "currency",
+    "installmentCount",
+    "frequency",
+    "firstDueDate",
+    "status",
+    "installments",
+)
+
+BILLING_INSTALLMENT_FIELDS = (
+    "installmentId",
+    "installmentNumber",
+    "dueDate",
+    "amount",
+    "status",
+    "paidAt",
+    "paymentId",
+)
+
+BILLING_INSTALLMENT_REQUIRED_FIELDS = (
+    "installmentId",
+    "installmentNumber",
+    "dueDate",
+    "amount",
+    "status",
+)
+
+BILLING_FREQUENCIES = ("MONTHLY", "QUARTERLY", "SEMI_ANNUAL", "ANNUAL")
+BILLING_PLAN_STATUSES = ("ACTIVE", "COMPLETE", "CANCELLED")
+BILLING_INSTALLMENT_STATUSES = ("DUE", "OVERDUE", "PAID", "WAIVED")
+BILLING_SETTLE_STATUSES = ("PAID", "WAIVED")
+BILLING_MIN_INSTALLMENTS = 1
+BILLING_MAX_INSTALLMENTS = 24
+
+# The three billing event names implemented by the Policy expert. The plan
+# name differs from the SPEC 11.2.13 `policy.billing.plan-created` spelling and
+# the installment facts have no SPEC name; MISMATCHES.md M-22 and M-27 record
+# the deviation.
+POLICY_BILLING_EVENTS = (
+    "policy.billing-plan.created",
+    "policy.installment.paid",
+    "policy.installment.waived",
+)
+
+
 # Event names the transactional-outbox rollout actually emits. The catalog must
 # list each one as published and implemented, and the vertical document must
 # expose a channel for it. Round 5 covered the first six verticals; the rollout
@@ -462,6 +532,9 @@ IMPLEMENTED_EVENTS = {
         "policy.policy.endorsed",
         "policy.policy.cancelled",
         "policy.policy.reinstated",
+        "policy.billing-plan.created",
+        "policy.installment.paid",
+        "policy.installment.waived",
     ],
     "contract": [
         "contract.contract.created",
@@ -559,6 +632,7 @@ REQUIRED_COMPONENTS = {
         "IdempotencyKey",
         "ClaimIdempotencyKey",
         "IfMatch",
+        "BookHeaderDirectOptional",
     ],
     "headers": [
         "ETag",
@@ -1651,6 +1725,313 @@ def check_document_links_openapi(contracts: ContractSet, document, relative: str
 
 
 # ---------------------------------------------------------------------------
+# Policy billing checks
+# ---------------------------------------------------------------------------
+
+
+def _response_schema(operation, status, media_type="application/json"):
+    response = (operation.get("responses") or {}).get(status)
+    if not isinstance(response, dict):
+        return None
+    return ((response.get("content") or {}).get(media_type) or {}).get("schema")
+
+
+def _parameter_names(operation):
+    """Return (referenced parameter component names, inline parameter names)."""
+    references = []
+    names = []
+    for parameter in operation.get("parameters") or []:
+        if not isinstance(parameter, dict):
+            continue
+        reference = parameter.get("$ref")
+        if isinstance(reference, str):
+            references.append(reference.rsplit("/", 1)[-1])
+        if isinstance(parameter.get("name"), str):
+            names.append(parameter["name"])
+    return references, names
+
+
+def check_policy_billing_openapi(contracts: ContractSet, document, relative: str):
+    """Require the Policy billing operations, schemas, and field rules."""
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    for method, billing_path, response_schema_name, request_schema_name in (
+        BILLING_OPENAPI_PATHS
+    ):
+        path_item = paths.get(billing_path) if isinstance(paths, dict) else None
+        operation = path_item.get(method) if isinstance(path_item, dict) else None
+        where = f"{relative}: {method.upper()} {billing_path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required billing operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+
+        parameter_refs, inline_names = _parameter_names(operation)
+        contracts.check(
+            "TenantHeader" in parameter_refs,
+            f"{where}: must require the shared TenantHeader",
+        )
+        contracts.check(
+            "BookHeaderDirectOptional" in parameter_refs,
+            f"{where}: must document the shared BookHeaderDirectOptional parameter",
+        )
+        contracts.check(
+            "policyId" in inline_names,
+            f"{where}: must declare the policyId path parameter",
+        )
+        if method == "patch":
+            contracts.check(
+                "installmentId" in inline_names,
+                f"{where}: must declare the installmentId path parameter",
+            )
+
+        responses = operation.get("responses") or {}
+        contracts.check(
+            "400" in responses,
+            f"{where}: must document the 400 response",
+        )
+        contracts.check(
+            "404" in responses,
+            f"{where}: must document the 404 response",
+        )
+        if method in ("post", "patch"):
+            contracts.check(
+                "409" in responses,
+                f"{where}: must document the 409 response",
+            )
+
+        if method == "get":
+            ok_schema = _response_schema(operation, "200")
+            contracts.check(
+                isinstance(ok_schema, dict)
+                and str(ok_schema.get("$ref", "")).endswith(
+                    f"/schemas/{response_schema_name}"
+                ),
+                f"{where}: 200 must return the {response_schema_name} schema",
+            )
+        else:
+            request_body = operation.get("requestBody") or {}
+            contracts.check(
+                request_body.get("required") is True,
+                f"{where}: request body must be required",
+            )
+            request_schema = (
+                ((request_body.get("content") or {}).get("application/json") or {})
+                .get("schema")
+                if isinstance(request_body, dict)
+                else None
+            )
+            contracts.check(
+                isinstance(request_schema, dict)
+                and str(request_schema.get("$ref", "")).endswith(
+                    f"/schemas/{request_schema_name}"
+                ),
+                f"{where}: request body must use the {request_schema_name} schema",
+            )
+            success_status = "201" if method == "post" else "200"
+            success_schema = _response_schema(operation, success_status)
+            contracts.check(
+                isinstance(success_schema, dict)
+                and str(success_schema.get("$ref", "")).endswith(
+                    f"/schemas/{response_schema_name}"
+                ),
+                f"{where}: {success_status} must return the {response_schema_name} schema",
+            )
+
+    plan = schemas.get("BillingPlan") or {}
+    plan_properties = plan.get("properties") or {}
+    plan_required = set(plan.get("required") or [])
+    contracts.check(
+        isinstance(plan, dict) and plan.get("type") == "object",
+        f"{relative}: BillingPlan must be an object schema",
+    )
+    for field in BILLING_PLAN_FIELDS:
+        contracts.check(
+            field in plan_properties,
+            f"{relative}: BillingPlan.properties.{field} is required",
+        )
+    for field in BILLING_PLAN_FIELDS:
+        contracts.check(
+            field in plan_required,
+            f"{relative}: BillingPlan.required must list {field}",
+        )
+    for field in ("planId", "policyId"):
+        contracts.check(
+            (plan_properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: BillingPlan.{field} must be a uuid",
+        )
+    contracts.check(
+        str((plan_properties.get("totalPremium") or {}).get("$ref", "")).endswith(
+            "/schemas/MoneyAmount"
+        ),
+        f"{relative}: BillingPlan.totalPremium must reference MoneyAmount",
+    )
+    contracts.check(
+        str((plan_properties.get("currency") or {}).get("$ref", "")).endswith(
+            "/schemas/CurrencyCode"
+        ),
+        f"{relative}: BillingPlan.currency must reference CurrencyCode",
+    )
+    plan_count = plan_properties.get("installmentCount") or {}
+    contracts.check(
+        (
+            plan_count.get("type"),
+            plan_count.get("minimum"),
+            plan_count.get("maximum"),
+        ) == ("integer", BILLING_MIN_INSTALLMENTS, BILLING_MAX_INSTALLMENTS),
+        f"{relative}: BillingPlan.installmentCount must be an integer between "
+        f"{BILLING_MIN_INSTALLMENTS} and {BILLING_MAX_INSTALLMENTS}",
+    )
+    contracts.check(
+        set((plan_properties.get("frequency") or {}).get("enum") or [])
+        == set(BILLING_FREQUENCIES),
+        f"{relative}: BillingPlan.frequency must enumerate {list(BILLING_FREQUENCIES)}",
+    )
+    contracts.check(
+        (plan_properties.get("firstDueDate") or {}).get("format") == "date",
+        f"{relative}: BillingPlan.firstDueDate must be a date",
+    )
+    contracts.check(
+        set((plan_properties.get("status") or {}).get("enum") or [])
+        == set(BILLING_PLAN_STATUSES),
+        f"{relative}: BillingPlan.status must enumerate {list(BILLING_PLAN_STATUSES)}",
+    )
+    plan_installments = plan_properties.get("installments") or {}
+    contracts.check(
+        plan_installments.get("type") == "array"
+        and str((plan_installments.get("items") or {}).get("$ref", "")).endswith(
+            "/schemas/Installment"
+        ),
+        f"{relative}: BillingPlan.installments must be an array of Installment",
+    )
+
+    installment = schemas.get("Installment") or {}
+    installment_properties = installment.get("properties") or {}
+    installment_required = set(installment.get("required") or [])
+    contracts.check(
+        isinstance(installment, dict) and installment.get("type") == "object",
+        f"{relative}: Installment must be an object schema",
+    )
+    for field in BILLING_INSTALLMENT_FIELDS:
+        contracts.check(
+            field in installment_properties,
+            f"{relative}: Installment.properties.{field} is required",
+        )
+    for field in BILLING_INSTALLMENT_REQUIRED_FIELDS:
+        contracts.check(
+            field in installment_required,
+            f"{relative}: Installment.required must list {field}",
+        )
+    contracts.check(
+        (installment_properties.get("installmentId") or {}).get("format") == "uuid",
+        f"{relative}: Installment.installmentId must be a uuid",
+    )
+    installment_number = installment_properties.get("installmentNumber") or {}
+    contracts.check(
+        (
+            installment_number.get("type"),
+            installment_number.get("minimum"),
+        ) == ("integer", 1),
+        f"{relative}: Installment.installmentNumber must be an integer >= 1",
+    )
+    contracts.check(
+        (installment_properties.get("dueDate") or {}).get("format") == "date",
+        f"{relative}: Installment.dueDate must be a date",
+    )
+    contracts.check(
+        str((installment_properties.get("amount") or {}).get("$ref", "")).endswith(
+            "/schemas/MoneyAmount"
+        ),
+        f"{relative}: Installment.amount must reference MoneyAmount",
+    )
+    contracts.check(
+        set((installment_properties.get("status") or {}).get("enum") or [])
+        == set(BILLING_INSTALLMENT_STATUSES),
+        f"{relative}: Installment.status must enumerate "
+        f"{list(BILLING_INSTALLMENT_STATUSES)}",
+    )
+    paid_at = installment_properties.get("paidAt") or {}
+    contracts.check(
+        _schema_types(paid_at) == {"string", "null"}
+        and paid_at.get("format") == "date-time",
+        f"{relative}: Installment.paidAt must be a nullable date-time",
+    )
+    payment_id = installment_properties.get("paymentId") or {}
+    contracts.check(
+        _schema_types(payment_id) == {"string", "null"}
+        and payment_id.get("format") == "uuid",
+        f"{relative}: Installment.paymentId must be a nullable uuid",
+    )
+
+    create = schemas.get("CreateBillingPlanRequest") or {}
+    create_properties = create.get("properties") or {}
+    create_required = set(create.get("required") or [])
+    contracts.check(
+        isinstance(create, dict) and create.get("type") == "object",
+        f"{relative}: CreateBillingPlanRequest must be an object schema",
+    )
+    contracts.check(
+        {"installmentCount", "frequency", "firstDueDate"} <= create_required,
+        f"{relative}: CreateBillingPlanRequest must require installmentCount, "
+        f"frequency, and firstDueDate",
+    )
+    create_count = create_properties.get("installmentCount") or {}
+    contracts.check(
+        (
+            create_count.get("type"),
+            create_count.get("minimum"),
+            create_count.get("maximum"),
+        ) == ("integer", BILLING_MIN_INSTALLMENTS, BILLING_MAX_INSTALLMENTS),
+        f"{relative}: CreateBillingPlanRequest.installmentCount must be an integer "
+        f"between {BILLING_MIN_INSTALLMENTS} and {BILLING_MAX_INSTALLMENTS}",
+    )
+    contracts.check(
+        set((create_properties.get("frequency") or {}).get("enum") or [])
+        == set(BILLING_FREQUENCIES),
+        f"{relative}: CreateBillingPlanRequest.frequency must enumerate "
+        f"{list(BILLING_FREQUENCIES)}",
+    )
+    contracts.check(
+        (create_properties.get("firstDueDate") or {}).get("format") == "date",
+        f"{relative}: CreateBillingPlanRequest.firstDueDate must be a date",
+    )
+
+    update = schemas.get("UpdateInstallmentRequest") or {}
+    update_properties = update.get("properties") or {}
+    update_required = set(update.get("required") or [])
+    contracts.check(
+        isinstance(update, dict) and update.get("type") == "object",
+        f"{relative}: UpdateInstallmentRequest must be an object schema",
+    )
+    contracts.check(
+        "status" in update_required,
+        f"{relative}: UpdateInstallmentRequest must require status",
+    )
+    contracts.check(
+        set((update_properties.get("status") or {}).get("enum") or [])
+        == set(BILLING_SETTLE_STATUSES),
+        f"{relative}: UpdateInstallmentRequest.status must enumerate "
+        f"{list(BILLING_SETTLE_STATUSES)}",
+    )
+    contracts.check(
+        "paymentId" in update_properties,
+        f"{relative}: UpdateInstallmentRequest.properties.paymentId is required",
+    )
+    contracts.check(
+        "paymentId" not in update_required,
+        f"{relative}: UpdateInstallmentRequest.paymentId must stay optional",
+    )
+    contracts.check(
+        _schema_types(update_properties.get("paymentId")) == {"string", "null"}
+        and (update_properties.get("paymentId") or {}).get("format") == "uuid",
+        f"{relative}: UpdateInstallmentRequest.paymentId must be a nullable uuid",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
 
@@ -1789,6 +2170,26 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             actor_header_schema.get("maxLength"),
         ) == ("string", ASSIGNMENT_MAX_ADJUSTER),
         "components.yaml: ActorHeader must be a string of at most 128 characters",
+    )
+    optional_direct_book = (
+        component_sections.get("parameters") or {}
+    ).get("BookHeaderDirectOptional") or {}
+    optional_direct_book_schema = optional_direct_book.get("schema") or {}
+    contracts.check(
+        optional_direct_book.get("name") == "X-EIA-Book",
+        "components.yaml: BookHeaderDirectOptional.name must be X-EIA-Book",
+    )
+    contracts.check(
+        optional_direct_book.get("in") == "header",
+        "components.yaml: BookHeaderDirectOptional.in must be header",
+    )
+    contracts.check(
+        optional_direct_book.get("required") is False,
+        "components.yaml: BookHeaderDirectOptional must stay optional",
+    )
+    contracts.check(
+        set(optional_direct_book_schema.get("enum") or []) == {"DIRECT"},
+        "components.yaml: BookHeaderDirectOptional must enumerate DIRECT",
     )
     replay_header = (component_sections.get("headers") or {}).get("IdempotentReplay") or {}
     replay_schema = replay_header.get("schema") or {}
@@ -2222,6 +2623,8 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_payment_openapi_sources(contracts, document, relative)
         if vertical == "document":
             check_document_links_openapi(contracts, document, relative)
+        if vertical == "policy":
+            check_policy_billing_openapi(contracts, document, relative)
         contracts.check_openapi_schemas(document, relative)
         if verbose:
             print(f"  OK {relative}  paths={len(paths)} operations={operation_count}")
@@ -2311,6 +2714,26 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
                 operation.get("x-status") in ("planned", "implemented"),
                 f"{where} must be marked x-status: planned or x-status: implemented",
             )
+
+        if vertical == "policy":
+            send_events = {
+                operation.get("x-event-type")
+                for operation in operations.values()
+                if isinstance(operation, dict) and operation.get("action") == "send"
+            }
+            for event in POLICY_BILLING_EVENTS:
+                contracts.check(
+                    event in addresses,
+                    f"{relative}: required billing event channel '{event}' is missing",
+                )
+                contracts.check(
+                    event in implemented_addresses,
+                    f"{relative}: billing event channel '{event}' must be implemented",
+                )
+                contracts.check(
+                    event in send_events,
+                    f"{relative}: billing event '{event}' must have a send operation",
+                )
 
         entry = catalog_entries.get(vertical) or {}
         published = entry.get("published") or []

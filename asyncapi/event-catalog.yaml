@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.6.0
+  version: 1.7.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -23,8 +23,12 @@ info:
     it appears in both lists. The Direct Claims and Assumed Claims task, note,
     and assignment events are new names with no SPEC 11.4.9 or 11.5.9
     equivalent, and the Document link events are new names with no SPEC 11.6.9
-    equivalent (MISMATCHES.md M-22). The platform event-ingest service is the
-    inbox:
+    equivalent (MISMATCHES.md M-22). The three Policy billing facts are new
+    names: SPEC 11.2.13 calls the plan fact `policy.billing.plan-created` and
+    defines no installment paid or waived fact, so the implemented names are
+    `policy.billing-plan.created`, `policy.installment.paid`, and
+    `policy.installment.waived` (M-22, M-27). The platform event-ingest service
+    is the inbox:
     it validates the canonical envelope, verifies the HMAC signature when
     configured, and stores each event idempotently. There is still no business
     subscriber, subscription registry, or gap detection, and no vertical
@@ -128,7 +132,7 @@ x-event-catalog:
       - document.document.registered
   policy:
     eventVertical: policy
-    specSection: SPEC 11.2.9
+    specSection: SPEC 11.2.9, SPEC 11.2.13
     published:
       - policy.policy.created
       - policy.policy.updated
@@ -139,6 +143,9 @@ x-event-catalog:
       - policy.policy.endorsed
       - policy.policy.cancelled
       - policy.policy.reinstated
+      - policy.billing-plan.created
+      - policy.installment.paid
+      - policy.installment.waived
       - policy.policy.renewed
       - policy.policy.expired
       - policy.policy.non-renewed
@@ -157,6 +164,9 @@ x-event-catalog:
       - policy.policy.endorsed
       - policy.policy.cancelled
       - policy.policy.reinstated
+      - policy.billing-plan.created
+      - policy.installment.paid
+      - policy.installment.waived
     consumed:
       - direct.claim.registered
       - direct.claim.allocated

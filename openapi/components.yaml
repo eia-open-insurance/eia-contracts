@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA canonical shared API components
-  version: 1.5.0
+  version: 1.6.0
   summary: Shared error, money, paging, global-search, concurrency, idempotency, actor, audit, and tenant/book components for every EIA API.
   description: >
     Shared OpenAPI 3.1 components referenced by the per-vertical contract
@@ -43,6 +43,13 @@ info:
     actor. The Direct Claims expert also accepts `X-EIA-User` as an alias for
     the same identity; the shared parameter names only `X-EIA-Actor`, which both
     verticals accept (MISMATCHES.md M-25).
+
+    The 2026-10-20 Policy billing contract (1.6.0) adds the optional
+    `BookHeaderDirectOptional` request parameter. The Policy billing proxy keeps
+    `X-EIA-Book` optional for compatibility with the other Policy proxy routes,
+    but a supplied value must be DIRECT and any other book is hidden as 404
+    `BOOK_SCOPE_VIOLATION` (SPEC 3.6.2, WALL-06). The addition is compatible: it
+    adds no required request field and changes no existing component.
 
     Authority is SPEC.md sections 6.11, 7.6, 7.18-7.23, 10.3, 12.2, and 12.6.
     Where an implemented service deviates from a component, the deviation is
@@ -97,6 +104,21 @@ components:
         response cannot confirm that a record exists in the other book
         (SPEC 3.6.2, WALL-06). A missing header is still a 400 `BOOK_REQUIRED`
         in Cession; see MISMATCHES.md.
+      schema:
+        type: string
+        enum:
+          - DIRECT
+    BookHeaderDirectOptional:
+      name: X-EIA-Book
+      in: header
+      required: false
+      description: >
+        Optional book scope for a DIRECT-only route that keeps the header
+        optional for backward compatibility. When supplied, the value must be
+        DIRECT; any other book is hidden as 404 `BOOK_SCOPE_VIOLATION` so the
+        response cannot confirm that a record exists in the other book
+        (SPEC 3.6.2, WALL-06). Policy billing accepts an absent header; see
+        MISMATCHES.md M-27.
       schema:
         type: string
         enum:

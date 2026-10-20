@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Policy API
-  version: 2.2.0
+  version: 2.3.0
   summary: Direct-book policy administration and the Policy expert API.
   description: >
     This document describes the implemented public Policy domain API and the
@@ -49,6 +49,23 @@ info:
     projections carry one `currency` per row with decimal-string amounts. The
     canonical Money object is defined in schemas/money.schema.json; migration of
     the flat pairs is tracked in MISMATCHES.md.
+
+    The 2026-10-20 billing slice adds the premium installment plan and its
+    settlement surface on the public domain API:
+
+    - `GET /api/v1/policies/{policyId}/billing` returns the current plan and its
+      ordered installments; `POST` creates the single ACTIVE plan and splits the
+      policy premium across 1..24 installments; `PATCH
+      .../billing/installments/{installmentId}` settles one installment as PAID
+      or WAIVED.
+    - A policy has at most one ACTIVE plan. The split preserves the premium
+      exactly: the first n-1 amounts are equal and the last one absorbs the
+      rounding remainder.
+    - `X-EIA-Tenant` is required and a supplied `X-EIA-Book` must be DIRECT.
+      Billing writes `policy.billing-plan.created`, `policy.installment.paid`,
+      and `policy.installment.waived` in the same transaction as the row change.
+      The SPEC route and event naming differences are recorded in MISMATCHES.md
+      M-27.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -1123,6 +1140,160 @@ paths:
           $ref: './components.yaml#/components/responses/UnprocessableContent'
         '428':
           $ref: './components.yaml#/components/responses/PreconditionRequired'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/billing:
+    get:
+      operationId: getPolicyBilling
+      tags:
+        - Policy
+      summary: Get the policy billing plan and installment schedule.
+      description: >
+        Returns the public flat billing projection: the plan members and the
+        ordered `installments` array. The ACTIVE plan is returned when one
+        exists; otherwise the most recently created closed plan is returned so
+        the read remains useful after the plan lifecycle closes.
+
+        A policy without any billing plan is 404 `BILLING_PLAN_NOT_FOUND`; an
+        unknown policy or a policy in another tenant is 404 `POLICY_NOT_FOUND`.
+        `X-EIA-Book` is optional for compatibility with the other Policy proxy
+        routes, but a supplied value must be DIRECT; another book is hidden as
+        404 `BOOK_SCOPE_VIOLATION`. Billing is a DIRECT-book business and the
+        domain always forwards DIRECT to the expert.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirectOptional'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The current billing plan and its ordered installments.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingPlan'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createPolicyBillingPlan
+      tags:
+        - Policy
+      summary: Create the policy billing plan.
+      description: >
+        Creates the single ACTIVE billing plan and its installment schedule. The
+        plan total is the policy premium and the plan currency is the policy
+        premium currency; the caller chooses only `installmentCount` (1..24),
+        `frequency`, and `firstDueDate`. The first n-1 installments are equal and
+        the last one absorbs the rounding remainder, so the schedule sums exactly
+        to the premium at scale 4.
+
+        Rejections: 400 `VALIDATION_ERROR` for a malformed body,
+        `INVALID_INSTALLMENT_COUNT` outside 1..24, `INVALID_BILLING_FREQUENCY`,
+        or `INVALID_FIRST_DUE_DATE`; 404 `POLICY_NOT_FOUND` (or
+        `BOOK_SCOPE_VIOLATION` for another book); 409
+        `BILLING_PLAN_ALREADY_EXISTS` when an ACTIVE plan already exists, or
+        `CONCURRENT_MODIFICATION` when the policy changed concurrently.
+
+        The command writes `policy.billing-plan.created` in the same transaction
+        as the plan and schedule. It is not idempotent and does not accept
+        `Idempotency-Key` or `If-Match` in this slice (MISMATCHES.md M-06, M-07).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirectOptional'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBillingPlanRequest'
+      responses:
+        '201':
+          description: Billing plan and installment schedule created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingPlan'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/billing/installments/{installmentId}:
+    patch:
+      operationId: updatePolicyInstallment
+      tags:
+        - Policy
+      summary: Settle one billing installment as PAID or WAIVED.
+      description: >
+        Marks a DUE or OVERDUE installment terminal. `PAID` records `paidAt` and
+        stores the optional `paymentId`; `WAIVED` clears payment evidence.
+        Repeating the same terminal status is an idempotent no-op that returns
+        the unchanged installment and writes no event. Switching a settled
+        installment to the other terminal status is 409
+        `INSTALLMENT_ALREADY_SETTLED`; a source status that is not DUE or OVERDUE
+        is 409 `INSTALLMENT_NOT_SETTLEABLE`.
+
+        Rejections: 400 `VALIDATION_ERROR` for a blank status or
+        `INVALID_INSTALLMENT_STATUS` for a value other than PAID or WAIVED; 404
+        `POLICY_NOT_FOUND`, `INSTALLMENT_NOT_FOUND` (including an installment
+        under another policy or tenant), or `BOOK_SCOPE_VIOLATION`; 409 for a
+        settled installment or `CONCURRENT_MODIFICATION`.
+
+        The accepted command writes `policy.installment.paid` or
+        `policy.installment.waived` in the same transaction as the row change.
+        It does not accept `Idempotency-Key`; repeating the same terminal status
+        is the retry-safe path (MISMATCHES.md M-07).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirectOptional'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: installmentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateInstallmentRequest'
+      responses:
+        '200':
+          description: The settled installment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Installment'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /internal/v1/policies:
@@ -2901,6 +3072,150 @@ components:
         createdAt:
           type: string
           format: date-time
+    BillingPlan:
+      type: object
+      description: >
+        Public billing plan for a policy (SPEC 11.2.13) with its ordered
+        installment schedule. A policy has at most one ACTIVE plan. The total
+        premium is split across the installments so their amounts sum exactly to
+        `totalPremium` at scale 4. `status` is ACTIVE for a created plan; the
+        COMPLETE and CANCELLED values are the closed-plan states the expert
+        repository recognizes. This is the domain projection: unlike the expert
+        view it is flat and names the plan identity `planId`.
+      required:
+        - planId
+        - planNumber
+        - policyId
+        - totalPremium
+        - currency
+        - installmentCount
+        - frequency
+        - firstDueDate
+        - status
+        - installments
+      properties:
+        planId:
+          type: string
+          format: uuid
+        planNumber:
+          type: string
+          maxLength: 32
+          description: Generated plan number, for example `BP-0001`.
+        policyId:
+          type: string
+          format: uuid
+        totalPremium:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        installmentCount:
+          type: integer
+          minimum: 1
+          maximum: 24
+        frequency:
+          type: string
+          enum:
+            - MONTHLY
+            - QUARTERLY
+            - SEMI_ANNUAL
+            - ANNUAL
+        firstDueDate:
+          type: string
+          format: date
+        status:
+          type: string
+          enum:
+            - ACTIVE
+            - COMPLETE
+            - CANCELLED
+        installments:
+          type: array
+          description: Ordered by `installmentNumber`, ascending.
+          items:
+            $ref: '#/components/schemas/Installment'
+    Installment:
+      type: object
+      description: >
+        One scheduled premium installment of a billing plan. `paidAt` and
+        `paymentId` are populated only for a PAID row; a WAIVED row carries no
+        payment evidence.
+      required:
+        - installmentId
+        - installmentNumber
+        - dueDate
+        - amount
+        - status
+      properties:
+        installmentId:
+          type: string
+          format: uuid
+        installmentNumber:
+          type: integer
+          minimum: 1
+        dueDate:
+          type: string
+          format: date
+        amount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        status:
+          type: string
+          enum:
+            - DUE
+            - OVERDUE
+            - PAID
+            - WAIVED
+        paidAt:
+          type: [string, 'null']
+          format: date-time
+        paymentId:
+          type: [string, 'null']
+          format: uuid
+    CreateBillingPlanRequest:
+      type: object
+      description: >
+        Create the single ACTIVE billing plan for a policy. The plan total and
+        currency are taken from the policy; the caller chooses only the
+        installment count, frequency, and first due date. Values are normalized
+        to upper case, and an unknown frequency is 400
+        `INVALID_BILLING_FREQUENCY`.
+      required:
+        - installmentCount
+        - frequency
+        - firstDueDate
+      properties:
+        installmentCount:
+          type: integer
+          minimum: 1
+          maximum: 24
+        frequency:
+          type: string
+          enum:
+            - MONTHLY
+            - QUARTERLY
+            - SEMI_ANNUAL
+            - ANNUAL
+        firstDueDate:
+          type: string
+          format: date
+    UpdateInstallmentRequest:
+      type: object
+      description: >
+        Settle one installment as PAID or WAIVED. `status` is trimmed and
+        normalized to upper case; any other value is 400
+        `INVALID_INSTALLMENT_STATUS`. `paymentId` is optional and is stored only
+        for PAID. Repeating the same terminal status is an idempotent no-op;
+        changing one terminal status to the other is 409.
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - PAID
+            - WAIVED
+        paymentId:
+          type: [string, 'null']
+          format: uuid
     PolicyPage:
       type: object
       description: >
@@ -3436,6 +3751,13 @@ x-implementation:
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyContractController.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyContractService.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyService.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyBillingController.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyBillingService.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/BillingPlan.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/Installment.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/CreateBillingPlanCommand.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/UpdateInstallmentCommand.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/BookScope.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyClient.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/ItemPage.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/Mutation.java
@@ -3443,6 +3765,15 @@ x-implementation:
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/Problems.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/ApiExceptionHandler.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyController.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/BillingController.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/BillingService.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/BillingRules.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/BillingRepository.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyBillingPlan.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyInstallment.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/CreateBillingPlanRequest.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/UpdateInstallmentRequest.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyVersionController.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/CoverageController.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/EndorsementController.java
@@ -3452,9 +3783,11 @@ x-implementation:
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/Problems.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/MutationGuard.java
     - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/PolicyContractControllerTest.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/PolicyBillingControllerTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/CoverageControllerTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/EndorsementControllerTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/CancellationControllerTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/BillingServiceTest.java
   errorEnvelope: >
     Canonical RFC 9457 Problem with content type application/problem+json, from
     both the Policy domain and the Policy expert. The vertical keeps its legacy
@@ -3464,21 +3797,31 @@ x-implementation:
     second-slice row. ETag is derived from the aggregate version and formatted
     as a quoted decimal. Every second-slice mutation returns the policy ETag and
     accepts If-Match and Idempotency-Key, both optional for backward
-    compatibility. 422 and 428 are emitted by the expert and re-emitted by the
-    domain unchanged. The list envelope is offset-based (page/size) rather than
-    the SPEC 7.6 cursor envelope; see MISMATCHES.md M-04.
+    compatibility; billing is the exception in this slice and accepts neither
+    (MISMATCHES.md M-06, M-07). 422 and 428 are emitted by the expert and
+    re-emitted by the domain unchanged. The list envelope is offset-based
+    (page/size) rather than the SPEC 7.6 cursor envelope; see MISMATCHES.md M-04.
+
+    The billing plan and installment slice documents the domain's public flat
+    projection. The domain proxies the expert's internal `{plan, installments}`
+    view and renames the identity fields to `planId` and `installmentId`; the
+    expert's internal route is not part of the public contract. The plan create
+    and installment settlement each bump the policy row version and write their
+    outbox event in the same transaction.
 x-compatibility:
-  contractVersion: 2.2.0
-  previousContractVersion: 2.1.0
+  contractVersion: 2.3.0
+  previousContractVersion: 2.2.0
   breaking: []
   compatible:
-    - Adds GET /api/v1/policies/search returning the shared SearchResponse envelope.
-    - Adds the 15 second-slice paths, their schemas, and the 422/428 responses.
-    - Adds the 422 and 428 statuses to existing mutation responses; no response shape changed.
-    - Adds no required request field and removes no response field.
+    - Adds GET and POST /api/v1/policies/{policyId}/billing.
+    - Adds PATCH /api/v1/policies/{policyId}/billing/installments/{installmentId}.
+    - Adds the BillingPlan, Installment, CreateBillingPlanRequest, and UpdateInstallmentRequest schemas.
+    - Adds the optional shared BookHeaderDirectOptional parameter; no existing operation changes.
+    - Adds no required request field to an existing operation and removes no response field.
   note: >
-    Search is additive over 2.1.0 and changes no existing path, schema, ETag, or
-    page envelope. The HTTP path remains /api/v1/policies.
+    Billing is additive over 2.2.0 and changes no existing path, schema, ETag, or
+    page envelope. The HTTP path remains /api/v1/policies. The event additions
+    are recorded in asyncapi/policy.yaml 1.2.0 and event-catalog.yaml 1.7.0.
 x-planned-operations:
   - method: POST
     path: /api/v1/policies/{policyId}/bind

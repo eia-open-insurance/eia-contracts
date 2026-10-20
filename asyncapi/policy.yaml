@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:policy
 info:
   title: EIA Policy events
-  version: 1.1.0
+  version: 1.2.0
   summary: Published domain event names for the Policy vertical.
   description: >
     Event contract for the Policy vertical. The authoritative event names are
@@ -16,11 +16,17 @@ info:
 
     The Policy expert now publishes `policy.policy.created`,
     `policy.policy.updated`, `policy.policy.version-issued`,
-    `policy.policy.endorsed`, `policy.policy.cancelled`, and
-    `policy.policy.reinstated` through the transactional outbox; those channels
+    `policy.policy.endorsed`, `policy.policy.cancelled`,
+    `policy.policy.reinstated`, and the billing facts
+    `policy.billing-plan.created`, `policy.installment.paid`, and
+    `policy.installment.waived` through the transactional outbox; those channels
     and operations are marked `x-status: implemented`. The `created` and
     `updated` names are additive: the catalog had no generic create or update
-    fact. The remaining SPEC 11.2.9 names are planned.
+    fact. The billing plan name is `policy.billing-plan.created`; SPEC 11.2.13
+    calls the same fact `policy.billing.plan-created` and defines no installment
+    paid or waived names, so the naming difference is recorded in
+    MISMATCHES.md M-22 and M-27. The remaining SPEC 11.2.9 and 11.2.13 names
+    are planned.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -173,6 +179,59 @@ channels:
     x-event-version: 1
     x-status: implemented
     x-spec-section: SPEC 11.2.9
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PolicyBillingPlanCreated:
+    address: policy.billing-plan.created
+    title: policy.billing-plan.created
+    description: >
+      Emitted when the single ACTIVE billing plan and its complete installment
+      schedule are created, in the same transaction as the plan and schedule
+      rows. The payload carries the policy and plan identity, the plan total
+      premium as a decimal string, currency, installment count, frequency, first
+      due date, status, and the full ordered installment array, so a consumer
+      can open receivables without a follow-up read.
+    x-event-type: policy.billing-plan.created
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.2.13
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PolicyInstallmentPaid:
+    address: policy.installment.paid
+    title: policy.installment.paid
+    description: >
+      Emitted when one billing installment is settled as PAID, in the same
+      transaction as the row change and the policy version bump. The payload
+      carries the policy and plan identity, the installment identity and number,
+      due date, amount as a decimal string, currency, terminal status, `paidAt`,
+      and the optional `paymentId`. Repeating PAID is a no-op and emits no
+      second event.
+    x-event-type: policy.installment.paid
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.2.13
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  PolicyInstallmentWaived:
+    address: policy.installment.waived
+    title: policy.installment.waived
+    description: >
+      Emitted when one billing installment is settled as WAIVED, in the same
+      transaction as the row change and the policy version bump. The payload
+      carries the policy and plan identity, the installment identity and number,
+      due date, amount as a decimal string, currency, terminal status, and null
+      payment evidence. Repeating WAIVED is a no-op and emits no second event.
+    x-event-type: policy.installment.waived
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.2.13
     x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
     messages:
       DomainEvent:
@@ -419,6 +478,35 @@ operations:
       Publishes policy.policy.reinstated when a cancelled policy is
       reinstated.
     x-event-type: policy.policy.reinstated
+    x-status: implemented
+  publishPolicyBillingPlanCreated:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyBillingPlanCreated'
+    summary: Publish policy.billing-plan.created
+    description: >
+      Publishes policy.billing-plan.created with the plan and full schedule when
+      the single ACTIVE plan is created.
+    x-event-type: policy.billing-plan.created
+    x-status: implemented
+  publishPolicyInstallmentPaid:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyInstallmentPaid'
+    summary: Publish policy.installment.paid
+    description: >
+      Publishes policy.installment.paid when an installment is settled as PAID.
+    x-event-type: policy.installment.paid
+    x-status: implemented
+  publishPolicyInstallmentWaived:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyInstallmentWaived'
+    summary: Publish policy.installment.waived
+    description: >
+      Publishes policy.installment.waived when an installment is settled as
+      WAIVED.
+    x-event-type: policy.installment.waived
     x-status: implemented
   publishPolicyPolicyRenewed:
     action: send
@@ -671,11 +759,14 @@ x-implementation:
   publisher: eia-policy-expert
   subscriber: none
   notes: >
-    Six Policy events are written to the transactional outbox in the same
+    Nine Policy events are written to the transactional outbox in the same
     transaction as the aggregate write and dispatched by the platform outbox
     dispatcher when `eia.outbox.enabled=true`: `created`, `updated`,
-    `version-issued`, `endorsed`, `cancelled`, and `reinstated`. The other
-    SPEC 11.2.9 names remain planned. There is no business subscriber or
+    `version-issued`, `endorsed`, `cancelled`, `reinstated`,
+    `billing-plan.created`, `installment.paid`, and `installment.waived`. The
+    billing plan event carries the complete schedule; the installment events
+    carry the settled row and its payment evidence. The other SPEC 11.2.9 and
+    11.2.13 names remain planned. There is no business subscriber or
     subscription registry yet.
 
 x-consumed-events:

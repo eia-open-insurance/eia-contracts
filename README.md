@@ -30,7 +30,7 @@ standard).
 
 | Path | Contents |
 |---|---|
-| `openapi/components.yaml` | Shared parameters, headers, responses, and schemas: canonical `Problem` error envelope, money, offset page envelope, global-search envelope, ETag/If-Match, Idempotency-Key (Policy and the claim task/note creates), the optional `X-EIA-Actor` header, audit fields, entity references, tenant and book headers. |
+| `openapi/components.yaml` | Shared parameters, headers, responses, and schemas: canonical `Problem` error envelope, money, offset page envelope, global-search envelope, ETag/If-Match, Idempotency-Key (Policy and the claim task/note creates), the optional `X-EIA-Actor` header, audit fields, entity references, tenant and book headers, including the optional Policy billing `X-EIA-Book`. |
 | `openapi/party.yaml` … `openapi/notifications.yaml` | One OpenAPI 3.1 document per vertical. Ten documents, each covering `/api/v1/**` and `/internal/v1/**`. |
 | `asyncapi/event-catalog.yaml` | Authoritative catalog of the published event names, their publisher, and the subscribers named in SPEC 11. |
 | `asyncapi/{vertical}.yaml` | Published event channels for one vertical. One channel and one `send` operation per event name. |
@@ -408,6 +408,54 @@ Link semantics:
   and have no SPEC 11.6.9 equivalent (the SPEC association fact is
   `document.document.associated`); M-22 records the naming gap.
 
+### Policy billing contract (2026-10-20)
+
+Policy 2.3.0 adds the premium installment plan and its settlement surface. The
+change is additive: the three routes are new, the four schemas are new, and no
+existing path, request field, response field, or event changed.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/policy.yaml` | 2.3.0 | Additive | `GET/POST /api/v1/policies/{policyId}/billing`, `PATCH /api/v1/policies/{policyId}/billing/installments/{installmentId}`, and the `BillingPlan`, `Installment`, `CreateBillingPlanRequest`, and `UpdateInstallmentRequest` schemas. |
+| `openapi/components.yaml` | 1.6.0 | Additive | The optional shared `BookHeaderDirectOptional` (`X-EIA-Book`, DIRECT when present). |
+| `asyncapi/policy.yaml` | 1.2.0 | Additive | Three implemented billing channels and `send` operations. |
+| `asyncapi/event-catalog.yaml` | 1.7.0 | Additive | The three names are published and implemented (183 published in total). |
+
+Billing semantics:
+
+- `GET .../billing` returns the public flat plan: `planId`, `planNumber`,
+  `policyId`, `totalPremium`, `currency`, `installmentCount`, `frequency`,
+  `firstDueDate`, `status`, and the ordered `installments[]`. The ACTIVE plan is
+  returned when one exists; otherwise the most recently created closed plan is
+  returned. A policy with no plan is 404 `BILLING_PLAN_NOT_FOUND`.
+- `POST .../billing` creates the single ACTIVE plan from the policy premium. The
+  caller chooses `installmentCount` (1..24), `frequency` (`MONTHLY`,
+  `QUARTERLY`, `SEMI_ANNUAL`, `ANNUAL`), and `firstDueDate`. The first n-1
+  installments are equal and the last absorbs the rounding remainder, so the
+  schedule sums exactly to the premium at scale 4. A second ACTIVE plan is 409
+  `BILLING_PLAN_ALREADY_EXISTS`.
+- `PATCH .../billing/installments/{installmentId}` settles a DUE or OVERDUE
+  installment as `PAID` (recording `paidAt` and the optional `paymentId`) or
+  `WAIVED` (no payment evidence). Repeating the same terminal status is an
+  idempotent no-op with no event and no version bump; switching PAID to WAIVED
+  or back is 409 `INSTALLMENT_ALREADY_SETTLED`.
+- The plan total and currency come from the policy, not the request. Mutation
+  errors preserve the Policy problem body: 400 for body fields and the 1..24
+  window, 404 for an unknown policy, plan, or installment, and 409 for the
+  duplicate plan, a settled installment, or a concurrent policy change.
+- `X-EIA-Tenant` is required. `X-EIA-Book` is optional for compatibility with
+  the other Policy proxy routes, but a supplied value must be DIRECT; another
+  book is hidden as 404 `BOOK_SCOPE_VIOLATION`. An absent header is accepted.
+  The domain always forwards DIRECT to the expert.
+- The plan create writes `policy.billing-plan.created` with the complete
+  schedule; settlement writes `policy.installment.paid` or
+  `policy.installment.waived`, each in the same transaction as the row change.
+  The commands do not accept `Idempotency-Key` or `If-Match` in this slice;
+  repeating a terminal settlement is the retry-safe path (M-06, M-07).
+- Billing account, billing instructions, receivables, credit notes, dunning,
+  disputes, and commission statements from SPEC 11.2.13 remain unimplemented
+  (M-12, M-27).
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -441,6 +489,7 @@ Every request carries a resolved tenant; no request body may override it.
 |---|---|---|
 | `X-EIA-Tenant` | All public routes and some internal routes | Required, UUID. Missing or malformed is a 400. |
 | `X-EIA-Book` | Direct Claims, Assumed Claims, Cession, Retrocession | Required and fixed to the vertical's book. A different book is hidden as 404 `BOOK_SCOPE_VIOLATION` in all four, so the response cannot confirm existence (SPEC 3.6.2, WALL-06). A missing header is still a 400 `BOOK_REQUIRED` in Cession and Retrocession; that is a validation error, not a book mismatch. |
+| `X-EIA-Book` | Policy billing | Optional for compatibility with the other Policy proxy routes, but a supplied value must be DIRECT; another book is hidden as 404 `BOOK_SCOPE_VIOLATION`. An absent header is accepted. The guard runs before the expert call. |
 | `X-EIA-Actor` | Claim assignment (`PATCH .../assignment`) | Optional acting identity, at most 128 characters. Recorded as `assignedBy` and in the claim audit trail; defaults to the assigned adjuster when absent or blank. The Direct Claims expert also accepts `X-EIA-User` as an alias (M-25). |
 | `?tenantId=` | Most internal expert routes | The expert is network-restricted and receives the tenant resolved by its domain service. |
 
@@ -606,6 +655,58 @@ Rules and semantics:
   matching and `secondary` suffix behaviour are described under
   [Global search](#global-search).
 
+### Policy billing
+
+Policy owns the premium installment plan (SPEC 11.2.13). The public billing
+surface is a domain proxy over the Policy expert; the expert also exposes the
+same resource under `/internal/v1/policies/{policyId}/billing` for the domain
+adapter, but that internal route is not part of the public contract.
+
+| Operation | Path | Success | Errors |
+|---|---|---|---|
+| Read plan | `GET /api/v1/policies/{policyId}/billing` | 200 `BillingPlan` | 400, 404 |
+| Create plan | `POST /api/v1/policies/{policyId}/billing` | 201 `BillingPlan` | 400, 404, 409 |
+| Settle installment | `PATCH /api/v1/policies/{policyId}/billing/installments/{installmentId}` | 200 `Installment` | 400, 404, 409 |
+
+The plan projection is flat and uses the domain DTO names: `planId`,
+`planNumber`, `policyId`, `totalPremium` (decimal string), `currency`,
+`installmentCount`, `frequency`, `firstDueDate`, `status`, and
+`installments[]`. Each installment is `installmentId`, `installmentNumber`,
+`dueDate`, `amount` (decimal string), `status`, `paidAt`, and `paymentId`.
+`paidAt` and `paymentId` are populated only for PAID; a WAIVED installment has
+no payment evidence.
+
+Rules:
+
+- At most one ACTIVE plan exists per policy. The create command takes the
+  total and currency from the policy and splits the premium across 1..24
+  installments; the first n-1 amounts are equal and the last one absorbs the
+  rounding remainder, so the schedule sums exactly to `totalPremium` at scale 4.
+  A second ACTIVE plan is 409 `BILLING_PLAN_ALREADY_EXISTS`.
+- Plan `frequency` is `MONTHLY`, `QUARTERLY`, `SEMI_ANNUAL`, or `ANNUAL`; the
+  due-date cadence applies that step to `firstDueDate`. A blank or unknown
+  frequency is 400 `INVALID_BILLING_FREQUENCY`.
+- Installment `status` is `DUE`, `OVERDUE`, `PAID`, or `WAIVED`. The settle
+  command accepts only the terminal targets `PAID` and `WAIVED`; a DUE or
+  OVERDUE row can be settled once. Repeating the same terminal status returns
+  the unchanged row and writes no event; switching terminal statuses is 409
+  `INSTALLMENT_ALREADY_SETTLED`.
+- `X-EIA-Tenant` is required. `X-EIA-Book` is optional on the public routes for
+  compatibility, but a supplied value must be DIRECT and any other book is
+  hidden as 404 `BOOK_SCOPE_VIOLATION` (SPEC 3.6.2, WALL-06). The domain always
+  sends DIRECT to the expert.
+- The plan create and each settlement bump the policy row version and write
+  `policy.billing-plan.created`, `policy.installment.paid`, or
+  `policy.installment.waived` in the same transaction. The billing commands do
+  not accept `Idempotency-Key` or `If-Match`; a repeated terminal settlement is
+  the retry-safe path (M-06, M-07).
+- The SPEC 11.2.13 `/installments` route and `policy.billing.plan-created`
+  event name differ from the implemented `/billing` route and
+  `policy.billing-plan.created` name; the two installment facts have no SPEC
+  name. The naming difference and the still-unimplemented billing-account,
+  instruction, receivable, credit-note, dunning, dispute, and commission
+  surfaces are recorded in M-22 and M-27.
+
 ### Global search
 
 The shell's `/search` page fans out to one search operation per vertical. Every
@@ -719,7 +820,10 @@ missing directory.
    operations' shared parameters and `SearchResponse`/400/404 responses, the
    `SearchResponse` and `SearchItem` keys, the required 422/409/428 response
    codes on the Round 5 mutations, the payment source fields and their create
-   rules, and agreement between `info.version` and
+   rules, the three Policy billing operations, the optional shared
+   `BookHeaderDirectOptional` parameter, the `BillingPlan`, `Installment`,
+   `CreateBillingPlanRequest`, and `UpdateInstallmentRequest` schemas and their
+   field bounds and enums, and agreement between `info.version` and
    `x-compatibility.contractVersion`.
 4. **AsyncAPI structure.** `asyncapi: 3.0.0`, channel addresses, `x-event-type`,
    `x-status: planned|implemented`, `x-implemented-by` on every implemented
@@ -733,8 +837,9 @@ missing directory.
    and the catalog `implemented` list must equal the channels marked
    `x-status: implemented`. The implemented event names for all ten publishing
    verticals are required explicitly, including `direct.claim.assigned`,
-   `assumed.claim.assigned`, `document.link.added`, and
-   `document.link.removed`.
+   `assumed.claim.assigned`, `document.link.added`,
+   `document.link.removed`, `policy.billing-plan.created`,
+   `policy.installment.paid`, and `policy.installment.waived`.
 6. **JSON Schema checks.** All three files parse as JSON, declare the 2020-12
    dialect and an `$id`, carry the required members, keep required properties
    defined, and validate their own examples against a small schema subset.
@@ -777,11 +882,12 @@ missing directory.
 - the Policy page envelope is offset-based (`items`, `page`, `size`, `total`,
   `_links`) rather than the cursor envelope in SPEC 7.6/12.2, and the other
   verticals still return bare arrays;
-- `ETag`/`If-Match` exist only in Policy. `Idempotency-Key` covers Policy plus
+- `ETag`/`If-Match` exist only in Policy, and the billing plan and installment
+  commands do not accept them. `Idempotency-Key` covers Policy plus
   the Direct Claims and Assumed Claims task/note creates; the remaining vertical
   creates do not accept it, the claim task/note responses spell the marker
   `Idempotent-Replay`, and the Direct Claims reservation has a narrow concurrent
-  first-attempt race (M-07). Detail `_links` exist nowhere, and
+  first-attempt race (M-06, M-07). Detail `_links` exist nowhere, and
   Cession/Retrocession still return 400 for an illegal lifecycle edge;
 - the Cession/Retrocession FS-RI hand-off is synchronous, with no hand-off
   queue or hand-off resource (SPEC 7.18.3/HAND-05);
@@ -804,6 +910,12 @@ missing directory.
   expert returns 409 instead of 400 for a negative `expectedVersion`, and the
   Direct Claims expert accepts `X-EIA-User` as an extra actor alias (M-22,
   M-25);
+- Policy billing is implemented under `/api/v1/policies/{policyId}/billing`
+  with the flat `BillingPlan`/`Installment` projection, while SPEC 11.2.13 names
+  the route `/installments` and defines the plan event as
+  `policy.billing.plan-created`; the installment paid and waived facts have no
+  SPEC name. Billing accounts, instructions, receivables, credit notes, dunning,
+  disputes, and commission statements remain unimplemented (M-12, M-22, M-27);
 - ten experts publish a subset of their events through the transactional
   outbox into the platform `event-ingest` inbox, but no vertical consumes
   another vertical's events, there is no subscription registry or gap

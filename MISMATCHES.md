@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-20 (document association-link contract).
+Status: open, reviewed 2026-10-20 (Policy billing contract).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -69,6 +69,7 @@ removed per the resolution policy.
 | M-24 | Payment source link is a flat triple, not the SPEC claim projection | M |
 | M-25 | Claim assignment contract alignment: team is optional, negative expectedVersion is 400, and X-EIA-Actor is the only actor header. Resolved 2026-10-20. | — |
 | M-26 | Document association links are a flat tenant-scoped link, not the SPEC association | M |
+| M-27 | Policy billing routes, event names, and status vocabulary differ from SPEC 11.2.13 | L |
 
 ## M-01 Public base paths
 
@@ -248,6 +249,7 @@ Policy now implements the SPEC 12.6 concurrency mechanism:
 | Policy public PATCH status | Accepts `If-Match` (`"<version>"`, `W/"<version>"`, a comma list, or `*`); response `ETag`; stale tag/version is 409 `CONCURRENT_MODIFICATION` with `meta.currentVersion`, `meta.expectedVersion`, and `errors[0].code = STALE_VERSION` |
 | Policy public second-slice mutations (coverage, endorsement, insured, location, cancel, reinstate) | Accept optional `If-Match` and return the policy `ETag`; stale tag is 409 `CONCURRENT_MODIFICATION` |
 | Policy public erosion | Returns the policy `ETag`; the derived limit state is version-checked internally and a lost update is 409 |
+| Policy public billing | No `ETag`/`If-Match`; the expert still version-checks the policy row and a concurrent change is 409 `CONCURRENT_MODIFICATION` |
 | Policy expert GET/create/PATCH | Same ETag and If-Match behaviour as the public service |
 | Contract public PATCH | Required `expectedVersion` body field; no ETag |
 | Contract public bind and commutation | Required `expectedVersion` on bind; the commutation has no caller-supplied version |
@@ -298,7 +300,9 @@ Evidence:
 Policy create (public and expert) accepts the optional `Idempotency-Key`
 header. In Round 5 every Policy second-slice mutation (coverage, erosion,
 endorsement, insured, location, cancellation, and reinstatement) accepts the
-same header on both the public and the expert route:
+same header on both the public and the expert route. The 2026-10-20 billing
+slice is the exception: the plan create and installment PATCH accept no key,
+and a repeated terminal settlement is the retry-safe path:
 
 - The key is normalized (trimmed, maximum 255 characters) and scoped to the
   tenant. A blank key is treated as absent.
@@ -363,8 +367,9 @@ Residual differences:
   scoped by tenant and are never replayed across tenants.
 - **Coverage.** Contract, Cession, Retrocession, Document, Payment, and
   Notifications create commands still accept no `Idempotency-Key` and emit no
-  replay marker. The header remains optional everywhere it exists, so a client
-  that omits it is unaffected.
+  replay marker. Policy billing's plan create and installment PATCH are also
+  outside the Policy idempotency mechanism. The header remains optional
+  everywhere it exists, so a client that omits it is unaffected.
 
 Evidence:
 
@@ -501,10 +506,13 @@ unimplemented fields and list the missing operations under
   data, or merge. `partyType`, `status`, `sanctionsStatus`, and
   `confidentiality` are unvalidated strings, not SPEC 11.1.5 enums.
 - Policy: no `policyType`, `productLine`, `insured` object, `limits[]` array on
-  the header, `massTort`, `claimSummary`, occurrences, programs, billing, or
-  the claims/reinsurance projections. Round 5 adds versions, coverage and limit
+  the header, `massTort`, `claimSummary`, occurrences, programs, or the
+  claims/reinsurance projections. Round 5 adds versions, coverage and limit
   schedules, aggregate erosion, endorsements, insureds, locations,
-  cancellations, and reinstatements, so those are no longer gaps.
+  cancellations, and reinstatements, so those are no longer gaps. The
+  2026-10-20 billing slice adds the installment plan and settlement; billing
+  accounts, billing instructions, receivables, credit notes, dunning, disputes,
+  and commission statements from SPEC 11.2.13 remain gaps (M-27).
 - Contract: no `treatyNumber`, `contractBasis`, inception-date naming,
   `contract_section`, `contract_version`, `contract_sliding_scale`,
   `contract_premium`, `contract_reinstatement`, `contract_wording`,
@@ -570,7 +578,7 @@ ten publishing verticals now emit a subset:
 | Vertical | Implemented event names | Source |
 |---|---|---|
 | Party | `party.party.created`, `party.party.updated` | `repos/eia-party-expert/.../PartyEvents.java` |
-| Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated` | `repos/eia-policy-expert/.../PolicyEvents.java` |
+| Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.billing-plan.created`, `policy.installment.paid`, `policy.installment.waived` | `repos/eia-policy-expert/.../PolicyEvents.java` |
 | Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded` | `repos/eia-contract-expert/.../ContractEvents.java` |
 | Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.assigned`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.closed`, `direct.claim.task-created`, `direct.claim.task-completed`, `direct.claim.task-updated`, `direct.claim.note-added` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
 | Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.assigned`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted`, `assumed.claim.task-created`, `assumed.claim.task-completed`, `assumed.claim.task-updated`, `assumed.claim.note-added` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
@@ -723,7 +731,7 @@ tables. The differences are:
 | Vertical | Implemented | SPEC /
 planned name |
 |---|---|---|
-| Policy | `policy.policy.created` / `.updated` | No SPEC name: SPEC 11.2.9 starts at `policy.policy.quoted`. `version-issued`, `endorsed`, `cancelled`, and `reinstated` match SPEC. |
+| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created`; `policy.installment.paid` / `.waived` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name. `version-issued`, `endorsed`, `cancelled`, and `reinstated` match SPEC. |
 | Contract | `contract.contract.updated` | No SPEC name: SPEC 11.3.9 lists lifecycle verbs only. `created`, `bound`, `commuted`, and `cession.recorded` match SPEC. |
 | Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned` | No SPEC names: SPEC 11.4.9 defines no assignment, task, or note event. `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and `closed` match SPEC. |
 | Assumed Claims | `assumed.claim.updated`; `assumed.claim.assigned`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no assignment, task, or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
@@ -741,7 +749,7 @@ implemented name is breaking and needs the EV-05 dual-publish window.
 
 Evidence:
 
-- `repos/eia-policy-expert/.../PolicyEvents.java:37-42`
+- `repos/eia-policy-expert/.../PolicyEvents.java:37-45` (policy and billing names)
 - `repos/eia-contract-expert/.../ContractEvents.java:41-49`
 - `repos/eia-direct-claims-expert/.../ClaimEvents.java:59-62`
 - `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java:52-65`
@@ -1040,10 +1048,53 @@ the target with its owning vertical (DOC-09), and publish
 canonical shape and amend SPEC 7.9, 11.6.9, 11.6.10, and DOC-09. The contract
 documents the implemented link shape.
 
+## M-27 Policy billing route, event, and status naming
+
+SPEC 11.2.13 defines the billing surface as
+`GET/POST /api/v1/policy/policies/{policyId}/installments` plus the billing
+account, billing-instruction, receivable, credit-note, dunning, dispute, and
+commission-statement routes. The 2026-10-20 slice implements only the
+installment plan and its settlement:
+
+| Aspect | Implemented | SPEC 11.2.13 |
+|---|---|---|
+| Read plan | `GET /api/v1/policies/{policyId}/billing` | `GET /api/v1/policy/.../installments` |
+| Create plan | `POST /api/v1/policies/{policyId}/billing` | `POST /api/v1/policy/.../installments` |
+| Settle installment | `PATCH /api/v1/policies/{policyId}/billing/installments/{installmentId}` | No API row; billing instructions carry the status |
+| Plan event | `policy.billing-plan.created` | `policy.billing.plan-created` |
+| Installment events | `policy.installment.paid`, `policy.installment.waived` | No SPEC name |
+| Plan status | `ACTIVE`, `COMPLETE`, `CANCELLED` | `DRAFT`, `ACTIVE`, `SUPERSEDED`, `CANCELLED` |
+| Installment status | `DUE`, `OVERDUE`, `PAID`, `WAIVED` | Billing-instruction status values |
+
+The projection is the domain's flat public DTO, which renames the plan identity
+`planId` and the installment identity `installmentId`; the expert's internal
+view nests `{plan, installments}` and is not part of the public contract. The
+public billing routes accept an absent `X-EIA-Book` for compatibility with the
+other Policy proxy routes, while a supplied value must be DIRECT and another
+book is hidden as 404 `BOOK_SCOPE_VIOLATION`. The domain always sends DIRECT to
+the expert.
+
+Evidence:
+
+- `repos/eia-policy-domain/.../PolicyBillingController.java` (public routes and
+  the `requireDirectWhenPresent` guard).
+- `repos/eia-policy-domain/.../BillingPlan.java`, `Installment.java` (flat
+  public DTO names).
+- `repos/eia-policy-expert/.../BillingController.java`,
+  `BillingRules.java`, `PolicyEvents.java` (route, vocabulary, event names).
+- `repos/eia-policy-expert/src/main/resources/schema.sql:388-433` (plan and
+  installment status check constraints).
+
+Resolution: either amend SPEC 11.2.13 to the implemented `/billing` route, flat
+projection, event names, and status vocabulary, or add the SPEC route and name
+as an alias with an EV-05 dual-publish window. The billing account, instruction,
+receivable, credit-note, dunning, dispute, and commission-statement routes
+remain unimplemented (M-12).
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-document association-link contract:
+Policy billing contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -1053,7 +1104,7 @@ python: 3.12.8 (standard library only)
 
 OpenAPI 3.1 documents
   OK openapi/party.yaml  5 paths, 7 operations
-  OK openapi/policy.yaml  37 paths, 47 operations
+  OK openapi/policy.yaml  39 paths, 50 operations
   OK openapi/contract.yaml  36 paths, 52 operations
   OK openapi/direct-claims.yaml  47 paths, 69 operations
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
@@ -1065,7 +1116,7 @@ OpenAPI 3.1 documents
 
 AsyncAPI 3 documents
   OK asyncapi/party.yaml  9 event channels
-  OK asyncapi/policy.yaml  20 event channels
+  OK asyncapi/policy.yaml  23 event channels
   OK asyncapi/contract.yaml  21 event channels
   OK asyncapi/direct-claims.yaml  25 event channels
   OK asyncapi/assumed-claims.yaml  21 event channels
@@ -1074,7 +1125,7 @@ AsyncAPI 3 documents
   OK asyncapi/document.yaml  20 event channels
   OK asyncapi/payment.yaml  18 event channels
   OK asyncapi/notifications.yaml  12 event channels
-  OK catalog: 180 unique published events across 10 verticals
+  OK catalog: 183 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -1082,7 +1133,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 9865 checks, 0 failures
+  PASS 10105 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -1128,7 +1179,11 @@ Additional checks and limits:
   more: removing the `/api/v1/documents/{documentId}/links` path, renaming the
   `DocumentLink` schema, and dropping `document.link.added` from the Document
   `implemented` list each fail with the specific path, schema, or
-  implemented-event message.
+  implemented-event message. The Policy billing pass added three more: renaming
+  the `/api/v1/policies/{policyId}/billing` path, renaming the `BillingPlan`
+  schema, and dropping `policy.installment.paid` from the Policy `implemented`
+  list each fail with the specific path, schema, or implemented-event message;
+  each exited non-zero and named the removed object.
 
 ## Resolution policy
 
