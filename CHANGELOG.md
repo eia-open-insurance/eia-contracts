@@ -709,6 +709,51 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   validation evidence.
 - `python scripts/validate_contracts.py` passes 11,527 checks with 0 failures.
 
+### Added in the Contract security/collateral contract (2026-10-20)
+
+- `openapi/contract.yaml` is 4.0.0: the public
+  `GET/POST /api/v1/contracts/{contractId}/security` operations now use the
+  ten-field `SecurityRecord` projection (`id`, `securityType`,
+  `requiredAmount`, `heldAmount`, `currency`, `providerPartyId`, `expiryDate`,
+  `approvalRef`, `status`, `createdAt`) and the `CreateContractSecurityRequest`
+  body (`securityType`, `requiredAmount`, `currency` required; `heldAmount`,
+  `providerPartyId`, `expiryDate`, `approvalRef`, and `approvedAt` optional).
+  Both operations require `X-EIA-Tenant` and `X-EIA-Book: ASSUMED`, document
+  400/404, and the POST documents 409. The create derives `ACTIVE` or
+  `EXPIRED`, defaults `heldAmount` to `0.0000`, requires the contract currency,
+  and documents `COLLATERAL_EXCEEDS_OBLIGATION`,
+  `COLLATERAL_APPROVAL_INCOMPLETE`, `SECURITY_CURRENCY_MISMATCH`, and
+  `CONTRACT_LOCKED`. The response status enum carries `ACTIVE` plus the
+  implemented bind-slice vocabulary, including `OUTSTANDING`, because the list
+  can return internal-expert rows. The wide `Security` and
+  `CreateSecurityRequest` schemas remain on the internal expert surface. The
+  public projection/request correction is breaking for a generated client of
+  the old public shape.
+- `asyncapi/contract.yaml` is 1.5.0: `contract.security.recorded` becomes an
+  implemented channel and `send` operation with a `ContractSecurityData` payload
+  (`contractId`, `securityId`, `securityType`, `requiredAmount`, `heldAmount`,
+  `currency`, `status`). The event is a child aggregate keyed by the security
+  id at aggregate version 1 while the outbox partition key stays the contract
+  id.
+- `asyncapi/event-catalog.yaml` is 1.15.0: `contract.security.recorded` joins
+  the Contract implemented subset. It was already published, so the platform
+  total stays 193 published names; Contract becomes 29 published and 16
+  implemented, and the platform implemented total becomes 72.
+- `scripts/validate_contracts.py` requires the two public security operations
+  with the shared tenant and ASSUMED book parameters, the `SecurityRecord` and
+  its ten required fields, the `CreateContractSecurityRequest`
+  required/optional split with no caller `status`, the `SecurityStatus` enum
+  including `ACTIVE` and `OUTSTANDING`, the 201/200 successes and 400/404/409
+  responses, the four documented conflict codes, the implemented
+  `contract.security.recorded` channel and `ContractSecurityData` payload, and
+  the event's place in the catalog implemented list.
+- `README.md` records the routes, projection, request rules, derived and legacy
+  status values, book rule, event, versions, and validator coverage;
+  `MISMATCHES.md` adds M-37 for the narrow projection, derived `ACTIVE` status
+  outside the SPEC enum, the legacy `OUTSTANDING` vocabulary, the absent-book
+  acceptance, and the release/status gaps, and updates M-14 with the event.
+- `python scripts/validate_contracts.py` passes 11,646 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

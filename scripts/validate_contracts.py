@@ -569,6 +569,87 @@ CONTRACT_CASH_CALL_EVENT_FIELDS = (
 )
 
 
+# Contract security/collateral. The public domain and expert expose the same
+# path; the public projection is the ten-field SecurityRecord, the create body
+# is CreateContractSecurityRequest, and the internal expert keeps the wider
+# Security row and CreateSecurityRequest body. The public create derives ACTIVE
+# or EXPIRED and never accepts a caller status; the list can also return the
+# internal bind-slice statuses (OUTSTANDING and the rest), which is why the
+# response enum carries the full database vocabulary.
+CONTRACT_SECURITY_PATHS = [
+    (
+        "get",
+        "/api/v1/contracts/{contractId}/security",
+        "200",
+        "SecurityRecord",
+        None,
+    ),
+    (
+        "post",
+        "/api/v1/contracts/{contractId}/security",
+        "201",
+        "SecurityRecord",
+        "CreateContractSecurityRequest",
+    ),
+]
+
+CONTRACT_SECURITY_FIELDS = (
+    "id",
+    "securityType",
+    "requiredAmount",
+    "heldAmount",
+    "currency",
+    "providerPartyId",
+    "expiryDate",
+    "approvalRef",
+    "status",
+    "createdAt",
+)
+
+CONTRACT_SECURITY_CREATE_REQUIRED = ("securityType", "requiredAmount", "currency")
+CONTRACT_SECURITY_CREATE_OPTIONAL = (
+    "heldAmount",
+    "providerPartyId",
+    "expiryDate",
+    "approvalRef",
+    "approvedAt",
+)
+CONTRACT_SECURITY_STATUSES = (
+    "ACTIVE",
+    "REQUIRED",
+    "OUTSTANDING",
+    "PARTIAL",
+    "RELEASED",
+    "EXPIRED",
+    "BREACH",
+)
+CONTRACT_SECURITY_TYPES = (
+    "LETTER_OF_CREDIT",
+    "TRUST_FUND",
+    "FUNDS_WITHHELD",
+    "CASH_ADVANCE",
+    "PARENT_GUARANTEE",
+    "BANK_GUARANTEE",
+    "SECURITIES",
+)
+CONTRACT_SECURITY_CONFLICT_CODES = (
+    "COLLATERAL_EXCEEDS_OBLIGATION",
+    "COLLATERAL_APPROVAL_INCOMPLETE",
+    "SECURITY_CURRENCY_MISMATCH",
+    "CONTRACT_LOCKED",
+)
+CONTRACT_SECURITY_EVENT = "contract.security.recorded"
+CONTRACT_SECURITY_EVENT_FIELDS = (
+    "contractId",
+    "securityId",
+    "securityType",
+    "requiredAmount",
+    "heldAmount",
+    "currency",
+    "status",
+)
+
+
 # Direct Claims and Assumed Claims task and note schemas. The public projection
 # and command shapes are the ones the domains serialize, so the names are
 # mandatory alongside the five public routes above.
@@ -967,6 +1048,7 @@ IMPLEMENTED_EVENTS = {
         "contract.cash-call.issued",
         "contract.cash-call.settled",
         "contract.cash-call.cancelled",
+        "contract.security.recorded",
     ],
     "direct-claims": [
         "direct.claim.registered",
@@ -4319,6 +4401,254 @@ def check_contract_cash_calls(contracts: ContractSet, document, relative: str):
 
 
 # ---------------------------------------------------------------------------
+# Contract security/collateral checks
+# ---------------------------------------------------------------------------
+
+
+def check_contract_security(contracts: ContractSet, document, relative: str):
+    """Require the public security operations, projection, and command rules."""
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    for method, security_path, success_status, response_schema_name, request_schema_name in (
+        CONTRACT_SECURITY_PATHS
+    ):
+        path_item = paths.get(security_path) if isinstance(paths, dict) else None
+        operation = path_item.get(method) if isinstance(path_item, dict) else None
+        where = f"{relative}: {method.upper()} {security_path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required security operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+
+        parameter_refs, inline_names = _parameter_names(operation)
+        contracts.check(
+            "TenantHeader" in parameter_refs,
+            f"{where}: must document the shared TenantHeader parameter",
+        )
+        contracts.check(
+            "BookHeaderAssumed" in parameter_refs,
+            f"{where}: must document the shared BookHeaderAssumed parameter",
+        )
+        contracts.check(
+            "contractId" in inline_names,
+            f"{where}: must declare the contractId path parameter",
+        )
+
+        responses = operation.get("responses") or {}
+        for code in ("400", "404"):
+            contracts.check(
+                code in responses,
+                f"{where}: must document the {code} response",
+            )
+
+        if method == "get":
+            ok_schema = _response_schema(operation, "200")
+            contracts.check(
+                isinstance(ok_schema, dict)
+                and ok_schema.get("type") == "array"
+                and str((ok_schema.get("items") or {}).get("$ref", "")).endswith(
+                    f"/schemas/{response_schema_name}"
+                ),
+                f"{where}: 200 must return an array of {response_schema_name}",
+            )
+        else:
+            contracts.check(
+                "409" in responses,
+                f"{where}: must document the 409 response",
+            )
+            request_body = operation.get("requestBody") or {}
+            contracts.check(
+                isinstance(request_body, dict) and request_body.get("required") is True,
+                f"{where}: request body must be required",
+            )
+            request_schema = (
+                ((request_body.get("content") or {}).get("application/json") or {})
+                .get("schema")
+                if isinstance(request_body, dict)
+                else None
+            )
+            contracts.check(
+                isinstance(request_schema, dict)
+                and str(request_schema.get("$ref", "")).endswith(
+                    f"/schemas/{request_schema_name}"
+                ),
+                f"{where}: request body must use the {request_schema_name} schema",
+            )
+            success_schema = _response_schema(operation, success_status)
+            contracts.check(
+                isinstance(success_schema, dict)
+                and str(success_schema.get("$ref", "")).endswith(
+                    f"/schemas/{response_schema_name}"
+                ),
+                f"{where}: {success_status} must return the {response_schema_name} schema",
+            )
+            description = operation.get("description") or ""
+            for code in CONTRACT_SECURITY_CONFLICT_CODES:
+                contracts.check(
+                    code in description,
+                    f"{where}: description must document 409 {code}",
+                )
+
+    record = schemas.get("SecurityRecord") or {}
+    properties = record.get("properties") or {}
+    required = set(record.get("required") or [])
+    contracts.check(
+        isinstance(record, dict) and record.get("type") == "object",
+        f"{relative}: SecurityRecord must be an object schema",
+    )
+    contracts.check(
+        required == set(CONTRACT_SECURITY_FIELDS),
+        f"{relative}: SecurityRecord must require exactly "
+        f"{list(CONTRACT_SECURITY_FIELDS)}",
+    )
+    for field in CONTRACT_SECURITY_FIELDS:
+        contracts.check(
+            field in properties,
+            f"{relative}: SecurityRecord.properties.{field} is required",
+        )
+    contracts.check(
+        (properties.get("id") or {}).get("format") == "uuid",
+        f"{relative}: SecurityRecord.id must be a uuid",
+    )
+    contracts.check(
+        str((properties.get("securityType") or {}).get("$ref", "")).endswith(
+            "/schemas/SecurityType"
+        ),
+        f"{relative}: SecurityRecord.securityType must reference SecurityType",
+    )
+    for field in ("requiredAmount", "heldAmount"):
+        contracts.check(
+            str((properties.get(field) or {}).get("$ref", "")).endswith(
+                "/schemas/MoneyAmount"
+            ),
+            f"{relative}: SecurityRecord.{field} must reference MoneyAmount",
+        )
+    contracts.check(
+        str((properties.get("currency") or {}).get("$ref", "")).endswith(
+            "/schemas/CurrencyCode"
+        ),
+        f"{relative}: SecurityRecord.currency must reference CurrencyCode",
+    )
+    contracts.check(
+        _schema_types(properties.get("providerPartyId")) == {"string", "null"}
+        and (properties.get("providerPartyId") or {}).get("format") == "uuid",
+        f"{relative}: SecurityRecord.providerPartyId must be a nullable uuid",
+    )
+    contracts.check(
+        _schema_types(properties.get("expiryDate")) == {"string", "null"}
+        and (properties.get("expiryDate") or {}).get("format") == "date",
+        f"{relative}: SecurityRecord.expiryDate must be a nullable date",
+    )
+    approval_ref = properties.get("approvalRef") or {}
+    contracts.check(
+        _schema_types(approval_ref) == {"string", "null"}
+        and approval_ref.get("maxLength") == 64,
+        f"{relative}: SecurityRecord.approvalRef must be a nullable string of at most 64 characters",
+    )
+    contracts.check(
+        str((properties.get("status") or {}).get("$ref", "")).endswith(
+            "/schemas/SecurityStatus"
+        ),
+        f"{relative}: SecurityRecord.status must reference SecurityStatus",
+    )
+    contracts.check(
+        (properties.get("createdAt") or {}).get("format") == "date-time",
+        f"{relative}: SecurityRecord.createdAt must be a date-time",
+    )
+
+    security_type = schemas.get("SecurityType") or {}
+    contracts.check(
+        security_type.get("type") == "string",
+        f"{relative}: SecurityType must be a string enum",
+    )
+    contracts.check(
+        set(security_type.get("enum") or []) == set(CONTRACT_SECURITY_TYPES),
+        f"{relative}: SecurityType must enumerate {list(CONTRACT_SECURITY_TYPES)}",
+    )
+
+    status = schemas.get("SecurityStatus") or {}
+    contracts.check(
+        status.get("type") == "string",
+        f"{relative}: SecurityStatus must be a string enum",
+    )
+    contracts.check(
+        set(status.get("enum") or []) == set(CONTRACT_SECURITY_STATUSES),
+        f"{relative}: SecurityStatus must enumerate "
+        f"{list(CONTRACT_SECURITY_STATUSES)} including ACTIVE and OUTSTANDING",
+    )
+
+    create = schemas.get("CreateContractSecurityRequest") or {}
+    create_properties = create.get("properties") or {}
+    create_required = set(create.get("required") or [])
+    contracts.check(
+        isinstance(create, dict) and create.get("type") == "object",
+        f"{relative}: CreateContractSecurityRequest must be an object schema",
+    )
+    contracts.check(
+        create_required == set(CONTRACT_SECURITY_CREATE_REQUIRED),
+        f"{relative}: CreateContractSecurityRequest must require "
+        f"{list(CONTRACT_SECURITY_CREATE_REQUIRED)}",
+    )
+    for field in CONTRACT_SECURITY_CREATE_OPTIONAL:
+        contracts.check(
+            field in create_properties,
+            f"{relative}: CreateContractSecurityRequest.properties.{field} is required",
+        )
+        contracts.check(
+            field not in create_required,
+            f"{relative}: CreateContractSecurityRequest.{field} must stay optional",
+        )
+    contracts.check(
+        "status" not in create_properties,
+        f"{relative}: CreateContractSecurityRequest must not accept a caller status",
+    )
+    contracts.check(
+        str((create_properties.get("securityType") or {}).get("$ref", "")).endswith(
+            "/schemas/SecurityType"
+        ),
+        f"{relative}: CreateContractSecurityRequest.securityType must reference SecurityType",
+    )
+    for field in ("requiredAmount", "heldAmount"):
+        contracts.check(
+            str((create_properties.get(field) or {}).get("$ref", "")).endswith(
+                "/schemas/MoneyAmount"
+            ),
+            f"{relative}: CreateContractSecurityRequest.{field} must reference MoneyAmount",
+        )
+    contracts.check(
+        str((create_properties.get("currency") or {}).get("$ref", "")).endswith(
+            "/schemas/CurrencyCode"
+        ),
+        f"{relative}: CreateContractSecurityRequest.currency must reference CurrencyCode",
+    )
+    contracts.check(
+        _schema_types(create_properties.get("providerPartyId")) == {"string", "null"}
+        and (create_properties.get("providerPartyId") or {}).get("format") == "uuid",
+        f"{relative}: CreateContractSecurityRequest.providerPartyId must be a nullable uuid",
+    )
+    contracts.check(
+        _schema_types(create_properties.get("expiryDate")) == {"string", "null"}
+        and (create_properties.get("expiryDate") or {}).get("format") == "date",
+        f"{relative}: CreateContractSecurityRequest.expiryDate must be a nullable date",
+    )
+    create_approval = create_properties.get("approvalRef") or {}
+    contracts.check(
+        _schema_types(create_approval) == {"string", "null"}
+        and create_approval.get("maxLength") == 64,
+        f"{relative}: CreateContractSecurityRequest.approvalRef must be a nullable "
+        "string of at most 64 characters",
+    )
+    contracts.check(
+        _schema_types(create_properties.get("approvedAt")) == {"string", "null"}
+        and (create_properties.get("approvedAt") or {}).get("format") == "date-time",
+        f"{relative}: CreateContractSecurityRequest.approvedAt must be a nullable date-time",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
 
@@ -5413,6 +5743,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_policy_renewal_openapi(contracts, document, relative)
             check_policy_mass_tort_profile_openapi(contracts, document, relative)
         if vertical == "contract":
+            check_contract_security(contracts, document, relative)
             check_contract_technical_accounts(contracts, document, relative)
             check_contract_bordereaux(contracts, document, relative)
             check_contract_cash_calls(contracts, document, relative)
@@ -5663,6 +5994,71 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
                 == set(CONTRACT_CASH_CALL_STATUSES),
                 f"{relative}: ContractCashCallData.status must enumerate "
                 f"{list(CONTRACT_CASH_CALL_STATUSES)}",
+            )
+
+            contracts.check(
+                CONTRACT_SECURITY_EVENT in addresses,
+                f"{relative}: required security event channel "
+                f"'{CONTRACT_SECURITY_EVENT}' is missing",
+            )
+            contracts.check(
+                CONTRACT_SECURITY_EVENT in implemented_addresses,
+                f"{relative}: security event channel '{CONTRACT_SECURITY_EVENT}' "
+                "must be implemented",
+            )
+            contracts.check(
+                CONTRACT_SECURITY_EVENT in contract_send_events,
+                f"{relative}: security event '{CONTRACT_SECURITY_EVENT}' must "
+                "have a send operation",
+            )
+            security_channel = next(
+                (
+                    channel
+                    for channel in channels.values()
+                    if isinstance(channel, dict)
+                    and channel.get("address") == CONTRACT_SECURITY_EVENT
+                ),
+                None,
+            )
+            security_messages = (
+                security_channel.get("messages")
+                if isinstance(security_channel, dict)
+                else None
+            ) or {}
+            contracts.check(
+                "ContractSecurityData" in security_messages,
+                f"{relative}: {CONTRACT_SECURITY_EVENT} must reference "
+                "ContractSecurityData",
+            )
+            security_message = (
+                ((document.get("components") or {}).get("messages") or {}).get(
+                    "ContractSecurityData"
+                )
+                or {}
+            )
+            security_payload = security_message.get("payload") or {}
+            security_properties = security_payload.get("properties") or {}
+            security_required = set(security_payload.get("required") or [])
+            for field in CONTRACT_SECURITY_EVENT_FIELDS:
+                contracts.check(
+                    field in security_properties,
+                    f"{relative}: ContractSecurityData.properties.{field} is required",
+                )
+                contracts.check(
+                    field in security_required,
+                    f"{relative}: ContractSecurityData.required must list {field}",
+                )
+            contracts.check(
+                set((security_properties.get("status") or {}).get("enum") or [])
+                == set(CONTRACT_SECURITY_STATUSES),
+                f"{relative}: ContractSecurityData.status must enumerate "
+                f"{list(CONTRACT_SECURITY_STATUSES)}",
+            )
+            contracts.check(
+                set((security_properties.get("securityType") or {}).get("enum") or [])
+                == set(CONTRACT_SECURITY_TYPES),
+                f"{relative}: ContractSecurityData.securityType must enumerate "
+                f"{list(CONTRACT_SECURITY_TYPES)}",
             )
 
         entry = catalog_entries.get(vertical) or {}

@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.14.0
+  version: 1.15.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -39,7 +39,12 @@ info:
     Contract cash-call facts add `contract.cash-call.requested`, `.settled`,
     and `.cancelled` as new child-aggregate names alongside the
     already-published `contract.cash-call.issued`; the four move into the
-    implemented subset (M-22, M-34). The Payment allocation fact
+    implemented subset (M-22, M-34). The Contract security/collateral fact
+    `contract.security.recorded` is already published and moves into the
+    Contract implemented subset. It is a child aggregate keyed by the security
+    id at version 1 while the outbox partition key stays the contract id (M-37).
+    Its implementation brings the platform implemented total to 72 names; the
+    published total stays 193. The Payment allocation fact
     `payment.allocation.created` is also a new child-aggregate name with no
     SPEC 11.7.10 equivalent; it is published and implemented, bringing the
     platform total to 193 published names (M-22, M-35). The Policy mass tort
@@ -246,6 +251,7 @@ x-event-catalog:
       - contract.cash-call.issued
       - contract.cash-call.settled
       - contract.cash-call.cancelled
+      - contract.security.recorded
     consumed:
       - policy.policy.issued
       - policy.policy.endorsed

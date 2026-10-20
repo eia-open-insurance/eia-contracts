@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-20 (Direct Claims allocation erosion).
+Status: open, reviewed 2026-10-20 (Contract security/collateral).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -45,7 +45,11 @@ where the running code does not meet it yet.
   Direct Claims allocation-erosion pass reads the domain allocation controller,
   service, policy-erosion client, projection, command, and tests plus the expert
   allocation controller, erosion request, service, repository, projection,
-  exception handler, and tests.
+  exception handler, and tests. The Contract security/collateral pass reads the
+  domain security controller, service, client, projection, and command plus the
+  expert public security controller, rules, view, request, entity, event
+  factory, internal security controller, repository, exception handler,
+  `schema.sql`, and tests.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -107,6 +111,7 @@ removed per the resolution policy.
 | M-34 | Contract cash calls add a SPEC-less route, lifecycle, and event names and omit the cash-call limit gate | L |
 | M-35 | Payment allocations add a SPEC-less POST route and event name | L |
 | M-36 | Direct Claims allocation erosion retry swallows the expert conflict and record failure | M |
+| M-37 | Contract security/collateral uses a narrow derived-status projection and a wider legacy status vocabulary | L |
 
 ## M-01 Public base paths
 
@@ -646,7 +651,7 @@ ten publishing verticals now emit a subset:
 |---|---|---|
 | Party | `party.party.created`, `party.party.updated` | `repos/eia-party-expert/.../PartyEvents.java` |
 | Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.billing-plan.created`, `policy.installment.paid`, `policy.installment.waived`, `policy.mass-tort-profile.updated` | `repos/eia-policy-expert/.../PolicyEvents.java` |
-| Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded`, `contract.technical-account.created`, `contract.technical-account.issued`, `contract.technical-account.settled`, `contract.bordereau.received`, `contract.bordereau.processed`, `contract.bordereau.failed` | `repos/eia-contract-expert/.../ContractEvents.java` |
+| Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded`, `contract.technical-account.created`, `contract.technical-account.issued`, `contract.technical-account.settled`, `contract.bordereau.received`, `contract.bordereau.processed`, `contract.bordereau.failed`, `contract.cash-call.requested`, `contract.cash-call.issued`, `contract.cash-call.settled`, `contract.cash-call.cancelled`, `contract.security.recorded` | `repos/eia-contract-expert/.../ContractEvents.java` |
 | Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.assigned`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.closed`, `direct.claim.task-created`, `direct.claim.task-completed`, `direct.claim.task-updated`, `direct.claim.note-added`, `direct.claim.allocation-created` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
 | Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.assigned`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted`, `assumed.claim.task-created`, `assumed.claim.task-completed`, `assumed.claim.task-updated`, `assumed.claim.note-added` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
 | Cession | `cession.cession.created`, `cession.cession.updated`, `cession.cession.handed-off` | `repos/eia-cession-expert/.../CessionEvents.java` |
@@ -691,7 +696,7 @@ The Contract expert's generic status command can additionally emit the
 already-cataloged `contract.contract.signed`, `.endorsed`, `.expired`, and
 `.cancelled` names when the target status matches. Those names remain published
 and are not part of the implemented subset recorded in this change; the catalog
-declares only the eleven Contract events listed above. The three
+declares only the sixteen Contract events listed above. The three
 technical-account facts are child-aggregate events: the envelope uses the
 account id and its lifecycle version (1 for created, 2 for issued, 3 for
 settled) while the outbox partition key stays the contract id. They have no
@@ -699,7 +704,12 @@ SPEC 11.3.9 equivalent (M-22, M-29). The three bordereau facts are also
 child-aggregate events: the envelope uses the bordereau id and version 1 for
 received and 2 for processed or failed, with the contract id as the partition
 key. `received` matches SPEC; `processed` and `failed` replace the SPEC
-`posted`/`rejected` names, which remain planned (M-22, M-30).
+`posted`/`rejected` names, which remain planned (M-22, M-30). The four cash-call
+facts are child-aggregate events with cash-call versions 1/2/3 (M-34). The
+security fact is a child aggregate with the security id at version 1 and the
+contract id as the partition key; its payload carries the derived
+`ACTIVE`/`EXPIRED` status of the public create, or a legacy bind-slice status
+when the internal expert surface records it (M-37).
 
 Live evidence (2026-10-20): the running `eia-event-ingest` pod reported 14
 events, all processed, and the recent types included `policy.policy.created`,
@@ -1705,10 +1715,83 @@ amend this contract and SPEC 11.4.10 to the 200/stale-state behaviour. Preserve
 the two expert create codes as M-31 requires. Renaming the route or the
 `CONFLICT` code is breaking for a generated client and needs an ADR.
 
+## M-37 Contract security/collateral projection and status vocabulary
+
+The public security/collateral slice is implemented on the Contract domain and
+expert and is documented as canonical. The remaining differences from SPEC
+11.3.4 and 11.3.10 are:
+
+| Area | Implemented | SPEC / gap |
+|---|---|---|
+| Routes | `GET/POST /api/v1/contracts/{contractId}/security` (the M-01 short form) and the same path on the expert, plus the wide internal `/internal/v1/contracts/{contractId}/security` surface | SPEC 11.3.10 uses `/api/v1/contract/contracts/{contractId}/security` and also lists an internal `POST /security/{securityId}/release`, which is not implemented. |
+| Projection | `SecurityRecord` with exactly `id`, `securityType`, `requiredAmount`, `heldAmount`, `currency`, `providerPartyId`, `expiryDate`, `approvalRef`, `status`, `createdAt`; `tenantId`, `contractId`, `beneficiaryPartyId`, effective dates, `collateralQuality`, `documentId`, `releaseConditions`, and the audit columns stay internal | SPEC 11.3.4 `contract_security` defines the tenant, contract, beneficiary, effective dates, collateral quality, document, and release-condition columns; the broad `Security` row remains only on the internal expert surface. |
+| Status | The public create derives `EXPIRED` when `expiryDate` is past and `ACTIVE` otherwise; `status` is not a caller input. The public response enum also carries `REQUIRED`, `OUTSTANDING`, `PARTIAL`, `RELEASED`, and `BREACH` because the list returns internal-expert and legacy rows | SPEC 11.3.4 enumerates `REQUIRED`, `OUTSTANDING`, `PARTIAL`, `RELEASED`, `EXPIRED`, and `BREACH` and has no `ACTIVE`. `OUTSTANDING` exists in the implemented internal lifecycle, the database check, and `SecurityRules`; the public create never derives it, but the public list can return it. |
+| Command | `CreateContractSecurityRequest` accepts `securityType`, `requiredAmount`, optional `heldAmount` (default `0.0000`), `currency` (must equal the contract currency), optional `providerPartyId`, `expiryDate`, `approvalRef`, and `approvedAt` | SPEC 11.3.4 also models beneficiary, effective from/to, collateral quality, document, release conditions, and status; the public command has no field for them. Held collateral above the obligation requires both an approval reference and an approved timestamp, and the contract must be `DRAFT`, `QUOTED`, `PLACED`, or `BOUND`. |
+| Book | The canonical contract requires `X-EIA-Book: ASSUMED`; another book is 404 `BOOK_SCOPE_VIOLATION` | The domain accepts an absent header for compatibility with the other Contract proxy routes, the same difference recorded for the technical-account, bordereau, and cash-call slices (M-29, M-30, M-34). |
+| Event | `contract.security.recorded` is implemented; it is a child aggregate keyed by the security id at version 1 while the outbox partition key stays the contract id. The payload is `{contractId, securityId, securityType, requiredAmount, heldAmount, currency, status}` | SPEC 11.3.9 names the event, so the name matches. The payload omits the contract number, provider, approval reference, expiry date, and the wide row fields. `contract.security.breached` remains planned and is never emitted. |
+
+Consequences:
+
+- A caller cannot release, expire, mark `OUTSTANDING`/`PARTIAL`, or otherwise
+  move a security record through the public API; there is no status action and
+  no public single-record GET. The only public write is the create.
+- A generated client must tolerate the full seven-value response status enum,
+  including `OUTSTANDING`, even though the public create only derives `ACTIVE`
+  or `EXPIRED`. The list is unfiltered by status and reveals internal-expert
+  rows for the same contract by design.
+- The event payload cannot drive a UI row without an extra read: it carries the
+  identity, type, amounts, currency, and derived status but not the provider,
+  expiry, or approval evidence.
+
+Evidence:
+
+- `repos/eia-contract-domain/.../SecurityController.java:27,36-63` (public
+  routes, tenant header, optional ASSUMED book wall) and
+  `SecurityService.java:23-29`, `SecurityClient.java:33,46-108` (expert
+  forwarding and 400/404/409 translation).
+- `repos/eia-contract-domain/.../SecurityRecord.java:23-34` (ten-field public
+  projection) and `CreateSecurityCommand.java:18-34` (domain command shape).
+- `repos/eia-contract-expert/.../security/ContractSecurityController.java:44,72-87,98-109`
+  (public list and create, tenant resolution, 201) and
+  `ContractSecurityRules.java:27-66` (closed type, positive required amount,
+  default held, contract-currency reconciliation, derived status, approval
+  reference).
+- `repos/eia-contract-expert/.../security/ContractSecurityView.java:18-43`
+  (public field cut) and `CreateContractSecurityRequest.java:16-25` (eight
+  request fields).
+- `repos/eia-contract-expert/.../security/SecurityController.java:29,43-62`
+  (internal wide surface) and `SecurityRules.java:19-27,32-84,90-99` (full
+  status/quality vocabulary, over-collateralisation approval, breach gate).
+- `repos/eia-contract-expert/.../ContractEvents.java:74,280-319`
+  (`contract.security.recorded`, `Security` aggregate at version 1, contract
+  partition key, seven-field data) and `ContractGuard.java:15-37`
+  (`CONTRACT_LOCKED` for a non-editable contract).
+- `repos/eia-contract-expert/src/main/resources/schema.sql:165-218`
+  (`contract_security` columns, the full status check including `ACTIVE` and
+  `OUTSTANDING`, and the public-create defaults).
+- Tests: `ContractSecurityControllerTest` (newest-first ten-field list,
+  derived `ACTIVE`/`EXPIRED`, invalid type/amount/currency/approval reference,
+  tenant wall, tenant mismatch, `CONTRACT_LOCKED`),
+  `ContractSecurityOutboxIntegrationTest` (row and event in one transaction,
+  rollback, tenant wall, field payload), and the domain `SecurityControllerTest`
+  and `SecurityClientTest` (book wall, tenant, error preservation, `OUTSTANDING`
+  pass-through).
+- `openapi/contract.yaml` 4.0.0, `asyncapi/contract.yaml` 1.5.0,
+  `asyncapi/event-catalog.yaml` 1.15.0, and the README security section record
+  the implemented shape.
+
+Resolution: the narrow public projection and derived status are canonical for
+now. Closing the gap means adding the public release/status command, the
+single-record read, and the missing SPEC columns to the public projection, or
+amending SPEC 11.3.4/11.3.10 to the derived-status public slice. `ACTIVE` is
+outside the SPEC status enum, so either the SPEC must add it or the public
+statuses must be renamed. `contract.security.recorded` already exists in SPEC
+11.3.9, so no dual-publish window is needed for the event.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-Direct Claims allocation-erosion contract:
+Contract security/collateral contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -1747,7 +1830,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 11527 checks, 0 failures
+  PASS 11646 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -1868,6 +1951,14 @@ Additional checks and limits:
   `STATE_CONFLICT`, and re-adding a public `AllocationErosionRequest` schema
   each fail with the specific request-body, required-field, conflict-code, or
   public-schema message. All four were run on a throwaway copy and exited
+  non-zero (exit 1); the working copy was left unchanged. The Contract
+  security/collateral pass added four more: renaming the
+  `/api/v1/contracts/{contractId}/security` path, removing `OUTSTANDING` from
+  the `SecurityStatus` enum, adding `status` to the
+  `CreateContractSecurityRequest` properties, and dropping
+  `contract.security.recorded` from the Contract catalog `implemented` list
+  each fail with the specific missing operation, enum, caller-status, or
+  implemented-event message. All four were run on a throwaway copy and exited
   non-zero (exit 1); the working copy was left unchanged.
 
 ## Resolution policy

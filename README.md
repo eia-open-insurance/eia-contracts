@@ -754,6 +754,66 @@ Cash-call semantics:
   reconciliation, and no claim/Payment link, so the SPEC "large loss above the
   cash-loss limit" gate and the SPEC 11.3.10 routes remain gaps (M-34).
 
+### Contract security/collateral contract (2026-10-20)
+
+Contract 4.0.0 replaces the public security/collateral projection and command
+with the implemented public surface. The change is breaking for a generated
+client of the old public `Security` shape; the internal expert keeps the wide
+row schema and the bind-slice `CreateSecurityRequest`.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/contract.yaml` | 4.0.0 | Breaking | `GET/POST /api/v1/contracts/{contractId}/security` now use the ten-field `SecurityRecord` response, the `CreateContractSecurityRequest` body, required `X-EIA-Tenant` and `X-EIA-Book: ASSUMED`, and the 201/400/404/409 responses. The wide `Security` and `CreateSecurityRequest` schemas remain on `/internal/v1`. |
+| `asyncapi/contract.yaml` | 1.5.0 | Additive | `contract.security.recorded` becomes an implemented channel and `send` operation with a `ContractSecurityData` payload. |
+| `asyncapi/event-catalog.yaml` | 1.15.0 | Additive | `contract.security.recorded` moves into the Contract implemented subset. It was already published, so the platform total stays 193 published names; Contract is 29 published and 16 implemented, and the platform implemented total is 72. |
+
+Security semantics:
+
+- The projection is exactly `{id, securityType, requiredAmount, heldAmount,
+  currency, providerPartyId, expiryDate, approvalRef, status, createdAt}`. The
+  tenant, contract, beneficiary, effective dates, collateral quality, document,
+  release conditions, and audit columns are internal-only. Money is a decimal
+  string (SPEC 10.3); `providerPartyId`, `expiryDate`, and `approvalRef` are
+  nullable.
+- The request accepts `securityType`, `requiredAmount`, optional `heldAmount`,
+  `currency`, optional `providerPartyId`, `expiryDate`, `approvalRef`, and
+  `approvedAt`. `securityType` is the seven-value closed set
+  (`LETTER_OF_CREDIT`, `TRUST_FUND`, `FUNDS_WITHHELD`, `CASH_ADVANCE`,
+  `PARENT_GUARANTEE`, `BANK_GUARANTEE`, `SECURITIES`); `requiredAmount` must be
+  greater than zero; `heldAmount` defaults to `0.0000`; `currency` is required
+  and must match the contract currency.
+- The expert derives the status: `EXPIRED` when `expiryDate` is before today,
+  otherwise `ACTIVE`. `status` is not a request field. The response enum also
+  carries the bind-slice values `REQUIRED`, `OUTSTANDING`, `PARTIAL`,
+  `RELEASED`, and `BREACH`, because the list returns every row on the contract,
+  including rows written through the internal expert surface; `OUTSTANDING`
+  exists in the implemented internal lifecycle even though the public create
+  never derives it.
+- Over-collateralisation is guarded: `heldAmount` above `requiredAmount`
+  without `approvalRef` is 409 `COLLATERAL_EXCEEDS_OBLIGATION`; with a
+  reference but no `approvedAt` it is 409 `COLLATERAL_APPROVAL_INCOMPLETE`. A
+  currency that differs from the contract is 409
+  `SECURITY_CURRENCY_MISMATCH`. The contract must be `DRAFT`, `QUOTED`,
+  `PLACED`, or `BOUND`; another state is 409 `CONTRACT_LOCKED`. Invalid fields
+  are 400 (`INVALID_SECURITY_TYPE`, `INVALID_REQUIRED_AMOUNT`,
+  `INVALID_HELD_AMOUNT`, `INVALID_CURRENCY`, `INVALID_APPROVAL_REF`,
+  `MISSING_TENANT`). An unknown or other-tenant contract is 404 `NOT_FOUND`.
+- `X-EIA-Tenant` is required. The canonical contract requires
+  `X-EIA-Book: ASSUMED`; another book is hidden as 404
+  `BOOK_SCOPE_VIOLATION`. The domain currently accepts an absent header for
+  compatibility with the other Contract proxy routes, which M-37 records.
+- The create writes `contract.security.recorded` in the same transaction as the
+  row. The event is a child aggregate: it uses the security id and aggregate
+  version 1 while the outbox partition key stays the contract id. The payload
+  is `{contractId, securityId, securityType, requiredAmount, heldAmount,
+  currency, status}`; it deliberately omits the contract number, provider,
+  approval reference, and expiry date.
+- The implemented route keeps the short M-01 form and the SPEC 11.3.10 table
+  uses `/api/v1/contract/contracts/{contractId}/security`. The SPEC 11.3.4
+  status enum has no `ACTIVE`, the request is narrower than the SPEC
+  `contract_security` columns, and there is no release or status action. M-37
+  records those gaps.
+
 ### Policy mass tort profile contract (2026-10-20)
 
 Policy 2.6.0 adds the mass tort profile of a direct policy. The change is
@@ -923,6 +983,7 @@ Every request carries a resolved tenant; no request body may override it.
 | `X-EIA-Book` | Contract technical accounts | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-29 records. |
 | `X-EIA-Book` | Contract period bordereaux | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-30 records. |
 | `X-EIA-Book` | Contract cash calls | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-34 records. |
+| `X-EIA-Book` | Contract security/collateral | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-37 records. |
 | `X-EIA-Actor` | Claim assignment (`PATCH .../assignment`) | Optional acting identity, at most 128 characters. Recorded as `assignedBy` and in the claim audit trail; defaults to the assigned adjuster when absent or blank. The Direct Claims expert also accepts `X-EIA-User` as an alias (M-25). |
 | `?tenantId=` | Most internal expert routes | The expert is network-restricted and receives the tenant resolved by its domain service. |
 
@@ -1491,16 +1552,24 @@ missing directory.
    `CashCallStatus`, `CreateCashCallRequest`, and
    `UpdateCashCallStatusRequest` schemas and their field types, the nullable
    4000-character `notes`, the `ISSUED`/`SETTLED`/`CANCELLED` request enum, the
-   201/200 successes, and the 400/404/409 responses, and agreement between
+   201/200 successes, and the 400/404/409 responses, the two public security
+   operations with their required `TenantHeader` and `BookHeaderAssumed`
+   parameters, the ten-field `SecurityRecord` projection, the
+   `CreateContractSecurityRequest` required/optional split that rejects a
+   caller `status`, the `SecurityStatus` enum with `ACTIVE` and `OUTSTANDING`,
+   the 201/200 successes and 400/404/409 responses, the four documented
+   security conflict codes, and agreement between
    `info.version` and `x-compatibility.contractVersion`.
 4. **AsyncAPI structure.** `asyncapi: 3.0.0`, channel addresses, `x-event-type`,
    `x-status: planned|implemented`, `x-implemented-by` on every implemented
    channel, one `send` operation per channel, a `DomainEvent` message on
    every channel, the optional source fields on the payment created payload,
    the `PaymentAllocationCreatedData` payload with its required payment
-   identity, target, component, money, and allocation-total members, and the
+   identity, target, component, money, and allocation-total members, the
    `PolicyMassTortProfileUpdatedData` payload with its required
-   identity, status, tort, trigger, allocation, and coverage-block members.
+   identity, status, tort, trigger, allocation, and coverage-block members, and
+   the `ContractSecurityData` payload with its contract/security identity,
+   type, money, currency, and status members.
 5. **Event catalog cross-check.** The published set in `event-catalog.yaml`
    must equal the channel addresses in the matching vertical document, event
    names must be unique across the platform and must match
@@ -1515,8 +1584,9 @@ missing directory.
    `policy.installment.waived`, `policy.mass-tort-profile.updated`,
    `payment.allocation.created`,
    `contract.bordereau.received`, `contract.bordereau.processed`,
-   `contract.bordereau.failed`, and the four `contract.cash-call.*` facts
-   (`requested`, `issued`, `settled`, and `cancelled`).
+   `contract.bordereau.failed`, the four `contract.cash-call.*` facts
+   (`requested`, `issued`, `settled`, and `cancelled`), and
+   `contract.security.recorded`.
 6. **JSON Schema checks.** All three files parse as JSON, declare the 2020-12
    dialect and an `$id`, carry the required members, keep required properties
    defined, and validate their own examples against a small schema subset.

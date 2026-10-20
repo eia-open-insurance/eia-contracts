@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:contract
 info:
   title: EIA Contract events
-  version: 1.4.0
+  version: 1.5.0
   summary: Published domain event names for the Contract vertical.
   description: >
     Event contract for the Contract vertical. The authoritative event names are
@@ -22,7 +22,10 @@ info:
     `contract.bordereau.received`, `.processed`, and `.failed`, and the four
     cash-call facts `contract.cash-call.requested`, `.issued`, `.settled`, and
     `.cancelled` through the transactional outbox; those channels and
-    operations are marked `x-status: implemented`. `contract.contract.updated`
+    operations are marked `x-status: implemented`. The security/collateral
+    fact `contract.security.recorded` is also implemented: it is a child
+    aggregate keyed by the security id at version 1, while the outbox
+    partition key stays the contract id. `contract.contract.updated`
     is additive: the catalog had no generic update fact. A status write that
     targets a catalog lifecycle state can also emit the already-cataloged
     `signed`, `endorsed`, `expired`, or `cancelled` name; those names remain
@@ -34,7 +37,10 @@ info:
     instead, so both spellings are published and only the implemented ones are
     recorded (M-22, M-30). SPEC 11.3.9 publishes only
     `contract.cash-call.issued`; the `requested`, `settled`, and `cancelled`
-    child facts are new names (M-22, M-34).
+    child facts are new names (M-22, M-34). The security name matches SPEC
+    11.3.9; its payload carries the derived ACTIVE/EXPIRED status of the public
+    create and can also carry a legacy bind-slice status when the internal
+    expert surface records it (M-37).
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -450,16 +456,27 @@ channels:
     address: contract.security.recorded
     title: contract.security.recorded
     description: >
-      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted by the security/collateral create in the same transaction as the
+      `contract_security` row. The public domain route and the internal expert
+      route both reach this factory. The event is a child aggregate: it uses
+      the security id and aggregate version 1 while the outbox partition key
+      remains the contract id. The payload carries exactly the contract and
+      security identity, the security type, the required and held amounts as
+      decimal strings, the currency, and the derived status. The public create
+      derives ACTIVE, or EXPIRED when the expiry date is already past; the
+      internal expert surface can also record the bind-slice statuses
+      (REQUIRED, OUTSTANDING, PARTIAL, RELEASED, BREACH). The payload does not
+      carry the provider, approval reference, expiry date, or contract number.
     x-event-type: contract.security.recorded
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.3.9
+    x-implemented-by: repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ContractEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
+      ContractSecurityData:
+        $ref: '#/components/messages/ContractSecurityData'
   ContractSecurityBreached:
     address: contract.security.breached
     title: contract.security.breached
@@ -764,10 +781,12 @@ operations:
       $ref: '#/channels/ContractSecurityRecorded'
     summary: Publish contract.security.recorded
     description: >
-      Publishes contract.security.recorded through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes contract.security.recorded through the transactional outbox in
+      the same transaction as the security insert (SPEC 7.5.1). The event uses
+      the security id at aggregate version 1; the outbox partition key stays
+      the contract id.
     x-event-type: contract.security.recorded
-    x-status: planned
+    x-status: implemented
   publishContractSecurityBreached:
     action: send
     channel:
@@ -1004,6 +1023,60 @@ components:
           lineCount:
             type: integer
             minimum: 0
+    ContractSecurityData:
+      name: ContractSecurityData
+      title: contract.security.recorded data
+      summary: >
+        Minimal schema for the envelope data object of a contract
+        security/collateral fact.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - contractId
+          - securityId
+          - securityType
+          - requiredAmount
+          - heldAmount
+          - currency
+          - status
+        properties:
+          contractId:
+            type: string
+            format: uuid
+          securityId:
+            type: string
+            format: uuid
+          securityType:
+            type: string
+            enum:
+              - LETTER_OF_CREDIT
+              - TRUST_FUND
+              - FUNDS_WITHHELD
+              - CASH_ADVANCE
+              - PARENT_GUARANTEE
+              - BANK_GUARANTEE
+              - SECURITIES
+          requiredAmount:
+            type: string
+            pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+          heldAmount:
+            type: string
+            pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+          currency:
+            type: string
+            pattern: '^[A-Z]{3}$'
+          status:
+            type: string
+            enum:
+              - ACTIVE
+              - REQUIRED
+              - OUTSTANDING
+              - PARTIAL
+              - RELEASED
+              - EXPIRED
+              - BREACH
     ContractCashCallData:
       name: ContractCashCallData
       title: contract.cash-call.* data
@@ -1082,24 +1155,28 @@ x-implementation:
   publisher: eia-contract-expert
   subscriber: none
   notes: >
-    Fifteen Contract events are written to the transactional outbox in the same
+    Sixteen Contract events are written to the transactional outbox in the same
     transaction as the aggregate write: `created`, `updated`, `bound`,
     `commuted`, `cession.recorded`, `technical-account.created`,
     `technical-account.issued`, `technical-account.settled`,
     `bordereau.received`, `bordereau.processed`, `bordereau.failed`,
-    `cash-call.requested`, `cash-call.issued`, `cash-call.settled`, and
-    `cash-call.cancelled`. The three technical-account facts are child-aggregate
-    events that use the account id and its lifecycle version while the outbox
-    partition key stays the contract id. The three bordereau facts are
-    child-aggregate events that use the bordereau id and version 1 (received)
-    or 2 (processed or failed) while the partition key stays the contract id.
-    The four cash-call facts use the cash-call id and aggregate version 1
-    (requested), 2 (issued or cancelled), or 3 (settled) while the partition
-    key stays the contract id. A status write that targets a catalog lifecycle
-    state can additionally emit the cataloged `signed`, `endorsed`, `expired`,
-    or `cancelled` name; those names remain published and are not part of the
-    implemented subset recorded here. The remaining SPEC 11.3.9 names are
-    planned. There is no business subscriber or subscription registry yet.
+    `cash-call.requested`, `cash-call.issued`, `cash-call.settled`,
+    `cash-call.cancelled`, and `security.recorded`. The three technical-account
+    facts are child-aggregate events that use the account id and its lifecycle
+    version while the outbox partition key stays the contract id. The three
+    bordereau facts are child-aggregate events that use the bordereau id and
+    version 1 (received) or 2 (processed or failed) while the partition key
+    stays the contract id. The four cash-call facts use the cash-call id and
+    aggregate version 1 (requested), 2 (issued or cancelled), or 3 (settled)
+    while the partition key stays the contract id. The security fact uses the
+    security id and aggregate version 1 while the partition key stays the
+    contract id; its payload carries the derived status of the public create or
+    a bind-slice status recorded through the internal expert surface. A status
+    write that targets a catalog lifecycle state can additionally emit the
+    cataloged `signed`, `endorsed`, `expired`, or `cancelled` name; those names
+    remain published and are not part of the implemented subset recorded here.
+    The remaining SPEC 11.3.9 names are planned. There is no business
+    subscriber or subscription registry yet.
 
 x-consumed-events:
   - policy.policy.issued

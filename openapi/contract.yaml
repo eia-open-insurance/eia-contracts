@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Contract API
-  version: 3.1.0
+  version: 4.0.0
   summary: Assumed-book reinsurance contract administration and the Contract expert API.
   description: >
     This document describes the implemented public Contract domain API and the
@@ -15,6 +15,13 @@ info:
     participants, terms, security, cessions, period bordereaux, commutations,
     technical accounts, and cash calls are implemented; endorsement, renewal,
     reinstatement, loss-aggregate, and lineage remain planned.
+
+    Security/collateral is the public ten-field `SecurityRecord` projection.
+    The create accepts `securityType`, `requiredAmount`, optional `heldAmount`,
+    `currency`, optional `providerPartyId`, `expiryDate`, `approvalRef`, and
+    `approvedAt`, derives `ACTIVE` or `EXPIRED`, and writes
+    `contract.security.recorded` in the same transaction. The wider `Security`
+    row and its bind-slice status vocabulary remain internal-only (M-37).
 
     A period bordereau is the cedent's financial schedule for one contract
     period. It is created in RECEIVED with the declared premium, loss,
@@ -508,8 +515,22 @@ paths:
       tags:
         - Contract
       summary: List security and collateral records.
+      description: >
+        Returns a bare JSON array of the contract's security records, newest
+        first (`created_at` descending, then `id` descending). The tenant comes
+        from
+        `X-EIA-Tenant`; an unknown contract or another tenant's contract is
+        404 `NOT_FOUND`. The canonical book is ASSUMED: another book is hidden
+        as 404 `BOOK_SCOPE_VIOLATION`. The domain currently accepts an absent
+        `X-EIA-Book` for compatibility with the other Contract proxy routes
+        (M-37). The list covers every row on the contract, including rows
+        recorded through the internal expert surface, so a legacy or internal
+        row can carry the bind-slice statuses (`REQUIRED`, `OUTSTANDING`,
+        `PARTIAL`, `RELEASED`, `BREACH`); the public create itself derives
+        `ACTIVE` or `EXPIRED`.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
         - name: contractId
           in: path
           required: true
@@ -518,13 +539,13 @@ paths:
             format: uuid
       responses:
         '200':
-          description: Security records of the contract.
+          description: Security records of the contract, newest first.
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/Security'
+                  $ref: '#/components/schemas/SecurityRecord'
         '400':
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
@@ -537,14 +558,27 @@ paths:
         - Contract
       summary: Record security or collateral.
       description: >
-        `heldAmount` above the secured obligation requires `approvalRef` and
-        `approvedAt`; otherwise the excess is 409
-        `COLLATERAL_EXCEEDS_OBLIGATION`. `expiryDate` may not precede
-        `effectiveFrom`. A security row in status BREACH blocks new cessions
-        (CTR-11). `securityType`, `status`, and `collateralQuality` are closed
-        enumerations.
+        Records one collateral item against the ASSUMED contract and returns
+        the ten-field `SecurityRecord` with 201. The expert derives `status`:
+        `EXPIRED` when `expiryDate` is before today, otherwise `ACTIVE`;
+        `status` is not a request field. `heldAmount` defaults to `0.0000`.
+        `currency` is required and must equal the contract currency, otherwise
+        the create is 409 `SECURITY_CURRENCY_MISMATCH`. When `heldAmount`
+        exceeds `requiredAmount`, both `approvalRef` and `approvedAt` are
+        required: a missing reference is 409 `COLLATERAL_EXCEEDS_OBLIGATION`
+        and a missing timestamp is 409 `COLLATERAL_APPROVAL_INCOMPLETE`.
+        `requiredAmount` must be greater than zero; malformed values are 400
+        `INVALID_SECURITY_TYPE`, `INVALID_REQUIRED_AMOUNT`,
+        `INVALID_HELD_AMOUNT`, `INVALID_CURRENCY`, or `INVALID_APPROVAL_REF`.
+        The contract must be DRAFT, QUOTED, PLACED, or BOUND; another lifecycle
+        state is 409 `CONTRACT_LOCKED`. A missing or malformed tenant is 400
+        `MISSING_TENANT`. An unknown or other-tenant contract is
+        404 `NOT_FOUND`, and a supplied non-ASSUMED book is 404
+        `BOOK_SCOPE_VIOLATION`. The record and `contract.security.recorded`
+        are written in one transaction, so a rollback leaves neither behind.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
         - name: contractId
           in: path
           required: true
@@ -556,14 +590,14 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateSecurityRequest'
+              $ref: '#/components/schemas/CreateContractSecurityRequest'
       responses:
         '201':
-          description: Security recorded.
+          description: Security record created.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Security'
+                $ref: '#/components/schemas/SecurityRecord'
         '400':
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
@@ -2770,6 +2804,54 @@ components:
         updatedAt:
           type: string
           format: date-time
+    SecurityRecord:
+      type: object
+      description: >
+        Public projection of a contract security/collateral record. The
+        projection is deliberately narrower than the internal expert row: the
+        tenant, contract, beneficiary, effective dates, collateral quality,
+        document, release conditions, and audit columns stay internal.
+        `requiredAmount` is the secured obligation and `heldAmount` the
+        collateral actually held; both are non-negative decimal strings
+        (SPEC 10.3).
+        `providerPartyId`, `expiryDate`, and `approvalRef` are nullable.
+      required:
+        - id
+        - securityType
+        - requiredAmount
+        - heldAmount
+        - currency
+        - providerPartyId
+        - expiryDate
+        - approvalRef
+        - status
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        securityType:
+          $ref: '#/components/schemas/SecurityType'
+        requiredAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        heldAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        providerPartyId:
+          type: [string, 'null']
+          format: uuid
+        expiryDate:
+          type: [string, 'null']
+          format: date
+        approvalRef:
+          type: [string, 'null']
+          maxLength: 64
+        status:
+          $ref: '#/components/schemas/SecurityStatus'
+        createdAt:
+          type: string
+          format: date-time
     SecurityType:
       type: string
       enum:
@@ -2782,7 +2864,17 @@ components:
         - SECURITIES
     SecurityStatus:
       type: string
+      description: >
+        Security lifecycle. The public create derives `ACTIVE`, or `EXPIRED`
+        when `expiryDate` is already past, and accepts no caller status. The
+        list covers every row on the contract, including rows recorded through
+        the internal expert surface, so the bind-slice values `REQUIRED`,
+        `OUTSTANDING`, `PARTIAL`, `RELEASED`, and `BREACH` can appear.
+        `OUTSTANDING` exists in the implemented internal lifecycle and the
+        `contract_security` status check even though the public create never
+        derives it (M-37).
       enum:
+        - ACTIVE
         - REQUIRED
         - OUTSTANDING
         - PARTIAL
@@ -3654,6 +3746,44 @@ components:
         sourceClause:
           type: string
           maxLength: 48
+    CreateContractSecurityRequest:
+      type: object
+      description: >
+        Public command that records one security/collateral item. The record
+        identity, tenant, contract, and status are server-derived; `status` is
+        not part of this command. `heldAmount` defaults to `0.0000`;
+        `currency` is required and must match the contract currency. A
+        `heldAmount` above `requiredAmount` requires both `approvalRef` and
+        `approvedAt`.
+      required:
+        - securityType
+        - requiredAmount
+        - currency
+      properties:
+        securityType:
+          $ref: '#/components/schemas/SecurityType'
+        requiredAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+          description: Secured obligation; must be greater than zero.
+        heldAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+          description: Collateral actually held, non-negative; defaults to 0.0000.
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+          description: Must equal the contract currency (409 SECURITY_CURRENCY_MISMATCH).
+        providerPartyId:
+          type: [string, 'null']
+          format: uuid
+        expiryDate:
+          type: [string, 'null']
+          format: date
+          description: A past date records the row as EXPIRED.
+        approvalRef:
+          type: [string, 'null']
+          maxLength: 64
+        approvedAt:
+          type: [string, 'null']
+          format: date-time
     CreateSecurityRequest:
       type: object
       required:
@@ -3976,6 +4106,17 @@ x-implementation:
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/participant/ParticipantController.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/term/TermController.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/security/SecurityController.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/security/ContractSecurityController.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/security/ContractSecurityRules.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/security/ContractSecurityView.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/security/ContractSecurity.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/security/CreateContractSecurityRequest.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/security/SecurityRules.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/SecurityController.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/SecurityService.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/SecurityClient.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/SecurityRecord.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/CreateSecurityCommand.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/cession/CessionController.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/bordereau/BordereauController.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/bordereau/BordereauHeaderController.java
@@ -4039,11 +4180,19 @@ x-implementation:
     REQUESTED -> CANCELLED, and both terminal states are immutable. The domain
     accepts an absent X-EIA-Book on the bordereau, technical-account, and
     cash-call routes even though the canonical contract requires ASSUMED (M-29,
-    M-30, M-34).
+    M-30, M-34). Security/collateral is the public `SecurityRecord` projection
+    (id, securityType, requiredAmount, heldAmount, currency, providerPartyId,
+    expiryDate, approvalRef, status, createdAt). The public create derives
+    ACTIVE or EXPIRED and never accepts a caller status; the list can also
+    return the internal bind-slice statuses, including OUTSTANDING. The wide
+    `Security` row and `CreateSecurityRequest` remain the internal expert
+    contract. The domain accepts an absent X-EIA-Book on the security route even
+    though the canonical contract requires ASSUMED (M-37).
 x-compatibility:
-  contractVersion: 3.1.0
-  previousContractVersion: 3.0.0
+  contractVersion: 4.0.0
+  previousContractVersion: 3.1.0
   breaking:
+    - The public GET/POST /api/v1/contracts/{contractId}/security operations now use the ten-field SecurityRecord response and the CreateContractSecurityRequest body. The wide Security and CreateSecurityRequest schemas are internal-expert only; a generated client of the old public Security shape must move to SecurityRecord.
     - PATCH /api/v1/contracts/{contractId}/status no longer accepts BOUND (since 2.0.0); it returns 409 BIND_REQUIRES_COMMAND and bind must use POST /bind.
     - The public GET/POST /api/v1/contracts/{contractId}/bordereaux operations now use the period-bordereau Bordereau projection. The legacy source-document ingest header moved to the internal-only BordereauHeader schema and /internal/v1 routes; a client generated from the old public BordereauHeader shape must move to the period-bordereau fields.
   compatible:
@@ -4053,6 +4202,7 @@ x-compatibility:
     - Adds PATCH /api/v1/contracts/{contractId}/bordereaux/{bordereauId}/status with the UpdateBordereauStatusRequest schema and the BordereauStatus lifecycle.
     - Adds GET/POST /api/v1/contracts/{contractId}/technical-accounts and PATCH /api/v1/contracts/{contractId}/technical-accounts/{accountId}/status with the TechnicalAccount, CreateTechnicalAccountRequest, UpdateTechnicalAccountStatusRequest, and TechnicalAccountStatus schemas.
     - Adds GET/POST /api/v1/contracts/{contractId}/cash-calls and PATCH /api/v1/contracts/{contractId}/cash-calls/{cashCallId}/status with the CashCall, CashCallStatus, CreateCashCallRequest, and UpdateCashCallStatusRequest schemas.
+    - Documents the implemented derived ACTIVE/EXPIRED security status, the OUTSTANDING bind-slice value, and the contract.security.recorded event; the HTTP security paths are unchanged.
   note: >
     Search, technical accounts, and cash calls are additive. The
     period-bordereau slice replaces the previously documented public bordereau
@@ -4061,7 +4211,10 @@ x-compatibility:
     stays available on the internal expert surface. The bind guard is a
     deliberate breaking change introduced in 2.0.0 for a client that used the
     status endpoint to bind without approvals; it is the SPEC 11.3.8 command
-    contract. The HTTP base path stays /api/v1/contracts.
+    contract. The security/public projection correction in 4.0.0 removes the
+    internal-only row fields from the public response and request, so a
+    generated client of the old public shape must move to SecurityRecord and
+    CreateContractSecurityRequest. The HTTP base path stays /api/v1/contracts.
 x-planned-operations:
   - method: PATCH
     path: /api/v1/contracts/{contractId}
