@@ -545,7 +545,10 @@ unimplemented fields and list the missing operations under
   not the SPEC 11.7.4 `claim_vertical`/`claim_id`/`claim_number` projection, and
   there is no referential-integrity check that `sourceId` exists in the source
   vertical (M-24). `sourceReference` is stored on the payment so lists and
-  record views can render and link the source without an N+1 lookup.
+  record views can render and link the source without an N+1 lookup. The list
+  also accepts a complete `sourceType` + `sourceId` pair to return the payments
+  linked to one source; that filter is documented in `openapi/payment.yaml`
+  1.3.0 and M-24.
 - Notifications: no `category`, `severity`, `subject` reference,
   `requiresAction`, `dueAt`, `actions[]`, inbox, read/acknowledge, stream,
   subscriptions, preferences, or admin surfaces.
@@ -886,6 +889,11 @@ Consequences:
   request, the projection, and the `payment.payment.created` payload. A created
   payment cannot add or change its source afterwards because the implemented
   API has no update command.
+- The tenant-scoped list accepts the same optional `sourceType` + `sourceId`
+  pair. The filter matches the exact normalized pair inside the tenant wall and
+  keeps the newest-first order. Both values are required together, so `OTHER`
+  cannot be listed by type alone, and `sourceReference` is not a filter
+  parameter (global search matches it).
 
 Evidence:
 
@@ -898,6 +906,18 @@ Evidence:
   and `CreatePaymentCommand.java:17-19`.
 - `repos/eia-payment-domain/.../PaymentService.java:107-117` (search matches
   `sourceId` and `sourceReference`) and `:134-155` (secondary suffix).
+- `repos/eia-payment-domain/.../PaymentController.java:27-32` (optional
+  `sourceType`/`sourceId` query parameters) and `PaymentService.java:29-45`
+  (trim, forward, otherwise unfiltered); `PaymentClientTest.java:75-184`
+  (forwarding and preserved 400 codes).
+- `repos/eia-payment-expert/.../PaymentController.java:27-32`,
+  `PaymentService.java:29-45` (normalization and pair rule),
+  `PaymentRules.java:261-301` (`normalizeSourceType` and
+  `validateSourceFilter`), and `PaymentRepository.java:57-68`
+  (`findAllBySource` exact SQL and order).
+- `repos/eia-payment-expert/src/test/java/com/eia/payment/expert/PaymentSourceFilterIntegrationTest.java:49-100`
+  (newest-first exact match, tenant wall, unfiltered list, and invalid/partial
+  pair rejection).
 - `repos/eia-payment-expert/.../PaymentEvents.java:52-54` (created payload).
 - `repos/eia-payment-expert/src/test/java/com/eia/payment/expert/PaymentOutboxIntegrationTest.java:87-127`
   (source persisted and emitted; OTHER reference-only).
@@ -1163,7 +1183,7 @@ of the public contract.
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-Policy renewal contract:
+payment source filter contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -1202,7 +1222,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 10171 checks, 0 failures
+  PASS 10199 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -1258,7 +1278,12 @@ Additional checks and limits:
   `policy.policy.renewed` from the Policy catalog entries each fail with the
   specific path, schema, or implemented-event message. All three negatives were
   run on a throwaway copy; the catalog negative removed the name from both lists
-  and produced the channel-set and implemented-event failures.
+  and produced the channel-set and implemented-event failures. The payment
+  source filter pass added three more: removing the `sourceType` parameter from
+  `GET /api/v1/payments`, dropping `OTHER` from `PaymentSourceType`, and
+  removing `INVALID_SOURCE_FILTER` from the public list description each fail
+  with the specific parameter, enum, or error-documentation message. All three
+  were run on a throwaway copy and exited non-zero.
 
 ## Resolution policy
 

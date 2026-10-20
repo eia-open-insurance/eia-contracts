@@ -682,6 +682,13 @@ PAYMENT_SOURCE_TYPES = ("DIRECT_CLAIM", "ASSUMED_CLAIM", "POLICY", "OTHER")
 PAYMENT_CLASSIFIED_SOURCE_TYPES = ("DIRECT_CLAIM", "ASSUMED_CLAIM", "POLICY")
 PAYMENT_SOURCE_REFERENCE_MAX_LENGTH = 64
 
+# Payment list source filter. The two optional query parameters form a pair:
+# the expert requires both or neither, normalizes the type, and rejects an
+# unknown type with INVALID_SOURCE_TYPE and a partial pair with
+# INVALID_SOURCE_FILTER.
+PAYMENT_SOURCE_FILTER_PARAMETERS = ("sourceType", "sourceId")
+PAYMENT_SOURCE_FILTER_ERRORS = ("INVALID_SOURCE_TYPE", "INVALID_SOURCE_FILTER")
+
 # Document association links. The three public routes are mirrored on the
 # expert's /internal/v1 base; both surfaces are mandatory. The link vocabulary
 # is the closed set the expert enforces, and linkedReference is an optional
@@ -1437,6 +1444,101 @@ def check_payment_openapi_sources(contracts: ContractSet, document, relative: st
         contracts.check(
             pairing_rule,
             f"{relative}: {schema_name} must require sourceType when sourceId is supplied",
+        )
+
+
+def _payment_filter_parameter(operation, name):
+    """Return the inline query parameter named ``name`` from an operation."""
+    for parameter in operation.get("parameters") or []:
+        if isinstance(parameter, dict) and parameter.get("name") == name:
+            return parameter
+    return None
+
+
+def check_payment_source_filter(contracts: ContractSet, document, relative: str):
+    """Require the optional sourceType + sourceId list filter and its 400s.
+
+    Both the public domain list and the expert list accept the pair. The
+    operation must document the tenant scope, both optional query parameters,
+    the closed source-type enum, the UUID source id, the 400 response, and the
+    two filter error codes.
+    """
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+    source_type = schemas.get("PaymentSourceType") or {}
+    contracts.check(
+        source_type.get("type") == "string",
+        f"{relative}: PaymentSourceType must be a string enum",
+    )
+    contracts.check(
+        set(source_type.get("enum") or []) == set(PAYMENT_SOURCE_TYPES),
+        f"{relative}: PaymentSourceType must enumerate {list(PAYMENT_SOURCE_TYPES)}",
+    )
+
+    for list_path, tenant_parameter in (
+        ("/api/v1/payments", "TenantHeader"),
+        ("/internal/v1/payments", "TenantIdQuery"),
+    ):
+        path_item = paths.get(list_path) if isinstance(paths, dict) else None
+        operation = path_item.get("get") if isinstance(path_item, dict) else None
+        where = f"{relative}: GET {list_path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required list operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+
+        parameter_refs = []
+        for parameter in operation.get("parameters") or []:
+            if isinstance(parameter, dict) and isinstance(parameter.get("$ref"), str):
+                parameter_refs.append(parameter["$ref"].rsplit("/", 1)[-1])
+        contracts.check(
+            tenant_parameter in parameter_refs,
+            f"{where}: must document the shared {tenant_parameter} parameter",
+        )
+
+        for name in PAYMENT_SOURCE_FILTER_PARAMETERS:
+            parameter = _payment_filter_parameter(operation, name)
+            contracts.check(
+                parameter is not None,
+                f"{where}: must declare the optional {name} filter parameter",
+            )
+            if parameter is None:
+                continue
+            contracts.check(
+                parameter.get("in") == "query",
+                f"{where}: {name} must be a query parameter",
+            )
+            contracts.check(
+                parameter.get("required") is False,
+                f"{where}: {name} must stay optional",
+            )
+
+        source_type_parameter = _payment_filter_parameter(operation, "sourceType") or {}
+        contracts.check(
+            str((source_type_parameter.get("schema") or {}).get("$ref", "")).endswith(
+                "/schemas/PaymentSourceType"
+            ),
+            f"{where}: sourceType must reference PaymentSourceType",
+        )
+        source_id_parameter = _payment_filter_parameter(operation, "sourceId") or {}
+        source_id_schema = source_id_parameter.get("schema") or {}
+        contracts.check(
+            source_id_schema.get("type") == "string"
+            and source_id_schema.get("format") == "uuid",
+            f"{where}: sourceId must be a uuid string",
+        )
+
+        description = str(operation.get("description") or "")
+        for code in PAYMENT_SOURCE_FILTER_ERRORS:
+            contracts.check(
+                code in description,
+                f"{where}: description must document 400 {code}",
+            )
+        contracts.check(
+            "400" in (operation.get("responses") or {}),
+            f"{where}: must document the 400 response",
         )
 
 
@@ -2802,6 +2904,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             )
         if vertical == "payment":
             check_payment_openapi_sources(contracts, document, relative)
+            check_payment_source_filter(contracts, document, relative)
         if vertical == "document":
             check_document_links_openapi(contracts, document, relative)
         if vertical == "policy":

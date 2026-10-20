@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Payment API
-  version: 1.2.0
+  version: 1.3.0
   summary: Payment instruction administration and the Payment expert API.
   description: >
     This document describes the implemented public Payment domain API and the
@@ -22,6 +22,11 @@ info:
     record views can render and link the source without an N+1 lookup; the
     full SPEC 11.7.4 `claim_id`/`claim_number` projection remains planned
     (MISMATCHES.md M-12 and M-24).
+
+    The tenant-scoped list accepts an optional `sourceType` + `sourceId` pair
+    that returns only the payments linked to one source. The two values are
+    required together: an unknown source type is 400 `INVALID_SOURCE_TYPE`, and
+    half a pair is 400 `INVALID_SOURCE_FILTER`.
 
     Amounts are decimal strings (SPEC 10.3) on this vertical, but they are flat
     `amount`/`currency` fields rather than the canonical Money object; see
@@ -54,11 +59,46 @@ paths:
         - Payment
       summary: List payments for the caller's tenant.
       description: >
-        Returns a bare JSON array. Free-text search is served by
-        `GET /api/v1/payments/search`; filtering and cursor pagination remain
+        Returns a bare JSON array ordered by `createdAt` newest first, with
+        `paymentNumber` as the tie-break. The optional `sourceType` +
+        `sourceId` pair restricts the list to the payments linked to exactly
+        that source; the two parameters must be supplied together, and a
+        request that supplies only one is 400 `INVALID_SOURCE_FILTER`.
+        `sourceType` is trimmed and matched case-insensitively against
+        `PaymentSourceType`, so `direct_claim` selects `DIRECT_CLAIM`; an
+        unknown value is 400 `INVALID_SOURCE_TYPE` and is reported before the
+        pairing check. A `sourceId` that is not a UUID is 400
+        `INVALID_PARAMETER`. The public route trims both values and treats a
+        blank value as absent; supplying neither value keeps the unfiltered
+        list. A missing or malformed `X-EIA-Tenant` is 400
+        `MISSING_TENANT_HEADER` or `INVALID_PARAMETER`. Free-text search is
+        served by `GET /api/v1/payments/search`; cursor pagination remains
         planned.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: sourceType
+          in: query
+          required: false
+          description: >
+            Optional payment-source filter. Must be supplied with `sourceId`;
+            half a pair is 400 `INVALID_SOURCE_FILTER`. The value is trimmed
+            and upper-cased before validation, so a lower-case value is
+            accepted. A value outside the four-value enum is 400
+            `INVALID_SOURCE_TYPE`. Because the pair is mandatory, `OTHER` is
+            filterable only with a `sourceId`; a type-only `OTHER` query cannot
+            list every OTHER payment.
+          schema:
+            $ref: '#/components/schemas/PaymentSourceType'
+        - name: sourceId
+          in: query
+          required: false
+          description: >
+            Optional UUID of the source record. Must be supplied with
+            `sourceType`; half a pair is 400 `INVALID_SOURCE_FILTER`. A value
+            that is not a UUID is 400 `INVALID_PARAMETER`.
+          schema:
+            type: string
+            format: uuid
       responses:
         '200':
           description: Payments of the tenant.
@@ -304,10 +344,40 @@ paths:
       tags:
         - Payment internal
       summary: List payments for a tenant (expert).
+      description: >
+        Returns a bare JSON array ordered by `createdAt` newest first, with
+        `paymentNumber` as the tie-break. The optional `sourceType` +
+        `sourceId` pair restricts the list to the payments linked to exactly
+        that source; both values must be supplied together. `sourceType` is
+        trimmed and upper-cased against `PaymentSourceType`; an unknown value
+        is 400 `INVALID_SOURCE_TYPE` and a partial pair is 400
+        `INVALID_SOURCE_FILTER`. A `sourceId` that is not a UUID is 400
+        `INVALID_PARAMETER`. The list is tenant-scoped by the required
+        `tenantId` query parameter.
       security: []
       x-internal-api: true
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: sourceType
+          in: query
+          required: false
+          description: >
+            Optional payment-source filter. Must be supplied with `sourceId`;
+            half a pair is 400 `INVALID_SOURCE_FILTER`. The value is trimmed
+            and upper-cased before validation; a value outside the four-value
+            enum is 400 `INVALID_SOURCE_TYPE`.
+          schema:
+            $ref: '#/components/schemas/PaymentSourceType'
+        - name: sourceId
+          in: query
+          required: false
+          description: >
+            Optional UUID of the source record. Must be supplied with
+            `sourceType`; half a pair is 400 `INVALID_SOURCE_FILTER`. A value
+            that is not a UUID is 400 `INVALID_PARAMETER`.
+          schema:
+            type: string
+            format: uuid
       responses:
         '200':
           description: Payments of the tenant.
@@ -755,12 +825,14 @@ x-implementation:
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentDto.java
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/CreatePaymentCommand.java
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentRules.java
+    - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/ApiExceptionHandler.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentController.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/Payment.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/CreatePaymentRequest.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentRules.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentEvents.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/ApiExceptionHandler.java
+    - repos/eia-payment-expert/src/test/java/com/eia/payment/expert/PaymentSourceFilterIntegrationTest.java
   errorEnvelope: >
     Vertical-specific ApiError {timestamp, status, code, message, path,
     details[{field, message}]}. Not the canonical Problem envelope yet.
@@ -769,21 +841,24 @@ x-implementation:
     of the expert. Amount is a decimal string but not yet the Money object.
     Source linkage is optional and denormalized: the payment stores a classified
     source type, its UUID, and a human reference instead of embedding the claim
-    or policy. See MISMATCHES.md M-12 and M-24.
+    or policy. The tenant-scoped list forwards an optional sourceType + sourceId
+    pair to the expert, which owns the closed-set and pairing validation, so the
+    public route preserves the expert's 400 code and message. See MISMATCHES.md
+    M-12 and M-24.
 x-compatibility:
-  contractVersion: 1.2.0
-  previousContractVersion: 1.1.0
+  contractVersion: 1.3.0
+  previousContractVersion: 1.2.0
   breaking: []
   compatible:
-    - Adds sourceType, sourceId, and sourceReference to the Payment projection and to the public and internal create requests.
-    - Adds the PaymentSourceType enum.
-    - Documents the create rules for classified sources, the sourceId/sourceType pairing, OTHER reference-only sources, and the 64-character sourceReference limit.
-    - Documents that payment search matches sourceId and sourceReference and appends sourceReference to the secondary line.
+    - Adds the optional sourceType and sourceId query parameters to GET /api/v1/payments and GET /internal/v1/payments.
+    - Documents the source-filter pairing rule and the 400 INVALID_SOURCE_TYPE, INVALID_SOURCE_FILTER, and INVALID_PARAMETER codes.
+    - Documents the tenant-scoped, newest-first ordering of the filtered list.
   note: >
-    Source linkage is additive over 1.1.0: every new field is optional on the
-    wire, an existing client that omits all three fields is unaffected, the
-    search response shape is unchanged, and the created event only gains
-    optional fields. The HTTP path and error envelope are unchanged.
+    The filter is additive over 1.2.0: a caller that omits both parameters keeps
+    the unchanged unfiltered list, the Payment projection and create requests are
+    unchanged, and the response remains a bare JSON array. An unknown source type
+    or a partial pair is a classified 400, so a caller must send a complete
+    normalized pair.
 x-planned-operations:
   - method: POST
     path: /api/v1/payments/{paymentId}/void

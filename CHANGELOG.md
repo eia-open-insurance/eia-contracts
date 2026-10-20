@@ -224,6 +224,29 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   existence check.
 - `python scripts/validate_contracts.py` passes 9,411 checks with 0 failures.
 
+### Added in the payment source filter contract (2026-10-20)
+
+- `openapi/payment.yaml` is 1.3.0: `GET /api/v1/payments` accepts the optional
+  `sourceType` and `sourceId` query parameters. Both must be supplied together;
+  `sourceType` references the four-value `PaymentSourceType` enum
+  (`DIRECT_CLAIM`, `ASSUMED_CLAIM`, `POLICY`, `OTHER`) and is trimmed and
+  upper-cased before validation, and `sourceId` is a UUID. The tenant header
+  stays required. The operation documents the exact, tenant-scoped,
+  newest-first filter, 400 `INVALID_SOURCE_TYPE` for an unknown type, 400
+  `INVALID_SOURCE_FILTER` for a partial pair, and 400 `INVALID_PARAMETER` for a
+  malformed `sourceId` or tenant. The expert list documents the same pair and
+  its `tenantId` scope.
+- `scripts/validate_contracts.py` requires the `sourceType` + `sourceId` pair
+  on both payment list operations, both parameters to stay optional query
+  parameters, the `PaymentSourceType` reference and its four-value enum, the
+  UUID `sourceId`, the tenant parameter, the 400 response, and the
+  `INVALID_SOURCE_TYPE`/`INVALID_SOURCE_FILTER` codes in each operation
+  description.
+- `README.md` records the 1.3.0 additive compatibility class and the filter
+  semantics; `MISMATCHES.md` extends M-24 with the exact-pair filter, its
+  evidence, and the new validation evidence.
+- `python scripts/validate_contracts.py` passes 10,199 checks with 0 failures.
+
 ### Added in the claim command idempotency contract (2026-10-20)
 
 - `openapi/components.yaml` is 1.4.0: adds the optional

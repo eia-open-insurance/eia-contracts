@@ -278,6 +278,25 @@ policy without an N+1 lookup against the Direct Claims, Assumed Claims, or Polic
 API. The payment still does not embed the source object and does not verify that
 the source exists (M-12, M-24).
 
+### Payment source filter (2026-10-20)
+
+Payment 1.3.0 adds an optional source filter to the tenant-scoped list. The
+change is additive: a caller that omits both parameters keeps the unfiltered
+list, and the response shape is unchanged.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/payment.yaml` | 1.3.0 | Additive | `GET /api/v1/payments` and `GET /internal/v1/payments` accept the optional `sourceType` + `sourceId` pair; the 400 `INVALID_SOURCE_TYPE`/`INVALID_SOURCE_FILTER` behaviour and the tenant scope are documented. |
+
+Both parameters are optional, but they form a pair: supplying one without the
+other is 400 `INVALID_SOURCE_FILTER`, not a silently widened list. `sourceType`
+is trimmed and upper-cased against the four-value enum, so an unknown value is
+400 `INVALID_SOURCE_TYPE`; `sourceId` is a UUID, and a malformed value is 400
+`INVALID_PARAMETER`. The filter matches the exact `(sourceType, sourceId)` pair
+inside the caller's tenant and keeps the newest-first order. Because the pair is
+always required, `OTHER` cannot be listed by type alone. The full semantics are
+under [Payment source filter semantics](#payment-source-filter-semantics).
+
 ### Claim task and note idempotency (2026-10-20)
 
 Direct Claims and Assumed Claims 1.4.0 make task and note creation retry-safe
@@ -713,6 +732,39 @@ Rules and semantics:
   matching and `secondary` suffix behaviour are described under
   [Global search](#global-search).
 
+### Payment source filter semantics
+
+The tenant-scoped list accepts an optional `sourceType` + `sourceId` pair:
+
+| Parameter | Type | Rule |
+|---|---|---|
+| `sourceType` | enum | `DIRECT_CLAIM`, `ASSUMED_CLAIM`, `POLICY`, or `OTHER`. Must be supplied with `sourceId`. The value is trimmed and upper-cased, so a lower-case value selects the canonical value. |
+| `sourceId` | UUID | Must be supplied with `sourceType`; a value that is not a UUID is 400 `INVALID_PARAMETER`. |
+
+Rules and semantics:
+
+- Both or neither. Supplying only `sourceType` or only `sourceId` is 400
+  `INVALID_SOURCE_FILTER`, with the message naming the missing member; the
+  expert rejects the partial pair instead of returning a wider list.
+- An unknown `sourceType` is 400 `INVALID_SOURCE_TYPE`. The type is normalized
+  before the pairing check, so an unknown type alone reports
+  `INVALID_SOURCE_TYPE` rather than `INVALID_SOURCE_FILTER`.
+- The match is exact on the normalized `(sourceType, sourceId)` pair and stays
+  inside the caller's tenant. A payment whose link has a different type, a
+  different id, or no link is not returned.
+- `OTHER` is part of the filter enum, but the pair is still mandatory, so a
+  type-only `OTHER` query is 400 and there is no way to list every OTHER
+  payment through this filter.
+- `sourceReference` is not a filter parameter; global search still matches it
+  through `q`.
+- The filtered list keeps the unfiltered list's order: `createdAt` descending,
+  with `paymentNumber` as the tie-break. Omitting both parameters returns the
+  unchanged unfiltered list.
+- `X-EIA-Tenant` is required. The domain forwards the pair and the tenant header
+  to the expert, and the expert owns the closed-set and pairing validation, so
+  the public 400 code and message are the expert's. A missing tenant is 400
+  `MISSING_TENANT_HEADER`; a malformed tenant is 400 `INVALID_PARAMETER`.
+
 ### Policy billing
 
 Policy owns the premium installment plan (SPEC 11.2.13). The public billing
@@ -878,7 +930,10 @@ missing directory.
    operations' shared parameters and `SearchResponse`/400/404 responses, the
    `SearchResponse` and `SearchItem` keys, the required 422/409/428 response
    codes on the Round 5 mutations, the payment source fields and their create
-   rules, the three Policy billing operations, the optional shared
+   rules, the optional `sourceType` + `sourceId` list filter on the public and
+   expert payment lists with its enum, UUID, tenant parameter, 400 response, and
+   `INVALID_SOURCE_TYPE`/`INVALID_SOURCE_FILTER` documentation, the three Policy
+   billing operations, the optional shared
    `BookHeaderDirectOptional` parameter, the `BillingPlan`, `Installment`,
    `CreateBillingPlanRequest`, and `UpdateInstallmentRequest` schemas and their
    field bounds and enums, the Policy renewal operation with its required
