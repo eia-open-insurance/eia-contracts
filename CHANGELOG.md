@@ -89,6 +89,33 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   `MISMATCHES.md` shrinks M-04, M-06, M-07, M-08, M-10, M-11, M-12, M-13,
   M-14, M-16, M-20, and M-21, and adds M-22 for the implemented event names.
 
+### Changed in the outbox completion (2026-10-20)
+
+- `asyncapi/policy.yaml` is 1.1.0: `policy.policy.created` and
+  `policy.policy.updated` are added and, with `version-issued`, `endorsed`,
+  `cancelled`, and `reinstated`, marked implemented; the two new channels carry
+  a minimal data schema and name their emitter.
+- `asyncapi/contract.yaml` is 1.1.0: `contract.contract.updated` is added and,
+  with `created`, `bound`, `commuted`, and `cession.recorded`, marked
+  implemented; the new channel carries a minimal data schema.
+- `asyncapi/direct-claims.yaml` is 1.1.0: `registered`, `updated`,
+  `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and `closed`
+  are marked implemented.
+- `asyncapi/assumed-claims.yaml` is 1.1.0: `assumed.claim.updated` is added and,
+  with `registered`, `closed`, `reopened`, `loss-advice-posted`,
+  `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and
+  `commuted`, marked implemented; the new channel carries a minimal data schema.
+- `asyncapi/event-catalog.yaml` is 1.2.0: the four new names are published
+  (168 total) and all ten verticals record their implemented subset; the
+  implementation notes now name the platform `event-ingest` inbox.
+- `scripts/validate_contracts.py` requires the implemented event names for all
+  ten verticals instead of the Round 5 six.
+- `MISMATCHES.md` expands M-14 to the ten publishers and the `event-ingest`
+  inbox, updates M-22 with the four names that have no SPEC equivalent, and
+  records 8,607 passing validation checks.
+- `README.md` records the completed rollout and its additive compatibility
+  class.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

@@ -146,6 +146,28 @@ canonical behaviour and the only consumer, the Contract web remote, is updated
 in the same release. The HTTP path stays `/api/v1/contracts`. The other three
 OpenAPI documents only add paths, schemas, and response codes.
 
+### Outbox rollout completion (2026-10-20)
+
+The four remaining vertical experts now publish through the transactional
+outbox, completing the rollout across all ten publishing verticals. The change
+is additive: four event names are added and the implemented channels are
+documented against the emitting source.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `asyncapi/policy.yaml` | 1.1.0 | Additive | Six implemented events. `policy.policy.created` and `policy.policy.updated` are added to the catalog and carry minimal payload schemas. |
+| `asyncapi/contract.yaml` | 1.1.0 | Additive | Five implemented events. `contract.contract.updated` is added with a minimal payload schema. |
+| `asyncapi/direct-claims.yaml` | 1.1.0 | Additive | Six implemented events; every name already existed in SPEC 11.4.9 and the catalog. |
+| `asyncapi/assumed-claims.yaml` | 1.1.0 | Additive | Nine implemented events. `assumed.claim.updated` is added with a minimal payload schema. |
+| `asyncapi/event-catalog.yaml` | 1.2.0 | Additive | Four new names (168 published in total) and the implemented subset for all ten verticals. |
+
+No existing event name is renamed or removed. The new names are the generic
+create and update facts that the services already emitted; the catalog now
+publishes them, so a consumer generated from the catalog sees every implemented
+name. The Contract status command can also emit the cataloged `signed`,
+`endorsed`, `expired`, and `cancelled` names; those remain published but
+outside the declared implemented subset recorded by this change (M-14).
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -313,8 +335,8 @@ missing directory.
    names must be unique across the platform and must match
    `{vertical}.{aggregate}.{verb}`, every consumed event must have a publisher,
    and the catalog `implemented` list must equal the channels marked
-   `x-status: implemented`. The Round 5 implemented event names are required
-   explicitly.
+   `x-status: implemented`. The implemented event names for all ten publishing
+   verticals are required explicitly.
 6. **JSON Schema checks.** All three files parse as JSON, declare the 2020-12
    dialect and an `$id`, carry the required members, keep required properties
    defined, and validate their own examples against a small schema subset.
@@ -362,9 +384,11 @@ missing directory.
   illegal lifecycle edge;
 - the Cession/Retrocession FS-RI hand-off is synchronous, with no hand-off
   queue or hand-off resource (SPEC 7.18.3/HAND-05);
-- six experts publish a subset of their events through the transactional
-  outbox, but there is no subscriber or inbox, and the implemented event names
-  differ from the SPEC catalog names.
+- ten experts publish a subset of their events through the transactional
+  outbox into the platform `event-ingest` inbox, but no vertical consumes
+  another vertical's events, there is no subscription registry or gap
+  detection, and the implemented event names still differ from the SPEC
+  catalog names (M-14, M-22).
 
 ## Repository standard
 

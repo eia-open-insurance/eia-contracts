@@ -321,13 +321,49 @@ ROUND5_REQUIRED_RESPONSES = {
 }
 
 
-# Event names the Round 5 outbox rollout actually emits. The catalog must list
-# each one as published and implemented, and the vertical document must expose
-# a channel for it.
-ROUND5_IMPLEMENTED_EVENTS = {
+# Event names the transactional-outbox rollout actually emits. The catalog must
+# list each one as published and implemented, and the vertical document must
+# expose a channel for it. Round 5 covered the first six verticals; the rollout
+# was completed for Policy, Contract, Direct Claims, and Assumed Claims on
+# 2026-10-20.
+IMPLEMENTED_EVENTS = {
     "party": [
         "party.party.created",
         "party.party.updated",
+    ],
+    "policy": [
+        "policy.policy.created",
+        "policy.policy.updated",
+        "policy.policy.version-issued",
+        "policy.policy.endorsed",
+        "policy.policy.cancelled",
+        "policy.policy.reinstated",
+    ],
+    "contract": [
+        "contract.contract.created",
+        "contract.contract.updated",
+        "contract.contract.bound",
+        "contract.contract.commuted",
+        "contract.cession.recorded",
+    ],
+    "direct-claims": [
+        "direct.claim.registered",
+        "direct.claim.updated",
+        "direct.claim.coverage-assessed",
+        "direct.claim.reserve-changed",
+        "direct.claim.settlement-authorized",
+        "direct.claim.closed",
+    ],
+    "assumed-claims": [
+        "assumed.claim.registered",
+        "assumed.claim.updated",
+        "assumed.claim.closed",
+        "assumed.claim.reopened",
+        "assumed.claim.loss-advice-posted",
+        "assumed.claim.reserve-changed",
+        "assumed.claim.cash-call-requested",
+        "assumed.claim.recovery-recorded",
+        "assumed.claim.commuted",
     ],
     "cession": [
         "cession.cession.created",
@@ -1292,17 +1328,17 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
         contracts.check(not overlap, f"event names published by more than one vertical: {sorted(overlap)}")
         all_events |= names
 
-    for vertical, expected_events in ROUND5_IMPLEMENTED_EVENTS.items():
+    for vertical, expected_events in IMPLEMENTED_EVENTS.items():
         entry = catalog_entries.get(vertical) or {}
         implemented = set(entry.get("implemented") or [])
         for event in expected_events:
             contracts.check(
                 event in all_events,
-                f"event-catalog.yaml: Round 5 event '{event}' is not published by any vertical",
+                f"event-catalog.yaml: implemented event '{event}' is not published by any vertical",
             )
             contracts.check(
                 event in implemented,
-                f"event-catalog.yaml: Round 5 event '{event}' must be listed in {vertical}.implemented",
+                f"event-catalog.yaml: implemented event '{event}' must be listed in {vertical}.implemented",
             )
 
     for vertical, entry in catalog_entries.items():

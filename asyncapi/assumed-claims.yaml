@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:assumed-claims
 info:
   title: EIA Assumed Claims events
-  version: 1.0.0
+  version: 1.1.0
   summary: Published domain event names for the Assumed Claims vertical.
   description: >
     Event contract for the Assumed Claims vertical. The authoritative event names are
@@ -14,9 +14,14 @@ info:
     signature (SPEC 7.5.1). A channel address is the logical routing key and
     equals the event name; it is not a broker topic.
 
-    No publisher or subscriber exists in the current codebase. Every channel
-    and operation in this document is therefore marked x-status planned. The
-    catalog and cross-vertical subscriptions live in event-catalog.yaml.
+    The Assumed Claims expert now publishes `assumed.claim.registered`,
+    `assumed.claim.updated`, `assumed.claim.closed`, `assumed.claim.reopened`,
+    `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`,
+    `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, and
+    `assumed.claim.commuted` through the transactional outbox; those channels
+    and operations are marked `x-status: implemented`. `assumed.claim.updated`
+    is additive: the catalog had no generic update fact. The other SPEC 11.5.9
+    names are planned.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -32,17 +37,37 @@ servers:
       Each subscriber registers an HTTPS endpoint and signing key. The outbox
       posts one event per request and requires a 2xx acknowledgement.
 channels:
+  AssumedClaimUpdated:
+    address: assumed.claim.updated
+    title: assumed.claim.updated
+    description: >
+      Emitted on an accepted assumed-claim status change that is neither
+      `closed` nor `reopened`. The payload carries `changedFields:
+      [status]`, `from`, `to`, and the assumed claim identity, status, and
+      row version.
+    x-event-type: assumed.claim.updated
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.5.9
+    x-implemented-by: repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/AssumedClaimEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      AssumedClaimUpdatedData:
+        $ref: '#/components/messages/AssumedClaimUpdatedData'
   AssumedClaimRegistered:
     address: assumed.claim.registered
     title: assumed.claim.registered
     description: >
-      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when an assumed claim is created from a notice, in the same
+      transaction as the row. The payload carries the assumed claim
+      identity, cedent claim number, contract, book, status, row version,
+      loss and report dates, and reserve.
     x-event-type: assumed.claim.registered
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.5.9
+    x-implemented-by: repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/AssumedClaimEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -64,13 +89,16 @@ channels:
     address: assumed.claim.loss-advice-posted
     title: assumed.claim.loss-advice-posted
     description: >
-      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when a loss advice is posted and the reserve is updated. The
+      payload carries the advice identity and number, type and dates,
+      status, reported/paid/outstanding/expense/reserve/recovery amounts,
+      cession percent and ceded amount, currency, layer-attachment flag,
+      source, and posting time.
     x-event-type: assumed.claim.loss-advice-posted
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.5.9
+    x-implemented-by: repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/AssumedClaimEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -92,13 +120,15 @@ channels:
     address: assumed.claim.reserve-changed
     title: assumed.claim.reserve-changed
     description: >
-      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted for every append-only assumed reserve change. The payload
+      carries the reserve entry identity, component, sequence, amount,
+      previous and current reserve, currency, effective date, reason,
+      authority, and approval evidence.
     x-event-type: assumed.claim.reserve-changed
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.5.9
+    x-implemented-by: repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/AssumedClaimEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -134,13 +164,14 @@ channels:
     address: assumed.claim.recovery-recorded
     title: assumed.claim.recovery-recorded
     description: >
-      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when a recovery is recorded. The payload carries the recovery
+      identity, type, amount and currency, received date, status, expected
+      amount, source party and contract, and payment id.
     x-event-type: assumed.claim.recovery-recorded
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.5.9
+    x-implemented-by: repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/AssumedClaimEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -148,13 +179,15 @@ channels:
     address: assumed.claim.cash-call-requested
     title: assumed.claim.cash-call-requested
     description: >
-      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when a cash call is requested. The payload carries the cash
+      call identity, request number, requested amount and currency, request
+      and due dates, status, reason, approval status and approver, and
+      payment id.
     x-event-type: assumed.claim.cash-call-requested
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.5.9
+    x-implemented-by: repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/AssumedClaimEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -162,13 +195,16 @@ channels:
     address: assumed.claim.commuted
     title: assumed.claim.commuted
     description: >
-      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when an assumed claim commutation is executed. The payload
+      carries the commutation identity and number, type,
+      offer/accepted/savings amounts, released reserve, currency, effective
+      and valuation dates, basis, release document, status, and approval
+      evidence.
     x-event-type: assumed.claim.commuted
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.5.9
+    x-implemented-by: repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/AssumedClaimEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -204,13 +240,14 @@ channels:
     address: assumed.claim.closed
     title: assumed.claim.closed
     description: >
-      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when an assumed claim is closed. The payload carries
+      `changedFields: [status]`, `from`, `to`, and the assumed claim
+      identity, status, and row version.
     x-event-type: assumed.claim.closed
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.5.9
+    x-implemented-by: repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/AssumedClaimEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -218,13 +255,14 @@ channels:
     address: assumed.claim.reopened
     title: assumed.claim.reopened
     description: >
-      Declared domain event for this vertical (SPEC 11.5.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when a closed assumed claim is reopened. The payload carries
+      `changedFields: [status]`, `from`, `to`, and the assumed claim
+      identity, status, and row version.
     x-event-type: assumed.claim.reopened
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.5.9
+    x-implemented-by: repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/AssumedClaimEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -243,16 +281,26 @@ channels:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
 operations:
+  publishAssumedClaimUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/AssumedClaimUpdated'
+    summary: Publish assumed.claim.updated
+    description: >
+      Publishes assumed.claim.updated on an accepted status change other
+      than close or reopen.
+    x-event-type: assumed.claim.updated
+    x-status: implemented
   publishAssumedClaimRegistered:
     action: send
     channel:
       $ref: '#/channels/AssumedClaimRegistered'
     summary: Publish assumed.claim.registered
     description: >
-      Publishes assumed.claim.registered through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes assumed.claim.registered through the transactional outbox in
+      the same transaction as the claim insert (SPEC 7.5.1).
     x-event-type: assumed.claim.registered
-    x-status: planned
+    x-status: implemented
   publishAssumedClaimLossAdviceReceived:
     action: send
     channel:
@@ -269,10 +317,10 @@ operations:
       $ref: '#/channels/AssumedClaimLossAdvicePosted'
     summary: Publish assumed.claim.loss-advice-posted
     description: >
-      Publishes assumed.claim.loss-advice-posted through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes assumed.claim.loss-advice-posted when a loss advice is
+      posted.
     x-event-type: assumed.claim.loss-advice-posted
-    x-status: planned
+    x-status: implemented
   publishAssumedClaimReserveEstablished:
     action: send
     channel:
@@ -289,10 +337,10 @@ operations:
       $ref: '#/channels/AssumedClaimReserveChanged'
     summary: Publish assumed.claim.reserve-changed
     description: >
-      Publishes assumed.claim.reserve-changed through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes assumed.claim.reserve-changed for every append-only reserve
+      change.
     x-event-type: assumed.claim.reserve-changed
-    x-status: planned
+    x-status: implemented
   publishAssumedClaimPaymentRequested:
     action: send
     channel:
@@ -319,30 +367,28 @@ operations:
       $ref: '#/channels/AssumedClaimRecoveryRecorded'
     summary: Publish assumed.claim.recovery-recorded
     description: >
-      Publishes assumed.claim.recovery-recorded through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes assumed.claim.recovery-recorded when a recovery is recorded.
     x-event-type: assumed.claim.recovery-recorded
-    x-status: planned
+    x-status: implemented
   publishAssumedClaimCashCallRequested:
     action: send
     channel:
       $ref: '#/channels/AssumedClaimCashCallRequested'
     summary: Publish assumed.claim.cash-call-requested
     description: >
-      Publishes assumed.claim.cash-call-requested through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes assumed.claim.cash-call-requested when a cash call is
+      requested.
     x-event-type: assumed.claim.cash-call-requested
-    x-status: planned
+    x-status: implemented
   publishAssumedClaimCommuted:
     action: send
     channel:
       $ref: '#/channels/AssumedClaimCommuted'
     summary: Publish assumed.claim.commuted
     description: >
-      Publishes assumed.claim.commuted through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes assumed.claim.commuted when a commutation is executed.
     x-event-type: assumed.claim.commuted
-    x-status: planned
+    x-status: implemented
   publishAssumedClaimDisputeRaised:
     action: send
     channel:
@@ -369,20 +415,19 @@ operations:
       $ref: '#/channels/AssumedClaimClosed'
     summary: Publish assumed.claim.closed
     description: >
-      Publishes assumed.claim.closed through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes assumed.claim.closed when an assumed claim is closed.
     x-event-type: assumed.claim.closed
-    x-status: planned
+    x-status: implemented
   publishAssumedClaimReopened:
     action: send
     channel:
       $ref: '#/channels/AssumedClaimReopened'
     summary: Publish assumed.claim.reopened
     description: >
-      Publishes assumed.claim.reopened through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes assumed.claim.reopened when a closed assumed claim is
+      reopened.
     x-event-type: assumed.claim.reopened
-    x-status: planned
+    x-status: implemented
   publishAssumedClaimReinstatementRequested:
     action: send
     channel:
@@ -419,6 +464,45 @@ components:
             type: string
       payload:
         $ref: '../schemas/event-envelope.schema.json'
+    AssumedClaimUpdatedData:
+      name: AssumedClaimUpdatedData
+      title: assumed.claim.updated data
+      summary: Minimal schema for the envelope data object of an assumed claim status change.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - assumedClaimId
+          - assumedClaimNumber
+          - status
+          - version
+          - changedFields
+        properties:
+          assumedClaimId:
+            type: string
+            format: uuid
+          assumedClaimNumber:
+            type: string
+          cedentClaimNumber:
+            type: string
+          contractId:
+            type: string
+            format: uuid
+          businessBook:
+            type: string
+          status:
+            type: string
+          version:
+            type: integer
+          changedFields:
+            type: array
+            items:
+              type: string
+          from:
+            type: string
+          to:
+            type: string
   securitySchemes:
     outboxSignature:
       type: httpApiKey
@@ -429,14 +513,17 @@ components:
         t=<unix>,v1=<hex> (SPEC 7.5.1).
 x-vertical: assumed
 x-spec-section: SPEC 11.5.9
-x-status: planned
+x-status: partial
 x-implementation:
-  publisher: none
+  publisher: eia-assumed-claims-expert
   subscriber: none
   notes: >
-    The current vertical slices emit no events; the outbox tables and the
-    dispatcher described in SPEC 7.5 are not implemented. This document is the
-    agreed event contract for the publisher that will be built.
+    Nine Assumed Claims events are written to the transactional outbox in the
+    same transaction as the aggregate or child write: `registered`, `updated`,
+    `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`,
+    `cash-call-requested`, `recovery-recorded`, and `commuted`. The other SPEC
+    11.5.9 names remain planned. There is no business subscriber or
+    subscription registry yet.
 
 x-consumed-events:
   - contract.contract.bound

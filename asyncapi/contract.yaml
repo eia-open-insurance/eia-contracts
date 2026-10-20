@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:contract
 info:
   title: EIA Contract events
-  version: 1.0.0
+  version: 1.1.0
   summary: Published domain event names for the Contract vertical.
   description: >
     Event contract for the Contract vertical. The authoritative event names are
@@ -14,9 +14,16 @@ info:
     signature (SPEC 7.5.1). A channel address is the logical routing key and
     equals the event name; it is not a broker topic.
 
-    No publisher or subscriber exists in the current codebase. Every channel
-    and operation in this document is therefore marked x-status planned. The
-    catalog and cross-vertical subscriptions live in event-catalog.yaml.
+    The Contract expert now publishes `contract.contract.created`,
+    `contract.contract.updated`, `contract.contract.bound`,
+    `contract.contract.commuted`, and `contract.cession.recorded` through the
+    transactional outbox; those channels and operations are marked
+    `x-status: implemented`. `contract.contract.updated` is additive: the
+    catalog had no generic update fact. A status write that targets a catalog
+    lifecycle state can also emit the already-cataloged `signed`, `endorsed`,
+    `expired`, or `cancelled` name; those names remain published and are not
+    part of the implemented subset recorded here. The remaining SPEC 11.3.9
+    names are planned.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -32,17 +39,36 @@ servers:
       Each subscriber registers an HTTPS endpoint and signing key. The outbox
       posts one event per request and requires a 2xx acknowledgement.
 channels:
+  ContractContractUpdated:
+    address: contract.contract.updated
+    title: contract.contract.updated
+    description: >
+      Emitted on every accepted contract status write, including bind and
+      commutation execution, at the same aggregate version as the lifecycle
+      event. The payload carries `changedFields: [status]`, `from`, `to`,
+      and the contract identity and row version.
+    x-event-type: contract.contract.updated
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.3.9
+    x-implemented-by: repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ContractEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      ContractContractUpdatedData:
+        $ref: '#/components/messages/ContractContractUpdatedData'
   ContractContractCreated:
     address: contract.contract.created
     title: contract.contract.created
     description: >
-      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when a contract is persisted, in the same transaction as the
+      row. The payload carries the contract identity, type, cedent and
+      reinsurer, currency, term dates, status, and row version.
     x-event-type: contract.contract.created
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.3.9
+    x-implemented-by: repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ContractEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -50,13 +76,15 @@ channels:
     address: contract.contract.bound
     title: contract.contract.bound
     description: >
-      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted by the bind command after the tower, share, term, security,
+      and approval preconditions pass. The payload carries the contract
+      identity, row version, `boundAt`, `boundBy`, `limitAmount`, and the
+      status change.
     x-event-type: contract.contract.bound
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.3.9
+    x-implemented-by: repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ContractEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -134,13 +162,15 @@ channels:
     address: contract.contract.commuted
     title: contract.contract.commuted
     description: >
-      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when an approved commutation is executed; the same transaction
+      also emits `contract.contract.updated`. The payload carries the
+      commutation identity, type, basis, amounts, effective and valuation
+      dates, release document, `contractClosed`, and `releasedSecurities`.
     x-event-type: contract.contract.commuted
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.3.9
+    x-implemented-by: repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ContractEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -148,13 +178,16 @@ channels:
     address: contract.cession.recorded
     title: contract.cession.recorded
     description: >
-      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when a cession is recorded against a bound or in-force
+      contract. The cession is a child aggregate: the envelope uses the
+      cession id and version while the outbox partition key remains the
+      contract id. The payload carries the contract and cession identities
+      and the ceded amounts and percentages.
     x-event-type: contract.cession.recorded
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.3.9
+    x-implemented-by: repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ContractEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -313,26 +346,35 @@ channels:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
 operations:
+  publishContractContractUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/ContractContractUpdated'
+    summary: Publish contract.contract.updated
+    description: >
+      Publishes contract.contract.updated on every accepted contract status
+      write.
+    x-event-type: contract.contract.updated
+    x-status: implemented
   publishContractContractCreated:
     action: send
     channel:
       $ref: '#/channels/ContractContractCreated'
     summary: Publish contract.contract.created
     description: >
-      Publishes contract.contract.created through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes contract.contract.created through the transactional outbox
+      in the same transaction as the contract insert (SPEC 7.5.1).
     x-event-type: contract.contract.created
-    x-status: planned
+    x-status: implemented
   publishContractContractBound:
     action: send
     channel:
       $ref: '#/channels/ContractContractBound'
     summary: Publish contract.contract.bound
     description: >
-      Publishes contract.contract.bound through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes contract.contract.bound when the bind command succeeds.
     x-event-type: contract.contract.bound
-    x-status: planned
+    x-status: implemented
   publishContractContractSigned:
     action: send
     channel:
@@ -389,20 +431,19 @@ operations:
       $ref: '#/channels/ContractContractCommuted'
     summary: Publish contract.contract.commuted
     description: >
-      Publishes contract.contract.commuted through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes contract.contract.commuted when an approved commutation is
+      executed.
     x-event-type: contract.contract.commuted
-    x-status: planned
+    x-status: implemented
   publishContractCessionRecorded:
     action: send
     channel:
       $ref: '#/channels/ContractCessionRecorded'
     summary: Publish contract.cession.recorded
     description: >
-      Publishes contract.cession.recorded through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes contract.cession.recorded when a cession is recorded.
     x-event-type: contract.cession.recorded
-    x-status: planned
+    x-status: implemented
   publishContractBordereauReceived:
     action: send
     channel:
@@ -539,6 +580,55 @@ components:
             type: string
       payload:
         $ref: '../schemas/event-envelope.schema.json'
+    ContractContractUpdatedData:
+      name: ContractContractUpdatedData
+      title: contract.contract.updated data
+      summary: Minimal schema for the envelope data object of a contract status change.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - contractId
+          - contractNumber
+          - status
+          - version
+          - changedFields
+        properties:
+          contractId:
+            type: string
+            format: uuid
+          contractNumber:
+            type: string
+          contractType:
+            type: string
+          cedentPartyId:
+            type: string
+            format: uuid
+          reinsurerPartyId:
+            type: string
+            format: uuid
+          currency:
+            type: string
+            pattern: '^[A-Z]{3}$'
+          effectiveDate:
+            type: string
+            format: date
+          expirationDate:
+            type: string
+            format: date
+          status:
+            type: string
+          version:
+            type: integer
+          changedFields:
+            type: array
+            items:
+              type: string
+          from:
+            type: string
+          to:
+            type: string
   securitySchemes:
     outboxSignature:
       type: httpApiKey
@@ -549,14 +639,19 @@ components:
         t=<unix>,v1=<hex> (SPEC 7.5.1).
 x-vertical: contract
 x-spec-section: SPEC 11.3.9
-x-status: planned
+x-status: partial
 x-implementation:
-  publisher: none
+  publisher: eia-contract-expert
   subscriber: none
   notes: >
-    The current vertical slices emit no events; the outbox tables and the
-    dispatcher described in SPEC 7.5 are not implemented. This document is the
-    agreed event contract for the publisher that will be built.
+    Five Contract events are written to the transactional outbox in the same
+    transaction as the aggregate write: `created`, `updated`, `bound`,
+    `commuted`, and `cession.recorded`. A status write that targets a catalog
+    lifecycle state can additionally emit the cataloged `signed`, `endorsed`,
+    `expired`, or `cancelled` name; those names remain published and are not
+    part of the implemented subset recorded here. The remaining SPEC 11.3.9
+    names are planned. There is no business subscriber or subscription registry
+    yet.
 
 x-consumed-events:
   - policy.policy.issued

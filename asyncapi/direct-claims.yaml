@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:direct-claims
 info:
   title: EIA Direct Claims events
-  version: 1.0.0
+  version: 1.1.0
   summary: Published domain event names for the Direct Claims vertical.
   description: >
     Event contract for the Direct Claims vertical. The authoritative event names are
@@ -14,9 +14,12 @@ info:
     signature (SPEC 7.5.1). A channel address is the logical routing key and
     equals the event name; it is not a broker topic.
 
-    No publisher or subscriber exists in the current codebase. Every channel
-    and operation in this document is therefore marked x-status planned. The
-    catalog and cross-vertical subscriptions live in event-catalog.yaml.
+    The Direct Claims expert now publishes `direct.claim.registered`,
+    `direct.claim.updated`, `direct.claim.coverage-assessed`,
+    `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, and
+    `direct.claim.closed` through the transactional outbox; those channels and
+    operations are marked `x-status: implemented`. Every name already exists in
+    SPEC 11.4.9. The other SPEC 11.4.9 names are planned.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -36,13 +39,15 @@ channels:
     address: direct.claim.registered
     title: direct.claim.registered
     description: >
-      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when a claim is registered, in the same transaction as the
+      row. The payload carries the claim identity, policy and claimant,
+      book, status, row version, loss and report dates, cause code, reserve
+      amounts, and settlement authority.
     x-event-type: direct.claim.registered
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.4.9
+    x-implemented-by: repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -50,13 +55,14 @@ channels:
     address: direct.claim.updated
     title: direct.claim.updated
     description: >
-      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted on every accepted claim status change. The payload carries
+      `changedFields: [status]`, `from`, `to`, and the claim identity,
+      status, row version, and reserve context.
     x-event-type: direct.claim.updated
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.4.9
+    x-implemented-by: repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -64,13 +70,14 @@ channels:
     address: direct.claim.coverage-assessed
     title: direct.claim.coverage-assessed
     description: >
-      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when the coverage decision is recorded. The payload carries
+      the coverage decision identity, position, status, basis, allocation
+      method and percent, decision date, reviewer, and coverage version.
     x-event-type: direct.claim.coverage-assessed
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.4.9
+    x-implemented-by: repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -120,13 +127,15 @@ channels:
     address: direct.claim.reserve-changed
     title: direct.claim.reserve-changed
     description: >
-      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted for every append-only reserve component change. The payload
+      carries the reserve entry identity, component, amount and currency,
+      sequence, previous amount, delta, total current reserve, effective
+      date, reason, and authority.
     x-event-type: direct.claim.reserve-changed
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.4.9
+    x-implemented-by: repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -148,13 +157,15 @@ channels:
     address: direct.claim.settlement-authorized
     title: direct.claim.settlement-authorized
     description: >
-      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when a settlement is authorized. The payload carries the
+      settlement identity and number, amount and currency, status, version,
+      structure, release scope, approval authority, and authorization
+      evidence.
     x-event-type: direct.claim.settlement-authorized
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.4.9
+    x-implemented-by: repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -260,13 +271,14 @@ channels:
     address: direct.claim.closed
     title: direct.claim.closed
     description: >
-      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when a claim is closed. The payload carries `changedFields:
+      [status]`, `from`, `to`, `closedAt`, the final reserve amount, and the
+      claim identity and row version.
     x-event-type: direct.claim.closed
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.4.9
+    x-implemented-by: repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -319,30 +331,29 @@ operations:
       $ref: '#/channels/DirectClaimRegistered'
     summary: Publish direct.claim.registered
     description: >
-      Publishes direct.claim.registered through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes direct.claim.registered through the transactional outbox in
+      the same transaction as the claim insert (SPEC 7.5.1).
     x-event-type: direct.claim.registered
-    x-status: planned
+    x-status: implemented
   publishDirectClaimUpdated:
     action: send
     channel:
       $ref: '#/channels/DirectClaimUpdated'
     summary: Publish direct.claim.updated
     description: >
-      Publishes direct.claim.updated through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes direct.claim.updated on every accepted claim status change.
     x-event-type: direct.claim.updated
-    x-status: planned
+    x-status: implemented
   publishDirectClaimCoverageAssessed:
     action: send
     channel:
       $ref: '#/channels/DirectClaimCoverageAssessed'
     summary: Publish direct.claim.coverage-assessed
     description: >
-      Publishes direct.claim.coverage-assessed through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes direct.claim.coverage-assessed when the coverage decision is
+      recorded.
     x-event-type: direct.claim.coverage-assessed
-    x-status: planned
+    x-status: implemented
   publishDirectClaimInjuryRecorded:
     action: send
     channel:
@@ -379,10 +390,10 @@ operations:
       $ref: '#/channels/DirectClaimReserveChanged'
     summary: Publish direct.claim.reserve-changed
     description: >
-      Publishes direct.claim.reserve-changed through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes direct.claim.reserve-changed for every append-only reserve
+      change.
     x-event-type: direct.claim.reserve-changed
-    x-status: planned
+    x-status: implemented
   publishDirectClaimLitigationUpdated:
     action: send
     channel:
@@ -399,10 +410,10 @@ operations:
       $ref: '#/channels/DirectClaimSettlementAuthorized'
     summary: Publish direct.claim.settlement-authorized
     description: >
-      Publishes direct.claim.settlement-authorized through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes direct.claim.settlement-authorized when a settlement is
+      authorized.
     x-event-type: direct.claim.settlement-authorized
-    x-status: planned
+    x-status: implemented
   publishDirectClaimSettlementExecuted:
     action: send
     channel:
@@ -479,10 +490,9 @@ operations:
       $ref: '#/channels/DirectClaimClosed'
     summary: Publish direct.claim.closed
     description: >
-      Publishes direct.claim.closed through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes direct.claim.closed when a claim is closed.
     x-event-type: direct.claim.closed
-    x-status: planned
+    x-status: implemented
   publishDirectClaimReopened:
     action: send
     channel:
@@ -549,14 +559,16 @@ components:
         t=<unix>,v1=<hex> (SPEC 7.5.1).
 x-vertical: direct
 x-spec-section: SPEC 11.4.9
-x-status: planned
+x-status: partial
 x-implementation:
-  publisher: none
+  publisher: eia-direct-claims-expert
   subscriber: none
   notes: >
-    The current vertical slices emit no events; the outbox tables and the
-    dispatcher described in SPEC 7.5 are not implemented. This document is the
-    agreed event contract for the publisher that will be built.
+    Six Direct Claims events are written to the transactional outbox in the
+    same transaction as the aggregate or child write: `registered`, `updated`,
+    `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and
+    `closed`. The other SPEC 11.4.9 names remain planned. There is no business
+    subscriber or subscription registry yet.
 
 x-consumed-events:
   - policy.policy.issued

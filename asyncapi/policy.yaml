@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:policy
 info:
   title: EIA Policy events
-  version: 1.0.0
+  version: 1.1.0
   summary: Published domain event names for the Policy vertical.
   description: >
     Event contract for the Policy vertical. The authoritative event names are
@@ -14,9 +14,13 @@ info:
     signature (SPEC 7.5.1). A channel address is the logical routing key and
     equals the event name; it is not a broker topic.
 
-    No publisher or subscriber exists in the current codebase. Every channel
-    and operation in this document is therefore marked x-status planned. The
-    catalog and cross-vertical subscriptions live in event-catalog.yaml.
+    The Policy expert now publishes `policy.policy.created`,
+    `policy.policy.updated`, `policy.policy.version-issued`,
+    `policy.policy.endorsed`, `policy.policy.cancelled`, and
+    `policy.policy.reinstated` through the transactional outbox; those channels
+    and operations are marked `x-status: implemented`. The `created` and
+    `updated` names are additive: the catalog had no generic create or update
+    fact. The remaining SPEC 11.2.9 names are planned.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -32,6 +36,41 @@ servers:
       Each subscriber registers an HTTPS endpoint and signing key. The outbox
       posts one event per request and requires a 2xx acknowledgement.
 channels:
+  PolicyPolicyCreated:
+    address: policy.policy.created
+    title: policy.policy.created
+    description: >
+      Emitted when a policy is persisted, in the same transaction as the
+      row. The payload carries the policy identity, status, row version,
+      term dates, premium and limit amounts as decimal strings, product
+      code, and insured party.
+    x-event-type: policy.policy.created
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.2.9
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      PolicyPolicyCreatedData:
+        $ref: '#/components/messages/PolicyPolicyCreatedData'
+  PolicyPolicyUpdated:
+    address: policy.policy.updated
+    title: policy.policy.updated
+    description: >
+      Emitted on every accepted policy status change. The payload carries
+      `changedFields: [status]`, `from`, `to`, the optional `reason`, and
+      the policy identity and row version.
+    x-event-type: policy.policy.updated
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.2.9
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      PolicyPolicyUpdatedData:
+        $ref: '#/components/messages/PolicyPolicyUpdatedData'
   PolicyPolicyQuoted:
     address: policy.policy.quoted
     title: policy.policy.quoted
@@ -78,13 +117,15 @@ channels:
     address: policy.policy.version-issued
     title: policy.policy.version-issued
     description: >
-      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when a policy version is issued, including the version issued
+      by an endorsement, cancellation, or reinstatement. The payload carries
+      the policy version identity, number, change type, effective window,
+      immutable hash, and premium delta.
     x-event-type: policy.policy.version-issued
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.2.9
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -92,13 +133,15 @@ channels:
     address: policy.policy.endorsed
     title: policy.policy.endorsed
     description: >
-      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when an endorsement is posted; the same command also issues a
+      policy version and emits `policy.policy.version-issued`. The payload
+      carries the endorsement identity, type, effective date, premium delta,
+      coverage impact, and the issued version.
     x-event-type: policy.policy.endorsed
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.2.9
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -106,13 +149,15 @@ channels:
     address: policy.policy.cancelled
     title: policy.policy.cancelled
     description: >
-      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when a cancellation is accepted; the same command also issues
+      a policy version and emits `policy.policy.version-issued`. The payload
+      carries the cancellation identity, type, reason, effective date,
+      notice and term days, pro-rata percent, earned and return premium.
     x-event-type: policy.policy.cancelled
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.2.9
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -120,13 +165,15 @@ channels:
     address: policy.policy.reinstated
     title: policy.policy.reinstated
     description: >
-      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when a cancelled policy is reinstated; the same command also
+      issues a policy version and emits `policy.policy.version-issued`. The
+      payload carries the reinstatement identity, cancellation reference,
+      effective date, reason, approval evidence, and the issued version.
     x-event-type: policy.policy.reinstated
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.2.9
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -285,6 +332,26 @@ channels:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
 operations:
+  publishPolicyPolicyCreated:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyPolicyCreated'
+    summary: Publish policy.policy.created
+    description: >
+      Publishes policy.policy.created through the transactional outbox in
+      the same transaction as the policy insert (SPEC 7.5.1).
+    x-event-type: policy.policy.created
+    x-status: implemented
+  publishPolicyPolicyUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyPolicyUpdated'
+    summary: Publish policy.policy.updated
+    description: >
+      Publishes policy.policy.updated on every accepted policy status
+      change.
+    x-event-type: policy.policy.updated
+    x-status: implemented
   publishPolicyPolicyQuoted:
     action: send
     channel:
@@ -321,40 +388,38 @@ operations:
       $ref: '#/channels/PolicyPolicyVersionIssued'
     summary: Publish policy.policy.version-issued
     description: >
-      Publishes policy.policy.version-issued through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes policy.policy.version-issued when a policy version is
+      issued.
     x-event-type: policy.policy.version-issued
-    x-status: planned
+    x-status: implemented
   publishPolicyPolicyEndorsed:
     action: send
     channel:
       $ref: '#/channels/PolicyPolicyEndorsed'
     summary: Publish policy.policy.endorsed
     description: >
-      Publishes policy.policy.endorsed through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes policy.policy.endorsed when an endorsement is posted.
     x-event-type: policy.policy.endorsed
-    x-status: planned
+    x-status: implemented
   publishPolicyPolicyCancelled:
     action: send
     channel:
       $ref: '#/channels/PolicyPolicyCancelled'
     summary: Publish policy.policy.cancelled
     description: >
-      Publishes policy.policy.cancelled through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes policy.policy.cancelled when a cancellation is accepted.
     x-event-type: policy.policy.cancelled
-    x-status: planned
+    x-status: implemented
   publishPolicyPolicyReinstated:
     action: send
     channel:
       $ref: '#/channels/PolicyPolicyReinstated'
     summary: Publish policy.policy.reinstated
     description: >
-      Publishes policy.policy.reinstated through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes policy.policy.reinstated when a cancelled policy is
+      reinstated.
     x-event-type: policy.policy.reinstated
-    x-status: planned
+    x-status: implemented
   publishPolicyPolicyRenewed:
     action: send
     channel:
@@ -491,6 +556,106 @@ components:
             type: string
       payload:
         $ref: '../schemas/event-envelope.schema.json'
+    PolicyPolicyCreatedData:
+      name: PolicyPolicyCreatedData
+      title: policy.policy.created data
+      summary: Minimal schema for the envelope data object of a created policy.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - policyId
+          - policyNumber
+          - status
+          - version
+        properties:
+          policyId:
+            type: string
+            format: uuid
+          policyNumber:
+            type: string
+          status:
+            type: string
+          version:
+            type: integer
+          productCode:
+            type: string
+          insuredPartyId:
+            type: string
+            format: uuid
+          effectiveDate:
+            type: string
+            format: date
+          expirationDate:
+            type: string
+            format: date
+          premiumAmount:
+            type: string
+            description: Decimal string with up to four fraction digits (SPEC 10.3).
+          premiumCurrency:
+            type: string
+            pattern: '^[A-Z]{3}$'
+          limitAmount:
+            type: string
+          limitCurrency:
+            type: string
+            pattern: '^[A-Z]{3}$'
+          createdAt:
+            type: string
+            format: date-time
+    PolicyPolicyUpdatedData:
+      name: PolicyPolicyUpdatedData
+      title: policy.policy.updated data
+      summary: Minimal schema for the envelope data object of a policy status change.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - policyId
+          - policyNumber
+          - status
+          - version
+          - changedFields
+        properties:
+          policyId:
+            type: string
+            format: uuid
+          policyNumber:
+            type: string
+          status:
+            type: string
+          version:
+            type: integer
+          changedFields:
+            type: array
+            items:
+              type: string
+          from:
+            type: string
+            description: Status before the accepted transition.
+          to:
+            type: string
+            description: Status after the accepted transition.
+          reason:
+            type: string
+          effectiveDate:
+            type: string
+            format: date
+          expirationDate:
+            type: string
+            format: date
+          premiumAmount:
+            type: string
+          premiumCurrency:
+            type: string
+            pattern: '^[A-Z]{3}$'
+          limitAmount:
+            type: string
+          limitCurrency:
+            type: string
+            pattern: '^[A-Z]{3}$'
   securitySchemes:
     outboxSignature:
       type: httpApiKey
@@ -501,14 +666,17 @@ components:
         t=<unix>,v1=<hex> (SPEC 7.5.1).
 x-vertical: policy
 x-spec-section: SPEC 11.2.9
-x-status: planned
+x-status: partial
 x-implementation:
-  publisher: none
+  publisher: eia-policy-expert
   subscriber: none
   notes: >
-    The current vertical slices emit no events; the outbox tables and the
-    dispatcher described in SPEC 7.5 are not implemented. This document is the
-    agreed event contract for the publisher that will be built.
+    Six Policy events are written to the transactional outbox in the same
+    transaction as the aggregate write and dispatched by the platform outbox
+    dispatcher when `eia.outbox.enabled=true`: `created`, `updated`,
+    `version-issued`, `endorsed`, `cancelled`, and `reinstated`. The other
+    SPEC 11.2.9 names remain planned. There is no business subscriber or
+    subscription registry yet.
 
 x-consumed-events:
   - direct.claim.registered

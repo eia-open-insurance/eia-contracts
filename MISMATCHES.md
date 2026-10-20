@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-19 (Round 5).
+Status: open, reviewed 2026-10-20 (outbox completion).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -55,7 +55,7 @@ removed per the resolution policy.
 | M-11 | Illegal-transition status codes: Policy is 409, five verticals are 400 | M |
 | M-12 | Resource models are narrower than the SPEC aggregates | M |
 | M-13 | Field names differ from the SPEC representations | L |
-| M-14 | Six experts publish a subset of their events; no subscriber or inbox | M |
+| M-14 | Ten experts publish a subset of their events; the platform inbox has no business subscriber | M |
 | M-16 | Assumed Claims mounts two public path sets | L |
 | M-17 | Error content type is `application/json` outside Policy, Notifications, and one book filter | M |
 | M-18 | SPEC 12.4 example envelope omits the book required by SPEC 3.6 | L |
@@ -461,34 +461,57 @@ change and needs a major version.
 ## M-14 Eventing
 
 The platform gained a transactional outbox library in Round 2
-(`eia-platform/libs`) and the Party expert writes its event in the same
+(`eia-platform/libs`) and the Party expert wrote its event in the same
 transaction as the Party row. Round 5 rolled the outbox out to five more
-experts. The implemented publishers are:
+experts, and the 2026-10-20 completion added the four remaining verticals. All
+ten publishing verticals now emit a subset:
 
 | Vertical | Implemented event names | Source |
 |---|---|---|
 | Party | `party.party.created`, `party.party.updated` | `repos/eia-party-expert/.../PartyEvents.java` |
+| Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated` | `repos/eia-policy-expert/.../PolicyEvents.java` |
+| Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded` | `repos/eia-contract-expert/.../ContractEvents.java` |
+| Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.closed` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
+| Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
 | Cession | `cession.cession.created`, `cession.cession.updated`, `cession.cession.handed-off` | `repos/eia-cession-expert/.../CessionEvents.java` |
 | Retrocession | `retrocession.retrocession.created`, `retrocession.retrocession.updated`, `retrocession.retrocession.handed-off` | `repos/eia-retrocession-expert/.../RetrocessionEvents.java` |
 | Document | `document.document.created`, `document.document.updated`, `document.document.status-changed` | `repos/eia-document-expert/.../DocumentEvents.java` |
 | Payment | `payment.payment.created`, `payment.payment.updated`, `payment.payment.status-changed` | `repos/eia-payment-expert/.../PaymentEvents.java` |
 | Notifications | `notifications.notification.created`, `notifications.notification.sent` | `repos/eia-notifications-expert/.../NotificationEvents.java` |
 
-Each `*Service` calls `outbox.insert(OutboxEvent.fromEnvelope(...))` in the same
-transaction as the aggregate write; for example
-`repos/eia-payment-expert/.../PaymentService.java:39-66` and
-`repos/eia-document-expert/.../DocumentService.java:38-55`.
+Each controller or service calls `outbox.insert(OutboxEvent.fromEnvelope(...))`
+in the same transaction as the aggregate write; for example
+`repos/eia-payment-expert/.../PaymentService.java:39-66`,
+`repos/eia-document-expert/.../DocumentService.java:38-55`, and the four
+completion tests `PolicyOutboxIntegrationTest`, `ContractOutboxIntegrationTest`,
+`DirectClaimsOutboxIntegrationTest`, and `AssumedClaimsOutboxIntegrationTest`.
 
 Every other AsyncAPI channel and operation is marked `x-status: planned`, and
 the catalog carries the implemented subset per vertical. The platform outbox
 dispatcher (`RestClientOutboxDispatcher`, `OutboxDispatchService`,
 `OutboxDispatchJob`) is implemented and is scheduled by a Quartz trigger in
-each of these services when `eia.outbox.enabled=true`; it posts each event to a
-subscriber-defined HTTPS endpoint with the HMAC-SHA256 signature. There is
-still no subscriber, inbox, subscription registry, or gap detection, so no
-event has been consumed by another vertical. The `consumed` lists in the
-catalog remain the planned SPEC subscriptions. The event names also differ from
-the SPEC catalog names; see M-22.
+each expert when `eia.outbox.enabled=true`; it posts each event to the
+subscriber-defined HTTPS endpoint with the HMAC-SHA256 signature. The platform
+`event-ingest` service (`eia-platform/event-ingest`, port 8102) is the inbox: it
+validates the canonical envelope, verifies the signature when configured, and
+stores each event idempotently in `eia_platform.inbox_event`; the
+`/api/v1/events/{recent,stats}` endpoints expose the stream. It is not a
+business subscriber: no vertical consumes another vertical's events, there is
+no subscription registry or gap detection, and the `consumed` lists in the
+catalog remain the planned SPEC subscriptions.
+
+The Contract expert's generic status command can additionally emit the
+already-cataloged `contract.contract.signed`, `.endorsed`, `.expired`, and
+`.cancelled` names when the target status matches. Those names remain published
+and are not part of the implemented subset recorded in this change; the catalog
+declares only the five Contract events listed above.
+
+Live evidence (2026-10-20): the running `eia-event-ingest` pod reported 14
+events, all processed, and the recent types included `policy.policy.created`,
+`contract.contract.created`, `direct.claim.registered`, and
+`assumed.claim.registered`. The update and lifecycle names had not been
+exercised by a live smoke at the time of this audit, so their implementation
+status rests on the source and the integration tests, not on inbox data.
 
 ## M-16 Assumed Claims path alias
 
@@ -579,24 +602,35 @@ the synchronous behaviour until that decision.
 
 ## M-22 Event names differ from the SPEC catalog
 
-The outbox rollout uses the names actually emitted by the services, which do
-not match every name in SPEC 11.9.6, 11.10.6, 11.6.9, 11.7.10, and 11.8.9:
+The outbox rollout uses the names actually emitted by the services. The four
+completed verticals add four names that SPEC 11 does not define; the other
+implemented names exist in the SPEC tables. The remaining differences are:
 
 | Vertical | Implemented | SPEC /
 planned name |
 |---|---|---|
+| Policy | `policy.policy.created` / `.updated` | No SPEC name: SPEC 11.2.9 starts at `policy.policy.quoted`. `version-issued`, `endorsed`, `cancelled`, and `reinstated` match SPEC. |
+| Contract | `contract.contract.updated` | No SPEC name: SPEC 11.3.9 lists lifecycle verbs only. `created`, `bound`, `commuted`, and `cession.recorded` match SPEC. |
+| Direct Claims | none | All six implemented names match SPEC 11.4.9. |
+| Assumed Claims | `assumed.claim.updated` | No SPEC name: SPEC 11.5.9 lists lifecycle verbs only. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
 | Cession | `cession.cession.created` / `.updated` / `.handed-off` | `cession.case.created`, `cession.handoff.sent`/`.acknowledged` |
 | Retrocession | `retrocession.retrocession.created` / `.updated` / `.handed-off` | `retrocession.case.created`, `retrocession.handoff.sent`/`.acknowledged` |
 | Document | `document.document.created` / `.updated` / `.status-changed` | `document.document.registered`, plus the SPEC lifecycle verbs |
 | Payment | `payment.payment.updated` / `.status-changed` | the SPEC per-verb names such as `payment.payment.authorized` |
 | Notifications | `notifications.notification.created` / `.sent` | `notifications.notification.issued` / `.delivered` |
 
-The catalog lists both sets and marks only the implemented ones. Publishing a
-SPEC name in addition to the implemented name is additive; renaming or removing
-an implemented name is breaking and needs the EV-05 dual-publish window.
+The catalog lists both sets and marks only the implemented ones. The four new
+names are additive under EV-05: the catalog now publishes them and records them
+in the implemented subset. Publishing a SPEC name in addition to the
+implemented name is additive; renaming or removing an implemented name is
+breaking and needs the EV-05 dual-publish window.
 
 Evidence:
 
+- `repos/eia-policy-expert/.../PolicyEvents.java:37-42`
+- `repos/eia-contract-expert/.../ContractEvents.java:41-49`
+- `repos/eia-direct-claims-expert/.../ClaimEvents.java:45-50`
+- `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java:45-53`
 - `repos/eia-cession-expert/.../CessionEvents.java:27-29`
 - `repos/eia-retrocession-expert/.../RetrocessionEvents.java:28-30`
 - `repos/eia-document-expert/.../DocumentEvents.java:29-31`
@@ -609,7 +643,8 @@ both until that decision.
 
 ## Validation evidence
 
-The repository validator was run on the working tree after the Round 5 changes:
+The repository validator was run on the working tree after the 2026-10-20
+outbox completion:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -631,16 +666,16 @@ OpenAPI 3.1 documents
 
 AsyncAPI 3 documents
   OK asyncapi/party.yaml  9 event channels
-  OK asyncapi/policy.yaml  18 event channels
-  OK asyncapi/contract.yaml  20 event channels
+  OK asyncapi/policy.yaml  20 event channels
+  OK asyncapi/contract.yaml  21 event channels
   OK asyncapi/direct-claims.yaml  20 event channels
-  OK asyncapi/assumed-claims.yaml  15 event channels
+  OK asyncapi/assumed-claims.yaml  16 event channels
   OK asyncapi/cession.yaml  17 event channels
   OK asyncapi/retrocession.yaml  17 event channels
   OK asyncapi/document.yaml  18 event channels
   OK asyncapi/payment.yaml  18 event channels
   OK asyncapi/notifications.yaml  12 event channels
-  OK catalog: 164 unique published events across 10 verticals
+  OK catalog: 168 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -648,7 +683,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 8481 checks, 0 failures
+  PASS 8607 checks, 0 failures
 ```
 
 Additional checks and limits:

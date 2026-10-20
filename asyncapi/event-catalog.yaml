@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.1.0
+  version: 1.2.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -16,14 +16,17 @@ info:
     no broker (ADR-0004); delivery is an authenticated HTTPS POST from the
     transactional outbox (SPEC 7.5.1).
 
-    Round 5 added a transactional-outbox rollout. The Party, Cession,
-    Retrocession, Document, Payment, and Notifications experts now write a
-    subset of their events in the same transaction as the aggregate write.
-    Each vertical entry lists that subset under `implemented`; `published`
-    remains the full agreed contract, so an event is planned until it appears
-    in both lists. There is still no subscriber, inbox, or subscription
-    registry. Changing an existing name is a breaking change and requires a new
-    event and a dual-publish window; adding an event is a compatible change.
+    The transactional-outbox rollout now covers all ten publishing verticals.
+    Each expert writes a subset of its events in the same transaction as the
+    aggregate write. Each vertical entry lists that subset under `implemented`;
+    `published` remains the full agreed contract, so an event is planned until
+    it appears in both lists. The platform event-ingest service is the inbox:
+    it validates the canonical envelope, verifies the HMAC signature when
+    configured, and stores each event idempotently. There is still no business
+    subscriber, subscription registry, or gap detection, and no vertical
+    consumes another vertical's events. Changing an existing name is a breaking
+    change and requires a new event and a dual-publish window; adding an event
+    is a compatible change.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -123,6 +126,8 @@ x-event-catalog:
     eventVertical: policy
     specSection: SPEC 11.2.9
     published:
+      - policy.policy.created
+      - policy.policy.updated
       - policy.policy.quoted
       - policy.policy.bound
       - policy.policy.issued
@@ -141,7 +146,13 @@ x-event-catalog:
       - policy.aggregate.reconciled
       - policy.mass-tort-profile.updated
       - policy.coverage-block.updated
-    implemented: []
+    implemented:
+      - policy.policy.created
+      - policy.policy.updated
+      - policy.policy.version-issued
+      - policy.policy.endorsed
+      - policy.policy.cancelled
+      - policy.policy.reinstated
     consumed:
       - direct.claim.registered
       - direct.claim.allocated
@@ -156,6 +167,7 @@ x-event-catalog:
     specSection: SPEC 11.3.9
     published:
       - contract.contract.created
+      - contract.contract.updated
       - contract.contract.bound
       - contract.contract.signed
       - contract.contract.endorsed
@@ -175,7 +187,12 @@ x-event-catalog:
       - contract.reinstatement.applied
       - contract.premium.adjusted
       - contract.loss-aggregate.updated
-    implemented: []
+    implemented:
+      - contract.contract.created
+      - contract.contract.updated
+      - contract.contract.bound
+      - contract.contract.commuted
+      - contract.cession.recorded
     consumed:
       - policy.policy.issued
       - policy.policy.endorsed
@@ -213,7 +230,13 @@ x-event-catalog:
       - direct.claim.reopened
       - direct.claim.transferred
       - direct.claim.aggregate-erosion-requested
-    implemented: []
+    implemented:
+      - direct.claim.registered
+      - direct.claim.updated
+      - direct.claim.coverage-assessed
+      - direct.claim.reserve-changed
+      - direct.claim.settlement-authorized
+      - direct.claim.closed
     consumed:
       - policy.policy.issued
       - policy.policy.endorsed
@@ -230,6 +253,7 @@ x-event-catalog:
     specSection: SPEC 11.5.9
     published:
       - assumed.claim.registered
+      - assumed.claim.updated
       - assumed.claim.loss-advice-received
       - assumed.claim.loss-advice-posted
       - assumed.claim.reserve-established
@@ -244,7 +268,16 @@ x-event-catalog:
       - assumed.claim.closed
       - assumed.claim.reopened
       - assumed.claim.reinstatement-requested
-    implemented: []
+    implemented:
+      - assumed.claim.registered
+      - assumed.claim.updated
+      - assumed.claim.closed
+      - assumed.claim.reopened
+      - assumed.claim.loss-advice-posted
+      - assumed.claim.reserve-changed
+      - assumed.claim.cash-call-requested
+      - assumed.claim.recovery-recorded
+      - assumed.claim.commuted
     consumed:
       - contract.contract.bound
       - contract.contract.commuted
@@ -438,12 +471,13 @@ x-delivery:
     - SPEC 7.5.2 inbox and gap detection
     - SPEC 7.5.3 subscriptions
 x-implementation:
-  publisher: eia-party-expert, eia-cession-expert, eia-retrocession-expert, eia-document-expert, eia-payment-expert, eia-notifications-expert
-  subscriber: none
+  publisher: eia-party-expert, eia-policy-expert, eia-contract-expert, eia-direct-claims-expert, eia-assumed-claims-expert, eia-cession-expert, eia-retrocession-expert, eia-document-expert, eia-payment-expert, eia-notifications-expert
+  subscriber: eia-platform event-ingest inbox (no business subscriber)
   notes: >
-    Six experts write a subset of their catalog events to the transactional
+    All ten experts write a subset of their catalog events to the transactional
     outbox in the same transaction as the aggregate write. The platform outbox
-    dispatcher delivers them when `eia.outbox.enabled=true`. No inbox,
-    subscriber, or subscription registry exists, and no event has yet been
-    consumed by another vertical, so every `consumed` list remains the planned
-    SPEC subscription.
+    dispatcher delivers them to the event-ingest inbox when
+    `eia.outbox.enabled=true`; the inbox validates the canonical envelope,
+    verifies the HMAC signature when configured, and deduplicates by event id.
+    No vertical consumes another vertical's events, so every `consumed` list
+    remains the planned SPEC subscription.
