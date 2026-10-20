@@ -67,7 +67,7 @@ removed per the resolution policy.
 | M-22 | Implemented outbox event names differ from the SPEC catalog names | M |
 | M-23 | Global search paths and validation differ from the SPEC naming and canonical limit rules | M |
 | M-24 | Payment source link is a flat triple, not the SPEC claim projection | M |
-| M-25 | Claim assignment contract gaps: assumed team required in the domain, direct negative version is 409, actor-header alias | M |
+| M-25 | Claim assignment contract alignment: team is optional, negative expectedVersion is 400, and X-EIA-Actor is the only actor header. Resolved 2026-10-20. | — |
 
 ## M-01 Public base paths
 
@@ -1066,3 +1066,4 @@ Additional checks and limits:
    updates the contract, and record the closure in the closed-mismatches table.
 3. A new deviation must be added here with the same evidence standard: source
    path and symbol or line, and the SPEC section it violates.
+
