@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-20 (global-search contract).
+Status: open, reviewed 2026-10-20 (Direct Claims task and note contract).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -314,7 +314,30 @@ same header on both the public and the expert route:
   persists, or replays an idempotency key, and `Idempotent-Replayed` is not
   emitted elsewhere.
 
+Direct Claims task and note POSTs are the counter-example:
+
+- Neither `POST /api/v1/claims/{claimId}/tasks` nor
+  `POST /api/v1/claims/{claimId}/notes` accepts an `Idempotency-Key`, and
+  neither the domain nor the expert stores a request hash or a dedupe row.
+- The expert assigns a fresh `TSK-{year}-{7 digits}` or
+  `NTE-{year}-{7 digits}` number and inserts a row on every accepted request. A
+  client retry after a timeout therefore opens a second task or appends a second
+  note; the duplicate is visible in `GET .../tasks` or `GET .../notes`.
+- A concurrent parent-claim version bump is 409. The task `PATCH` is
+  version-checked against the task version and is retry-safe: a command that
+  repeats the current status returns the existing task and writes no event.
+- Clients must not blind-retry the two POSTs; they should read the collection
+  and reconcile before retrying. No `Idempotent-Replayed` header is emitted.
+
 Evidence:
+
+- `repos/eia-direct-claims-domain/.../ClaimDetailController.java` (tasks and
+  notes), `ClaimDetailService.addTask`/`addNote`,
+  `ClaimClient.addTask`/`changeTaskStatus`/`addNote`.
+- `repos/eia-direct-claims-expert/.../ClaimTaskController.java`,
+  `ClaimTaskService.create`/`changeStatus`, `ClaimNoteController.java`,
+  `ClaimNoteService.add`.
+- `repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/ClaimTaskNoteEndpointTest.java`.
 
 - `repos/eia-policy-domain/.../IdempotencyKeys.java`,
   `PolicyController.java` (`Idempotency-Key` request header),
@@ -609,16 +632,16 @@ the synchronous behaviour until that decision.
 
 ## M-22 Event names differ from the SPEC catalog
 
-The outbox rollout uses the names actually emitted by the services. The four
-completed verticals add four names that SPEC 11 does not define; the other
-implemented names exist in the SPEC tables. The remaining differences are:
+The outbox rollout uses the names actually emitted by the services. Several
+implemented names have no SPEC 11 definition; the rest exist in the SPEC
+tables. The differences are:
 
 | Vertical | Implemented | SPEC /
 planned name |
 |---|---|---|
 | Policy | `policy.policy.created` / `.updated` | No SPEC name: SPEC 11.2.9 starts at `policy.policy.quoted`. `version-issued`, `endorsed`, `cancelled`, and `reinstated` match SPEC. |
 | Contract | `contract.contract.updated` | No SPEC name: SPEC 11.3.9 lists lifecycle verbs only. `created`, `bound`, `commuted`, and `cession.recorded` match SPEC. |
-| Direct Claims | none | All six implemented names match SPEC 11.4.9. |
+| Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC name: SPEC 11.4.9 defines no task or note event. `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and `closed` match SPEC. |
 | Assumed Claims | `assumed.claim.updated` | No SPEC name: SPEC 11.5.9 lists lifecycle verbs only. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
 | Cession | `cession.cession.created` / `.updated` / `.handed-off` | `cession.case.created`, `cession.handoff.sent`/`.acknowledged` |
 | Retrocession | `retrocession.retrocession.created` / `.updated` / `.handed-off` | `retrocession.case.created`, `retrocession.handoff.sent`/`.acknowledged` |
@@ -626,17 +649,17 @@ planned name |
 | Payment | `payment.payment.updated` / `.status-changed` | the SPEC per-verb names such as `payment.payment.authorized` |
 | Notifications | `notifications.notification.created` / `.sent` | `notifications.notification.issued` / `.delivered` |
 
-The catalog lists both sets and marks only the implemented ones. The four new
-names are additive under EV-05: the catalog now publishes them and records them
-in the implemented subset. Publishing a SPEC name in addition to the
-implemented name is additive; renaming or removing an implemented name is
-breaking and needs the EV-05 dual-publish window.
+The catalog lists both sets and marks only the implemented ones. The names
+without a SPEC equivalent are additive under EV-05: the catalog now publishes
+them and records them in the implemented subset. Publishing a SPEC name in
+addition to the implemented name is additive; renaming or removing an
+implemented name is breaking and needs the EV-05 dual-publish window.
 
 Evidence:
 
 - `repos/eia-policy-expert/.../PolicyEvents.java:37-42`
 - `repos/eia-contract-expert/.../ContractEvents.java:41-49`
-- `repos/eia-direct-claims-expert/.../ClaimEvents.java:45-50`
+- `repos/eia-direct-claims-expert/.../ClaimEvents.java:59-62`
 - `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java:45-53`
 - `repos/eia-cession-expert/.../CessionEvents.java:27-29`
 - `repos/eia-retrocession-expert/.../RetrocessionEvents.java:28-30`
@@ -730,7 +753,7 @@ and every web remote already call the documented routes.
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-global-search contract:
+Direct Claims task and note contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -742,7 +765,7 @@ OpenAPI 3.1 documents
   OK openapi/party.yaml  5 paths, 7 operations
   OK openapi/policy.yaml  37 paths, 47 operations
   OK openapi/contract.yaml  36 paths, 52 operations
-  OK openapi/direct-claims.yaml  39 paths, 57 operations
+  OK openapi/direct-claims.yaml  45 paths, 67 operations
   OK openapi/assumed-claims.yaml  36 paths, 51 operations
   OK openapi/cession.yaml  9 paths, 11 operations
   OK openapi/retrocession.yaml  9 paths, 11 operations
@@ -754,14 +777,14 @@ AsyncAPI 3 documents
   OK asyncapi/party.yaml  9 event channels
   OK asyncapi/policy.yaml  20 event channels
   OK asyncapi/contract.yaml  21 event channels
-  OK asyncapi/direct-claims.yaml  20 event channels
+  OK asyncapi/direct-claims.yaml  24 event channels
   OK asyncapi/assumed-claims.yaml  16 event channels
   OK asyncapi/cession.yaml  17 event channels
   OK asyncapi/retrocession.yaml  17 event channels
   OK asyncapi/document.yaml  18 event channels
   OK asyncapi/payment.yaml  18 event channels
   OK asyncapi/notifications.yaml  12 event channels
-  OK catalog: 168 unique published events across 10 verticals
+  OK catalog: 172 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -769,7 +792,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 8874 checks, 0 failures
+  PASS 9155 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -789,7 +812,11 @@ Additional checks and limits:
   failure message. The 2026-10-20 pass added three more negative checks that
   each fail as expected: removing `/api/v1/parties/search`, dropping `items`
   from the required `SearchResponse` keys, and declaring a book header on the
-  non-book-scoped `/api/v1/documents/search`.
+  non-book-scoped `/api/v1/documents/search`. The task/note pass added three
+  more: renaming the `/api/v1/claims/{claimId}/tasks` path, renaming the
+  `TaskCreate` schema, and dropping `direct.claim.task-created` from the Direct
+  Claims `implemented` list each fail with the specific path, schema, or
+  implemented-event message.
 
 ## Resolution policy
 

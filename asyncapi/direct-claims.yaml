@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:direct-claims
 info:
   title: EIA Direct Claims events
-  version: 1.1.0
+  version: 1.2.0
   summary: Published domain event names for the Direct Claims vertical.
   description: >
     Event contract for the Direct Claims vertical. The authoritative event names are
@@ -16,10 +16,14 @@ info:
 
     The Direct Claims expert now publishes `direct.claim.registered`,
     `direct.claim.updated`, `direct.claim.coverage-assessed`,
-    `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, and
+    `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`,
+    `direct.claim.task-created`, `direct.claim.task-completed`,
+    `direct.claim.task-updated`, `direct.claim.note-added`, and
     `direct.claim.closed` through the transactional outbox; those channels and
-    operations are marked `x-status: implemented`. Every name already exists in
-    SPEC 11.4.9. The other SPEC 11.4.9 names are planned.
+    operations are marked `x-status: implemented`. The task and note names are
+    new in this contract and have no SPEC 11.4.9 equivalent (MISMATCHES.md
+    M-22); every other implemented name already exists in the SPEC. The other
+    SPEC 11.4.9 names are planned.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -132,6 +136,74 @@ channels:
       sequence, previous amount, delta, total current reserve, effective
       date, reason, and authority.
     x-event-type: direct.claim.reserve-changed
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.4.9
+    x-implemented-by: repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimTaskCreated:
+    address: direct.claim.task-created
+    title: direct.claim.task-created
+    description: >
+      Emitted when a diary task is opened, in the same transaction as the task
+      row and the parent claim version bump. The payload carries the claim
+      identity and `claimStatus`, the task identity and number, title,
+      description, due date, priority, task status, assignee, task version,
+      task timestamps, and `completedAt` when set. This name is new in this
+      contract and has no SPEC 11.4.9 equivalent (MISMATCHES.md M-22).
+    x-event-type: direct.claim.task-created
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.4.9
+    x-implemented-by: repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimTaskCompleted:
+    address: direct.claim.task-completed
+    title: direct.claim.task-completed
+    description: >
+      Emitted when a task moves to COMPLETE. The payload carries the claim
+      identity and `claimStatus`, the task fields after the change,
+      `changedFields: [status]`, `from`, and `to`. This name is new in this
+      contract and has no SPEC 11.4.9 equivalent (MISMATCHES.md M-22).
+    x-event-type: direct.claim.task-completed
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.4.9
+    x-implemented-by: repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimTaskUpdated:
+    address: direct.claim.task-updated
+    title: direct.claim.task-updated
+    description: >
+      Emitted when a task is cancelled or reopened. The payload is the same
+      shape as `direct.claim.task-completed` and carries `changedFields:
+      [status]`, `from`, and `to`; a transition to COMPLETE uses
+      `direct.claim.task-completed` instead. This name is new in this contract
+      and has no SPEC 11.4.9 equivalent (MISMATCHES.md M-22).
+    x-event-type: direct.claim.task-updated
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.4.9
+    x-implemented-by: repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimNoteAdded:
+    address: direct.claim.note-added
+    title: direct.claim.note-added
+    description: >
+      Emitted when an append-only note is written in the same transaction as
+      the note row and the parent claim version bump. The payload carries
+      `noteId`, `noteNumber`, `noteType`, `body`, `author`, and `createdAt`
+      plus the claim identity and version. This name is new in this contract
+      and has no SPEC 11.4.9 equivalent (MISMATCHES.md M-22).
+    x-event-type: direct.claim.note-added
     x-event-version: 1
     x-status: implemented
     x-spec-section: SPEC 11.4.9
@@ -394,6 +466,46 @@ operations:
       change.
     x-event-type: direct.claim.reserve-changed
     x-status: implemented
+  publishDirectClaimTaskCreated:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimTaskCreated'
+    summary: Publish direct.claim.task-created
+    description: >
+      Publishes direct.claim.task-created through the transactional outbox in
+      the same transaction as the task insert and the parent claim version
+      bump.
+    x-event-type: direct.claim.task-created
+    x-status: implemented
+  publishDirectClaimTaskCompleted:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimTaskCompleted'
+    summary: Publish direct.claim.task-completed
+    description: >
+      Publishes direct.claim.task-completed when a task status change reaches
+      COMPLETE.
+    x-event-type: direct.claim.task-completed
+    x-status: implemented
+  publishDirectClaimTaskUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimTaskUpdated'
+    summary: Publish direct.claim.task-updated
+    description: >
+      Publishes direct.claim.task-updated when a task is cancelled or reopened.
+    x-event-type: direct.claim.task-updated
+    x-status: implemented
+  publishDirectClaimNoteAdded:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimNoteAdded'
+    summary: Publish direct.claim.note-added
+    description: >
+      Publishes direct.claim.note-added through the transactional outbox in the
+      same transaction as the note insert and the parent claim version bump.
+    x-event-type: direct.claim.note-added
+    x-status: implemented
   publishDirectClaimLitigationUpdated:
     action: send
     channel:
@@ -564,9 +676,10 @@ x-implementation:
   publisher: eia-direct-claims-expert
   subscriber: none
   notes: >
-    Six Direct Claims events are written to the transactional outbox in the
+    Ten Direct Claims events are written to the transactional outbox in the
     same transaction as the aggregate or child write: `registered`, `updated`,
-    `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and
+    `coverage-assessed`, `reserve-changed`, `settlement-authorized`,
+    `task-created`, `task-completed`, `task-updated`, `note-added`, and
     `closed`. The other SPEC 11.4.9 names remain planned. There is no business
     subscriber or subscription registry yet.
 

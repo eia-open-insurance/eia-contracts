@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.2.0
+  version: 1.3.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -20,7 +20,9 @@ info:
     Each expert writes a subset of its events in the same transaction as the
     aggregate write. Each vertical entry lists that subset under `implemented`;
     `published` remains the full agreed contract, so an event is planned until
-    it appears in both lists. The platform event-ingest service is the inbox:
+    it appears in both lists. The Direct Claims task and note events are new
+    names with no SPEC 11.4.9 equivalent (MISMATCHES.md M-22). The platform
+    event-ingest service is the inbox:
     it validates the canonical envelope, verifies the HMAC signature when
     configured, and stores each event idempotently. There is still no business
     subscriber, subscription registry, or gap detection, and no vertical
@@ -217,6 +219,10 @@ x-event-catalog:
       - direct.claim.exposure-recorded
       - direct.claim.reserve-established
       - direct.claim.reserve-changed
+      - direct.claim.task-created
+      - direct.claim.task-completed
+      - direct.claim.task-updated
+      - direct.claim.note-added
       - direct.claim.litigation-updated
       - direct.claim.settlement-authorized
       - direct.claim.settlement-executed
@@ -235,6 +241,10 @@ x-event-catalog:
       - direct.claim.updated
       - direct.claim.coverage-assessed
       - direct.claim.reserve-changed
+      - direct.claim.task-created
+      - direct.claim.task-completed
+      - direct.claim.task-updated
+      - direct.claim.note-added
       - direct.claim.settlement-authorized
       - direct.claim.closed
     consumed:

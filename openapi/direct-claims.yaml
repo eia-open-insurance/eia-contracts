@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Direct Claims API
-  version: 1.2.0
+  version: 1.3.0
   summary: Direct-book claim administration and the Direct Claims expert API.
   description: >
     This document describes the implemented public Direct Claims domain API and
@@ -25,6 +25,12 @@ info:
     `expectedVersion` may be supplied. The expert close applies the closure
     preconditions (no unresolved lien, no open reserve, and a legal CLOSED
     transition).
+
+    The task and note routes complete the Direct Claims second slice. Tasks are
+    diary items with a task version used by PATCH for optimistic concurrency;
+    notes are append-only and have no update or delete route. Neither POST
+    accepts an Idempotency-Key: a retried task or note POST creates a second row
+    (MISMATCHES.md M-07).
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -1118,6 +1124,209 @@ paths:
           $ref: './components.yaml#/components/responses/Conflict'
         default:
           $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/tasks:
+    get:
+      operationId: listClaimTasks
+      tags:
+        - Direct Claims
+      summary: List claim tasks.
+      description: >
+        Returns a bare JSON array: OPEN tasks first ordered by due date, then
+        CANCELLED tasks, then COMPLETE tasks with the most recently completed
+        first. A missing or non-DIRECT book is hidden as 404 (SPEC 3.6.2,
+        WALL-06), and a claim outside the caller's tenant is also 404.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Tasks of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Task'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createClaimTask
+      tags:
+        - Direct Claims
+      summary: Open a diary task.
+      description: >
+        `title`, `dueDate`, and `priority` are required; `priority` is one of
+        LOW, NORMAL, HIGH, or URGENT. The expert assigns the task number
+        `TSK-{year}-{7 digits}` and the initial OPEN status. The POST accepts no
+        Idempotency-Key and is not idempotent: a retried request opens a second
+        task (MISMATCHES.md M-07). A concurrent change to the parent claim is
+        409.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskCreate'
+      responses:
+        '201':
+          description: Task opened.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/tasks/{taskId}:
+    patch:
+      operationId: changeClaimTaskStatus
+      tags:
+        - Direct Claims
+      summary: Change the status of a diary task.
+      description: >
+        `status` is one of OPEN, COMPLETE, or CANCELLED and `version` is the
+        task version the caller observed. OPEN may move to COMPLETE or
+        CANCELLED, and COMPLETE or CANCELLED may move back to OPEN. A stale
+        version is 409 and an illegal transition is 400. A command that repeats
+        the current status is a no-op that returns the task without writing an
+        event. A transition to COMPLETE emits `direct.claim.task-completed`; a
+        cancellation or reopen emits `direct.claim.task-updated`.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskStatusChange'
+      responses:
+        '200':
+          description: Task after the status change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/notes:
+    get:
+      operationId: listClaimNotes
+      tags:
+        - Direct Claims
+      summary: List claim notes.
+      description: >
+        Returns a bare JSON array newest first: `createdAt` descending with
+        `noteNumber` as the tiebreaker. Notes are append-only; a missing or
+        non-DIRECT book is hidden as 404 (SPEC 3.6.2, WALL-06).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Notes of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Note'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createClaimNote
+      tags:
+        - Direct Claims
+      summary: Append a claim note.
+      description: >
+        `noteType` is one of DIARY, COVERAGE, RESERVE, LITIGATION, SETTLEMENT,
+        or GENERAL; `body` and `author` are required. The expert assigns the
+        note number `NTE-{year}-{7 digits}`. There is no update or delete route.
+        The POST accepts no Idempotency-Key and is not idempotent: a retried
+        request appends a second note (MISMATCHES.md M-07). A concurrent change
+        to the parent claim is 409.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NoteCreate'
+      responses:
+        '201':
+          description: Note appended.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Note'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
   /internal/v1/claims:
     get:
       operationId: expertListClaims
@@ -2119,6 +2328,193 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Lien'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+  /internal/v1/claims/{claimId}/tasks:
+    get:
+      operationId: expertListClaimTasks
+      tags:
+        - Direct Claims internal
+      summary: List claim tasks (expert).
+      description: >
+        The expert also accepts X-EIA-Tenant; the Direct Claims domain client
+        sends the tenant as a header on this route. Tasks are ordered like the
+        public list: OPEN by due date, then CANCELLED, then COMPLETE newest
+        first.
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Tasks of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Task'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertCreateClaimTask
+      tags:
+        - Direct Claims internal
+      summary: Open a diary task (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskCreate'
+      responses:
+        '201':
+          description: Task opened.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/claims/{claimId}/tasks/{taskId}:
+    patch:
+      operationId: expertChangeClaimTaskStatus
+      tags:
+        - Direct Claims internal
+      summary: Change a diary task status (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskStatusChange'
+      responses:
+        '200':
+          description: Task after the status change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/claims/{claimId}/notes:
+    get:
+      operationId: expertListClaimNotes
+      tags:
+        - Direct Claims internal
+      summary: List claim notes (expert).
+      description: >
+        The expert also accepts X-EIA-Tenant; the Direct Claims domain client
+        sends the tenant as a header on this route. Notes are returned newest
+        first.
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Notes of the claim.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Note'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertCreateClaimNote
+      tags:
+        - Direct Claims internal
+      summary: Append a claim note (expert).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NoteCreate'
+      responses:
+        '201':
+          description: Note appended.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Note'
         '400':
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
@@ -3339,6 +3735,183 @@ components:
         expectedVersion:
           type: integer
           minimum: 0
+    Task:
+      type: object
+      description: >
+        A diary task on a claim. The public projection omits the expert's
+        `tenantId`; the tenant is implied by the request context. `version` is
+        the optimistic concurrency token and starts at 1.
+      required:
+        - id
+        - claimId
+        - taskNumber
+        - title
+        - dueDate
+        - priority
+        - status
+        - version
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        claimId:
+          type: string
+          format: uuid
+        taskNumber:
+          type: string
+          examples:
+            - TSK-2026-0000001
+        title:
+          type: string
+          maxLength: 200
+        description:
+          type: [string, 'null']
+          maxLength: 4000
+        dueDate:
+          type: string
+          format: date
+        priority:
+          type: string
+          enum:
+            - LOW
+            - NORMAL
+            - HIGH
+            - URGENT
+        status:
+          type: string
+          enum:
+            - OPEN
+            - COMPLETE
+            - CANCELLED
+        assignedTo:
+          type: [string, 'null']
+          maxLength: 120
+        version:
+          type: integer
+          minimum: 1
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: [string, 'null']
+          format: date-time
+    TaskCreate:
+      type: object
+      description: >
+        Command to open a diary task. The expert assigns the task number and
+        the initial OPEN status.
+      required:
+        - title
+        - dueDate
+        - priority
+      properties:
+        title:
+          type: string
+          maxLength: 200
+        description:
+          type: [string, 'null']
+          maxLength: 4000
+        dueDate:
+          type: string
+          format: date
+        priority:
+          type: string
+          enum:
+            - LOW
+            - NORMAL
+            - HIGH
+            - URGENT
+        assignedTo:
+          type: [string, 'null']
+          maxLength: 120
+    TaskStatusChange:
+      type: object
+      description: >
+        Command to move a task to OPEN, COMPLETE, or CANCELLED at the observed
+        task version. A stale version is 409; an illegal transition is 400.
+      required:
+        - status
+        - version
+      properties:
+        status:
+          type: string
+          enum:
+            - OPEN
+            - COMPLETE
+            - CANCELLED
+        version:
+          type: integer
+          minimum: 1
+    Note:
+      type: object
+      description: >
+        An append-only claim note. Notes have no version, no update route, and
+        no delete route.
+      required:
+        - id
+        - claimId
+        - noteNumber
+        - noteType
+        - body
+        - author
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        claimId:
+          type: string
+          format: uuid
+        noteNumber:
+          type: string
+          examples:
+            - NTE-2026-0000001
+        noteType:
+          type: string
+          enum:
+            - DIARY
+            - COVERAGE
+            - RESERVE
+            - LITIGATION
+            - SETTLEMENT
+            - GENERAL
+        body:
+          type: string
+          maxLength: 8000
+        author:
+          type: string
+          maxLength: 120
+        createdAt:
+          type: string
+          format: date-time
+    NoteCreate:
+      type: object
+      description: Command to append an immutable claim note.
+      required:
+        - noteType
+        - body
+        - author
+      properties:
+        noteType:
+          type: string
+          enum:
+            - DIARY
+            - COVERAGE
+            - RESERVE
+            - LITIGATION
+            - SETTLEMENT
+            - GENERAL
+        body:
+          type: string
+          maxLength: 8000
+        author:
+          type: string
+          maxLength: 120
 x-vertical: direct-claims
 x-implementation:
   status: implemented
@@ -3362,9 +3935,20 @@ x-implementation:
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/SettlementController.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/RecoveryController.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/LienController.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimTaskController.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimTaskService.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimTask.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/CreateTaskRequest.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/TaskStatusChangeRequest.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimNoteController.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimNoteService.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimNote.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/CreateNoteRequest.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimEvents.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimService.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ApiExceptionHandler.java
     - repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/DirectClaimsEndpointTest.java
+    - repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/ClaimTaskNoteEndpointTest.java
   errorEnvelope: >
     Vertical-specific ApiError {timestamp, status, code, message, path,
     details[{field, message}]}. Not the canonical Problem envelope yet.
@@ -3373,19 +3957,25 @@ x-implementation:
     other internal GET routes take ?tenantId=; create and close take
     X-EIA-Tenant. Every internal route requires X-EIA-Book: DIRECT and hides a
     missing or different book as 404. The public transition has no
-    expectedVersion; every public child PATCH requires it.
+    expectedVersion; every public child PATCH requires it. Task and note routes
+    are implemented on both surfaces; the task PATCH is version-checked, while
+    the task and note POSTs have no Idempotency-Key and are not retry-safe
+    (MISMATCHES.md M-07).
 x-compatibility:
-  contractVersion: 1.2.0
-  previousContractVersion: 1.1.0
+  contractVersion: 1.3.0
+  previousContractVersion: 1.2.0
   breaking: []
   compatible:
+    - Adds GET/POST /api/v1/claims/{claimId}/tasks, PATCH /api/v1/claims/{claimId}/tasks/{taskId}, and GET/POST /api/v1/claims/{claimId}/notes (and the internal expert equivalents).
+    - Adds the Task, TaskCreate, TaskStatusChange, Note, and NoteCreate schemas.
     - Adds GET /api/v1/claims/search returning the shared SearchResponse envelope.
     - Adds the injury, exposure, reserve, coverage, litigation, settlement, recovery, lien, and close routes.
     - Adds claimType, settlementAuthorityAmount, settlementAuthorityCurrency, litigationFlag, and currentReserveAmount to the claim projection.
     - Corrects the claim money fields to decimal strings; the services already serialize them as strings.
   note: >
-    Search is additive over 1.1.0. The HTTP path and the error envelope are
-    unchanged.
+    Tasks and notes are additive over 1.2.0: no existing path, request field, or
+    response field changed. The HTTP path and the error envelope are unchanged.
+    The task and note POSTs accept no Idempotency-Key; see MISMATCHES.md M-07.
 x-planned-operations:
   - method: PATCH
     path: /api/v1/claims/{claimId}

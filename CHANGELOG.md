@@ -146,6 +146,30 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   M-23 for the SPEC naming gap and the current limit/book validation divergence.
 - `python scripts/validate_contracts.py` passes 8,874 checks with 0 failures.
 
+### Added in the Direct Claims task and note contract (2026-10-20)
+
+- `openapi/direct-claims.yaml` is 1.3.0: adds `GET/POST
+  /api/v1/claims/{claimId}/tasks`, `PATCH
+  /api/v1/claims/{claimId}/tasks/{taskId}`, and `GET/POST
+  /api/v1/claims/{claimId}/notes`, their `/internal/v1` expert equivalents, and
+  the `Task`, `TaskCreate`, `TaskStatusChange`, `Note`, and `NoteCreate`
+  schemas. Every route keeps the DIRECT book wall, the tenant header, the
+  document-level session-cookie security, and the 400/404 responses; the
+  mutations also document 409.
+- `asyncapi/direct-claims.yaml` is 1.2.0: adds implemented channels and `send`
+  operations for `direct.claim.task-created`, `direct.claim.task-completed`,
+  `direct.claim.task-updated`, and `direct.claim.note-added`, each naming
+  `ClaimEvents.java` in `x-implemented-by`.
+- `asyncapi/event-catalog.yaml` is 1.3.0: the four task/note names are added to
+  the Direct Claims published and implemented lists (172 published in total).
+- `scripts/validate_contracts.py` requires the five public and five internal
+  task/note paths, the five schemas, and the four task/note events in the
+  Direct Claims implemented list.
+- `README.md` records the task/note versions, routes, and schemas;
+  `MISMATCHES.md` extends M-07 with the retry caveat for the task/note POSTs and
+  updates M-22 for the four names that have no SPEC equivalent.
+- `python scripts/validate_contracts.py` passes 9,155 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

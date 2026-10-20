@@ -192,6 +192,33 @@ response field, or event changed.
 the Policy page envelope. The search operations keep the document-level
 security and add no required request field outside the tenant and book headers.
 
+### Direct Claims task and note contract (2026-10-20)
+
+Direct Claims 1.3.0 adds the diary task and append-only note surface. The change
+is additive: no existing path, request field, response field, or event changed.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/direct-claims.yaml` | 1.3.0 | Additive | `GET/POST /api/v1/claims/{claimId}/tasks`, `PATCH /api/v1/claims/{claimId}/tasks/{taskId}`, `GET/POST /api/v1/claims/{claimId}/notes`, their expert equivalents, and the `Task`, `TaskCreate`, `TaskStatusChange`, `Note`, and `NoteCreate` schemas. |
+| `asyncapi/direct-claims.yaml` | 1.2.0 | Additive | Four implemented events: `direct.claim.task-created`, `direct.claim.task-completed`, `direct.claim.task-updated`, and `direct.claim.note-added`. |
+| `asyncapi/event-catalog.yaml` | 1.3.0 | Additive | The four names are published and implemented (172 published in total). |
+
+The public routes keep the document-level session-cookie security and the
+DIRECT book wall: `X-EIA-Tenant` and `X-EIA-Book: DIRECT` are required, and a
+missing or different book is hidden as 404. Task `PATCH` is version-checked
+(`version` is the task version, not the claim version): a stale version is 409
+and an illegal transition is 400. A status command that repeats the current
+status is a no-op that returns the task and writes no event.
+
+**Idempotency caveat.** Neither `POST /tasks` nor `POST /notes` accepts an
+`Idempotency-Key`. The expert assigns a new `TSK-...` or `NTE-...` number and
+inserts a row on every accepted request, so a retried POST after a timeout
+creates a duplicate task or note. Clients must not blind-retry these two POSTs;
+read the collection and reconcile first. A concurrent parent-claim version bump
+is 409. Task `PATCH` is safe to retry with the same version because a repeated
+status is a no-op, but the POSTs have no natural key. `MISMATCHES.md` M-07
+records the deviation.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -297,6 +324,11 @@ PATCH commands take `expectedVersion`; Assumed Claims propagates the expert's
 edge. Their FS-RI hand-off is a separate case: an FS-RI conflict is 409
 `FSRI_CONFLICT`, an unusable FS-RI response is 502, and an FS-RI outage is 503.
 See `MISMATCHES.md` M-06, M-07, M-11, and M-21.
+
+The Direct Claims task and note POSTs are the exception on that side: they
+accept no `Idempotency-Key` and are not replay-safe, so a retried POST creates a
+second task or note. Task `PATCH` is version-checked, and a repeated status is a
+no-op, so it is retry-safe. The caveat is part of M-07.
 
 ### Pagination and collections
 
@@ -408,7 +440,8 @@ missing directory.
    content types, internal-route security markers, the required shared
    components (schemas, parameters, headers, and responses), the complete table
    of required paths and methods per vertical (including the Round 5 second
-   slice and the ten global-search routes), the search operations' shared
+   slice, the Direct Claims task and note routes, and the ten global-search
+   routes), the task/note schemas, the search operations' shared
    parameters and `SearchResponse`/400/404 responses, the `SearchResponse` and
    `SearchItem` keys, the required 422/409/428 response codes on the Round 5
    mutations, and agreement between `info.version` and
@@ -466,9 +499,10 @@ missing directory.
 - the Policy page envelope is offset-based (`items`, `page`, `size`, `total`,
   `_links`) rather than the cursor envelope in SPEC 7.6/12.2, and the other
   verticals still return bare arrays;
-- `ETag`/`If-Match` and `Idempotency-Key` exist only in Policy; detail
-  `_links` exist nowhere, and Cession/Retrocession still return 400 for an
-  illegal lifecycle edge;
+- `ETag`/`If-Match` and `Idempotency-Key` exist only in Policy; the Direct
+  Claims task and note POSTs are not idempotent (M-07); detail `_links` exist
+  nowhere, and Cession/Retrocession still return 400 for an illegal lifecycle
+  edge;
 - the Cession/Retrocession FS-RI hand-off is synchronous, with no hand-off
   queue or hand-off resource (SPEC 7.18.3/HAND-05);
 - the ten global-search routes are implemented under the short

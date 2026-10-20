@@ -251,6 +251,11 @@ ROUND5_OPENAPI_PATHS = {
         ("/api/v1/claims/{claimId}/liens", "get"),
         ("/api/v1/claims/{claimId}/liens", "post"),
         ("/api/v1/claims/{claimId}/liens/{lienId}", "patch"),
+        ("/api/v1/claims/{claimId}/tasks", "get"),
+        ("/api/v1/claims/{claimId}/tasks", "post"),
+        ("/api/v1/claims/{claimId}/tasks/{taskId}", "patch"),
+        ("/api/v1/claims/{claimId}/notes", "get"),
+        ("/api/v1/claims/{claimId}/notes", "post"),
         ("/internal/v1/claims/{claimId}/close", "post"),
         ("/internal/v1/claims/{claimId}/injuries", "post"),
         ("/internal/v1/claims/{claimId}/exposures", "post"),
@@ -260,6 +265,11 @@ ROUND5_OPENAPI_PATHS = {
         ("/internal/v1/claims/{claimId}/settlements/{settlementId}/execute", "post"),
         ("/internal/v1/claims/{claimId}/recoveries", "post"),
         ("/internal/v1/claims/{claimId}/liens", "post"),
+        ("/internal/v1/claims/{claimId}/tasks", "get"),
+        ("/internal/v1/claims/{claimId}/tasks", "post"),
+        ("/internal/v1/claims/{claimId}/tasks/{taskId}", "patch"),
+        ("/internal/v1/claims/{claimId}/notes", "get"),
+        ("/internal/v1/claims/{claimId}/notes", "post"),
     ],
     "assumed-claims": [
         ("/api/v1/assumed-claims/{assumedClaimId}/close", "post"),
@@ -342,6 +352,20 @@ SEARCH_RESPONSE_KEYS = ("query", "limit", "items")
 SEARCH_ITEM_KEYS = ("id", "type", "label", "secondary", "status", "href")
 
 
+# Direct Claims task and note schemas added with contract 1.3.0. The public
+# projection and command shapes are the ones the domain records serialize, so
+# the names are mandatory alongside the five public routes above.
+TASK_NOTE_REQUIRED_SCHEMAS = {
+    "direct-claims": [
+        "Task",
+        "TaskCreate",
+        "TaskStatusChange",
+        "Note",
+        "NoteCreate",
+    ],
+}
+
+
 # Event names the transactional-outbox rollout actually emits. The catalog must
 # list each one as published and implemented, and the vertical document must
 # expose a channel for it. Round 5 covered the first six verticals; the rollout
@@ -374,6 +398,10 @@ IMPLEMENTED_EVENTS = {
         "direct.claim.reserve-changed",
         "direct.claim.settlement-authorized",
         "direct.claim.closed",
+        "direct.claim.task-created",
+        "direct.claim.task-completed",
+        "direct.claim.task-updated",
+        "direct.claim.note-added",
     ],
     "assumed-claims": [
         "assumed.claim.registered",
@@ -1259,6 +1287,12 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             contracts.check(
                 isinstance(path_item, dict) and required_method in path_item,
                 f"{relative}: required Round 5 operation {required_method.upper()} {required_path} is missing",
+            )
+        document_schemas = (document.get("components") or {}).get("schemas") or {}
+        for schema_name in TASK_NOTE_REQUIRED_SCHEMAS.get(vertical, []):
+            contracts.check(
+                schema_name in document_schemas,
+                f"{relative}: required task/note schema {schema_name} is missing",
             )
         for required_path, required_method, required_codes in ROUND5_REQUIRED_RESPONSES.get(vertical, []):
             path_item = paths.get(required_path) if isinstance(paths, dict) else None
