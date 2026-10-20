@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:direct-claims
 info:
   title: EIA Direct Claims events
-  version: 1.3.0
+  version: 1.4.0
   summary: Published domain event names for the Direct Claims vertical.
   description: >
     Event contract for the Direct Claims vertical. The authoritative event names are
@@ -19,13 +19,13 @@ info:
     `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`,
     `direct.claim.settlement-authorized`, `direct.claim.task-created`,
     `direct.claim.task-completed`, `direct.claim.task-updated`,
-    `direct.claim.note-added`, and `direct.claim.closed` through the
-    transactional outbox; those channels and operations are marked
-    `x-status: implemented`. The task and note names are new in this contract
-    and have no SPEC 11.4.9 equivalent (MISMATCHES.md M-22);
-    `direct.claim.assigned` is also new and has no SPEC 11.4.9 equivalent. Every
-    other implemented name already exists in the SPEC. The other SPEC 11.4.9
-    names are planned.
+    `direct.claim.note-added`, `direct.claim.allocation-created`, and
+    `direct.claim.closed` through the transactional outbox; those channels and
+    operations are marked `x-status: implemented`. The task, note, assignment,
+    and allocation-created names are new in this contract and have no SPEC
+    11.4.9 equivalent (MISMATCHES.md M-22). The SPEC name
+    `direct.claim.allocated` remains planned. Every other implemented name
+    already exists in the SPEC.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -85,6 +85,25 @@ channels:
       no-op and emits nothing. This name is new in this contract and has no
       SPEC 11.4.9 equivalent (MISMATCHES.md M-22).
     x-event-type: direct.claim.assigned
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.4.9
+    x-implemented-by: repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimAllocationCreated:
+    address: direct.claim.allocation-created
+    title: direct.claim.allocation-created
+    description: >
+      Emitted when a claim allocation is recorded, in the same transaction as
+      the allocation row and the parent claim version bump. The payload carries
+      the claim identity and number, the allocation's policy id, policy year,
+      layer, allocation percentage and allocated amount, and the claim's new
+      allocation totals. This name is new in this contract and has no SPEC
+      11.4.9 equivalent; the SPEC `direct.claim.allocated` name remains planned
+      (MISMATCHES.md M-22).
+    x-event-type: direct.claim.allocation-created
     x-event-version: 1
     x-status: implemented
     x-spec-section: SPEC 11.4.9
@@ -448,6 +467,17 @@ operations:
       same transaction as a real assignment change and its audit entry.
     x-event-type: direct.claim.assigned
     x-status: implemented
+  publishDirectClaimAllocationCreated:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimAllocationCreated'
+    summary: Publish direct.claim.allocation-created
+    description: >
+      Publishes direct.claim.allocation-created through the transactional
+      outbox in the same transaction as the allocation insert and the parent
+      claim version bump.
+    x-event-type: direct.claim.allocation-created
+    x-status: implemented
   publishDirectClaimCoverageAssessed:
     action: send
     channel:
@@ -708,11 +738,12 @@ x-implementation:
   publisher: eia-direct-claims-expert
   subscriber: none
   notes: >
-    Eleven Direct Claims events are written to the transactional outbox in the
+    Twelve Direct Claims events are written to the transactional outbox in the
     same transaction as the aggregate or child write: `registered`, `updated`,
     `assigned`, `coverage-assessed`, `reserve-changed`,
     `settlement-authorized`, `task-created`, `task-completed`, `task-updated`,
-    `note-added`, and `closed`. The other SPEC 11.4.9 names remain planned.
+    `note-added`, `allocation-created`, and `closed`. The SPEC name
+    `direct.claim.allocated` and the other SPEC 11.4.9 names remain planned.
     There is no business subscriber or subscription registry yet.
 
 x-consumed-events:

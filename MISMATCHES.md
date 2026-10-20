@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-20 (Contract period bordereaux).
+Status: open, reviewed 2026-10-20 (Direct Claims allocations).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -23,7 +23,10 @@ where the running code does not meet it yet.
   event factory, and `schema.sql`. The Contract period-bordereau pass reads the
   domain controller, service, client, projection, and command rules plus the
   expert period controller, legacy header controller, rules, repositories,
-  status enum, event factory, and `schema.sql`.
+  status enum, event factory, and `schema.sql`. The Direct Claims allocation
+  pass reads the domain allocation controller, service, client, projection, and
+  command plus the expert allocation controller, service, projection, summary,
+  request, exception handler, event factory, repository, and tests.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -79,6 +82,7 @@ removed per the resolution policy.
 | M-28 | Policy renewal creates a successor instead of transitioning the source, and the route/body are narrower than SPEC 11.2.6/11.2.10 | L |
 | M-29 | Contract technical accounts use the `/technical-accounts` path, a narrow status set, and no period-overlap/window check | L |
 | M-30 | Contract period bordereaux use a PROCESSED/FAILED vocabulary and event names, omit the SPEC line/exception staging, and accept an absent book header | L |
+| M-31 | Direct Claims allocation error codes are remapped at the public surface | L |
 
 ## M-01 Public base paths
 
@@ -545,10 +549,11 @@ unimplemented fields and list the missing operations under
   the SPEC `technical_account_line` breakdown, the AGREED/DISPUTED/SUPERSEDED
   statuses, and the `/accounts` path remain gaps (M-29).
 - Direct Claims: no `tortCode` (the implemented name is `causeCode`),
-  `claimant` object, policy-year allocations, financial summary, reopen,
-  documents, lineage, or work queues. Round 5 adds injuries, exposures,
-  reserve history, the coverage decision, litigation, settlements, recoveries,
-  liens, and close.
+  `claimant` object, financial summary, reopen, documents, lineage, or work
+  queues. Round 5 adds injuries, exposures, reserve history, the coverage
+  decision, litigation, settlements, recoveries, liens, and close. The
+  allocation slice adds policy-year/layer splits with summary totals, so those
+  are no longer gaps.
 - Assumed Claims: no policy-year allocations, documents, lineage, or work
   queues. Round 5 adds loss advices, bordereau ingest, reserve history, cash
   calls, recoveries, commutation, disputes, audit, financials, and close.
@@ -608,7 +613,7 @@ ten publishing verticals now emit a subset:
 | Party | `party.party.created`, `party.party.updated` | `repos/eia-party-expert/.../PartyEvents.java` |
 | Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.billing-plan.created`, `policy.installment.paid`, `policy.installment.waived` | `repos/eia-policy-expert/.../PolicyEvents.java` |
 | Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded`, `contract.technical-account.created`, `contract.technical-account.issued`, `contract.technical-account.settled`, `contract.bordereau.received`, `contract.bordereau.processed`, `contract.bordereau.failed` | `repos/eia-contract-expert/.../ContractEvents.java` |
-| Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.assigned`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.closed`, `direct.claim.task-created`, `direct.claim.task-completed`, `direct.claim.task-updated`, `direct.claim.note-added` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
+| Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.assigned`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.closed`, `direct.claim.task-created`, `direct.claim.task-completed`, `direct.claim.task-updated`, `direct.claim.note-added`, `direct.claim.allocation-created` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
 | Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.assigned`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted`, `assumed.claim.task-created`, `assumed.claim.task-completed`, `assumed.claim.task-updated`, `assumed.claim.note-added` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
 | Cession | `cession.cession.created`, `cession.cession.updated`, `cession.cession.handed-off` | `repos/eia-cession-expert/.../CessionEvents.java` |
 | Retrocession | `retrocession.retrocession.created`, `retrocession.retrocession.updated`, `retrocession.retrocession.handed-off` | `repos/eia-retrocession-expert/.../RetrocessionEvents.java` |
@@ -769,7 +774,7 @@ planned name |
 |---|---|---|
 | Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created`; `policy.installment.paid` / `.waived` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name. `version-issued`, `endorsed`, `cancelled`, `reinstated`, and `renewed` match SPEC. |
 | Contract | `contract.contract.updated`; `contract.technical-account.created` / `.issued` / `.settled`; `contract.bordereau.processed` / `.failed` | No SPEC name for updated, the technical-account facts, or the two terminal bordereau facts: SPEC 11.3.9 lists lifecycle verbs, the contract-level `contract.account.issued` / `.agreed` facts, and `contract.bordereau.posted` / `.rejected` instead. `created`, `bound`, `commuted`, `cession.recorded`, and `contract.bordereau.received` match SPEC. |
-| Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned` | No SPEC names: SPEC 11.4.9 defines no assignment, task, or note event. `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and `closed` match SPEC. |
+| Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned`; `direct.claim.allocation-created` | No SPEC names: SPEC 11.4.9 defines no assignment, task, note, or allocation-created event; it names the allocation fact `direct.claim.allocated`, which remains planned. `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and `closed` match SPEC. |
 | Assumed Claims | `assumed.claim.updated`; `assumed.claim.assigned`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no assignment, task, or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
 | Cession | `cession.cession.created` / `.updated` / `.handed-off` | `cession.case.created`, `cession.handoff.sent`/`.acknowledged` |
 | Retrocession | `retrocession.retrocession.created` / `.updated` / `.handed-off` | `retrocession.case.created`, `retrocession.handoff.sent`/`.acknowledged` |
@@ -787,7 +792,7 @@ Evidence:
 
 - `repos/eia-policy-expert/.../PolicyEvents.java:37-45` (policy and billing names)
 - `repos/eia-contract-expert/.../ContractEvents.java:41-56`
-- `repos/eia-direct-claims-expert/.../ClaimEvents.java:59-62`
+- `repos/eia-direct-claims-expert/.../ClaimEvents.java:57-68`
 - `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java:52-65`
 - `repos/eia-cession-expert/.../CessionEvents.java:27-29`
 - `repos/eia-retrocession-expert/.../RetrocessionEvents.java:28-30`
@@ -1306,10 +1311,51 @@ and either enforcing `X-EIA-Book: ASSUMED` at the domain edge and in the expert
 or relaxing the contract. Renaming the statuses or the two terminal event names
 is breaking and needs an ADR and an EV-05 dual-publish window.
 
+## M-31 Direct Claims allocation error codes are remapped at the public surface
+
+The canonical contract documents the Direct Claims expert's stable allocation
+error codes at the public surface:
+
+| Status | Canonical code | Meaning |
+|---|---|---|
+| 400 | `POLICY_MISMATCH` | The requested `policyId` is not the claim's own policy. |
+| 409 | `ALLOCATION_EXCEEDS_100` | The allocation percentages already recorded for the claim plus the new one would exceed 1. |
+
+The expert emits both codes from `ApiExceptionHandler.java`. The Direct Claims
+domain receives them as an upstream `RestClientResponseException` and maps the
+status in its own `ApiExceptionHandler`:
+
+- an expert 400 becomes 400 `VALIDATION_ERROR` with the expert detail preserved;
+- an expert 409 becomes 409 `CONFLICT` unless the expert code is
+  `EIA-DIR-4091`, the only code the domain preserves.
+
+The domain tests assert only the status and detail:
+`ClaimDetailControllerTest.expertPolicyMismatchIsPreservedAs400` expects 400
+`VALIDATION_ERROR`, and `expertAllocationExceedsHundredIsPreservedAs409` does
+not assert the code. A public client therefore sees the right statuses and
+detail but not `POLICY_MISMATCH` or `ALLOCATION_EXCEEDS_100`.
+
+Evidence:
+
+- `repos/eia-direct-claims-expert/.../ClaimAllocationService.java` (claim-policy
+  match and percentage-total guard).
+- `repos/eia-direct-claims-expert/.../ApiExceptionHandler.java:87-101`
+  (`POLICY_MISMATCH`, `ALLOCATION_EXCEEDS_100`).
+- `repos/eia-direct-claims-domain/.../ApiExceptionHandler.java:75-100`
+  (400 -> `VALIDATION_ERROR`, 409 -> `CONFLICT`; `EIA-DIR-4091` preserved).
+- `repos/eia-direct-claims-domain/.../ClaimDetailControllerTest.java:342-389`
+  (the two remap tests).
+
+Resolution: preserve the two expert codes in the domain's upstream-error
+mapping, or amend this contract and SPEC 11.4.10 to the remapped codes. The
+contract keeps the stable expert codes because they are the only codes that
+distinguish the policy and percentage rules from generic validation and
+concurrency failures. The statuses and detail text already match.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-Contract period-bordereaux contract:
+Direct Claims allocations contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -1321,7 +1367,7 @@ OpenAPI 3.1 documents
   OK openapi/party.yaml  5 paths, 7 operations
   OK openapi/policy.yaml  40 paths, 51 operations
   OK openapi/contract.yaml  38 paths, 55 operations
-  OK openapi/direct-claims.yaml  47 paths, 69 operations
+  OK openapi/direct-claims.yaml  48 paths, 71 operations
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
   OK openapi/cession.yaml  9 paths, 11 operations
   OK openapi/retrocession.yaml  9 paths, 11 operations
@@ -1333,14 +1379,14 @@ AsyncAPI 3 documents
   OK asyncapi/party.yaml  9 event channels
   OK asyncapi/policy.yaml  23 event channels
   OK asyncapi/contract.yaml  26 event channels
-  OK asyncapi/direct-claims.yaml  25 event channels
+  OK asyncapi/direct-claims.yaml  26 event channels
   OK asyncapi/assumed-claims.yaml  21 event channels
   OK asyncapi/cession.yaml  17 event channels
   OK asyncapi/retrocession.yaml  17 event channels
   OK asyncapi/document.yaml  20 event channels
   OK asyncapi/payment.yaml  18 event channels
   OK asyncapi/notifications.yaml  12 event channels
-  OK catalog: 188 unique published events across 10 verticals
+  OK catalog: 189 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -1348,7 +1394,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 10593 checks, 0 failures
+  PASS 10738 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -1423,7 +1469,15 @@ Additional checks and limits:
   `UpdateBordereauStatusRequest.status` enum, and dropping
   `contract.bordereau.received` from the catalog `implemented` list each fail
   with the specific missing operation, schema, enum, or implemented-event
-  message. All four were run on a throwaway copy and exited non-zero.
+  message. All four were run on a throwaway copy and exited non-zero. The
+  Direct Claims allocation pass added four more: renaming the
+  `/api/v1/claims/{claimId}/allocations` path, renaming the `AllocationSummary`
+  schema, widening `CreateClaimAllocationRequest.policyYear` from 1900-2200 to
+  1800-2200, and dropping `direct.claim.allocation-created` from the Direct
+  Claims `implemented` list each fail with the specific missing operation,
+  schema, bounds, or implemented-channel message. All four were run against the
+  working tree with the mutated file restored after each run and exited
+  non-zero.
 
 ## Resolution policy
 

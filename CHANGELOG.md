@@ -483,6 +483,38 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   M-22.
 - `python scripts/validate_contracts.py` passes 10,593 checks with 0 failures.
 
+### Added in the Direct Claims allocations contract (2026-10-20)
+
+- `openapi/direct-claims.yaml` is 1.6.0: adds `GET/POST
+  /api/v1/claims/{claimId}/allocations`, the `AllocationSummary` (`items`,
+  `totalPct`, `totalAmount`), `Allocation` (`allocationId`, `claimId`,
+  `policyId`, `policyYear`, `layer`, `allocationPct`, `allocatedAmount`,
+  `createdAt`), and `CreateClaimAllocationRequest` (`policyId`; `policyYear`
+  1900-2200; `layer` at most 32 characters; `allocationPct` greater than 0 and
+  at most 1; `allocatedAmount` zero or greater) schemas, and the
+  200/201/400/404/409 responses with 400 `POLICY_MISMATCH` and 409
+  `ALLOCATION_EXCEEDS_100`. The implemented path is removed from
+  `x-planned-operations`.
+- `asyncapi/direct-claims.yaml` is 1.4.0: adds the implemented
+  `direct.claim.allocation-created` channel and `send` operation, naming
+  `ClaimEvents.java`. The SPEC `direct.claim.allocated` channel remains
+  planned.
+- `asyncapi/event-catalog.yaml` is 1.11.0: `direct.claim.allocation-created`
+  is published and implemented (189 published in total; Direct Claims 26
+  published and 12 implemented).
+- `scripts/validate_contracts.py` requires the two public allocation
+  operations, the `AllocationSummary`, `Allocation`, and
+  `CreateClaimAllocationRequest` schemas and their field bounds, the
+  `TenantHeader`/`BookHeaderDirect` parameters, the 200/201 successes, the 400
+  `POLICY_MISMATCH` and 409 `ALLOCATION_EXCEEDS_100` documentation, the
+  absence of the path from `x-planned-operations`, and the implemented event
+  name.
+- `README.md` records the routes, projection, field bounds, percentage guard,
+  DIRECT book rule, event, and additive versions; `MISMATCHES.md` adds M-31 for
+  the domain error-code remap, removes policy-year allocations from the Direct
+  Claims resource gaps, and updates M-14 and M-22 with the event.
+- `python scripts/validate_contracts.py` passes 10,738 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

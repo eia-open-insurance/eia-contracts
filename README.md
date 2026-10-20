@@ -781,6 +781,45 @@ assigned adjuster); it is stored as `assignedBy` and is deliberately not part of
 the public claim projection. A missing or wrong book is hidden as 404, and a
 same-tenant claim that does not exist is 404.
 
+### Direct Claims allocations
+
+A direct claim may be split across a policy year and layer:
+
+| Operation | Path | Success | Errors |
+|---|---|---|---|
+| List allocations | `GET /api/v1/claims/{claimId}/allocations` | 200 `AllocationSummary` | 400, 404 |
+| Record allocation | `POST /api/v1/claims/{claimId}/allocations` | 201 `Allocation` | 400, 404, 409 |
+
+The summary is `{items, totalPct, totalAmount}`; `items` is ordered oldest
+first and `totalPct`/`totalAmount` sum the claim's rows. An allocation is
+`{allocationId, claimId, policyId, policyYear, layer, allocationPct,
+allocatedAmount, createdAt}`. `allocationPct` and `allocatedAmount` are decimal
+strings; the tenant is implied and is not part of the public projection.
+
+Rules:
+
+- `X-EIA-Tenant` is required. `X-EIA-Book` is required and must be DIRECT; a
+  missing or different book is hidden as 404, consistent with every other claim
+  route (SPEC 3.6.2, WALL-06).
+- The create body is `CreateClaimAllocationRequest`: all five fields are
+  required. `policyId` must be the claim's own policy (400 `POLICY_MISMATCH`);
+  `policyYear` must be 1900-2200; `layer` is trimmed and at most 32 characters;
+  `allocationPct` is a fraction greater than 0 and at most 1; `allocatedAmount`
+  is zero or greater.
+- The percentages already recorded for the claim plus the new one may not
+  exceed 1. An excess is 409 `ALLOCATION_EXCEEDS_100` and writes no row and no
+  event. `allocatedAmount` is a booking figure and is not capped by the current
+  reserve.
+- The create bumps the parent claim version and writes
+  `direct.claim.allocation-created` in the same transaction. The payload
+  carries the claim identity and number, the allocation fields, and the claim's
+  new `totalPct`/`totalAmount`.
+- The expert serves the same public path and an `/internal/v1` alias that the
+  domain calls; the domain remaps the expert's `id`/`tenantId` projection to
+  the public `allocationId`. The public error codes are the expert's stable
+  `POLICY_MISMATCH` and `ALLOCATION_EXCEEDS_100`, but the domain currently
+  collapses them to `VALIDATION_ERROR` and `CONFLICT` (M-31).
+
 ### Pagination and collections
 
 The implemented Policy page envelope is `Page` in `openapi/components.yaml`:
@@ -1027,7 +1066,12 @@ missing directory.
    the claim assignment paths on both claim verticals, the `AssignClaimRequest`
    schema and its field bounds, the nullable assignment fields on `Claim` and
    `AssumedClaim`, the optional shared `ActorHeader`, the assignment
-   200/400/404/409 responses, the six document association-link operations on
+   200/400/404/409 responses, the Direct Claims allocation operations, the
+   `AllocationSummary`, `Allocation`, and `CreateClaimAllocationRequest`
+   schemas with their field bounds, the 201/200 successes, the 400
+   `POLICY_MISMATCH` and 409 `ALLOCATION_EXCEEDS_100` documentation, and the
+   removal of the implemented allocations path from `x-planned-operations`,
+   the six document association-link operations on
    the public and expert surfaces, the `DocumentLink`, `CreateDocumentLinkRequest`,
    and `DocumentLinkedType` schemas, the `linkedType` + `linkedId` list filter,
    the expert list `q`, and the search `linkedReference` match, the ten search
@@ -1064,7 +1108,8 @@ missing directory.
    and the catalog `implemented` list must equal the channels marked
    `x-status: implemented`. The implemented event names for all ten publishing
    verticals are required explicitly, including `direct.claim.assigned`,
-   `assumed.claim.assigned`, `document.link.added`,
+   `direct.claim.allocation-created`, `assumed.claim.assigned`,
+   `document.link.added`,
    `document.link.removed`, `policy.policy.renewed`,
    `policy.billing-plan.created`, `policy.installment.paid`,
    `policy.installment.waived`, `contract.bordereau.received`,
@@ -1139,6 +1184,12 @@ missing directory.
   expert returns 409 instead of 400 for a negative `expectedVersion`, and the
   Direct Claims expert accepts `X-EIA-User` as an extra actor alias (M-22,
   M-25);
+- Direct Claims allocations are implemented under
+  `/api/v1/claims/{claimId}/allocations` and publish
+  `direct.claim.allocation-created`, while SPEC 11.4.9 names the fact
+  `direct.claim.allocated`. The domain also collapses the expert's stable 400
+  `POLICY_MISMATCH` and 409 `ALLOCATION_EXCEEDS_100` to `VALIDATION_ERROR` and
+  `CONFLICT` at the public surface (M-22, M-31);
 - Policy billing is implemented under `/api/v1/policies/{policyId}/billing`
   with the flat `BillingPlan`/`Installment` projection, while SPEC 11.2.13 names
   the route `/installments` and defines the plan event as

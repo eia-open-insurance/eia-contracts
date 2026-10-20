@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.10.0
+  version: 1.11.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -21,10 +21,11 @@ info:
     aggregate write. Each vertical entry lists that subset under `implemented`;
     `published` remains the full agreed contract, so an event is planned until
     it appears in both lists. The Direct Claims and Assumed Claims task, note,
-    and assignment events are new names with no SPEC 11.4.9 or 11.5.9
-    equivalent, and the Document link events are new names with no SPEC 11.6.9
-    equivalent (MISMATCHES.md M-22). The three Policy billing facts are new
-    names: SPEC 11.2.13 calls the plan fact `policy.billing.plan-created` and
+    and assignment events and the Direct Claims allocation-created event are
+    new names with no SPEC 11.4.9 or 11.5.9 equivalent, and the Document link
+    events are new names with no SPEC 11.6.9 equivalent (MISMATCHES.md M-22).
+    The three Policy billing facts are new names: SPEC 11.2.13 calls the plan
+    fact `policy.billing.plan-created` and
     defines no installment paid or waived fact, so the implemented names are
     `policy.billing-plan.created`, `policy.installment.paid`, and
     `policy.installment.waived` (M-22, M-27). The three Contract
@@ -264,6 +265,7 @@ x-event-catalog:
       - direct.claim.recovery-recorded
       - direct.claim.lien-recorded
       - direct.claim.lien-resolved
+      - direct.claim.allocation-created
       - direct.claim.allocated
       - direct.claim.closed
       - direct.claim.reopened
@@ -273,6 +275,7 @@ x-event-catalog:
       - direct.claim.registered
       - direct.claim.updated
       - direct.claim.assigned
+      - direct.claim.allocation-created
       - direct.claim.coverage-assessed
       - direct.claim.reserve-changed
       - direct.claim.task-created

@@ -584,6 +584,54 @@ ASSIGNMENT_MAX_ADJUSTER = 128
 ASSIGNMENT_MAX_TEAM = 64
 
 
+# Direct Claims policy-year allocations. Each tuple is
+# (method, path, success status, success schema, request schema or None). The
+# two public operations are mandatory. The expert shares the public path and
+# also exposes an /internal/v1 alias that the domain calls; the domain remaps
+# the expert's id/tenantId projection to the public allocationId, so the alias
+# is deliberately not part of the public contract (README, Policy billing
+# precedent).
+ALLOCATION_OPENAPI_PATHS = [
+    (
+        "get",
+        "/api/v1/claims/{claimId}/allocations",
+        "200",
+        "AllocationSummary",
+        None,
+    ),
+    (
+        "post",
+        "/api/v1/claims/{claimId}/allocations",
+        "201",
+        "Allocation",
+        "CreateClaimAllocationRequest",
+    ),
+]
+
+ALLOCATION_PROJECTION_FIELDS = (
+    "allocationId",
+    "claimId",
+    "policyId",
+    "policyYear",
+    "layer",
+    "allocationPct",
+    "allocatedAmount",
+    "createdAt",
+)
+
+ALLOCATION_REQUEST_FIELDS = (
+    "policyId",
+    "policyYear",
+    "layer",
+    "allocationPct",
+    "allocatedAmount",
+)
+
+ALLOCATION_MIN_POLICY_YEAR = 1900
+ALLOCATION_MAX_POLICY_YEAR = 2200
+ALLOCATION_MAX_LAYER = 32
+
+
 # Policy billing (SPEC 11.2.13). The public domain routes proxy the expert's
 # billing service; the expert's /internal/v1 alias is an implementation detail
 # and is not part of the public contract. Every operation requires the tenant
@@ -717,6 +765,7 @@ IMPLEMENTED_EVENTS = {
         "direct.claim.task-completed",
         "direct.claim.task-updated",
         "direct.claim.note-added",
+        "direct.claim.allocation-created",
     ],
     "assumed-claims": [
         "assumed.claim.registered",
@@ -2922,6 +2971,262 @@ def _schema_types(schema) -> set:
     return set()
 
 
+# ---------------------------------------------------------------------------
+# Direct Claims policy-year allocation checks
+# ---------------------------------------------------------------------------
+
+
+def check_direct_claim_allocations(contracts: ContractSet, document, relative: str):
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    allocation = schemas.get("Allocation") or {}
+    allocation_properties = allocation.get("properties") or {}
+    allocation_required = allocation.get("required") or []
+    contracts.check(
+        isinstance(allocation, dict) and allocation.get("type") == "object",
+        f"{relative}: Allocation must be an object schema",
+    )
+    for field in ALLOCATION_PROJECTION_FIELDS:
+        contracts.check(
+            isinstance(allocation_properties.get(field), dict),
+            f"{relative}: Allocation.{field} is required",
+        )
+        contracts.check(
+            field in allocation_required,
+            f"{relative}: Allocation.required must list {field}",
+        )
+    for field in ("allocationId", "claimId", "policyId"):
+        contracts.check(
+            (allocation_properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: Allocation.{field} must be a uuid",
+        )
+    policy_year = allocation_properties.get("policyYear") or {}
+    contracts.check(
+        (
+            policy_year.get("type"),
+            policy_year.get("minimum"),
+            policy_year.get("maximum"),
+        )
+        == ("integer", ALLOCATION_MIN_POLICY_YEAR, ALLOCATION_MAX_POLICY_YEAR),
+        f"{relative}: Allocation.policyYear must be an integer in "
+        f"{ALLOCATION_MIN_POLICY_YEAR}-{ALLOCATION_MAX_POLICY_YEAR}",
+    )
+    layer = allocation_properties.get("layer") or {}
+    contracts.check(
+        (layer.get("type"), layer.get("maxLength"))
+        == ("string", ALLOCATION_MAX_LAYER),
+        f"{relative}: Allocation.layer must be a string of at most "
+        f"{ALLOCATION_MAX_LAYER} characters",
+    )
+    contracts.check(
+        str((allocation_properties.get("allocationPct") or {}).get("$ref", "")).endswith(
+            "/schemas/Percent"
+        ),
+        f"{relative}: Allocation.allocationPct must use the shared Percent schema",
+    )
+    contracts.check(
+        str((allocation_properties.get("allocatedAmount") or {}).get("$ref", "")).endswith(
+            "/schemas/MoneyAmount"
+        ),
+        f"{relative}: Allocation.allocatedAmount must use the shared MoneyAmount schema",
+    )
+    contracts.check(
+        (allocation_properties.get("createdAt") or {}).get("format") == "date-time",
+        f"{relative}: Allocation.createdAt must be a date-time",
+    )
+
+    summary = schemas.get("AllocationSummary") or {}
+    summary_properties = summary.get("properties") or {}
+    summary_required = summary.get("required") or []
+    contracts.check(
+        isinstance(summary, dict) and summary.get("type") == "object",
+        f"{relative}: AllocationSummary must be an object schema",
+    )
+    for field in ("items", "totalPct", "totalAmount"):
+        contracts.check(
+            isinstance(summary_properties.get(field), dict),
+            f"{relative}: AllocationSummary.{field} is required",
+        )
+        contracts.check(
+            field in summary_required,
+            f"{relative}: AllocationSummary.required must list {field}",
+        )
+    summary_items = summary_properties.get("items") or {}
+    contracts.check(
+        summary_items.get("type") == "array"
+        and str((summary_items.get("items") or {}).get("$ref", "")).endswith(
+            "/schemas/Allocation"
+        ),
+        f"{relative}: AllocationSummary.items must be an array of Allocation",
+    )
+    contracts.check(
+        str((summary_properties.get("totalPct") or {}).get("$ref", "")).endswith(
+            "/schemas/Percent"
+        ),
+        f"{relative}: AllocationSummary.totalPct must use the shared Percent schema",
+    )
+    contracts.check(
+        str((summary_properties.get("totalAmount") or {}).get("$ref", "")).endswith(
+            "/schemas/MoneyAmount"
+        ),
+        f"{relative}: AllocationSummary.totalAmount must use the shared MoneyAmount schema",
+    )
+
+    request = schemas.get("CreateClaimAllocationRequest") or {}
+    request_properties = request.get("properties") or {}
+    request_required = request.get("required") or []
+    contracts.check(
+        isinstance(request, dict) and request.get("type") == "object",
+        f"{relative}: CreateClaimAllocationRequest must be an object schema",
+    )
+    for field in ALLOCATION_REQUEST_FIELDS:
+        contracts.check(
+            isinstance(request_properties.get(field), dict),
+            f"{relative}: CreateClaimAllocationRequest.{field} is required",
+        )
+        contracts.check(
+            field in request_required,
+            f"{relative}: CreateClaimAllocationRequest.required must list {field}",
+        )
+    request_year = request_properties.get("policyYear") or {}
+    contracts.check(
+        (
+            request_year.get("type"),
+            request_year.get("minimum"),
+            request_year.get("maximum"),
+        )
+        == ("integer", ALLOCATION_MIN_POLICY_YEAR, ALLOCATION_MAX_POLICY_YEAR),
+        f"{relative}: CreateClaimAllocationRequest.policyYear must be an integer in "
+        f"{ALLOCATION_MIN_POLICY_YEAR}-{ALLOCATION_MAX_POLICY_YEAR}",
+    )
+    request_layer = request_properties.get("layer") or {}
+    contracts.check(
+        (request_layer.get("type"), request_layer.get("maxLength"))
+        == ("string", ALLOCATION_MAX_LAYER),
+        f"{relative}: CreateClaimAllocationRequest.layer must be a string of at most "
+        f"{ALLOCATION_MAX_LAYER} characters",
+    )
+    request_pct = request_properties.get("allocationPct") or {}
+    contracts.check(
+        (
+            request_pct.get("type"),
+            request_pct.get("exclusiveMinimum"),
+            request_pct.get("maximum"),
+        )
+        == ("number", 0, 1),
+        f"{relative}: CreateClaimAllocationRequest.allocationPct must be a number "
+        "greater than 0 and at most 1",
+    )
+    contracts.check(
+        str((request_properties.get("allocatedAmount") or {}).get("$ref", "")).endswith(
+            "/schemas/MoneyAmount"
+        ),
+        f"{relative}: CreateClaimAllocationRequest.allocatedAmount must use the shared "
+        "MoneyAmount schema",
+    )
+
+    paths = document.get("paths") or {}
+    for method, path, success_status, success_schema, request_schema in (
+        ALLOCATION_OPENAPI_PATHS
+    ):
+        path_item = paths.get(path) if isinstance(paths, dict) else None
+        operation = path_item.get(method) if isinstance(path_item, dict) else None
+        where = f"{relative}: {method.upper()} {path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required allocation operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+        parameter_refs = []
+        inline_names = []
+        for parameter in operation.get("parameters") or []:
+            if not isinstance(parameter, dict):
+                continue
+            reference = parameter.get("$ref")
+            if isinstance(reference, str):
+                parameter_refs.append(reference.rsplit("/", 1)[-1])
+            if isinstance(parameter.get("name"), str):
+                inline_names.append(parameter["name"])
+        for required_parameter in ("TenantHeader", "BookHeaderDirect"):
+            contracts.check(
+                required_parameter in parameter_refs,
+                f"{where}: must document the shared {required_parameter} parameter",
+            )
+        contracts.check(
+            "claimId" in inline_names,
+            f"{where}: must declare the claimId path parameter",
+        )
+        if request_schema:
+            request_body = operation.get("requestBody") or {}
+            body_schema = (
+                ((request_body.get("content") or {}).get("application/json") or {})
+                .get("schema")
+                if isinstance(request_body, dict)
+                else None
+            )
+            contracts.check(
+                isinstance(request_body, dict)
+                and request_body.get("required") is True,
+                f"{where}: requestBody must be required",
+            )
+            contracts.check(
+                isinstance(body_schema, dict)
+                and str(body_schema.get("$ref", "")).endswith(
+                    f"/schemas/{request_schema}"
+                ),
+                f"{where}: request body must use the {request_schema} schema",
+            )
+        responses = operation.get("responses") or {}
+        success = responses.get(success_status) if isinstance(responses, dict) else None
+        success_body = (
+            ((success.get("content") or {}).get("application/json") or {}).get("schema")
+            if isinstance(success, dict)
+            else None
+        )
+        contracts.check(
+            isinstance(success_body, dict)
+            and str(success_body.get("$ref", "")).endswith(f"/schemas/{success_schema}"),
+            f"{where}: {success_status} must return the {success_schema} schema",
+        )
+        for code in ("400", "404"):
+            contracts.check(
+                isinstance(responses, dict) and code in responses,
+                f"{where}: must document response {code}",
+            )
+        bad_request = responses.get("400") if isinstance(responses, dict) else None
+        bad_request_text = (
+            str(bad_request.get("description") or "")
+            if isinstance(bad_request, dict)
+            else ""
+        )
+        if request_schema:
+            contracts.check(
+                "POLICY_MISMATCH" in bad_request_text,
+                f"{where}: 400 must document POLICY_MISMATCH",
+            )
+            conflict = responses.get("409") if isinstance(responses, dict) else None
+            conflict_text = (
+                str(conflict.get("description") or "")
+                if isinstance(conflict, dict)
+                else ""
+            )
+            contracts.check(
+                "ALLOCATION_EXCEEDS_100" in conflict_text,
+                f"{where}: 409 must document ALLOCATION_EXCEEDS_100",
+            )
+
+    planned = document.get("x-planned-operations") or []
+    contracts.check(
+        not any(
+            isinstance(entry, dict)
+            and entry.get("path") == "/api/v1/claims/{claimId}/allocations"
+            for entry in planned
+        ),
+        f"{relative}: x-planned-operations must not list the implemented allocations path",
+    )
+
+
 def check_openapi(contracts: ContractSet, verbose: bool):
     print("\nOpenAPI 3.1 documents")
     expected = {"components"} | set(VERTICAL_FILES)
@@ -3504,6 +3809,8 @@ def check_openapi(contracts: ContractSet, verbose: bool):
         if vertical == "contract":
             check_contract_technical_accounts(contracts, document, relative)
             check_contract_bordereaux(contracts, document, relative)
+        if vertical == "direct-claims":
+            check_direct_claim_allocations(contracts, document, relative)
         contracts.check_openapi_schemas(document, relative)
         if verbose:
             print(f"  OK {relative}  paths={len(paths)} operations={operation_count}")

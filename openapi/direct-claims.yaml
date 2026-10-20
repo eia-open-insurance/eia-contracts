@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Direct Claims API
-  version: 1.5.0
+  version: 1.6.0
   summary: Direct-book claim administration and the Direct Claims expert API.
   description: >
     This document describes the implemented public Direct Claims domain API and
@@ -50,6 +50,18 @@ info:
     `Claim` projection exposes `assignedAdjuster`, `assignedTeam`, and
     `assignedAt` as nullable fields; a claim that has never been assigned
     returns null for all three.
+
+    Allocations split a claim across a policy year and layer. GET returns the
+    claim's allocations oldest first plus `totalPct` and `totalAmount`; POST
+    appends one split. `policyId` must be the claim's own policy and a mismatch
+    is 400 `POLICY_MISMATCH`; `policyYear` is 1900-2200, `layer` is trimmed to
+    at most 32 characters, `allocationPct` is a fraction greater than 0 and at
+    most 1, and `allocatedAmount` is zero or greater. The percentages already
+    recorded for the claim plus the new one may not exceed 1; an excess is 409
+    `ALLOCATION_EXCEEDS_100` and nothing is written. A create bumps the claim
+    version and emits `direct.claim.allocation-created` in the same
+    transaction. A missing or non-DIRECT book is hidden as 404 (SPEC 3.6.2,
+    WALL-06).
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -693,6 +705,99 @@ paths:
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
           $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/allocations:
+    get:
+      operationId: listClaimAllocations
+      tags:
+        - Direct Claims
+      summary: List a claim's policy-year allocations.
+      description: >
+        Returns the claim's allocations oldest first, with `totalPct` and
+        `totalAmount` summing the rows. The tenant is taken from
+        `X-EIA-Tenant`; `X-EIA-Book` is required and must be DIRECT. A missing
+        or different book is hidden as 404 (SPEC 3.6.2, WALL-06).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Allocation summary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AllocationSummary'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createClaimAllocation
+      tags:
+        - Direct Claims
+      summary: Allocate part of a claim to a policy year and layer.
+      description: >
+        Appends one allocation. `policyId` must be the claim's own policy
+        (400 `POLICY_MISMATCH`); `policyYear` must be 1900-2200; `layer` is
+        trimmed and limited to 32 characters; `allocationPct` must be greater
+        than 0 and at most 1; and `allocatedAmount` must be zero or greater.
+        The allocation percentages already recorded for the claim plus the new
+        one may not exceed 1; an excess is 409 `ALLOCATION_EXCEEDS_100` and
+        writes nothing. The create bumps the claim version and emits
+        `direct.claim.allocation-created` in the same transaction. A missing or
+        non-DIRECT book is hidden as 404 (SPEC 3.6.2, WALL-06).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateClaimAllocationRequest'
+      responses:
+        '201':
+          description: Allocation recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Allocation'
+        '400':
+          description: >
+            400. A malformed or out-of-range body is a problem+json
+            `VALIDATION_ERROR`. A `policyId` that is not the claim's own policy
+            is `POLICY_MISMATCH`; retrying with the claim's policy succeeds.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            409. The allocation percentages already recorded for the claim plus
+            the requested `allocationPct` would exceed 1. The code is
+            `ALLOCATION_EXCEEDS_100`; nothing is written. Reduce the percentage
+            or use a different policy year or layer and retry.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /api/v1/claims/{claimId}/litigation:
@@ -3186,6 +3291,65 @@ components:
         - COVERED
         - DENIED
         - DEFENSE_ONLY
+    Allocation:
+      type: object
+      description: >
+        One policy-year and layer split of a claim. `allocationPct` is a
+        fraction in (0, 1] serialized as a decimal string and
+        `allocatedAmount` is a booking amount in the claim currency; neither is
+        capped by the current reserve. The public projection omits the tenant
+        implied by the request context.
+      required:
+        - allocationId
+        - claimId
+        - policyId
+        - policyYear
+        - layer
+        - allocationPct
+        - allocatedAmount
+        - createdAt
+      properties:
+        allocationId:
+          type: string
+          format: uuid
+        claimId:
+          type: string
+          format: uuid
+        policyId:
+          type: string
+          format: uuid
+        policyYear:
+          type: integer
+          minimum: 1900
+          maximum: 2200
+        layer:
+          type: string
+          maxLength: 32
+        allocationPct:
+          $ref: './components.yaml#/components/schemas/Percent'
+        allocatedAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        createdAt:
+          type: string
+          format: date-time
+    AllocationSummary:
+      type: object
+      description: >
+        A claim's allocations oldest first plus the sums of the percentages and
+        allocated amounts across those rows.
+      required:
+        - items
+        - totalPct
+        - totalAmount
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Allocation'
+        totalPct:
+          $ref: './components.yaml#/components/schemas/Percent'
+        totalAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
     Litigation:
       type: object
       required:
@@ -3767,6 +3931,38 @@ components:
         reviewerPartyId:
           type: string
           format: uuid
+    CreateClaimAllocationRequest:
+      type: object
+      description: >
+        Command to allocate part of a claim to a policy year and layer.
+        `policyId` must be the claim's own policy; `allocationPct` is a fraction
+        greater than 0 and at most 1; `allocatedAmount` is zero or greater; and
+        the percentages already allocated to the claim plus the new one may not
+        exceed 1.
+      required:
+        - policyId
+        - policyYear
+        - layer
+        - allocationPct
+        - allocatedAmount
+      properties:
+        policyId:
+          type: string
+          format: uuid
+        policyYear:
+          type: integer
+          minimum: 1900
+          maximum: 2200
+        layer:
+          type: string
+          maxLength: 32
+        allocationPct:
+          type: number
+          description: Fraction of the claim, greater than 0 and at most 1.
+          exclusiveMinimum: 0
+          maximum: 1
+        allocatedAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
     LitigationRequest:
       type: object
       description: Record or update a litigation matter.
@@ -4178,6 +4374,14 @@ x-implementation:
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ExposureController.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ReserveController.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/CoverageController.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimAllocationController.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimAllocationService.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimAllocation.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimAllocationSummary.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimAllocationRepository.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/CreateClaimAllocationRequest.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/AllocationExceedsHundredException.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/PolicyMismatchException.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/LitigationController.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/SettlementController.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/RecoveryController.java
@@ -4204,6 +4408,9 @@ x-implementation:
     - repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/ClaimTaskNoteIdempotencyIntegrationTest.java
     - repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/ClaimAssignmentControllerTest.java
     - repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/ClaimAssignmentIntegrationTest.java
+    - repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/ClaimAllocationControllerTest.java
+    - repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/ClaimAllocationServiceTest.java
+    - repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/ClaimAllocationIntegrationTest.java
   errorEnvelope: >
     Vertical-specific ApiError {timestamp, status, code, message, path,
     details[{field, message}]}. Not the canonical Problem envelope yet.
@@ -4227,12 +4434,26 @@ x-implementation:
     contract documents the shared `X-EIA-Actor` header. `assignedBy` is persisted
     and audited but is not part of the public `Claim` projection. The assignment
     event name has no SPEC 11.4.9 equivalent (MISMATCHES.md M-22); the
-    implementation gaps are recorded in M-25.
+    implementation gaps are recorded in M-25. Allocation is implemented on the
+    public route and on the expert's public and `/internal/v1` aliases; the
+    domain calls the internal alias and remaps the expert's `id`/`tenantId`
+    projection to the public `allocationId` without a tenant. The expert owns
+    the policy match and the percentage total, and the domain validates the
+    caller-fixable bounds first. The expert codes are 400 `POLICY_MISMATCH` and
+    409 `ALLOCATION_EXCEEDS_100`; the domain currently remaps them to 400
+    `VALIDATION_ERROR` and 409 `CONFLICT` while preserving the detail
+    (MISMATCHES.md M-31). The allocation event name has no SPEC 11.4.9
+    equivalent and the SPEC `direct.claim.allocated` name remains planned
+    (MISMATCHES.md M-22).
 x-compatibility:
-  contractVersion: 1.5.0
-  previousContractVersion: 1.4.0
+  contractVersion: 1.6.0
+  previousContractVersion: 1.5.0
   breaking: []
   compatible:
+    - Adds GET/POST /api/v1/claims/{claimId}/allocations.
+    - Adds the AllocationSummary, Allocation, and CreateClaimAllocationRequest schemas.
+    - Documents 200/201/400/404/409, the 400 POLICY_MISMATCH policy guard, and the 409 ALLOCATION_EXCEEDS_100 percentage guard.
+    - Documents the direct.claim.allocation-created event published in the same transaction as an allocation create.
     - Adds PATCH /api/v1/claims/{claimId}/assignment and the /internal/v1/claims/{claimId}/assignment expert route.
     - Adds the AssignClaimRequest schema (assignedAdjuster required, max 128; assignedTeam optional, max 64; expectedVersion required, integer zero or greater).
     - Adds the optional X-EIA-Actor request header to the assignment operations.
@@ -4261,15 +4482,19 @@ x-compatibility:
     changed. The optional actor header is ignored by clients that do not send
     it. The X-EIA-User alias accepted by the Direct Claims expert and the
     negative-version handling difference are recorded in MISMATCHES.md M-25.
+
+    Allocation is additive over 1.5.0: the two public operations and the three
+    schemas are new, no existing path or request or response field changed, and
+    a claim without allocations returns an empty `items` array with zero totals
+    from the new read. The allocation-created event name is new and has no SPEC
+    11.4.9 equivalent; the SPEC `direct.claim.allocated` channel remains
+    planned. The domain's public error-code remap is recorded in MISMATCHES.md
+    M-31.
 x-planned-operations:
   - method: PATCH
     path: /api/v1/claims/{claimId}
     spec: SPEC 11.4.10
     note: Update non-financial claim fields.
-  - method: GET
-    path: /api/v1/claims/{claimId}/allocations
-    spec: SPEC 11.4.10
-    note: Policy-year allocations.
   - method: GET
     path: /api/v1/claims/{claimId}/financials
     spec: SPEC 11.4.10
