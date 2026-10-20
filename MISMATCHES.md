@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-20 (Direct Claims and Assumed Claims task and note contracts).
+Status: open, reviewed 2026-10-20 (payment source linkage contract).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -66,6 +66,7 @@ removed per the resolution policy.
 | M-21 | Cession/Retrocession FS-RI hand-off is synchronous | M |
 | M-22 | Implemented outbox event names differ from the SPEC catalog names | M |
 | M-23 | Global search paths and validation differ from the SPEC naming and canonical limit rules | M |
+| M-24 | Payment source link is a flat triple, not the SPEC claim projection | M |
 
 ## M-01 Public base paths
 
@@ -473,9 +474,14 @@ unimplemented fields and list the missing operations under
   calls, recoveries, commutation, disputes, audit, financials, and close.
 - Document: no content, versions, associations, hashes, page count, OCR status,
   tags, holds, packages, requests, or retention class.
-- Payment: no `claim`, `payee` object, `netAmount`, `method`, `dueDate`,
-  `authority`, SAP postings, allocations, requests, batches, reconciliations,
-  or escheatment.
+- Payment: no embedded `claim` object, `payee` object, `netAmount`, `method`,
+  `dueDate`, `authority`, SAP postings, allocations, requests, batches,
+  reconciliations, or escheatment. The implemented source link
+  (`sourceType`/`sourceId`/`sourceReference`) is a flat denormalized reference,
+  not the SPEC 11.7.4 `claim_vertical`/`claim_id`/`claim_number` projection, and
+  there is no referential-integrity check that `sourceId` exists in the source
+  vertical (M-24). `sourceReference` is stored on the payment so lists and
+  record views can render and link the source without an N+1 lookup.
 - Notifications: no `category`, `severity`, `subject` reference,
   `requiresAction`, `dueAt`, `actions[]`, inbox, read/acknowledge, stream,
   subscriptions, preferences, or admin surfaces.
@@ -501,6 +507,7 @@ unimplemented fields and list the missing operations under
 | Assumed Claims `assumedClaimNumber` | `assumed_claim_number` (matches DB, not the SPEC JSON examples) |
 | Policy `coinsurancePct` | a decimal fraction (`0.150000`) |
 | Contract `sharePct`, `signedLinePct`, `cessionPct` | percentages of 100 (`15.000000`), not the SPEC 12.2 fraction |
+| Payment `sourceType` + `sourceId` + `sourceReference` | Payment `claim_vertical` + `claim_id` + `claim_number` (or the contract link) |
 
 The contracts use the implemented names. Renaming any of these is a breaking
 change and needs a major version.
@@ -525,6 +532,12 @@ ten publishing verticals now emit a subset:
 | Document | `document.document.created`, `document.document.updated`, `document.document.status-changed` | `repos/eia-document-expert/.../DocumentEvents.java` |
 | Payment | `payment.payment.created`, `payment.payment.updated`, `payment.payment.status-changed` | `repos/eia-payment-expert/.../PaymentEvents.java` |
 | Notifications | `notifications.notification.created`, `notifications.notification.sent` | `repos/eia-notifications-expert/.../NotificationEvents.java` |
+
+The Payment `payment.payment.created` payload now also carries the optional
+`sourceType`, `sourceId`, and `sourceReference` fields in its `data` object.
+They are additive: `eventVersion` stays 1, the fields are absent or null on an
+unlinked payment, and `payment.payment.updated` and `.status-changed` keep their
+existing identity-only payloads.
 
 Each controller or service calls `outbox.insert(OutboxEvent.fromEnvelope(...))`
 in the same transaction as the aggregate write; for example
@@ -769,10 +782,67 @@ SPEC 11 (or a global-search section to SPEC 7.6) so the canonical paths have a
 normative home. No path change is proposed now because the gateway, the shell,
 and every web remote already call the documented routes.
 
+## M-24 Payment source link is a flat triple, not the SPEC claim projection
+
+SPEC 11.7.4 models the payment's business context as separate columns:
+`claim_vertical` (`direct` or `assumed`), `claim_id`, `claim_number`,
+`settlement_id`, `contract_id`, `contract_number`, and `payment_request_id`.
+The implemented payment instead stores one optional, generic source link:
+
+| Implemented field | Type | Rule | SPEC 11.7.4 equivalent |
+|---|---|---|---|
+| `sourceType` | enum | `DIRECT_CLAIM`, `ASSUMED_CLAIM`, `POLICY`, or `OTHER`; required whenever `sourceId` is supplied | `claim_vertical` plus the relation name |
+| `sourceId` | UUID | Required for `DIRECT_CLAIM`, `ASSUMED_CLAIM`, and `POLICY`; omitted for an `OTHER` reference-only source | `claim_id` or `contract_id` |
+| `sourceReference` | string, max 64 | Optional human label (for example `CLM-2026-0000001`); never replaces `sourceId` for a classified source | `claim_number` / `contract_number` projection |
+
+Consequences:
+
+- `sourceType` does not distinguish a claim from a settlement, or a policy from
+  a contract; a contract payment has no matching classified value and falls
+  under `OTHER`.
+- `sourceId` is a plain UUID with no foreign key and no existence check against
+  the Direct Claims, Assumed Claims, or Policy service. A create succeeds for a
+  well-formed UUID that names no source record. The SPEC 11.7.8
+  `payment.authorize` step 2 claim-capacity check is not implemented, and
+  nothing in the payment flow resolves `sourceId` against the claim or
+  contract.
+- The link is denormalized on purpose. `sourceReference` is stored on the
+  payment and appended to the global-search `secondary` line, and the payment
+  web remote builds the cross-link from `sourceType`. A payment list or record
+  therefore renders the source without an N+1 lookup per row. The full source
+  object, the projected `claim_number`, and the source-vertical API call remain
+  unimplemented.
+- A payment with no source link is valid; the fields are optional on the create
+  request, the projection, and the `payment.payment.created` payload. A created
+  payment cannot add or change its source afterwards because the implemented
+  API has no update command.
+
+Evidence:
+
+- `repos/eia-payment-domain/.../PaymentRules.java:110-137` and
+  `repos/eia-payment-expert/.../PaymentRules.java:147-175`
+  (`validateSourceLinkage`); the expert constants are at `:39-45`
+  (`SOURCE_TYPES`, `SOURCE_REFERENCE_MAX_LENGTH`).
+- `repos/eia-payment-expert/.../CreatePaymentRequest.java:19-21` and
+  `Payment.java:26-28`; `repos/eia-payment-domain/.../PaymentDto.java:23-25`
+  and `CreatePaymentCommand.java:17-19`.
+- `repos/eia-payment-domain/.../PaymentService.java:107-117` (search matches
+  `sourceId` and `sourceReference`) and `:134-155` (secondary suffix).
+- `repos/eia-payment-expert/.../PaymentEvents.java:52-54` (created payload).
+- `repos/eia-payment-expert/src/test/java/com/eia/payment/expert/PaymentOutboxIntegrationTest.java:87-127`
+  (source persisted and emitted; OTHER reference-only).
+- `repos/eia-payment-web/README.md:16-26` and `CHANGELOG.md:22-32` (hand-off
+  parameters and source cross-links).
+
+Resolution: either model `claim_vertical`/`claim_id`/`claim_number` explicitly,
+validate `sourceId` against the source vertical before create or authorize, and
+add the contract/settlement context, or accept the generic source triple as the
+canonical Round 2 shape and amend SPEC 11.7.4 and the M-12 gap accordingly.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-Direct Claims and Assumed Claims task and note contracts:
+payment source linkage contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -811,7 +881,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 9361 checks, 0 failures
+  PASS 9411 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -839,7 +909,11 @@ Additional checks and limits:
   renaming the `/api/v1/assumed-claims/claims/{claimId}/tasks` path, renaming
   the `TaskStatusChange` schema, and dropping
   `assumed.claim.note-added` from the Assumed Claims `implemented` list each
-  fail with the specific path, schema, or implemented-event message.
+  fail with the specific path, schema, or implemented-event message. The payment
+  source pass added three more: removing `sourceId` from the `Payment` schema,
+  adding `OTHER` to the classified-source `if` enum, and removing
+  `sourceReference` from the `PaymentPaymentCreatedData` payload each fail with
+  the specific schema or rule message.
 
 ## Resolution policy
 

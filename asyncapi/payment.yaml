@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:payment
 info:
   title: EIA Payment events
-  version: 1.1.0
+  version: 1.2.0
   summary: Published domain event names for the Payment vertical.
   description: >
     Event contract for the Payment vertical. The authoritative event names are
@@ -18,9 +18,13 @@ info:
     `payment.payment.updated`, and `payment.payment.status-changed` through the
     transactional outbox; those channels and operations are marked
     `x-status: implemented`. A status write emits `updated` and `status-changed`
-    together at the same aggregate version. The remaining SPEC 11.7.10 names
-    are planned. Payment is a shared financial service and the current API has
-    no book input, so these events are stamped DIRECT.
+    together at the same aggregate version. `payment.payment.created` carries
+    the optional source link (`sourceType`, `sourceId`, `sourceReference`) in
+    its data object; a classified source always carries `sourceId`, and
+    `sourceReference` is the denormalized human label that lets a consumer link
+    the payment to its claim or policy without an N+1 lookup. The remaining
+    SPEC 11.7.10 names are planned. Payment is a shared financial service and
+    the current API has no book input, so these events are stamped DIRECT.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -73,8 +77,12 @@ channels:
     description: >
       Emitted by the Payment expert when a payment is persisted, in the same
       transaction as the row. The payload carries the payment identity, type,
-      status, amount, currency, payee, optional payment date, and the row
-      version.
+      status, amount, currency, payee, optional payment date, the row version,
+      and the optional source link (`sourceType`, `sourceId`,
+      `sourceReference`). `sourceType` is DIRECT_CLAIM, ASSUMED_CLAIM, POLICY,
+      or OTHER; the three classified types carry `sourceId`, while OTHER may
+      carry only `sourceReference`. The source fields are optional so an
+      unlinked payment stays a valid payload.
     x-event-type: payment.payment.created
     x-event-version: 1
     x-status: implemented
@@ -83,6 +91,8 @@ channels:
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
+      PaymentPaymentCreatedData:
+        $ref: '#/components/messages/PaymentPaymentCreatedData'
   PaymentPaymentAuthorized:
     address: payment.payment.authorized
     title: payment.payment.authorized
@@ -499,6 +509,100 @@ components:
             type: string
       payload:
         $ref: '../schemas/event-envelope.schema.json'
+    PaymentPaymentCreatedData:
+      name: PaymentPaymentCreatedData
+      title: payment.payment.created data
+      summary: Minimal schema for the envelope data object of a created payment.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - paymentId
+          - paymentNumber
+          - paymentType
+          - status
+          - amount
+          - currency
+          - payeePartyId
+          - version
+        properties:
+          paymentId:
+            type: string
+            format: uuid
+          paymentNumber:
+            type: string
+            pattern: '^PAY-[0-9]{4}-[0-9]{7}$'
+          paymentType:
+            type: string
+            enum:
+              - INDEMNITY
+              - DEFENSE_COST
+              - ALAE
+              - EXPENSE
+              - MEDICAL
+              - STRUCTURED_SETTLEMENT
+              - ANNUITY
+              - LIEN_PAYMENT
+              - TRUST_DEPOSIT
+              - TRUST_DISTRIBUTION
+              - SUBROGATION_RECOVERY
+              - SALVAGE_RECOVERY
+              - ASSUMED_RECOVERY
+              - DEDUCTIBLE_REIMBURSEMENT
+              - PREMIUM
+              - COMMISSION
+              - BROKERAGE
+              - CASH_CALL
+              - TECHNICAL_ACCOUNT_SETTLEMENT
+              - SECURITY_COLLATERAL
+              - REFUND
+              - OFFSET
+              - INTERCOMPANY
+              - TAX
+              - FEE
+          status:
+            type: string
+          amount:
+            type: string
+            description: Decimal string with up to four fraction digits (SPEC 10.3).
+          currency:
+            type: string
+            pattern: '^[A-Z]{3}$'
+          payeePartyId:
+            type: string
+            format: uuid
+          paymentDate:
+            type: [string, 'null']
+            format: date
+          version:
+            type: integer
+            minimum: 0
+          sourceType:
+            oneOf:
+              - type: string
+                enum:
+                  - DIRECT_CLAIM
+                  - ASSUMED_CLAIM
+                  - POLICY
+                  - OTHER
+              - type: 'null'
+            description: >
+              Optional source classification. Null when the payment has no
+              source link.
+          sourceId:
+            type: [string, 'null']
+            format: uuid
+            description: >
+              UUID of the source claim or policy. Set for a classified source;
+              null for an OTHER reference-only source or an unlinked payment.
+          sourceReference:
+            type: [string, 'null']
+            maxLength: 64
+            description: >
+              Human-readable source reference (for example
+              `CLM-2026-0000001`) so consumers can link the source without an
+              N+1 lookup. Never replaces `sourceId` for a classified source.
   securitySchemes:
     outboxSignature:
       type: httpApiKey
@@ -516,7 +620,9 @@ x-implementation:
   notes: >
     Three implemented event names are written to the transactional outbox in
     the same transaction as the payment write and dispatched by the platform
-    outbox dispatcher when `eia.outbox.enabled=true`. The other SPEC 11.7.10
+    outbox dispatcher when `eia.outbox.enabled=true`.
+    `payment.payment.created` carries the optional source link; the source
+    fields are absent or null on an unlinked payment. The other SPEC 11.7.10
     names remain planned. There is no subscriber, inbox, or subscription
     registry yet.
 

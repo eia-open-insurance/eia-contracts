@@ -197,6 +197,33 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   events, and M-22 with the four names that have no SPEC 11.5.9 equivalent.
 - `python scripts/validate_contracts.py` passes 9,361 checks with 0 failures.
 
+### Added in the payment source linkage contract (2026-10-20)
+
+- `openapi/payment.yaml` is 1.2.0: adds `sourceType`, `sourceId`, and
+  `sourceReference` to the `Payment` projection and to
+  `CreatePaymentRequest` and `CreatePaymentRequestInternal`; adds the
+  `PaymentSourceType` enum (`DIRECT_CLAIM`, `ASSUMED_CLAIM`, `POLICY`, `OTHER`);
+  and documents the create rules. A classified source requires `sourceId`,
+  `sourceId` requires `sourceType`, `OTHER` may be reference-only, and
+  `sourceReference` is at most 64 characters. The search operation now documents
+  that matching covers `sourceId` and `sourceReference` and that a present
+  `sourceReference` is appended to the `secondary` line.
+- `asyncapi/payment.yaml` is 1.2.0: the implemented `payment.payment.created`
+  channel carries a `PaymentPaymentCreatedData` message whose payload schema
+  includes the optional `sourceType`, `sourceId`, and `sourceReference` fields.
+- `scripts/validate_contracts.py` requires the source fields on `Payment`,
+  both create request schemas, and the created event payload; it also requires
+  the classified-source/sourceId rule, the sourceId/sourceType pairing rule, the
+  four-value enum, the UUID format, the 64-character reference limit, and the
+  source fields to remain optional on the create requests and the event payload.
+- `README.md` documents the source semantics, the search suffix behaviour, and
+  why the denormalized `sourceReference` avoids an N+1 lookup; the
+  `MISMATCHES.md` M-12 "no claim" gap is replaced with the implemented source
+  link, M-13 records the naming difference, and the new M-24 records the SPEC
+  `claim_vertical`/`claim_id`/`claim_number` deviation and the absent source
+  existence check.
+- `python scripts/validate_contracts.py` passes 9,411 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

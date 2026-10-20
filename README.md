@@ -250,6 +250,24 @@ version-checked write in this slice: a stale task version is 409, and a repeated
 status is a no-op, so `PATCH` is retry-safe. The POSTs have no natural key.
 `MISMATCHES.md` M-07 records the deviation.
 
+### Payment source linkage (2026-10-20)
+
+Payment 1.2.0 adds the optional link from a payment to the business record it
+disburses. The change is additive: every new field is optional, a client that
+omits all three fields sees no change, and the event payload only gains optional
+members.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/payment.yaml` | 1.2.0 | Additive | `sourceType`, `sourceId`, and `sourceReference` on `Payment`, `CreatePaymentRequest`, and `CreatePaymentRequestInternal`; the `PaymentSourceType` enum; the create rules; the search matching and `secondary` behaviour. |
+| `asyncapi/payment.yaml` | 1.2.0 | Additive | `payment.payment.created` carries a minimal `PaymentPaymentCreatedData` schema with the optional source fields. |
+
+`sourceReference` is the denormalized human label. Storing it on the payment lets
+the shell, the queue, and the record subtitle render and link the source claim or
+policy without an N+1 lookup against the Direct Claims, Assumed Claims, or Policy
+API. The payment still does not embed the source object and does not verify that
+the source exists (M-12, M-24).
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -380,6 +398,41 @@ collections. SPEC 7.6 and 12.2 specify a different, cursor-based envelope
 contract; the divergence and the migration choice are recorded in
 `MISMATCHES.md` M-04.
 
+### Payment source linkage
+
+The Payment slice does not embed the source claim or policy. A payment may
+carry a flat, optional source link instead:
+
+| Field | Type | Rule |
+|---|---|---|
+| `sourceType` | enum | `DIRECT_CLAIM`, `ASSUMED_CLAIM`, `POLICY`, or `OTHER`. Required whenever `sourceId` is supplied. |
+| `sourceId` | UUID | UUID of the source direct claim, assumed claim, or policy. Required for the three classified types; omitted for an `OTHER` reference-only source. |
+| `sourceReference` | string, max 64 | Human-readable reference, for example `CLM-2026-0000001`. Optional metadata; it never replaces `sourceId` for a classified source. |
+
+Rules and semantics:
+
+- A classified source (`DIRECT_CLAIM`, `ASSUMED_CLAIM`, `POLICY`) requires
+  `sourceId`; supplying `sourceId` without `sourceType` is a 400
+  (`sourceType is required when sourceId is supplied`).
+- `OTHER` is the escape hatch: it may carry only `sourceReference`, with no
+  `sourceId`. A payment with no source at all is valid.
+- `sourceType` accepts `DIRECT_CLAIM` and `ASSUMED_CLAIM` even though the
+  Direct Claims and Assumed Claims books are separate; the payment is not book
+  scoped, so the type, not the book header, identifies the source vertical.
+- The link is deliberately denormalized. `sourceReference` is the label the
+  list, queue, and record subtitle render, and the payment web remote uses
+  `sourceType` to cross-link to `/direct-claims`, `/assumed-claims`, or
+  `/policy`. Rendering a page of payments therefore needs no N+1 lookup of the
+  source vertical; the reference is stored at create time.
+- The source is not a foreign key: there is no referential-integrity or
+  existence check against the source vertical, and `sourceId` is not resolved
+  before create. The SPEC 11.7.4 `claim_vertical`/`claim_id`/`claim_number`
+  projection, claim-capacity check, and source object remain planned (M-12,
+  M-24).
+- `sourceReference` is trimmed and limited to 64 characters; the search
+  matching and `secondary` suffix behaviour are described under
+  [Global search](#global-search).
+
 ### Global search
 
 The shell's `/search` page fans out to one search operation per vertical. Every
@@ -413,6 +466,14 @@ Request rules:
   to be a 400 `application/problem+json` `Problem`; a different book is hidden
   as 404 `BOOK_SCOPE_VIOLATION`. Security is the document-level session cookie,
   the same requirement as the list operation.
+
+Payment search additionally matches `sourceId` and `sourceReference`. When a
+matched payment has a `sourceReference`, it is appended to `secondary` after
+the payment type (or currency) and the status, separated by ` · `:
+`INDEMNITY · DRAFT · CLM-2026-0000001`. The source UUID is searchable but is not
+rendered in `secondary`, and `label` remains the payment number. This keeps the
+source visible and linkable in the result row without an N+1 lookup per
+payment.
 
 Response shape:
 
@@ -475,12 +536,13 @@ missing directory.
    global-search routes), the task/note schemas, the search operations' shared
    parameters and `SearchResponse`/400/404 responses, the `SearchResponse` and
    `SearchItem` keys, the required 422/409/428 response codes on the Round 5
-   mutations, and agreement between `info.version` and
-   `x-compatibility.contractVersion`.
+   mutations, the payment source fields and their create rules, and agreement
+   between `info.version` and `x-compatibility.contractVersion`.
 4. **AsyncAPI structure.** `asyncapi: 3.0.0`, channel addresses, `x-event-type`,
    `x-status: planned|implemented`, `x-implemented-by` on every implemented
-   channel, one `send` operation per channel, and a `DomainEvent` message on
-   every channel.
+   channel, one `send` operation per channel, a `DomainEvent` message on
+   every channel, and the optional source fields on the payment created
+   payload.
 5. **Event catalog cross-check.** The published set in `event-catalog.yaml`
    must equal the channel addresses in the matching vertical document, event
    names must be unique across the platform and must match
@@ -542,6 +604,9 @@ missing directory.
   services also clamp an over-limit `limit` instead of returning 400 and the
   claim verticals hide a missing book as 404. The contract records the canonical
   400/1-25 behaviour and `MISMATCHES.md` M-23 records the divergence;
+- a payment carries a flat `sourceType`/`sourceId`/`sourceReference` link rather
+  than the SPEC 11.7.4 `claim_vertical`/`claim_id`/`claim_number` projection, and
+  the source is neither resolved nor checked for existence (M-12, M-24);
 - ten experts publish a subset of their events through the transactional
   outbox into the platform `event-ingest` inbox, but no vertical consumes
   another vertical's events, there is no subscription registry or gap

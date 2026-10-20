@@ -510,6 +510,14 @@ REQUIRED_SCHEMA_FILES = [
     "event-envelope.schema.json",
 ]
 
+# Payment source linkage. The three classified types identify a UUID source;
+# OTHER is the reference-only escape hatch. All three fields are optional on the
+# wire so an unlinked payment and a pre-linkage payment stay valid.
+PAYMENT_SOURCE_FIELDS = ("sourceType", "sourceId", "sourceReference")
+PAYMENT_SOURCE_TYPES = ("DIRECT_CLAIM", "ASSUMED_CLAIM", "POLICY", "OTHER")
+PAYMENT_CLASSIFIED_SOURCE_TYPES = ("DIRECT_CLAIM", "ASSUMED_CLAIM", "POLICY")
+PAYMENT_SOURCE_REFERENCE_MAX_LENGTH = 64
+
 EVENT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$")
 VALID_JSON_TYPES = {"null", "boolean", "object", "array", "number", "string", "integer"}
 
@@ -1124,6 +1132,168 @@ class ContractSet:
 
 
 # ---------------------------------------------------------------------------
+# Payment source-linkage checks
+# ---------------------------------------------------------------------------
+
+
+def _payment_source_type_values(property_schema, document):
+    """Return the sourceType enum values from a plain, oneOf, or $ref property."""
+    if not isinstance(property_schema, dict):
+        return set()
+    if isinstance(property_schema.get("enum"), list):
+        return set(property_schema["enum"])
+    for branch in property_schema.get("oneOf") or []:
+        if not isinstance(branch, dict):
+            continue
+        if isinstance(branch.get("enum"), list):
+            return set(branch["enum"])
+        reference = branch.get("$ref")
+        if isinstance(reference, str):
+            target = _local_ref(document, reference)
+            if isinstance(target, dict) and isinstance(target.get("enum"), list):
+                return set(target["enum"])
+    return set()
+
+
+def _payment_create_rules(schema):
+    """Return (classified requires sourceId, sourceId requires sourceType)."""
+    classified_rule = False
+    pairing_rule = False
+    for branch in schema.get("allOf") or []:
+        if not isinstance(branch, dict):
+            continue
+        condition = branch.get("if") or {}
+        consequence = branch.get("then") or {}
+        if not isinstance(condition, dict) or not isinstance(consequence, dict):
+            continue
+        condition_required = set(condition.get("required") or [])
+        then_required = set(consequence.get("required") or [])
+        condition_properties = condition.get("properties") or {}
+        source_type = condition_properties.get("sourceType") or {}
+        source_id = condition_properties.get("sourceId") or {}
+        if (
+            "sourceType" in condition_required
+            and set(source_type.get("enum") or []) == set(PAYMENT_CLASSIFIED_SOURCE_TYPES)
+            and "sourceId" in then_required
+        ):
+            classified_rule = True
+        if (
+            "sourceId" in condition_required
+            and source_id.get("type") == "string"
+            and "sourceType" in then_required
+        ):
+            pairing_rule = True
+    return classified_rule, pairing_rule
+
+
+def check_payment_openapi_sources(contracts: ContractSet, document, relative: str):
+    """Require the optional source fields and create rules in openapi/payment.yaml."""
+    schemas = (document.get("components") or {}).get("schemas") or {}
+    payment = schemas.get("Payment") or {}
+    payment_properties = payment.get("properties") or {}
+    for field in PAYMENT_SOURCE_FIELDS:
+        contracts.check(
+            field in payment_properties,
+            f"{relative}: Payment.properties.{field} is required",
+        )
+    contracts.check(
+        _payment_source_type_values(payment_properties.get("sourceType"), document)
+        == set(PAYMENT_SOURCE_TYPES),
+        f"{relative}: Payment.sourceType must enumerate {list(PAYMENT_SOURCE_TYPES)}",
+    )
+    contracts.check(
+        (payment_properties.get("sourceId") or {}).get("format") == "uuid",
+        f"{relative}: Payment.sourceId must be a uuid",
+    )
+    contracts.check(
+        (payment_properties.get("sourceReference") or {}).get("maxLength")
+        == PAYMENT_SOURCE_REFERENCE_MAX_LENGTH,
+        f"{relative}: Payment.sourceReference maxLength must be {PAYMENT_SOURCE_REFERENCE_MAX_LENGTH}",
+    )
+
+    for schema_name in ("CreatePaymentRequest", "CreatePaymentRequestInternal"):
+        schema = schemas.get(schema_name) or {}
+        properties = schema.get("properties") or {}
+        required = set(schema.get("required") or [])
+        for field in PAYMENT_SOURCE_FIELDS:
+            contracts.check(
+                field in properties,
+                f"{relative}: {schema_name}.properties.{field} is required",
+            )
+            contracts.check(
+                field not in required,
+                f"{relative}: {schema_name}.{field} must stay optional",
+            )
+        contracts.check(
+            _payment_source_type_values(properties.get("sourceType"), document)
+            == set(PAYMENT_SOURCE_TYPES),
+            f"{relative}: {schema_name}.sourceType must enumerate {list(PAYMENT_SOURCE_TYPES)}",
+        )
+        contracts.check(
+            (properties.get("sourceId") or {}).get("format") == "uuid",
+            f"{relative}: {schema_name}.sourceId must be a uuid",
+        )
+        contracts.check(
+            (properties.get("sourceReference") or {}).get("maxLength")
+            == PAYMENT_SOURCE_REFERENCE_MAX_LENGTH,
+            f"{relative}: {schema_name}.sourceReference maxLength must be "
+            f"{PAYMENT_SOURCE_REFERENCE_MAX_LENGTH}",
+        )
+        classified_rule, pairing_rule = _payment_create_rules(schema)
+        contracts.check(
+            classified_rule,
+            f"{relative}: {schema_name} must require sourceId for "
+            f"{list(PAYMENT_CLASSIFIED_SOURCE_TYPES)}",
+        )
+        contracts.check(
+            pairing_rule,
+            f"{relative}: {schema_name} must require sourceType when sourceId is supplied",
+        )
+
+
+def check_payment_asyncapi_sources(contracts: ContractSet, document, relative: str):
+    """Require the optional source fields on the created event payload."""
+    channels = document.get("channels") or {}
+    created = channels.get("PaymentPaymentCreated") or {}
+    created_messages = created.get("messages") or {}
+    contracts.check(
+        (created_messages.get("PaymentPaymentCreatedData") or {}).get("$ref")
+        == "#/components/messages/PaymentPaymentCreatedData",
+        f"{relative}: PaymentPaymentCreated must reference PaymentPaymentCreatedData",
+    )
+    messages = (document.get("components") or {}).get("messages") or {}
+    message = messages.get("PaymentPaymentCreatedData") or {}
+    payload = message.get("payload") or {}
+    properties = payload.get("properties") or {}
+    required = set(payload.get("required") or [])
+    for field in PAYMENT_SOURCE_FIELDS:
+        contracts.check(
+            field in properties,
+            f"{relative}: PaymentPaymentCreatedData.payload.properties.{field} is required",
+        )
+        contracts.check(
+            field not in required,
+            f"{relative}: PaymentPaymentCreatedData.payload.{field} must stay optional",
+        )
+    contracts.check(
+        _payment_source_type_values(properties.get("sourceType"), document)
+        == set(PAYMENT_SOURCE_TYPES),
+        f"{relative}: PaymentPaymentCreatedData.sourceType must enumerate "
+        f"{list(PAYMENT_SOURCE_TYPES)}",
+    )
+    contracts.check(
+        (properties.get("sourceId") or {}).get("format") == "uuid",
+        f"{relative}: PaymentPaymentCreatedData.sourceId must be a uuid",
+    )
+    contracts.check(
+        (properties.get("sourceReference") or {}).get("maxLength")
+        == PAYMENT_SOURCE_REFERENCE_MAX_LENGTH,
+        f"{relative}: PaymentPaymentCreatedData.sourceReference maxLength must be "
+        f"{PAYMENT_SOURCE_REFERENCE_MAX_LENGTH}",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
 
@@ -1396,6 +1566,8 @@ def check_openapi(contracts: ContractSet, verbose: bool):
                 compatibility.get("contractVersion") == doc_info.get("version"),
                 f"{relative}: x-compatibility.contractVersion must equal info.version",
             )
+        if vertical == "payment":
+            check_payment_openapi_sources(contracts, document, relative)
         contracts.check_openapi_schemas(document, relative)
         if verbose:
             print(f"  OK {relative}  paths={len(paths)} operations={operation_count}")
@@ -1517,6 +1689,8 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
         )
         for event in published:
             contracts.check(bool(EVENT_NAME_RE.fullmatch(event)), f"event-catalog.yaml: {event} is not a valid event name")
+        if vertical == "payment":
+            check_payment_asyncapi_sources(contracts, document, relative)
         published_by_vertical[vertical] = set(published)
         if verbose:
             print(f"  OK {relative}  channels={len(channels)} operations={len(operations)}")
