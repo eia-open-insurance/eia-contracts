@@ -702,6 +702,56 @@ POLICY_BILLING_EVENTS = (
 )
 
 
+# Policy premium receivables (SPEC 11.2.13). The cross-policy queue is served by
+# the domain over the expert's billing read and deliberately sits outside
+# /api/v1/policies because it is not scoped to one policy. The expert's
+# /internal/v1 alias is an implementation detail and is not part of the public
+# contract. Each tuple is (method, path, response schema).
+RECEIVABLE_OPENAPI_PATHS = [
+    ("get", "/api/v1/billing/installments", "ReceivableSummary"),
+]
+
+RECEIVABLE_FIELDS = (
+    "installmentId",
+    "planId",
+    "planNumber",
+    "policyId",
+    "policyNumber",
+    "insuredPartyId",
+    "installmentNumber",
+    "dueDate",
+    "amount",
+    "currency",
+    "status",
+    "daysPastDue",
+    "paidAt",
+    "paymentId",
+)
+
+# paidAt and paymentId are nullable and stay optional because the queue only
+# returns unsettled installments; every other member is always present.
+RECEIVABLE_REQUIRED_FIELDS = (
+    "installmentId",
+    "planId",
+    "planNumber",
+    "policyId",
+    "policyNumber",
+    "insuredPartyId",
+    "installmentNumber",
+    "dueDate",
+    "amount",
+    "currency",
+    "status",
+    "daysPastDue",
+)
+
+RECEIVABLE_STATUSES = ("DUE", "OVERDUE")
+RECEIVABLE_SUMMARY_FIELDS = ("items", "totalAmount", "overdueAmount", "count")
+RECEIVABLE_DEFAULT_LIMIT = 20
+RECEIVABLE_MIN_LIMIT = 1
+RECEIVABLE_MAX_LIMIT = 200
+
+
 # Policy renewal (SPEC 11.2.4 renewal lineage, SPEC 11.2.10 renew). The public
 # route creates a successor DRAFT term, leaves the source policy unchanged, and
 # returns the successor with its own ETag. The request body carries the two term
@@ -2064,6 +2114,14 @@ def _parameter_names(operation):
     return references, names
 
 
+def _inline_parameter(operation, name):
+    """Return the inline query/path parameter called name, or None."""
+    for parameter in operation.get("parameters") or []:
+        if isinstance(parameter, dict) and parameter.get("name") == name:
+            return parameter
+    return None
+
+
 def check_policy_billing_openapi(contracts: ContractSet, document, relative: str):
     """Require the Policy billing operations, schemas, and field rules."""
     paths = document.get("paths") or {}
@@ -2341,6 +2399,252 @@ def check_policy_billing_openapi(contracts: ContractSet, document, relative: str
         _schema_types(update_properties.get("paymentId")) == {"string", "null"}
         and (update_properties.get("paymentId") or {}).get("format") == "uuid",
         f"{relative}: UpdateInstallmentRequest.paymentId must be a nullable uuid",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Policy premium-receivables checks
+# ---------------------------------------------------------------------------
+
+
+def check_policy_receivables_openapi(contracts: ContractSet, document, relative: str):
+    """Require the cross-policy receivables queue, schemas, and query rules."""
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    for method, receivable_path, response_schema_name in RECEIVABLE_OPENAPI_PATHS:
+        path_item = paths.get(receivable_path) if isinstance(paths, dict) else None
+        operation = path_item.get(method) if isinstance(path_item, dict) else None
+        where = f"{relative}: {method.upper()} {receivable_path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required receivable operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+
+        parameter_refs, _ = _parameter_names(operation)
+        contracts.check(
+            "TenantHeader" in parameter_refs,
+            f"{where}: must require the shared TenantHeader",
+        )
+        contracts.check(
+            "BookHeaderDirectOptional" in parameter_refs,
+            f"{where}: must document the shared BookHeaderDirectOptional parameter",
+        )
+        contracts.check(
+            not any(
+                isinstance(parameter, dict) and parameter.get("in") == "path"
+                for parameter in operation.get("parameters") or []
+            ),
+            f"{where}: is a cross-policy read and must not declare a path parameter",
+        )
+
+        description = str(operation.get("description") or "")
+        contracts.check(
+            "outside" in description.lower() and "/api/v1/policies" in description,
+            f"{where}: description must note that the route is outside /api/v1/policies",
+        )
+        contracts.check(
+            "BOOK_SCOPE_VIOLATION" in description,
+            f"{where}: description must document the 404 BOOK_SCOPE_VIOLATION book wall",
+        )
+        contracts.check(
+            "INVALID_INSTALLMENT_STATUS" in description,
+            f"{where}: description must document INVALID_INSTALLMENT_STATUS",
+        )
+        contracts.check(
+            "VALIDATION_ERROR" in description,
+            f"{where}: description must document the limit VALIDATION_ERROR",
+        )
+
+        status_parameter = _inline_parameter(operation, "status")
+        contracts.check(
+            isinstance(status_parameter, dict)
+            and status_parameter.get("in") == "query"
+            and status_parameter.get("required") is False,
+            f"{where}: must declare an optional query parameter status",
+        )
+        contracts.check(
+            set(((status_parameter or {}).get("schema") or {}).get("enum") or [])
+            == set(RECEIVABLE_STATUSES),
+            f"{where}: status must enumerate {list(RECEIVABLE_STATUSES)}",
+        )
+
+        due_before = _inline_parameter(operation, "dueBefore")
+        contracts.check(
+            isinstance(due_before, dict)
+            and due_before.get("in") == "query"
+            and due_before.get("required") is False
+            and (due_before.get("schema") or {}).get("format") == "date",
+            f"{where}: must declare an optional date query parameter dueBefore",
+        )
+
+        limit_parameter = _inline_parameter(operation, "limit")
+        limit_schema = (limit_parameter or {}).get("schema") or {}
+        contracts.check(
+            isinstance(limit_parameter, dict)
+            and limit_parameter.get("in") == "query"
+            and limit_parameter.get("required") is False,
+            f"{where}: must declare an optional query parameter limit",
+        )
+        contracts.check(
+            (
+                limit_schema.get("type"),
+                limit_schema.get("minimum"),
+                limit_schema.get("maximum"),
+                limit_schema.get("default"),
+            )
+            == (
+                "integer",
+                RECEIVABLE_MIN_LIMIT,
+                RECEIVABLE_MAX_LIMIT,
+                RECEIVABLE_DEFAULT_LIMIT,
+            ),
+            f"{where}: limit must be an integer {RECEIVABLE_MIN_LIMIT}.."
+            f"{RECEIVABLE_MAX_LIMIT} defaulting to {RECEIVABLE_DEFAULT_LIMIT}",
+        )
+
+        responses = operation.get("responses") or {}
+        contracts.check(
+            "400" in responses,
+            f"{where}: must document the 400 response",
+        )
+        contracts.check(
+            "404" in responses,
+            f"{where}: must document the 404 response",
+        )
+        bad_request = responses.get("400")
+        contracts.check(
+            isinstance(bad_request, dict)
+            and str(bad_request.get("$ref", "")).endswith("/responses/BadRequest"),
+            f"{where}: 400 must reference the shared BadRequest",
+        )
+        not_found = responses.get("404")
+        contracts.check(
+            isinstance(not_found, dict)
+            and str(not_found.get("$ref", "")).endswith("/responses/NotFound"),
+            f"{where}: 404 must reference the shared NotFound",
+        )
+        ok_schema = _response_schema(operation, "200")
+        contracts.check(
+            isinstance(ok_schema, dict)
+            and str(ok_schema.get("$ref", "")).endswith(
+                f"/schemas/{response_schema_name}"
+            ),
+            f"{where}: 200 must return the {response_schema_name} schema",
+        )
+
+    receivable = schemas.get("Receivable") or {}
+    receivable_properties = receivable.get("properties") or {}
+    receivable_required = set(receivable.get("required") or [])
+    contracts.check(
+        isinstance(receivable, dict) and receivable.get("type") == "object",
+        f"{relative}: Receivable must be an object schema",
+    )
+    for field in RECEIVABLE_FIELDS:
+        contracts.check(
+            field in receivable_properties,
+            f"{relative}: Receivable.properties.{field} is required",
+        )
+    contracts.check(
+        set(RECEIVABLE_REQUIRED_FIELDS) == receivable_required,
+        f"{relative}: Receivable.required must list the non-nullable receivable fields",
+    )
+    for field in ("installmentId", "planId", "policyId", "insuredPartyId"):
+        contracts.check(
+            (receivable_properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: Receivable.{field} must be a uuid",
+        )
+    for field in ("planNumber", "policyNumber"):
+        contracts.check(
+            (
+                (receivable_properties.get(field) or {}).get("type"),
+                (receivable_properties.get(field) or {}).get("maxLength"),
+            )
+            == ("string", 32),
+            f"{relative}: Receivable.{field} must be a string of at most 32 characters",
+        )
+    installment_number = receivable_properties.get("installmentNumber") or {}
+    contracts.check(
+        (installment_number.get("type"), installment_number.get("minimum"))
+        == ("integer", 1),
+        f"{relative}: Receivable.installmentNumber must be an integer >= 1",
+    )
+    contracts.check(
+        (receivable_properties.get("dueDate") or {}).get("format") == "date",
+        f"{relative}: Receivable.dueDate must be a date",
+    )
+    contracts.check(
+        str((receivable_properties.get("amount") or {}).get("$ref", "")).endswith(
+            "/schemas/MoneyAmount"
+        ),
+        f"{relative}: Receivable.amount must reference MoneyAmount",
+    )
+    contracts.check(
+        str((receivable_properties.get("currency") or {}).get("$ref", "")).endswith(
+            "/schemas/CurrencyCode"
+        ),
+        f"{relative}: Receivable.currency must reference CurrencyCode",
+    )
+    contracts.check(
+        set((receivable_properties.get("status") or {}).get("enum") or [])
+        == set(RECEIVABLE_STATUSES),
+        f"{relative}: Receivable.status must enumerate {list(RECEIVABLE_STATUSES)}",
+    )
+    days_past_due = receivable_properties.get("daysPastDue") or {}
+    contracts.check(
+        (days_past_due.get("type"), days_past_due.get("minimum")) == ("integer", 0),
+        f"{relative}: Receivable.daysPastDue must be an integer >= 0",
+    )
+    paid_at = receivable_properties.get("paidAt") or {}
+    contracts.check(
+        _schema_types(paid_at) == {"string", "null"}
+        and paid_at.get("format") == "date-time",
+        f"{relative}: Receivable.paidAt must be a nullable date-time",
+    )
+    payment_id = receivable_properties.get("paymentId") or {}
+    contracts.check(
+        _schema_types(payment_id) == {"string", "null"}
+        and payment_id.get("format") == "uuid",
+        f"{relative}: Receivable.paymentId must be a nullable uuid",
+    )
+
+    summary = schemas.get("ReceivableSummary") or {}
+    summary_properties = summary.get("properties") or {}
+    summary_required = set(summary.get("required") or [])
+    contracts.check(
+        isinstance(summary, dict) and summary.get("type") == "object",
+        f"{relative}: ReceivableSummary must be an object schema",
+    )
+    for field in RECEIVABLE_SUMMARY_FIELDS:
+        contracts.check(
+            field in summary_properties,
+            f"{relative}: ReceivableSummary.properties.{field} is required",
+        )
+        contracts.check(
+            field in summary_required,
+            f"{relative}: ReceivableSummary.required must list {field}",
+        )
+    items = summary_properties.get("items") or {}
+    contracts.check(
+        items.get("type") == "array"
+        and str((items.get("items") or {}).get("$ref", "")).endswith(
+            "/schemas/Receivable"
+        ),
+        f"{relative}: ReceivableSummary.items must be an array of Receivable",
+    )
+    for field in ("totalAmount", "overdueAmount"):
+        contracts.check(
+            str((summary_properties.get(field) or {}).get("$ref", "")).endswith(
+                "/schemas/MoneyAmount"
+            ),
+            f"{relative}: ReceivableSummary.{field} must reference MoneyAmount",
+        )
+    count = summary_properties.get("count") or {}
+    contracts.check(
+        (count.get("type"), count.get("minimum")) == ("integer", 0),
+        f"{relative}: ReceivableSummary.count must be an integer >= 0",
     )
 
 
@@ -3805,6 +4109,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_document_links_openapi(contracts, document, relative)
         if vertical == "policy":
             check_policy_billing_openapi(contracts, document, relative)
+            check_policy_receivables_openapi(contracts, document, relative)
             check_policy_renewal_openapi(contracts, document, relative)
         if vertical == "contract":
             check_contract_technical_accounts(contracts, document, relative)

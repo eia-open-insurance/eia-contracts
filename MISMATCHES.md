@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-20 (Direct Claims allocations).
+Status: open, reviewed 2026-10-20 (Policy premium receivables).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -26,7 +26,10 @@ where the running code does not meet it yet.
   status enum, event factory, and `schema.sql`. The Direct Claims allocation
   pass reads the domain allocation controller, service, client, projection, and
   command plus the expert allocation controller, service, projection, summary,
-  request, exception handler, event factory, repository, and tests.
+  request, exception handler, event factory, repository, and tests. The Policy
+  premium-receivables pass reads the domain receivable controller, service,
+  book scope, projection, and client plus the expert billing-receivables
+  controller, service, projection, row mapper, query, rules, and tests.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -78,7 +81,7 @@ removed per the resolution policy.
 | M-24 | Payment source link is a flat triple, not the SPEC claim projection | M |
 | M-25 | Claim assignment contract alignment: team is optional, negative expectedVersion is 400, and X-EIA-Actor is the only actor header. Resolved 2026-10-20. | — |
 | M-26 | Document association links are a flat tenant-scoped link, not the SPEC association | M |
-| M-27 | Policy billing routes, event names, and status vocabulary differ from SPEC 11.2.13 | L |
+| M-27 | Policy billing and premium-receivables routes, event names, and status vocabulary differ from SPEC 11.2.13 | L |
 | M-28 | Policy renewal creates a successor instead of transitioning the source, and the route/body are narrower than SPEC 11.2.6/11.2.10 | L |
 | M-29 | Contract technical accounts use the `/technical-accounts` path, a narrow status set, and no period-overlap/window check | L |
 | M-30 | Contract period bordereaux use a PROCESSED/FAILED vocabulary and event names, omit the SPEC line/exception staging, and accept an absent book header | L |
@@ -528,8 +531,10 @@ unimplemented fields and list the missing operations under
   schedules, aggregate erosion, endorsements, insureds, locations,
   cancellations, and reinstatements, so those are no longer gaps. The
   2026-10-20 billing slice adds the installment plan and settlement; billing
-  accounts, billing instructions, receivables, credit notes, dunning, disputes,
-  and commission statements from SPEC 11.2.13 remain gaps (M-27). The renewal
+  accounts, billing instructions, credit notes, dunning, disputes, and
+  commission statements from SPEC 11.2.13 remain gaps (M-27). The
+  premium-receivables slice adds the tenant-wide receivable queue over those
+  installments, so receivables are no longer a resource gap. The renewal
   slice adds successor-term creation with `renewedFromPolicyId`; the reverse
   `renewed_by_policy_id` pointer, the renewal-bound source transition, the
   renewal batch, non-renewal reasons, and renewal invitations remain gaps
@@ -1106,19 +1111,20 @@ the target with its owning vertical (DOC-09), and publish
 canonical shape and amend SPEC 7.9, 11.6.9, 11.6.10, and DOC-09. The contract
 documents the implemented link shape.
 
-## M-27 Policy billing route, event, and status naming
+## M-27 Policy billing and premium-receivable route, event, and status naming
 
 SPEC 11.2.13 defines the billing surface as
 `GET/POST /api/v1/policy/policies/{policyId}/installments` plus the billing
 account, billing-instruction, receivable, credit-note, dunning, dispute, and
-commission-statement routes. The 2026-10-20 slice implements only the
-installment plan and its settlement:
+commission-statement routes. The 2026-10-20 slices implement the installment
+plan and its settlement plus a tenant-wide receivable read:
 
 | Aspect | Implemented | SPEC 11.2.13 |
 |---|---|---|
 | Read plan | `GET /api/v1/policies/{policyId}/billing` | `GET /api/v1/policy/.../installments` |
 | Create plan | `POST /api/v1/policies/{policyId}/billing` | `POST /api/v1/policy/.../installments` |
 | Settle installment | `PATCH /api/v1/policies/{policyId}/billing/installments/{installmentId}` | No API row; billing instructions carry the status |
+| Receivable queue | `GET /api/v1/billing/installments` (tenant-wide, outside `/api/v1/policies`) | No API row; SPEC 11.2.13 defines the per-policy plan, not a cross-policy receivable read |
 | Plan event | `policy.billing-plan.created` | `policy.billing.plan-created` |
 | Installment events | `policy.installment.paid`, `policy.installment.waived` | No SPEC name |
 | Plan status | `ACTIVE`, `COMPLETE`, `CANCELLED` | `DRAFT`, `ACTIVE`, `SUPERSEDED`, `CANCELLED` |
@@ -1132,22 +1138,48 @@ other Policy proxy routes, while a supplied value must be DIRECT and another
 book is hidden as 404 `BOOK_SCOPE_VIOLATION`. The domain always sends DIRECT to
 the expert.
 
+The receivable queue is a separate read over the same installment plan. It has
+no `policyId`, so it is mounted at `/api/v1/billing/installments`, outside
+`/api/v1/policies`, and the gateway routes `/api/v1/billing/**` to the Policy
+domain. The domain normalizes the optional DUE/OVERDUE `status` (trim and
+upper-case), defaults and validates `limit` to 1..200 (default 20), forwards
+`dueBefore` as an inclusive cutoff, and proxies the expert's
+`/internal/v1/billing/installments` read with the tenant and DIRECT book. The
+expert clamps the limit to 1..200 and defaults it to 100 for internal callers,
+derives OVERDUE and `daysPastDue` from the due date without rewriting the
+stored row, and returns only unsettled installments, so `paidAt` and `paymentId`
+are null on every item. The public projection is the domain's
+`Receivable`/`ReceivableSummary`: `{installmentId, planId, planNumber,
+policyId, policyNumber, insuredPartyId, installmentNumber, dueDate, amount,
+currency, status, daysPastDue, paidAt, paymentId}` inside `{items, totalAmount,
+overdueAmount, count}`.
+
 Evidence:
 
 - `repos/eia-policy-domain/.../PolicyBillingController.java` (public routes and
   the `requireDirectWhenPresent` guard).
 - `repos/eia-policy-domain/.../BillingPlan.java`, `Installment.java` (flat
   public DTO names).
+- `repos/eia-policy-domain/.../ReceivableController.java`,
+  `ReceivableService.java`, `Receivable.java`, `ReceivableSummary.java`
+  (`/api/v1/billing/installments`, status and limit normalization, projection).
+- `repos/eia-policy-domain/.../PolicyClient.java:379-450`
+  (`/internal/v1/billing/installments` call and projection remap).
 - `repos/eia-policy-expert/.../BillingController.java`,
   `BillingRules.java`, `PolicyEvents.java` (route, vocabulary, event names).
+- `repos/eia-policy-expert/.../BillingReceivablesController.java`,
+  `BillingService.java:75-102`, `BillingRepository.java:155-194`,
+  `BillingRules.java:101-140`, `InstallmentReceivable.java`,
+  `ReceivablesView.java` (tenant-wide query, derived status, totals).
 - `repos/eia-policy-expert/src/main/resources/schema.sql:388-433` (plan and
   installment status check constraints).
 
-Resolution: either amend SPEC 11.2.13 to the implemented `/billing` route, flat
-projection, event names, and status vocabulary, or add the SPEC route and name
-as an alias with an EV-05 dual-publish window. The billing account, instruction,
-receivable, credit-note, dunning, dispute, and commission-statement routes
-remain unimplemented (M-12).
+Resolution: either amend SPEC 11.2.13 to the implemented `/billing` and
+cross-policy `/api/v1/billing/installments` routes, flat projections, event
+names, and status vocabulary, or add the SPEC route and name as an alias with an
+EV-05 dual-publish window. The billing account, instruction, credit-note,
+dunning, dispute, and commission-statement routes remain unimplemented (M-12);
+the receivable queue is implemented as the tenant-wide read above.
 
 ## M-28 Policy renewal creates a successor instead of transitioning the source
 
@@ -1355,7 +1387,7 @@ concurrency failures. The statuses and detail text already match.
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-Direct Claims allocations contract:
+Policy premium receivables contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -1365,7 +1397,7 @@ python: 3.12.8 (standard library only)
 
 OpenAPI 3.1 documents
   OK openapi/party.yaml  5 paths, 7 operations
-  OK openapi/policy.yaml  40 paths, 51 operations
+  OK openapi/policy.yaml  41 paths, 52 operations
   OK openapi/contract.yaml  38 paths, 55 operations
   OK openapi/direct-claims.yaml  48 paths, 71 operations
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
@@ -1394,7 +1426,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 10738 checks, 0 failures
+  PASS 10847 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -1477,7 +1509,12 @@ Additional checks and limits:
   Claims `implemented` list each fail with the specific missing operation,
   schema, bounds, or implemented-channel message. All four were run against the
   working tree with the mutated file restored after each run and exited
-  non-zero.
+  non-zero. The Policy premium-receivables pass added three more: renaming the
+  `/api/v1/billing/installments` path, renaming the `Receivable` schema, and
+  widening the receivable `limit` maximum from 200 to 500 each fail with the
+  specific missing operation, schema, or limit-bounds message. All three were
+  run on a throwaway copy and exited non-zero (exit 1); the working copy was
+  left unchanged.
 
 ## Resolution policy
 

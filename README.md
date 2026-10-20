@@ -30,7 +30,7 @@ standard).
 
 | Path | Contents |
 |---|---|
-| `openapi/components.yaml` | Shared parameters, headers, responses, and schemas: canonical `Problem` error envelope, money, offset page envelope, global-search envelope, ETag/If-Match, Idempotency-Key (Policy and the claim task/note creates), the optional `X-EIA-Actor` header, audit fields, entity references, tenant and book headers, including the optional Policy billing `X-EIA-Book`. |
+| `openapi/components.yaml` | Shared parameters, headers, responses, and schemas: canonical `Problem` error envelope, money, offset page envelope, global-search envelope, ETag/If-Match, Idempotency-Key (Policy and the claim task/note creates), the optional `X-EIA-Actor` header, audit fields, entity references, tenant and book headers, including the optional Policy billing and receivables `X-EIA-Book`. |
 | `openapi/party.yaml` … `openapi/notifications.yaml` | One OpenAPI 3.1 document per vertical. Ten documents, each covering `/api/v1/**` and `/internal/v1/**`. |
 | `asyncapi/event-catalog.yaml` | Authoritative catalog of the published event names, their publisher, and the subscribers named in SPEC 11. |
 | `asyncapi/{vertical}.yaml` | Published event channels for one vertical. One channel and one `send` operation per event name. |
@@ -471,9 +471,50 @@ Billing semantics:
   `policy.installment.waived`, each in the same transaction as the row change.
   The commands do not accept `Idempotency-Key` or `If-Match` in this slice;
   repeating a terminal settlement is the retry-safe path (M-06, M-07).
-- Billing account, billing instructions, receivables, credit notes, dunning,
-  disputes, and commission statements from SPEC 11.2.13 remain unimplemented
-  (M-12, M-27).
+- Billing account, billing instructions, credit notes, dunning, disputes, and
+  commission statements from SPEC 11.2.13 remain unimplemented (M-12, M-27).
+  The cross-policy premium-receivables queue is the next section.
+
+### Policy premium receivables contract (2026-10-20)
+
+Policy 2.5.0 adds the cross-policy premium-receivables queue. The change is
+additive: the route and the two schemas are new, and no existing path, request
+field, response field, or event changed.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/policy.yaml` | 2.5.0 | Additive | `GET /api/v1/billing/installments`, the `Receivable` and `ReceivableSummary` schemas, and the DUE/OVERDUE, `dueBefore`, and 1..200 `limit` rules. |
+
+Queue semantics:
+
+- The route is **outside `/api/v1/policies`** because it is not scoped to one
+  policy. It joins the tenant's billing plans, installments, policies, and
+  insured parties; a client must not expect a `policyId` path parameter. The
+  gateway maps `/api/v1/billing/**` to the Policy domain.
+- The response is the bare `ReceivableSummary`: `items[]`, `totalAmount`,
+  `overdueAmount`, and `count`. Each `Receivable` is `{installmentId, planId,
+  planNumber, policyId, policyNumber, insuredPartyId, installmentNumber,
+  dueDate, amount, currency, status, daysPastDue, paidAt, paymentId}`;
+  `amount`, `totalAmount`, and `overdueAmount` are decimal strings, and
+  `installmentNumber` and `daysPastDue` are integers.
+- Only unsettled installments are returned, so `status` is DUE or OVERDUE and
+  `paidAt` and `paymentId` are null. `totalAmount` sums every returned item;
+  `overdueAmount` sums the effective OVERDUE subset; `count` is `items.length`.
+  OVERDUE is derived at read time: a stored DUE row whose due date has passed is
+  reported as OVERDUE with a positive `daysPastDue` without mutating the row.
+- `status` is optional, trimmed, and upper-cased; any value other than DUE or
+  OVERDUE is 400 `INVALID_INSTALLMENT_STATUS`. `dueBefore` is an inclusive
+  `dueDate` cutoff. `limit` defaults to 20 and must be 1..200; a non-integer is
+  400 `INVALID_PARAMETER` and an out-of-range integer is 400
+  `VALIDATION_ERROR`. A missing or malformed tenant is 400.
+- `X-EIA-Tenant` is required. `X-EIA-Book` is optional for compatibility with
+  the other Policy proxy routes, but a supplied value must be DIRECT; another
+  book is hidden as 404 `BOOK_SCOPE_VIOLATION`. Items are ordered by `dueDate`,
+  then `policyNumber`, `installmentNumber`, and `installmentId`.
+- The route is read-only and writes no event. SPEC 11.2.13 describes the
+  per-policy installment plan rather than a cross-policy receivable resource;
+  M-27 records this route and projection deviation alongside the still-missing
+  billing-account and dunning surfaces.
 
 ### Policy renewal contract (2026-10-20)
 
@@ -666,7 +707,7 @@ Every request carries a resolved tenant; no request body may override it.
 |---|---|---|
 | `X-EIA-Tenant` | All public routes and some internal routes | Required, UUID. Missing or malformed is a 400. |
 | `X-EIA-Book` | Direct Claims, Assumed Claims, Cession, Retrocession | Required and fixed to the vertical's book. A different book is hidden as 404 `BOOK_SCOPE_VIOLATION` in all four, so the response cannot confirm existence (SPEC 3.6.2, WALL-06). A missing header is still a 400 `BOOK_REQUIRED` in Cession and Retrocession; that is a validation error, not a book mismatch. |
-| `X-EIA-Book` | Policy billing | Optional for compatibility with the other Policy proxy routes, but a supplied value must be DIRECT; another book is hidden as 404 `BOOK_SCOPE_VIOLATION`. An absent header is accepted. The guard runs before the expert call. |
+| `X-EIA-Book` | Policy billing and receivables | Optional for compatibility with the other Policy proxy routes, but a supplied value must be DIRECT; another book is hidden as 404 `BOOK_SCOPE_VIOLATION`. An absent header is accepted. The guard runs before the expert call. |
 | `X-EIA-Book` | Policy renewal | Required and fixed to `DIRECT`. The contract makes a missing header a 400 and hides another book as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header, which M-28 records. |
 | `X-EIA-Book` | Contract technical accounts | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-29 records. |
 | `X-EIA-Book` | Contract period bordereaux | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-30 records. |
@@ -957,8 +998,42 @@ Rules:
   event name differ from the implemented `/billing` route and
   `policy.billing-plan.created` name; the two installment facts have no SPEC
   name. The naming difference and the still-unimplemented billing-account,
-  instruction, receivable, credit-note, dunning, dispute, and commission
-  surfaces are recorded in M-22 and M-27.
+  instruction, credit-note, dunning, dispute, and commission surfaces are
+  recorded in M-22 and M-27.
+
+### Policy premium receivables
+
+The cross-policy receivables queue is a separate read over the same billing
+tables. It is served at `GET /api/v1/billing/installments`, deliberately
+outside `/api/v1/policies`, because it spans every policy in the tenant.
+
+| Operation | Path | Success | Errors |
+|---|---|---|---|
+| List receivables | `GET /api/v1/billing/installments` | 200 `ReceivableSummary` | 400, 404 |
+
+The summary is `{items, totalAmount, overdueAmount, count}`. An item is
+`{installmentId, planId, planNumber, policyId, policyNumber, insuredPartyId,
+installmentNumber, dueDate, amount, currency, status, daysPastDue, paidAt,
+paymentId}`, matching the domain `Receivable` DTO. Only DUE and OVERDUE rows are
+eligible, so `paidAt` and `paymentId` are null; `overdueAmount` sums the items
+whose effective status is OVERDUE.
+
+Rules:
+
+- `status` is optional and accepts only DUE or OVERDUE; it is trimmed and
+  upper-cased. Another value is 400 `INVALID_INSTALLMENT_STATUS`.
+- `dueBefore` is an inclusive due-date cutoff. A malformed value is 400
+  `INVALID_PARAMETER`.
+- `limit` defaults to 20 and must be 1..200. A non-integer is 400
+  `INVALID_PARAMETER`; an integer outside the window is 400 `VALIDATION_ERROR`.
+- `X-EIA-Tenant` is required. `X-EIA-Book` is optional for compatibility, but a
+  supplied value must be DIRECT; any other book is hidden as 404
+  `BOOK_SCOPE_VIOLATION`.
+- Items are ordered by `dueDate`, then `policyNumber`, `installmentNumber`, and
+  `installmentId`. The read writes no event.
+- The domain proxies the expert's `/internal/v1/billing/installments` read; the
+  expert additionally accepts `?tenantId=` for that internal call. Neither is
+  part of the public contract.
 
 ### Global search
 
@@ -1084,7 +1159,11 @@ missing directory.
    billing operations, the optional shared
    `BookHeaderDirectOptional` parameter, the `BillingPlan`, `Installment`,
    `CreateBillingPlanRequest`, and `UpdateInstallmentRequest` schemas and their
-   field bounds and enums, the Policy renewal operation with its required
+   field bounds and enums, the cross-policy receivable queue with its required
+   `TenantHeader` and optional DIRECT book parameter, its DUE/OVERDUE `status`,
+   `dueBefore`, default-20 1..200 `limit`, 200 `ReceivableSummary`, 400/404
+   responses, and the `Receivable` and `ReceivableSummary` schemas, the Policy
+   renewal operation with its required
    `TenantHeader` and `BookHeaderDirect` parameters, the `RenewPolicyRequest`
    required/optional field split, the 201 successor `Policy` with the shared
    `ETag`, the 400/404/409 responses with `RENEWAL_NOT_ALLOWED` on the 409, the
@@ -1194,8 +1273,13 @@ missing directory.
   with the flat `BillingPlan`/`Installment` projection, while SPEC 11.2.13 names
   the route `/installments` and defines the plan event as
   `policy.billing.plan-created`; the installment paid and waived facts have no
-  SPEC name. Billing accounts, instructions, receivables, credit notes, dunning,
-  disputes, and commission statements remain unimplemented (M-12, M-22, M-27);
+  SPEC name. Billing accounts, instructions, credit notes, dunning, disputes,
+  and commission statements remain unimplemented (M-12, M-22, M-27);
+- the premium-receivables queue is a tenant-wide read at
+  `GET /api/v1/billing/installments`, outside `/api/v1/policies`, and returns the
+  flat `Receivable`/`ReceivableSummary` projection. SPEC 11.2.13 describes the
+  per-policy installment plan rather than a cross-policy receivable resource, so
+  the route and projection are recorded in M-27;
 - Policy renewal creates a successor DRAFT policy and leaves the source in its
   current status, whereas SPEC 11.2.6 turns the source to `RENEWED`; the public
   path is the short `/api/v1/policies/{policyId}/renew` rather than SPEC

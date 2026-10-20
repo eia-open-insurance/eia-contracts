@@ -515,6 +515,31 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   Claims resource gaps, and updates M-14 and M-22 with the event.
 - `python scripts/validate_contracts.py` passes 10,738 checks with 0 failures.
 
+### Added in the Policy premium receivables contract (2026-10-20)
+
+- `openapi/policy.yaml` is 2.5.0: adds `GET /api/v1/billing/installments`, the
+  cross-policy premium-receivables queue. The response is the bare
+  `ReceivableSummary` (`items`, `totalAmount`, `overdueAmount`, `count`); each
+  `Receivable` is `{installmentId, planId, planNumber, policyId, policyNumber,
+  insuredPartyId, installmentNumber, dueDate, amount, currency, status,
+  daysPastDue, paidAt, paymentId}`. The operation requires `X-EIA-Tenant`,
+  accepts the optional `X-EIA-Book` fixed to DIRECT when present, filters by the
+  DUE/OVERDUE `status` and the inclusive `dueBefore` cutoff, and documents the
+  default-20 1..200 `limit` with its 400 `VALIDATION_ERROR`/
+  `INVALID_INSTALLMENT_STATUS` and 404 `BOOK_SCOPE_VIOLATION` responses. The
+  route is outside `/api/v1/policies` because it spans the tenant's policies;
+  the per-policy billing routes are unchanged.
+- `scripts/validate_contracts.py` requires the receivable path, the
+  `TenantHeader`/`BookHeaderDirectOptional` parameters, the DUE/OVERDUE enum,
+  the `dueBefore` date, the 1..200 limit, the 200 `ReceivableSummary`, the
+  400/404 responses, and the `Receivable`/`ReceivableSummary` fields,
+  nullability, money, currency, and count bounds; it also requires the operation
+  description to note that the route is outside `/api/v1/policies`.
+- `README.md` records the queue route, projection, filters, DIRECT book rule,
+  ordering, and the additive 2.5.0 class; `MISMATCHES.md` extends M-27 with the
+  implemented cross-policy receivable read and updates M-12.
+- `python scripts/validate_contracts.py` passes 10,847 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was
