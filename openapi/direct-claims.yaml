@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Direct Claims API
-  version: 1.7.0
+  version: 1.8.0
   summary: Direct-book claim administration and the Direct Claims expert API.
   description: >
     This document describes the implemented public Direct Claims domain API and
@@ -62,6 +62,22 @@ info:
     version and emits `direct.claim.allocation-created` in the same
     transaction. A missing or non-DIRECT book is hidden as 404 (SPEC 3.6.2,
     WALL-06).
+
+    Allocation erosion records the policy-limit posting outcome. An allocation
+    may link the policy limit it erodes through the optional `limitId` and
+    carries `erosionStatus` (`NOT_POSTED` until a posting is recorded, then
+    `POSTED` or `FAILED`), the optional `erosionMessage`, and
+    `erosionPostedAt`, which is stamped only for `POSTED`. A create that
+    supplies `limitId` attempts the policy posting and returns the resulting
+    `POSTED` or `FAILED` state; an allocation without a limit stays
+    `NOT_POSTED`. The erosion command
+    `POST /api/v1/claims/{claimId}/allocations/{allocationId}/erosion` records
+    the outcome supplied in `status` (`POSTED` or `FAILED`) and an optional
+    `message`: `POSTED` stamps `erosionPostedAt`, `FAILED` stores the reason
+    with a null instant so a later retry can post, and repeating the stored
+    status is an idempotent 200 no-op. Once `POSTED`, the state is terminal and
+    a different status is 409 `ALLOCATION_ALREADY_POSTED`. A missing or
+    non-DIRECT book is hidden as 404 (SPEC 3.6.2, WALL-06).
 
     The claim list accepts the optional `status` and `claimantPartyId` filters
     on both the public and expert surfaces. The filters are independent:
@@ -825,6 +841,74 @@ paths:
             the requested `allocationPct` would exceed 1. The code is
             `ALLOCATION_EXCEEDS_100`; nothing is written. Reduce the percentage
             or use a different policy year or layer and retry.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/allocations/{allocationId}/erosion:
+    post:
+      operationId: recordClaimAllocationErosion
+      tags:
+        - Direct Claims
+      summary: Record the policy-erosion posting outcome of an allocation.
+      description: >
+        Records the policy-limit posting outcome of one allocation. `status` is
+        trimmed and upper-cased and must be `POSTED` or `FAILED`; `message` is
+        an optional posting reference or failure reason of at most 4000
+        characters. `POSTED` stamps `erosionPostedAt`; `FAILED` stores the
+        message with a null instant so the posting can be retried later. The
+        state starts at `NOT_POSTED`. Repeating the stored status is an
+        idempotent 200 no-op that keeps the stored message and instant. A
+        different status after `POSTED` is 409 `ALLOCATION_ALREADY_POSTED`;
+        the posted state is terminal. The route is scoped to the claim and the
+        allocation within the caller's tenant; a missing or non-DIRECT book is
+        hidden as 404 (SPEC 3.6.2, WALL-06).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: allocationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AllocationErosionRequest'
+      responses:
+        '200':
+          description: Erosion outcome recorded; the allocation is returned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Allocation'
+        '400':
+          description: >
+            400. A missing or blank `status`, a status other than `POSTED` or
+            `FAILED`, a message longer than 4000 characters, a malformed path
+            UUID, or a missing tenant is a problem+json `VALIDATION_ERROR`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            409. The allocation is already `POSTED` and the requested status is
+            different. The code is `ALLOCATION_ALREADY_POSTED`; the posted state
+            is terminal. Repeating `POSTED` is a 200 no-op, not a conflict.
           content:
             application/problem+json:
               schema:
@@ -3345,8 +3429,14 @@ components:
         One policy-year and layer split of a claim. `allocationPct` is a
         fraction in (0, 1] serialized as a decimal string and
         `allocatedAmount` is a booking amount in the claim currency; neither is
-        capped by the current reserve. The public projection omits the tenant
-        implied by the request context.
+        capped by the current reserve. `limitId` optionally links the policy
+        limit the allocation erodes. `erosionStatus` is the policy-erosion
+        posting state: `NOT_POSTED` until a posting is recorded, then `POSTED`
+        or `FAILED`. A create that supplies `limitId` attempts the posting and
+        returns the resulting state. A `POSTED` posting stamps
+        `erosionPostedAt`; an unposted or `FAILED` allocation leaves it null,
+        and `erosionMessage` carries the posting reference or failure reason.
+        The public projection omits the tenant implied by the request context.
       required:
         - allocationId
         - claimId
@@ -3355,6 +3445,7 @@ components:
         - layer
         - allocationPct
         - allocatedAmount
+        - erosionStatus
         - createdAt
       properties:
         allocationId:
@@ -3366,6 +3457,12 @@ components:
         policyId:
           type: string
           format: uuid
+        limitId:
+          type: [string, 'null']
+          format: uuid
+          description: >
+            Policy limit this allocation erodes, or null when the allocation is
+            not linked to a limit.
         policyYear:
           type: integer
           minimum: 1900
@@ -3377,9 +3474,34 @@ components:
           $ref: './components.yaml#/components/schemas/Percent'
         allocatedAmount:
           $ref: './components.yaml#/components/schemas/MoneyAmount'
+        erosionStatus:
+          $ref: '#/components/schemas/AllocationErosionStatus'
+        erosionMessage:
+          type: [string, 'null']
+          maxLength: 4000
+          description: >
+            Policy posting reference or failure reason; null while `NOT_POSTED`
+            and null after a successful `POSTED` posting that supplied no
+            message.
+        erosionPostedAt:
+          type: [string, 'null']
+          format: date-time
+          description: >
+            Instant the policy posting succeeded; null while `NOT_POSTED` or
+            after a `FAILED` posting.
         createdAt:
           type: string
           format: date-time
+    AllocationErosionStatus:
+      type: string
+      description: >
+        Policy-erosion posting state. `NOT_POSTED` is the creation state;
+        `POSTED` and `FAILED` are recorded outcomes, and only those two are
+        accepted by the erosion command.
+      enum:
+        - NOT_POSTED
+        - POSTED
+        - FAILED
     AllocationSummary:
       type: object
       description: >
@@ -3986,7 +4108,8 @@ components:
         `policyId` must be the claim's own policy; `allocationPct` is a fraction
         greater than 0 and at most 1; `allocatedAmount` is zero or greater; and
         the percentages already allocated to the claim plus the new one may not
-        exceed 1.
+        exceed 1. `limitId` optionally names the policy limit the allocation
+        erodes.
       required:
         - policyId
         - policyYear
@@ -4011,6 +4134,33 @@ components:
           maximum: 1
         allocatedAmount:
           $ref: './components.yaml#/components/schemas/MoneyAmount'
+        limitId:
+          type: string
+          format: uuid
+          description: >
+            Optional policy limit this allocation erodes. When supplied, the
+            allocation is linked to the limit and the create attempts the
+            policy posting; the returned allocation carries the resulting
+            `POSTED` or `FAILED` state. Omit it for an allocation that is not
+            linked to a limit, which stays `NOT_POSTED`.
+    AllocationErosionRequest:
+      type: object
+      description: >
+        Command to record the policy-erosion posting outcome of one allocation.
+        `status` is trimmed and upper-cased and must be `POSTED` or `FAILED`;
+        `message` is an optional posting reference or failure reason of at most
+        4000 characters, trimmed and stored as null when blank.
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - POSTED
+            - FAILED
+        message:
+          type: [string, 'null']
+          maxLength: 4000
     LitigationRequest:
       type: object
       description: Record or update a litigation matter.
@@ -4412,6 +4562,7 @@ x-implementation:
     - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimCommands.java
     - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimDetailDtos.java
     - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimClient.java
+    - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/PolicyErosionClient.java
     - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimCommandResult.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimController.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimAssignmentController.java
@@ -4428,6 +4579,7 @@ x-implementation:
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimAllocationSummary.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimAllocationRepository.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/CreateClaimAllocationRequest.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/AllocationErosionRequest.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/AllocationExceedsHundredException.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/PolicyMismatchException.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/LitigationController.java
@@ -4459,6 +4611,7 @@ x-implementation:
     - repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/ClaimAllocationControllerTest.java
     - repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/ClaimAllocationServiceTest.java
     - repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/ClaimAllocationIntegrationTest.java
+    - repos/eia-direct-claims-domain/src/test/java/com/eia/directclaims/domain/PolicyErosionClientTest.java
   errorEnvelope: >
     Vertical-specific ApiError {timestamp, status, code, message, path,
     details[{field, message}]}. Not the canonical Problem envelope yet.
@@ -4495,10 +4648,21 @@ x-implementation:
     `VALIDATION_ERROR` and 409 `CONFLICT` while preserving the detail
     (MISMATCHES.md M-31). The allocation event name has no SPEC 11.4.9
     equivalent and the SPEC `direct.claim.allocated` name remains planned
-    (MISMATCHES.md M-22).
+    (MISMATCHES.md M-22). Allocation erosion is implemented on the expert as
+    `PATCH /internal/v1/claims/{claimId}/allocations/{allocationId}/erosion`
+    with `{status, message?}`; the canonical public command is `POST` on the
+    same sub-resource. The running public domain `POST` takes no body, posts
+    the allocation's limit to the Policy domain itself, and records the
+    computed `POSTED`/`FAILED` outcome through the expert `PATCH`; the canonical
+    public command instead carries the caller-supplied status and message.
+    Both surfaces hide a foreign tenant, another claim's allocation, a missing
+    allocation, and a missing or non-DIRECT book as 404. The expert emits 409
+    `CONFLICT` for a request that changes a `POSTED` allocation, while the
+    contract keeps the stable `ALLOCATION_ALREADY_POSTED` code. MISMATCHES.md
+    M-36 records both differences.
 x-compatibility:
-  contractVersion: 1.7.0
-  previousContractVersion: 1.6.0
+  contractVersion: 1.8.0
+  previousContractVersion: 1.7.0
   breaking: []
   compatible:
     - Adds the optional claimantPartyId UUID query parameter to GET /api/v1/claims and GET /internal/v1/claims, alongside the existing status filter.
@@ -4507,6 +4671,9 @@ x-compatibility:
     - Adds the AllocationSummary, Allocation, and CreateClaimAllocationRequest schemas.
     - Documents 200/201/400/404/409, the 400 POLICY_MISMATCH policy guard, and the 409 ALLOCATION_EXCEEDS_100 percentage guard.
     - Documents the direct.claim.allocation-created event published in the same transaction as an allocation create.
+    - Adds the optional limitId field to CreateClaimAllocationRequest and the nullable limitId, erosionMessage, and erosionPostedAt fields plus the required erosionStatus field to Allocation.
+    - Adds the AllocationErosionStatus enum (NOT_POSTED, POSTED, FAILED) and the AllocationErosionRequest command (status POSTED or FAILED; optional message, max 4000).
+    - Adds POST /api/v1/claims/{claimId}/allocations/{allocationId}/erosion with the 200/400/404/409 responses and the 409 ALLOCATION_ALREADY_POSTED terminal guard.
     - Adds PATCH /api/v1/claims/{claimId}/assignment and the /internal/v1/claims/{claimId}/assignment expert route.
     - Adds the AssignClaimRequest schema (assignedAdjuster required, max 128; assignedTeam optional, max 64; expectedVersion required, integer zero or greater).
     - Adds the optional X-EIA-Actor request header to the assignment operations.
@@ -4550,6 +4717,19 @@ x-compatibility:
     tenant list. The filter is an implementation extension already present in
     both claim controllers; it does not resolve the party, so an unknown UUID
     returns an empty array (MISMATCHES.md M-33).
+
+    Allocation erosion is additive over 1.7.0: `limitId`, `erosionMessage`, and
+    `erosionPostedAt` are nullable and optional, `erosionStatus` is always
+    present and starts at `NOT_POSTED`, the create `limitId` is optional, and
+    the erosion command is a new operation. A client that never links a limit
+    or posts an outcome sees the previous allocation shape with a null
+    `limitId` and `NOT_POSTED`; a create that supplies `limitId` may return
+    `POSTED` or `FAILED` because it attempts the policy posting. The running
+    public domain `POST` is bodyless and computes the outcome from the Policy
+    domain, while the canonical command carries `{status, message?}`; the
+    expert emits 409 `CONFLICT` rather than the canonical
+    `ALLOCATION_ALREADY_POSTED` code. MISMATCHES.md M-36 records both
+    differences.
 x-planned-operations:
   - method: PATCH
     path: /api/v1/claims/{claimId}

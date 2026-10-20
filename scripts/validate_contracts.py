@@ -704,6 +704,24 @@ ALLOCATION_MIN_POLICY_YEAR = 1900
 ALLOCATION_MAX_POLICY_YEAR = 2200
 ALLOCATION_MAX_LAYER = 32
 
+# Allocation policy erosion. The projection carries the optional limit, the
+# posting state, and the posting evidence; the command records POSTED or FAILED
+# and an optional message. The posted state is terminal.
+ALLOCATION_EROSION_PATH = (
+    "/api/v1/claims/{claimId}/allocations/{allocationId}/erosion"
+)
+
+ALLOCATION_EROSION_PROJECTION_FIELDS = (
+    "limitId",
+    "erosionStatus",
+    "erosionMessage",
+    "erosionPostedAt",
+)
+ALLOCATION_EROSION_STATUSES = ("NOT_POSTED", "POSTED", "FAILED")
+ALLOCATION_EROSION_REQUEST_STATUSES = ("POSTED", "FAILED")
+ALLOCATION_EROSION_MESSAGE_MAX_LENGTH = 4000
+ALLOCATION_EROSION_CONFLICT_CODE = "ALLOCATION_ALREADY_POSTED"
+
 
 # Policy billing (SPEC 11.2.13). The public domain routes proxy the expert's
 # billing service; the expert's /internal/v1 alias is an implementation detail
@@ -4382,6 +4400,54 @@ def check_direct_claim_allocations(contracts: ContractSet, document, relative: s
         f"{relative}: Allocation.createdAt must be a date-time",
     )
 
+    for field in ALLOCATION_EROSION_PROJECTION_FIELDS:
+        contracts.check(
+            isinstance(allocation_properties.get(field), dict),
+            f"{relative}: Allocation.{field} is required",
+        )
+    contracts.check(
+        "erosionStatus" in allocation_required,
+        f"{relative}: Allocation.required must list erosionStatus",
+    )
+    for field in ("limitId", "erosionMessage", "erosionPostedAt"):
+        contracts.check(
+            field not in allocation_required,
+            f"{relative}: Allocation.{field} must stay optional because it is nullable",
+        )
+    allocation_limit = allocation_properties.get("limitId") or {}
+    contracts.check(
+        _schema_types(allocation_limit) == {"string", "null"}
+        and allocation_limit.get("format") == "uuid",
+        f"{relative}: Allocation.limitId must be a nullable uuid",
+    )
+    contracts.check(
+        str((allocation_properties.get("erosionStatus") or {}).get("$ref", "")).endswith(
+            "/schemas/AllocationErosionStatus"
+        ),
+        f"{relative}: Allocation.erosionStatus must use the AllocationErosionStatus schema",
+    )
+    allocation_message = allocation_properties.get("erosionMessage") or {}
+    contracts.check(
+        _schema_types(allocation_message) == {"string", "null"}
+        and allocation_message.get("maxLength") == ALLOCATION_EROSION_MESSAGE_MAX_LENGTH,
+        f"{relative}: Allocation.erosionMessage must be a nullable string of at most "
+        f"{ALLOCATION_EROSION_MESSAGE_MAX_LENGTH} characters",
+    )
+    allocation_posted_at = allocation_properties.get("erosionPostedAt") or {}
+    contracts.check(
+        _schema_types(allocation_posted_at) == {"string", "null"}
+        and allocation_posted_at.get("format") == "date-time",
+        f"{relative}: Allocation.erosionPostedAt must be a nullable date-time",
+    )
+
+    erosion_status = schemas.get("AllocationErosionStatus") or {}
+    contracts.check(
+        erosion_status.get("type") == "string"
+        and tuple(erosion_status.get("enum") or ()) == ALLOCATION_EROSION_STATUSES,
+        f"{relative}: AllocationErosionStatus must enumerate "
+        f"{list(ALLOCATION_EROSION_STATUSES)}",
+    )
+
     summary = schemas.get("AllocationSummary") or {}
     summary_properties = summary.get("properties") or {}
     summary_required = summary.get("required") or []
@@ -4470,6 +4536,45 @@ def check_direct_claim_allocations(contracts: ContractSet, document, relative: s
         ),
         f"{relative}: CreateClaimAllocationRequest.allocatedAmount must use the shared "
         "MoneyAmount schema",
+    )
+    request_limit = request_properties.get("limitId") or {}
+    contracts.check(
+        isinstance(request_limit, dict),
+        f"{relative}: CreateClaimAllocationRequest.limitId is required",
+    )
+    contracts.check(
+        _schema_types(request_limit) == {"string"}
+        and request_limit.get("format") == "uuid",
+        f"{relative}: CreateClaimAllocationRequest.limitId must be an optional uuid",
+    )
+    contracts.check(
+        "limitId" not in request_required,
+        f"{relative}: CreateClaimAllocationRequest.limitId must stay optional",
+    )
+
+    erosion_request = schemas.get("AllocationErosionRequest") or {}
+    erosion_properties = erosion_request.get("properties") or {}
+    erosion_required = set(erosion_request.get("required") or ())
+    contracts.check(
+        isinstance(erosion_request, dict) and erosion_request.get("type") == "object",
+        f"{relative}: AllocationErosionRequest must be an object schema",
+    )
+    contracts.check(
+        erosion_required == {"status"},
+        f"{relative}: AllocationErosionRequest.required must list status only",
+    )
+    status_schema = erosion_properties.get("status") or {}
+    contracts.check(
+        tuple(status_schema.get("enum") or ()) == ALLOCATION_EROSION_REQUEST_STATUSES,
+        f"{relative}: AllocationErosionRequest.status must enumerate "
+        f"{list(ALLOCATION_EROSION_REQUEST_STATUSES)}",
+    )
+    message_schema = erosion_properties.get("message") or {}
+    contracts.check(
+        _schema_types(message_schema) == {"string", "null"}
+        and message_schema.get("maxLength") == ALLOCATION_EROSION_MESSAGE_MAX_LENGTH,
+        f"{relative}: AllocationErosionRequest.message must be an optional nullable "
+        f"string of at most {ALLOCATION_EROSION_MESSAGE_MAX_LENGTH} characters",
     )
 
     paths = document.get("paths") or {}
@@ -4563,14 +4668,114 @@ def check_direct_claim_allocations(contracts: ContractSet, document, relative: s
                 f"{where}: 409 must document ALLOCATION_EXCEEDS_100",
             )
 
+    erosion_path_item = (
+        paths.get(ALLOCATION_EROSION_PATH) if isinstance(paths, dict) else None
+    )
+    erosion_operation = (
+        erosion_path_item.get("post") if isinstance(erosion_path_item, dict) else None
+    )
+    erosion_where = f"{relative}: POST {ALLOCATION_EROSION_PATH}"
+    contracts.check(
+        isinstance(erosion_operation, dict),
+        f"{erosion_where}: required allocation erosion operation is missing",
+    )
+    if isinstance(erosion_operation, dict):
+        erosion_parameter_refs = []
+        erosion_inline_names = []
+        for parameter in erosion_operation.get("parameters") or []:
+            if not isinstance(parameter, dict):
+                continue
+            reference = parameter.get("$ref")
+            if isinstance(reference, str):
+                erosion_parameter_refs.append(reference.rsplit("/", 1)[-1])
+            if isinstance(parameter.get("name"), str):
+                erosion_inline_names.append(parameter["name"])
+        for required_parameter in ("TenantHeader", "BookHeaderDirect"):
+            contracts.check(
+                required_parameter in erosion_parameter_refs,
+                f"{erosion_where}: must document the shared {required_parameter} parameter",
+            )
+        for path_parameter in ("claimId", "allocationId"):
+            contracts.check(
+                path_parameter in erosion_inline_names,
+                f"{erosion_where}: must declare the {path_parameter} path parameter",
+            )
+        erosion_request_body = erosion_operation.get("requestBody") or {}
+        erosion_body_schema = (
+            ((erosion_request_body.get("content") or {}).get("application/json") or {})
+            .get("schema")
+            if isinstance(erosion_request_body, dict)
+            else None
+        )
+        contracts.check(
+            isinstance(erosion_request_body, dict)
+            and erosion_request_body.get("required") is True,
+            f"{erosion_where}: requestBody must be required",
+        )
+        contracts.check(
+            isinstance(erosion_body_schema, dict)
+            and str(erosion_body_schema.get("$ref", "")).endswith(
+                "/schemas/AllocationErosionRequest"
+            ),
+            f"{erosion_where}: request body must use the AllocationErosionRequest schema",
+        )
+        erosion_responses = erosion_operation.get("responses") or {}
+        erosion_success = (
+            erosion_responses.get("200") if isinstance(erosion_responses, dict) else None
+        )
+        erosion_success_body = (
+            ((erosion_success.get("content") or {}).get("application/json") or {})
+            .get("schema")
+            if isinstance(erosion_success, dict)
+            else None
+        )
+        contracts.check(
+            isinstance(erosion_success_body, dict)
+            and str(erosion_success_body.get("$ref", "")).endswith("/schemas/Allocation"),
+            f"{erosion_where}: 200 must return the Allocation schema",
+        )
+        for code in ("400", "404", "409"):
+            contracts.check(
+                isinstance(erosion_responses, dict) and code in erosion_responses,
+                f"{erosion_where}: must document response {code}",
+            )
+        erosion_bad_request = (
+            erosion_responses.get("400") if isinstance(erosion_responses, dict) else None
+        )
+        erosion_bad_text = (
+            str(erosion_bad_request.get("description") or "")
+            if isinstance(erosion_bad_request, dict)
+            else ""
+        )
+        contracts.check(
+            "VALIDATION_ERROR" in erosion_bad_text,
+            f"{erosion_where}: 400 must document VALIDATION_ERROR",
+        )
+        erosion_conflict = (
+            erosion_responses.get("409") if isinstance(erosion_responses, dict) else None
+        )
+        erosion_conflict_text = (
+            str(erosion_conflict.get("description") or "")
+            if isinstance(erosion_conflict, dict)
+            else ""
+        )
+        contracts.check(
+            ALLOCATION_EROSION_CONFLICT_CODE in erosion_conflict_text,
+            f"{erosion_where}: 409 must document {ALLOCATION_EROSION_CONFLICT_CODE}",
+        )
+
     planned = document.get("x-planned-operations") or []
+    implemented_allocation_paths = {
+        "/api/v1/claims/{claimId}/allocations",
+        ALLOCATION_EROSION_PATH,
+    }
     contracts.check(
         not any(
             isinstance(entry, dict)
-            and entry.get("path") == "/api/v1/claims/{claimId}/allocations"
+            and entry.get("path") in implemented_allocation_paths
             for entry in planned
         ),
-        f"{relative}: x-planned-operations must not list the implemented allocations path",
+        f"{relative}: x-planned-operations must not list an implemented allocations path",
     )
 
 
