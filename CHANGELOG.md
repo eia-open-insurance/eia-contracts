@@ -408,6 +408,38 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   command and event.
 - `python scripts/validate_contracts.py` passes 10,171 checks with 0 failures.
 
+### Added in the contract technical accounts contract (2026-10-20)
+
+- `openapi/contract.yaml` is 2.2.0: adds `GET/POST
+  /api/v1/contracts/{contractId}/technical-accounts` and `PATCH
+  /api/v1/contracts/{contractId}/technical-accounts/{accountId}/status`, the
+  `TechnicalAccount` projection (`accountId`, `accountNumber`, `contractId`,
+  `periodStart`, `periodEnd`, `currency`, `cededPremium`, `cededLosses`,
+  `commission`, `otherCharges`, `balance`, `status`, `createdAt`), the
+  `TechnicalAccountStatus` enum (DRAFT, ISSUED, SETTLED), the
+  `CreateTechnicalAccountRequest` command (period, currency, and four required
+  non-negative amounts; server-derived account number and balance), and the
+  `UpdateTechnicalAccountStatusRequest` command (status ISSUED or SETTLED). The
+  operations document `X-EIA-Tenant`, `X-EIA-Book: ASSUMED`, 200/201, 400, 404,
+  and 409 `DUPLICATE_TECHNICAL_ACCOUNT_PERIOD`/`INVALID_STATUS_TRANSITION`.
+- `asyncapi/contract.yaml` is 1.2.0: adds implemented child-aggregate channels
+  and `send` operations for `contract.technical-account.created`,
+  `contract.technical-account.issued`, and `contract.technical-account.settled`,
+  a shared `ContractTechnicalAccountData` payload, and the account aggregate
+  versions 1/2/3.
+- `asyncapi/event-catalog.yaml` is 1.9.0: the three names are published and
+  implemented (186 published in total; Contract 24 published and 8 implemented).
+- `scripts/validate_contracts.py` requires the three public operations, the
+  `TenantHeader` and `BookHeaderAssumed` parameters, the 200/201, 400, 404, and
+  409 responses, the four schemas and their field types and enums, and the
+  three implemented technical-account events in the catalog and channels.
+- `README.md` records the technical-account routes, projection, period,
+  balance, lifecycle, book, and event semantics, and the additive versions;
+  `MISMATCHES.md` adds M-29 for the SPEC path, status-vocabulary, line-breakdown,
+  overlap/window, and absent-book differences, and updates M-12, M-14, and M-22
+  with the new slice and event names.
+- `python scripts/validate_contracts.py` passes 10,406 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

@@ -357,6 +357,73 @@ SEARCH_RESPONSE_KEYS = ("query", "limit", "items")
 SEARCH_ITEM_KEYS = ("id", "type", "label", "secondary", "status", "href")
 
 
+# Contract technical accounts. Each tuple is
+# (method, path, success status, success schema, request schema or None). All
+# three public operations must document the tenant header, the ASSUMED book
+# header, the path parameters, and the 400/404 problem responses; the two
+# mutations also document 409.
+CONTRACT_TECHNICAL_ACCOUNT_PATHS = [
+    (
+        "get",
+        "/api/v1/contracts/{contractId}/technical-accounts",
+        "200",
+        "TechnicalAccount",
+        None,
+    ),
+    (
+        "post",
+        "/api/v1/contracts/{contractId}/technical-accounts",
+        "201",
+        "TechnicalAccount",
+        "CreateTechnicalAccountRequest",
+    ),
+    (
+        "patch",
+        "/api/v1/contracts/{contractId}/technical-accounts/{accountId}/status",
+        "200",
+        "TechnicalAccount",
+        "UpdateTechnicalAccountStatusRequest",
+    ),
+]
+
+CONTRACT_TECHNICAL_ACCOUNT_FIELDS = (
+    "accountId",
+    "accountNumber",
+    "contractId",
+    "periodStart",
+    "periodEnd",
+    "currency",
+    "cededPremium",
+    "cededLosses",
+    "commission",
+    "otherCharges",
+    "balance",
+    "status",
+    "createdAt",
+)
+
+CONTRACT_TECHNICAL_ACCOUNT_MONEY_FIELDS = (
+    "cededPremium",
+    "cededLosses",
+    "commission",
+    "otherCharges",
+    "balance",
+)
+
+CONTRACT_TECHNICAL_ACCOUNT_CREATE_FIELDS = (
+    "periodStart",
+    "periodEnd",
+    "currency",
+    "cededPremium",
+    "cededLosses",
+    "commission",
+    "otherCharges",
+)
+
+CONTRACT_TECHNICAL_ACCOUNT_STATUSES = ("DRAFT", "ISSUED", "SETTLED")
+CONTRACT_TECHNICAL_ACCOUNT_REQUEST_STATUSES = ("ISSUED", "SETTLED")
+
+
 # Direct Claims and Assumed Claims task and note schemas. The public projection
 # and command shapes are the ones the domains serialize, so the names are
 # mandatory alongside the five public routes above.
@@ -559,6 +626,9 @@ IMPLEMENTED_EVENTS = {
         "contract.contract.bound",
         "contract.contract.commuted",
         "contract.cession.recorded",
+        "contract.technical-account.created",
+        "contract.technical-account.issued",
+        "contract.technical-account.settled",
     ],
     "direct-claims": [
         "direct.claim.registered",
@@ -2315,6 +2385,209 @@ def check_policy_renewal_openapi(contracts: ContractSet, document, relative: str
 
 
 # ---------------------------------------------------------------------------
+# Contract technical-account checks
+# ---------------------------------------------------------------------------
+
+
+def check_contract_technical_accounts(contracts: ContractSet, document, relative: str):
+    """Require the technical-account operations, schemas, and field rules."""
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    for method, account_path, success_status, response_schema_name, request_schema_name in (
+        CONTRACT_TECHNICAL_ACCOUNT_PATHS
+    ):
+        path_item = paths.get(account_path) if isinstance(paths, dict) else None
+        operation = path_item.get(method) if isinstance(path_item, dict) else None
+        where = f"{relative}: {method.upper()} {account_path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required technical-account operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+
+        parameter_refs, inline_names = _parameter_names(operation)
+        contracts.check(
+            "TenantHeader" in parameter_refs,
+            f"{where}: must document the shared TenantHeader parameter",
+        )
+        contracts.check(
+            "BookHeaderAssumed" in parameter_refs,
+            f"{where}: must document the shared BookHeaderAssumed parameter",
+        )
+        contracts.check(
+            "contractId" in inline_names,
+            f"{where}: must declare the contractId path parameter",
+        )
+        if method == "patch":
+            contracts.check(
+                "accountId" in inline_names,
+                f"{where}: must declare the accountId path parameter",
+            )
+
+        responses = operation.get("responses") or {}
+        for code in ("400", "404"):
+            contracts.check(
+                code in responses,
+                f"{where}: must document the {code} response",
+            )
+        if method in ("post", "patch"):
+            contracts.check(
+                "409" in responses,
+                f"{where}: must document the 409 response",
+            )
+
+        if method == "get":
+            ok_schema = _response_schema(operation, "200")
+            contracts.check(
+                isinstance(ok_schema, dict)
+                and ok_schema.get("type") == "array"
+                and str((ok_schema.get("items") or {}).get("$ref", "")).endswith(
+                    "/schemas/TechnicalAccount"
+                ),
+                f"{where}: 200 must return an array of TechnicalAccount",
+            )
+        else:
+            request_body = operation.get("requestBody") or {}
+            contracts.check(
+                request_body.get("required") is True,
+                f"{where}: request body must be required",
+            )
+            request_schema = (
+                ((request_body.get("content") or {}).get("application/json") or {})
+                .get("schema")
+                if isinstance(request_body, dict)
+                else None
+            )
+            contracts.check(
+                isinstance(request_schema, dict)
+                and str(request_schema.get("$ref", "")).endswith(
+                    f"/schemas/{request_schema_name}"
+                ),
+                f"{where}: request body must use the {request_schema_name} schema",
+            )
+            success_schema = _response_schema(operation, success_status)
+            contracts.check(
+                isinstance(success_schema, dict)
+                and str(success_schema.get("$ref", "")).endswith(
+                    f"/schemas/{response_schema_name}"
+                ),
+                f"{where}: {success_status} must return the {response_schema_name} schema",
+            )
+
+    account = schemas.get("TechnicalAccount") or {}
+    account_properties = account.get("properties") or {}
+    account_required = set(account.get("required") or [])
+    contracts.check(
+        isinstance(account, dict) and account.get("type") == "object",
+        f"{relative}: TechnicalAccount must be an object schema",
+    )
+    for field in CONTRACT_TECHNICAL_ACCOUNT_FIELDS:
+        contracts.check(
+            field in account_properties,
+            f"{relative}: TechnicalAccount.properties.{field} is required",
+        )
+        contracts.check(
+            field in account_required,
+            f"{relative}: TechnicalAccount.required must list {field}",
+        )
+    for field in ("accountId", "contractId"):
+        contracts.check(
+            (account_properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: TechnicalAccount.{field} must be a uuid",
+        )
+    for field in ("periodStart", "periodEnd"):
+        contracts.check(
+            (account_properties.get(field) or {}).get("format") == "date",
+            f"{relative}: TechnicalAccount.{field} must be a date",
+        )
+    contracts.check(
+        str((account_properties.get("currency") or {}).get("$ref", "")).endswith(
+            "/schemas/CurrencyCode"
+        ),
+        f"{relative}: TechnicalAccount.currency must reference CurrencyCode",
+    )
+    for field in CONTRACT_TECHNICAL_ACCOUNT_MONEY_FIELDS:
+        contracts.check(
+            str((account_properties.get(field) or {}).get("$ref", "")).endswith(
+                "/schemas/MoneyAmount"
+            ),
+            f"{relative}: TechnicalAccount.{field} must reference MoneyAmount",
+        )
+    contracts.check(
+        str((account_properties.get("status") or {}).get("$ref", "")).endswith(
+            "/schemas/TechnicalAccountStatus"
+        ),
+        f"{relative}: TechnicalAccount.status must reference TechnicalAccountStatus",
+    )
+    contracts.check(
+        (account_properties.get("createdAt") or {}).get("format") == "date-time",
+        f"{relative}: TechnicalAccount.createdAt must be a date-time",
+    )
+
+    account_status = schemas.get("TechnicalAccountStatus") or {}
+    contracts.check(
+        account_status.get("type") == "string",
+        f"{relative}: TechnicalAccountStatus must be a string enum",
+    )
+    contracts.check(
+        set(account_status.get("enum") or []) == set(CONTRACT_TECHNICAL_ACCOUNT_STATUSES),
+        f"{relative}: TechnicalAccountStatus must enumerate "
+        f"{list(CONTRACT_TECHNICAL_ACCOUNT_STATUSES)}",
+    )
+
+    create = schemas.get("CreateTechnicalAccountRequest") or {}
+    create_properties = create.get("properties") or {}
+    create_required = set(create.get("required") or [])
+    contracts.check(
+        isinstance(create, dict) and create.get("type") == "object",
+        f"{relative}: CreateTechnicalAccountRequest must be an object schema",
+    )
+    contracts.check(
+        create_required == set(CONTRACT_TECHNICAL_ACCOUNT_CREATE_FIELDS),
+        f"{relative}: CreateTechnicalAccountRequest must require "
+        f"{list(CONTRACT_TECHNICAL_ACCOUNT_CREATE_FIELDS)}",
+    )
+    for field in ("periodStart", "periodEnd"):
+        contracts.check(
+            (create_properties.get(field) or {}).get("format") == "date",
+            f"{relative}: CreateTechnicalAccountRequest.{field} must be a date",
+        )
+    contracts.check(
+        str((create_properties.get("currency") or {}).get("$ref", "")).endswith(
+            "/schemas/CurrencyCode"
+        ),
+        f"{relative}: CreateTechnicalAccountRequest.currency must reference CurrencyCode",
+    )
+    for field in ("cededPremium", "cededLosses", "commission", "otherCharges"):
+        contracts.check(
+            str((create_properties.get(field) or {}).get("$ref", "")).endswith(
+                "/schemas/MoneyAmount"
+            ),
+            f"{relative}: CreateTechnicalAccountRequest.{field} must reference MoneyAmount",
+        )
+
+    update = schemas.get("UpdateTechnicalAccountStatusRequest") or {}
+    update_properties = update.get("properties") or {}
+    update_required = set(update.get("required") or [])
+    contracts.check(
+        isinstance(update, dict) and update.get("type") == "object",
+        f"{relative}: UpdateTechnicalAccountStatusRequest must be an object schema",
+    )
+    contracts.check(
+        update_required == {"status"},
+        f"{relative}: UpdateTechnicalAccountStatusRequest must require only status",
+    )
+    contracts.check(
+        set((update_properties.get("status") or {}).get("enum") or [])
+        == set(CONTRACT_TECHNICAL_ACCOUNT_REQUEST_STATUSES),
+        f"{relative}: UpdateTechnicalAccountStatusRequest.status must enumerate "
+        f"{list(CONTRACT_TECHNICAL_ACCOUNT_REQUEST_STATUSES)}",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
 
@@ -2910,6 +3183,8 @@ def check_openapi(contracts: ContractSet, verbose: bool):
         if vertical == "policy":
             check_policy_billing_openapi(contracts, document, relative)
             check_policy_renewal_openapi(contracts, document, relative)
+        if vertical == "contract":
+            check_contract_technical_accounts(contracts, document, relative)
         contracts.check_openapi_schemas(document, relative)
         if verbose:
             print(f"  OK {relative}  paths={len(paths)} operations={operation_count}")

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Contract API
-  version: 2.1.0
+  version: 2.2.0
   summary: Assumed-book reinsurance contract administration and the Contract expert API.
   description: >
     This document describes the implemented public Contract domain API and the
@@ -11,9 +11,18 @@ info:
     The Contract vertical is ASSUMED book only. Round 5 adds the second slice:
     layers, participants, terms, security, cessions, bordereaux, commutations,
     and the bind command. The contract header, dates, currency, lifecycle,
-    layers, participants, terms, security, cessions, bordereaux, and
-    commutations are implemented; technical accounts, endorsement, renewal,
-    reinstatement, loss-aggregate, and lineage remain planned.
+    layers, participants, terms, security, cessions, bordereaux, commutations,
+    and technical accounts are implemented; endorsement, renewal, reinstatement,
+    loss-aggregate, and lineage remain planned.
+
+    A technical account is the periodic financial statement of the treaty. The
+    expert generates `accountNumber` as `TA-{year}-{sequence}`, derives
+    `balance = cededPremium - commission - cededLosses + otherCharges`, and
+    exposes every money field as a decimal string (SPEC 10.3). A positive
+    balance is due from the cedent to the reinsurer. The account is created in
+    DRAFT and moves DRAFT -> ISSUED -> SETTLED; the SPEC 11.3.4
+    `technical_account_line` breakdown is not part of this slice, and the SPEC
+    11.3.10 `/accounts` route is exposed as `/technical-accounts` (M-29).
 
     Bind is a command, not a status transition. `PATCH /status` to `BOUND` is
     rejected with 409 `BIND_REQUIRES_COMMAND`; `POST /bind` enforces the tower,
@@ -882,6 +891,150 @@ paths:
           $ref: './components.yaml#/components/responses/NotFound'
         '409':
           $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/{contractId}/technical-accounts:
+    get:
+      operationId: listContractTechnicalAccounts
+      tags:
+        - Contract
+      summary: List the contract's technical accounts.
+      description: >
+        Returns a bare array ordered by `periodStart` descending, then
+        `periodEnd` and `createdAt` descending. The tenant comes from
+        `X-EIA-Tenant`. The Contract vertical is ASSUMED-only, so `X-EIA-Book`
+        must be ASSUMED; another book is hidden as 404 `BOOK_SCOPE_VIOLATION`
+        (SPEC 3.6.2). An absent book header is accepted by the domain for
+        compatibility with the other Contract proxy routes (M-29).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Technical accounts of the contract, newest period first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TechnicalAccount'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createContractTechnicalAccount
+      tags:
+        - Contract
+      summary: Produce a technical account for one period.
+      description: >
+        Creates the account in DRAFT. `accountNumber` is generated as
+        `TA-{year}-{sequence}` and `balance` is derived as
+        `cededPremium - commission - cededLosses + otherCharges`; neither is
+        accepted from the caller. `periodStart` must be before `periodEnd`,
+        `currency` must be an uppercase ISO 4217 code, and all four amounts are
+        required and non-negative. The account is unique per tenant, contract,
+        and exact period; a duplicate period is 409
+        `DUPLICATE_TECHNICAL_ACCOUNT_PERIOD`. The write and its
+        `contract.technical-account.created` outbox event are one transaction.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTechnicalAccountRequest'
+      responses:
+        '201':
+          description: Technical account produced and opened in DRAFT.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TechnicalAccount'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            409. `DUPLICATE_TECHNICAL_ACCOUNT_PERIOD` when an account already
+            exists for the exact tenant, contract, and period.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/{contractId}/technical-accounts/{accountId}/status:
+    patch:
+      operationId: updateContractTechnicalAccountStatus
+      tags:
+        - Contract
+      summary: Advance a technical account through its lifecycle.
+      description: >
+        Applies one transition: DRAFT -> ISSUED or ISSUED -> SETTLED. The
+        request only accepts `ISSUED` or `SETTLED`; `DRAFT` is the creation
+        state and is 400 `INVALID_STATUS`. Skipping a step, repeating a terminal
+        status, or a concurrent change is 409 `INVALID_STATUS_TRANSITION`. A
+        successful transition appends `contract.technical-account.issued` or
+        `contract.technical-account.settled` to the outbox in the same
+        transaction as the row update.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTechnicalAccountStatusRequest'
+      responses:
+        '200':
+          description: Technical account after the transition.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TechnicalAccount'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            409. `INVALID_STATUS_TRANSITION` when the requested edge is not
+            DRAFT -> ISSUED or ISSUED -> SETTLED, including a concurrent change.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /api/v1/contracts/{contractId}/bind-eligibility:
@@ -2720,6 +2873,123 @@ components:
         updatedAt:
           type: string
           format: date-time
+    TechnicalAccount:
+      type: object
+      description: >
+        Public projection of a contract technical account (SPEC 11.3.4
+        `technical_account`). The expert generates the account number and
+        derives the balance as
+        `cededPremium - commission - cededLosses + otherCharges`; a positive
+        balance is due from the cedent to the reinsurer and a negative balance
+        is due from the reinsurer to the cedent. Money fields are decimal
+        strings (SPEC 10.3). The SPEC `technical_account_line` breakdown is not
+        part of this slice (M-29).
+      required:
+        - accountId
+        - accountNumber
+        - contractId
+        - periodStart
+        - periodEnd
+        - currency
+        - cededPremium
+        - cededLosses
+        - commission
+        - otherCharges
+        - balance
+        - status
+        - createdAt
+      properties:
+        accountId:
+          type: string
+          format: uuid
+        accountNumber:
+          type: string
+          maxLength: 32
+          description: Generated as `TA-{year}-{sequence}` and unique per tenant.
+        contractId:
+          type: string
+          format: uuid
+        periodStart:
+          type: string
+          format: date
+        periodEnd:
+          type: string
+          format: date
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        cededPremium:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        cededLosses:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        commission:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        otherCharges:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        balance:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        status:
+          $ref: '#/components/schemas/TechnicalAccountStatus'
+        createdAt:
+          type: string
+          format: date-time
+    TechnicalAccountStatus:
+      type: string
+      description: >
+        Technical-account lifecycle status. This slice implements only the
+        linear path DRAFT -> ISSUED -> SETTLED; the SPEC 11.3.4 AGREED,
+        DISPUTED, and SUPERSEDED values are planned (M-29).
+      enum:
+        - DRAFT
+        - ISSUED
+        - SETTLED
+    CreateTechnicalAccountRequest:
+      type: object
+      description: >
+        Produces one technical-account period. The tenant comes from
+        `X-EIA-Tenant` and the contract from the path; `accountNumber`,
+        `balance`, and the initial DRAFT status are server-derived. Every
+        amount is required and non-negative; `periodStart` must be before
+        `periodEnd`.
+      required:
+        - periodStart
+        - periodEnd
+        - currency
+        - cededPremium
+        - cededLosses
+        - commission
+        - otherCharges
+      properties:
+        periodStart:
+          type: string
+          format: date
+        periodEnd:
+          type: string
+          format: date
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        cededPremium:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        cededLosses:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        commission:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        otherCharges:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+    UpdateTechnicalAccountStatusRequest:
+      type: object
+      description: >
+        Lifecycle command for one technical account. Only `ISSUED` and
+        `SETTLED` are accepted; `DRAFT` is the creation state and is rejected
+        with 400 `INVALID_STATUS`. Skipping ISSUED or repeating a terminal
+        status is 409 `INVALID_STATUS_TRANSITION`.
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - ISSUED
+            - SETTLED
     TowerSummary:
       type: object
       required:
@@ -3227,6 +3497,16 @@ x-implementation:
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/cession/CessionController.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/bordereau/BordereauController.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/commutation/CommutationController.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/TechnicalAccountController.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/TechnicalAccountService.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/TechnicalAccountClient.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/TechnicalAccount.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/CreateTechnicalAccountCommand.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/technicalaccount/TechnicalAccountController.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/technicalaccount/TechnicalAccountRules.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/technicalaccount/TechnicalAccountRepository.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/technicalaccount/TechnicalAccountStatus.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/technicalaccount/ContractTechnicalAccount.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ContractGuard.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ApiExceptionHandler.java
     - repos/eia-contract-domain/src/test/java/com/eia/contract/domain/ContractDetailControllerTest.java
@@ -3239,21 +3519,29 @@ x-implementation:
     Concurrency is body-based expectedVersion: there is no ETag and no
     Idempotency-Key. effectiveDate is the implemented name for the SPEC
     inception date. Cession source references are business strings, not UUIDs.
-    Percentages are points of 100, not decimal fractions.
+    Percentages are points of 100, not decimal fractions. Technical accounts
+    are projected with accountId (the expert row id) and exclude tenantId; the
+    expert generates accountNumber and the balance, and the only statuses are
+    DRAFT, ISSUED, and SETTLED. The domain accepts an absent X-EIA-Book on the
+    technical-account routes even though the canonical contract requires
+    ASSUMED (M-29).
 x-compatibility:
-  contractVersion: 2.1.0
-  previousContractVersion: 2.0.0
+  contractVersion: 2.2.0
+  previousContractVersion: 2.1.0
   breaking:
     - PATCH /api/v1/contracts/{contractId}/status no longer accepts BOUND (since 2.0.0); it returns 409 BIND_REQUIRES_COMMAND and bind must use POST /bind.
   compatible:
     - Adds GET /api/v1/contracts/search returning the shared SearchResponse envelope.
     - Adds the layers, participants, terms, security, cessions, bordereaux, commutations, bind-eligibility, and bind routes.
     - Adds the expert routes that mirror the public second slice.
+    - Adds GET/POST /api/v1/contracts/{contractId}/technical-accounts and PATCH /api/v1/contracts/{contractId}/technical-accounts/{accountId}/status with the TechnicalAccount, CreateTechnicalAccountRequest, UpdateTechnicalAccountStatusRequest, and TechnicalAccountStatus schemas.
   note: >
-    Search is additive over 2.0.0 and changes no existing path or schema. The
-    bind guard is a deliberate breaking change introduced in 2.0.0 for a client
-    that used the status endpoint to bind without approvals; it is the SPEC
-    11.3.8 command contract. The HTTP path stays /api/v1/contracts.
+    Search is additive over 2.0.0 and changes no existing path or schema.
+    Technical accounts are additive over 2.1.0: three new operations, four new
+    schemas, and no change to an existing path or field. The bind guard is a
+    deliberate breaking change introduced in 2.0.0 for a client that used the
+    status endpoint to bind without approvals; it is the SPEC 11.3.8 command
+    contract. The HTTP path stays /api/v1/contracts.
 x-planned-operations:
   - method: PATCH
     path: /api/v1/contracts/{contractId}
@@ -3270,7 +3558,10 @@ x-planned-operations:
   - method: GET
     path: /api/v1/contracts/{contractId}/accounts
     spec: SPEC 11.3.10
-    note: Technical accounts.
+    note: >
+      Technical accounts are implemented at
+      /api/v1/contracts/{contractId}/technical-accounts, not this SPEC path
+      (M-29).
   - method: GET
     path: /api/v1/contracts/{contractId}/loss-aggregate
     spec: SPEC 11.3.10

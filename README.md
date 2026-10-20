@@ -532,6 +532,54 @@ Renewal semantics:
   untouched, on the short `/api/v1/policies/{policyId}/renew` path. M-01 and
   M-28 record the deviation.
 
+### Contract technical accounts (2026-10-20)
+
+Contract 2.2.0 adds the periodic technical-account statement for an ASSUMED
+treaty. The change is additive: the three operations and four schemas are new,
+the three event names are new, and no existing path, request field, response
+field, or event changed.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/contract.yaml` | 2.2.0 | Additive | `GET/POST /api/v1/contracts/{contractId}/technical-accounts`, `PATCH /api/v1/contracts/{contractId}/technical-accounts/{accountId}/status`, and the `TechnicalAccount`, `TechnicalAccountStatus`, `CreateTechnicalAccountRequest`, and `UpdateTechnicalAccountStatusRequest` schemas. |
+| `asyncapi/contract.yaml` | 1.2.0 | Additive | Three implemented child-aggregate channels and `send` operations: `contract.technical-account.created`, `.issued`, and `.settled`. |
+| `asyncapi/event-catalog.yaml` | 1.9.0 | Additive | The three names are published and implemented (186 published in total). |
+
+Technical-account semantics:
+
+- `GET .../technical-accounts` returns a bare array of the contract's accounts,
+  newest period first (`periodStart` descending, then `periodEnd` and
+  `createdAt`). A missing tenant is 400; an unknown contract, another tenant's
+  contract, or an account under another contract is 404.
+- `POST .../technical-accounts` produces one period in DRAFT. `periodStart` must
+  be before `periodEnd`, `currency` must be an uppercase ISO 4217 code, and
+  `cededPremium`, `cededLosses`, `commission`, and `otherCharges` are required
+  and non-negative. `accountNumber` is generated as `TA-{year}-{sequence}` and
+  `balance` as `cededPremium - commission - cededLosses + otherCharges`; neither
+  is accepted from the caller. A positive balance is due from the cedent to the
+  reinsurer.
+- The exact `(tenant, contract, periodStart, periodEnd)` period is unique. A
+  duplicate is 409 `DUPLICATE_TECHNICAL_ACCOUNT_PERIOD`; overlapping but
+  non-identical periods are not rejected in this slice (M-29).
+- `PATCH .../{accountId}/status` applies only `DRAFT -> ISSUED -> SETTLED`. The
+  request enum is `ISSUED` or `SETTLED`; `DRAFT` is 400 `INVALID_STATUS` and a
+  skipped or repeated edge is 409 `INVALID_STATUS_TRANSITION`. Each accepted
+  transition writes `contract.technical-account.issued` or `.settled` in the
+  same transaction as the row update.
+- `X-EIA-Tenant` is required. The canonical contract requires
+  `X-EIA-Book: ASSUMED`; another book is hidden as 404
+  `BOOK_SCOPE_VIOLATION`. The domain currently accepts an absent header for
+  compatibility with the other Contract proxy routes, which M-29 records.
+- The projection is `{accountId, accountNumber, contractId, periodStart,
+  periodEnd, currency, cededPremium, cededLosses, commission, otherCharges,
+  balance, status, createdAt}`. `tenantId` is not part of the public projection.
+  The SPEC 11.3.4 `technical_account_line` breakdown, the `AGREED`, `DISPUTED`,
+  and `SUPERSEDED` statuses, and the SPEC 11.3.10 `/accounts` path remain gaps
+  (M-29).
+- The three event names are child-aggregate facts with no SPEC 11.3.9
+  equivalent (M-22, M-29). The envelope uses the account id and its lifecycle
+  version (1, 2, 3) while the outbox partition key stays the contract id.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -567,6 +615,7 @@ Every request carries a resolved tenant; no request body may override it.
 | `X-EIA-Book` | Direct Claims, Assumed Claims, Cession, Retrocession | Required and fixed to the vertical's book. A different book is hidden as 404 `BOOK_SCOPE_VIOLATION` in all four, so the response cannot confirm existence (SPEC 3.6.2, WALL-06). A missing header is still a 400 `BOOK_REQUIRED` in Cession and Retrocession; that is a validation error, not a book mismatch. |
 | `X-EIA-Book` | Policy billing | Optional for compatibility with the other Policy proxy routes, but a supplied value must be DIRECT; another book is hidden as 404 `BOOK_SCOPE_VIOLATION`. An absent header is accepted. The guard runs before the expert call. |
 | `X-EIA-Book` | Policy renewal | Required and fixed to `DIRECT`. The contract makes a missing header a 400 and hides another book as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header, which M-28 records. |
+| `X-EIA-Book` | Contract technical accounts | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-29 records. |
 | `X-EIA-Actor` | Claim assignment (`PATCH .../assignment`) | Optional acting identity, at most 128 characters. Recorded as `assignedBy` and in the claim audit trail; defaults to the assigned adjuster when absent or blank. The Direct Claims expert also accepts `X-EIA-User` as an alias (M-25). |
 | `?tenantId=` | Most internal expert routes | The expert is network-restricted and receives the tenant resolved by its domain service. |
 
@@ -690,8 +739,9 @@ locations, cancellations, and reinstatements) returns the same envelope with
 `items` narrowed to its resource in `policy.yaml`.
 
 Every other vertical still returns a bare JSON array, including the Contract
-second-slice collections and the Direct Claims and Assumed Claims child
-collections. SPEC 7.6 and 12.2 specify a different, cursor-based envelope
+second-slice collections, the technical-account list, and the Direct Claims and
+Assumed Claims child collections. SPEC 7.6 and 12.2 specify a different,
+cursor-based envelope
 (`data`, `page:{size, hasMore, nextCursor, total?}`, `?page[size]` and
 `?page[after]`, default 25, maximum 200). The offset form is the implemented
 contract; the divergence and the migration choice are recorded in

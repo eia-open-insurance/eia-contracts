@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.8.0
+  version: 1.9.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -27,7 +27,10 @@ info:
     names: SPEC 11.2.13 calls the plan fact `policy.billing.plan-created` and
     defines no installment paid or waived fact, so the implemented names are
     `policy.billing-plan.created`, `policy.installment.paid`, and
-    `policy.installment.waived` (M-22, M-27). The platform event-ingest service
+    `policy.installment.waived` (M-22, M-27). The three Contract
+    technical-account facts `contract.technical-account.created`, `.issued`,
+    and `.settled` are new child-aggregate names with no SPEC 11.3.9
+    equivalent (M-22, M-29). The platform event-ingest service
     is the inbox:
     it validates the canonical envelope, verifies the HMAC signature when
     configured, and stores each event idempotently. There is still no business
@@ -191,6 +194,9 @@ x-event-catalog:
       - contract.contract.cancelled
       - contract.contract.commuted
       - contract.cession.recorded
+      - contract.technical-account.created
+      - contract.technical-account.issued
+      - contract.technical-account.settled
       - contract.bordereau.received
       - contract.bordereau.posted
       - contract.bordereau.rejected
@@ -208,6 +214,9 @@ x-event-catalog:
       - contract.contract.bound
       - contract.contract.commuted
       - contract.cession.recorded
+      - contract.technical-account.created
+      - contract.technical-account.issued
+      - contract.technical-account.settled
     consumed:
       - policy.policy.issued
       - policy.policy.endorsed
