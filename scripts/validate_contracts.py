@@ -923,6 +923,53 @@ RECEIVABLE_MIN_LIMIT = 1
 RECEIVABLE_MAX_LIMIT = 200
 
 
+# Policy installment dunning (SPEC 11.2.13 collections and dunning). The public
+# surface is a per-installment history and command under /api/v1/billing. The
+# canonical contract requires the DIRECT book; the domain accepts an absent
+# header for compatibility, which MISMATCHES.md M-38 records. A dunning action
+# is per escalation level: the unique (tenant, installment, level) constraint is
+# the retry guard, and the level/channel vocabularies and statuses are closed.
+DUNNING_PATH = "/api/v1/billing/installments/{installmentId}/dunning"
+DUNNING_FIELDS = (
+    "dunningId",
+    "installmentId",
+    "planId",
+    "policyId",
+    "level",
+    "channel",
+    "notes",
+    "status",
+    "sentAt",
+)
+DUNNING_REQUIRED_FIELDS = (
+    "dunningId",
+    "installmentId",
+    "planId",
+    "policyId",
+    "level",
+    "channel",
+    "status",
+    "sentAt",
+)
+DUNNING_REQUEST_FIELDS = ("level", "channel", "notes")
+DUNNING_REQUEST_REQUIRED_FIELDS = ("level", "channel")
+DUNNING_LEVELS = ("REMINDER", "FIRST_NOTICE", "SECOND_NOTICE", "COLLECTIONS")
+DUNNING_CHANNELS = ("EMAIL", "LETTER", "PORTAL")
+DUNNING_STATUSES = ("SENT", "CANCELLED")
+DUNNING_NOTES_MAX_LENGTH = 2000
+DUNNING_CONFLICT_CODES = ("INSTALLMENT_NOT_DUNNABLE", "DUNNING_ALREADY_SENT")
+DUNNING_EVENT = "policy.dunning.sent"
+DUNNING_EVENT_FIELDS = (
+    "policyId",
+    "policyNumber",
+    "installmentId",
+    "level",
+    "channel",
+    "sentAt",
+    "status",
+)
+
+
 # Policy renewal (SPEC 11.2.4 renewal lineage, SPEC 11.2.10 renew). The public
 # route creates a successor DRAFT term, leaves the source policy unchanged, and
 # returns the successor with its own ETag. The request body carries the two term
@@ -1030,6 +1077,7 @@ IMPLEMENTED_EVENTS = {
         "policy.billing-plan.created",
         "policy.installment.paid",
         "policy.installment.waived",
+        "policy.dunning.sent",
         "policy.mass-tort-profile.updated",
     ],
     "contract": [
@@ -3316,6 +3364,244 @@ def check_policy_receivables_openapi(contracts: ContractSet, document, relative:
         (count.get("type"), count.get("minimum")) == ("integer", 0),
         f"{relative}: ReceivableSummary.count must be an integer >= 0",
     )
+
+
+# ---------------------------------------------------------------------------
+# Policy installment-dunning checks
+# ---------------------------------------------------------------------------
+
+
+def check_policy_dunning_openapi(contracts: ContractSet, document, relative: str):
+    """Require the installment dunning operations, schemas, and field rules."""
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    for method in ("get", "post"):
+        path_item = paths.get(DUNNING_PATH) if isinstance(paths, dict) else None
+        operation = path_item.get(method) if isinstance(path_item, dict) else None
+        where = f"{relative}: {method.upper()} {DUNNING_PATH}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required dunning operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+
+        parameter_refs, inline_names = _parameter_names(operation)
+        contracts.check(
+            "TenantHeader" in parameter_refs,
+            f"{where}: must require the shared TenantHeader",
+        )
+        contracts.check(
+            "BookHeaderDirect" in parameter_refs,
+            f"{where}: must require the shared BookHeaderDirect parameter",
+        )
+        contracts.check(
+            "installmentId" in inline_names,
+            f"{where}: must declare the installmentId path parameter",
+        )
+        installment_parameter = _inline_parameter(operation, "installmentId")
+        contracts.check(
+            isinstance(installment_parameter, dict)
+            and installment_parameter.get("in") == "path"
+            and installment_parameter.get("required") is True
+            and (installment_parameter.get("schema") or {}).get("format") == "uuid",
+            f"{where}: installmentId must be a required uuid path parameter",
+        )
+
+        responses = operation.get("responses") or {}
+        contracts.check("400" in responses, f"{where}: must document the 400 response")
+        contracts.check("404" in responses, f"{where}: must document the 404 response")
+        for code, component in (("400", "BadRequest"), ("404", "NotFound")):
+            response = responses.get(code)
+            contracts.check(
+                isinstance(response, dict)
+                and str(response.get("$ref", "")).endswith(
+                    f"/responses/{component}"
+                ),
+                f"{where}: {code} must reference the shared {component}",
+            )
+
+        description = str(operation.get("description") or "")
+        contracts.check(
+            "INSTALLMENT_NOT_FOUND" in description,
+            f"{where}: description must document INSTALLMENT_NOT_FOUND",
+        )
+        contracts.check(
+            "BOOK_SCOPE_VIOLATION" in description,
+            f"{where}: description must document the 404 BOOK_SCOPE_VIOLATION "
+            "book wall",
+        )
+
+        if method == "get":
+            ok_schema = _response_schema(operation, "200")
+            contracts.check(
+                isinstance(ok_schema, dict)
+                and ok_schema.get("type") == "array"
+                and str((ok_schema.get("items") or {}).get("$ref", "")).endswith(
+                    "/schemas/DunningAction"
+                ),
+                f"{where}: 200 must return an array of DunningAction",
+            )
+        else:
+            contracts.check("409" in responses, f"{where}: must document the 409 response")
+            conflict = responses.get("409")
+            contracts.check(
+                isinstance(conflict, dict)
+                and str(conflict.get("$ref", "")).endswith("/responses/Conflict"),
+                f"{where}: 409 must reference the shared Conflict",
+            )
+            for code in DUNNING_CONFLICT_CODES:
+                contracts.check(
+                    code in description,
+                    f"{where}: description must document the 409 {code}",
+                )
+
+            request_body = operation.get("requestBody") or {}
+            contracts.check(
+                request_body.get("required") is True,
+                f"{where}: request body must be required",
+            )
+            request_schema = (
+                ((request_body.get("content") or {}).get("application/json") or {})
+                .get("schema")
+                if isinstance(request_body, dict)
+                else None
+            )
+            contracts.check(
+                isinstance(request_schema, dict)
+                and str(request_schema.get("$ref", "")).endswith(
+                    "/schemas/CreateDunningRequest"
+                ),
+                f"{where}: request body must use the CreateDunningRequest schema",
+            )
+            success_schema = _response_schema(operation, "201")
+            contracts.check(
+                isinstance(success_schema, dict)
+                and str(success_schema.get("$ref", "")).endswith(
+                    "/schemas/DunningAction"
+                ),
+                f"{where}: 201 must return the DunningAction schema",
+            )
+
+    dunning = schemas.get("DunningAction") or {}
+    dunning_properties = dunning.get("properties") or {}
+    dunning_required = set(dunning.get("required") or [])
+    contracts.check(
+        isinstance(dunning, dict) and dunning.get("type") == "object",
+        f"{relative}: DunningAction must be an object schema",
+    )
+    for field in DUNNING_FIELDS:
+        contracts.check(
+            field in dunning_properties,
+            f"{relative}: DunningAction.properties.{field} is required",
+        )
+    contracts.check(
+        dunning_required == set(DUNNING_REQUIRED_FIELDS),
+        f"{relative}: DunningAction.required must list the non-nullable action fields",
+    )
+    for field in ("dunningId", "installmentId", "planId", "policyId"):
+        contracts.check(
+            (dunning_properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: DunningAction.{field} must be a uuid",
+        )
+    contracts.check(
+        tuple((dunning_properties.get("level") or {}).get("enum") or [])
+        == DUNNING_LEVELS,
+        f"{relative}: DunningAction.level must enumerate {list(DUNNING_LEVELS)}",
+    )
+    contracts.check(
+        tuple((dunning_properties.get("channel") or {}).get("enum") or [])
+        == DUNNING_CHANNELS,
+        f"{relative}: DunningAction.channel must enumerate {list(DUNNING_CHANNELS)}",
+    )
+    dunning_notes = dunning_properties.get("notes") or {}
+    contracts.check(
+        _schema_types(dunning_notes) == {"string", "null"}
+        and dunning_notes.get("maxLength") == DUNNING_NOTES_MAX_LENGTH,
+        f"{relative}: DunningAction.notes must be a nullable string of at most "
+        f"{DUNNING_NOTES_MAX_LENGTH} characters",
+    )
+    contracts.check(
+        "notes" not in dunning_required,
+        f"{relative}: DunningAction.notes must stay optional",
+    )
+    contracts.check(
+        tuple((dunning_properties.get("status") or {}).get("enum") or [])
+        == DUNNING_STATUSES,
+        f"{relative}: DunningAction.status must enumerate {list(DUNNING_STATUSES)}",
+    )
+    contracts.check(
+        (dunning_properties.get("sentAt") or {}).get("format") == "date-time",
+        f"{relative}: DunningAction.sentAt must be a date-time",
+    )
+
+    create = schemas.get("CreateDunningRequest") or {}
+    create_properties = create.get("properties") or {}
+    create_required = set(create.get("required") or [])
+    contracts.check(
+        isinstance(create, dict) and create.get("type") == "object",
+        f"{relative}: CreateDunningRequest must be an object schema",
+    )
+    for field in DUNNING_REQUEST_FIELDS:
+        contracts.check(
+            field in create_properties,
+            f"{relative}: CreateDunningRequest.properties.{field} is required",
+        )
+    contracts.check(
+        create_required == set(DUNNING_REQUEST_REQUIRED_FIELDS),
+        f"{relative}: CreateDunningRequest.required must list level and channel",
+    )
+    contracts.check(
+        tuple((create_properties.get("level") or {}).get("enum") or [])
+        == DUNNING_LEVELS,
+        f"{relative}: CreateDunningRequest.level must enumerate "
+        f"{list(DUNNING_LEVELS)}",
+    )
+    contracts.check(
+        tuple((create_properties.get("channel") or {}).get("enum") or [])
+        == DUNNING_CHANNELS,
+        f"{relative}: CreateDunningRequest.channel must enumerate "
+        f"{list(DUNNING_CHANNELS)}",
+    )
+    create_notes = create_properties.get("notes") or {}
+    contracts.check(
+        _schema_types(create_notes) == {"string", "null"}
+        and create_notes.get("maxLength") == DUNNING_NOTES_MAX_LENGTH,
+        f"{relative}: CreateDunningRequest.notes must be a nullable string of at "
+        f"most {DUNNING_NOTES_MAX_LENGTH} characters",
+    )
+    contracts.check(
+        "notes" not in create_required,
+        f"{relative}: CreateDunningRequest.notes must stay optional",
+    )
+    contracts.check(
+        set(create_properties) == set(DUNNING_REQUEST_FIELDS),
+        f"{relative}: CreateDunningRequest must not accept server-owned fields "
+        f"beyond {list(DUNNING_REQUEST_FIELDS)}",
+    )
+
+    receivable = schemas.get("Receivable") or {}
+    receivable_properties = receivable.get("properties") or {}
+    receivable_required = set(receivable.get("required") or [])
+    last_level = receivable_properties.get("lastDunningLevel") or {}
+    contracts.check(
+        _schema_types(last_level) == {"string", "null"}
+        and last_level.get("maxLength") == 16,
+        f"{relative}: Receivable.lastDunningLevel must be a nullable string of at "
+        "most 16 characters",
+    )
+    last_at = receivable_properties.get("lastDunningAt") or {}
+    contracts.check(
+        _schema_types(last_at) == {"string", "null"}
+        and last_at.get("format") == "date-time",
+        f"{relative}: Receivable.lastDunningAt must be a nullable date-time",
+    )
+    for field in ("lastDunningLevel", "lastDunningAt"):
+        contracts.check(
+            field not in receivable_required,
+            f"{relative}: Receivable.{field} must stay optional",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -5740,6 +6026,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
         if vertical == "policy":
             check_policy_billing_openapi(contracts, document, relative)
             check_policy_receivables_openapi(contracts, document, relative)
+            check_policy_dunning_openapi(contracts, document, relative)
             check_policy_renewal_openapi(contracts, document, relative)
             check_policy_mass_tort_profile_openapi(contracts, document, relative)
         if vertical == "contract":
@@ -5932,6 +6219,86 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
                     _schema_types(payload_properties.get(field)) == {"string", "null"},
                     f"{relative}: PolicyMassTortProfileUpdatedData.{field} must be a "
                     "nullable string",
+                )
+
+            contracts.check(
+                DUNNING_EVENT in addresses,
+                f"{relative}: required dunning event channel '{DUNNING_EVENT}' is "
+                "missing",
+            )
+            contracts.check(
+                DUNNING_EVENT in implemented_addresses,
+                f"{relative}: dunning event channel '{DUNNING_EVENT}' must be "
+                "implemented",
+            )
+            contracts.check(
+                DUNNING_EVENT in send_events,
+                f"{relative}: dunning event '{DUNNING_EVENT}' must have a send "
+                "operation",
+            )
+            dunning_channel = next(
+                (
+                    channel
+                    for channel in channels.values()
+                    if isinstance(channel, dict)
+                    and channel.get("address") == DUNNING_EVENT
+                ),
+                None,
+            )
+            dunning_messages = (
+                dunning_channel.get("messages")
+                if isinstance(dunning_channel, dict)
+                else None
+            ) or {}
+            contracts.check(
+                "PolicyDunningSentData" in dunning_messages,
+                f"{relative}: {DUNNING_EVENT} must reference PolicyDunningSentData",
+            )
+            dunning_message = (
+                ((document.get("components") or {}).get("messages") or {}).get(
+                    "PolicyDunningSentData"
+                )
+                or {}
+            )
+            dunning_payload = dunning_message.get("payload") or {}
+            dunning_properties = dunning_payload.get("properties") or {}
+            dunning_required = set(dunning_payload.get("required") or [])
+            for field in DUNNING_EVENT_FIELDS:
+                contracts.check(
+                    field in dunning_properties,
+                    f"{relative}: PolicyDunningSentData.properties.{field} is "
+                    "required",
+                )
+                contracts.check(
+                    field in dunning_required,
+                    f"{relative}: PolicyDunningSentData.required must list {field}",
+                )
+            contracts.check(
+                tuple((dunning_properties.get("level") or {}).get("enum") or [])
+                == DUNNING_LEVELS,
+                f"{relative}: PolicyDunningSentData.level must enumerate "
+                f"{list(DUNNING_LEVELS)}",
+            )
+            contracts.check(
+                tuple((dunning_properties.get("channel") or {}).get("enum") or [])
+                == DUNNING_CHANNELS,
+                f"{relative}: PolicyDunningSentData.channel must enumerate "
+                f"{list(DUNNING_CHANNELS)}",
+            )
+            contracts.check(
+                tuple((dunning_properties.get("status") or {}).get("enum") or [])
+                == DUNNING_STATUSES,
+                f"{relative}: PolicyDunningSentData.status must enumerate "
+                f"{list(DUNNING_STATUSES)}",
+            )
+            contracts.check(
+                (dunning_properties.get("sentAt") or {}).get("format") == "date-time",
+                f"{relative}: PolicyDunningSentData.sentAt must be a date-time",
+            )
+            for field in ("policyId", "installmentId"):
+                contracts.check(
+                    (dunning_properties.get(field) or {}).get("format") == "uuid",
+                    f"{relative}: PolicyDunningSentData.{field} must be a uuid",
                 )
 
         if vertical == "contract":

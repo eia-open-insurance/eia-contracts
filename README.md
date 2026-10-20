@@ -495,8 +495,9 @@ Billing semantics:
   `policy.installment.waived`, each in the same transaction as the row change.
   The commands do not accept `Idempotency-Key` or `If-Match` in this slice;
   repeating a terminal settlement is the retry-safe path (M-06, M-07).
-- Billing account, billing instructions, credit notes, dunning, disputes, and
-  commission statements from SPEC 11.2.13 remain unimplemented (M-12, M-27).
+- Billing account, billing instructions, credit notes, disputes, and
+  commission statements from SPEC 11.2.13 remain unimplemented (M-12, M-27);
+  the installment dunning history is the separate surface documented below.
   The cross-policy premium-receivables queue is the next section.
 
 ### Policy premium receivables contract (2026-10-20)
@@ -538,7 +539,55 @@ Queue semantics:
 - The route is read-only and writes no event. SPEC 11.2.13 describes the
   per-policy installment plan rather than a cross-policy receivable resource;
   M-27 records this route and projection deviation alongside the still-missing
-  billing-account and dunning surfaces.
+  billing-account, dispute, and commission-statement surfaces.
+
+### Policy installment dunning contract (2026-10-20)
+
+Policy 2.7.0 adds the per-installment dunning history and command. The change
+is additive: the two operations and the two schemas are new, and the two
+receivable members are nullable and absent until the first action is recorded.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/policy.yaml` | 2.7.0 | Additive | `GET/POST /api/v1/billing/installments/{installmentId}/dunning`, the `DunningAction` and `CreateDunningRequest` schemas, and the nullable `Receivable.lastDunningLevel` and `Receivable.lastDunningAt` members. |
+| `asyncapi/policy.yaml` | 1.5.0 | Additive | The implemented `policy.dunning.sent` channel and `send` operation with the `PolicyDunningSentData` payload. |
+| `asyncapi/event-catalog.yaml` | 1.16.0 | Additive | `policy.dunning.sent` is published and implemented (194 published in total; Policy 24 published and 12 implemented). |
+
+Dunning semantics:
+
+- `GET .../dunning` returns the installment's recorded actions newest first
+  (`sentAt`, then record time, then `dunningId`) and an empty array when none
+  exists. The read applies the tenant wall through the installment, its plan,
+  and its policy, and writes no event.
+- `POST .../dunning` records one action with 201. `level` is `REMINDER`,
+  `FIRST_NOTICE`, `SECOND_NOTICE`, or `COLLECTIONS`; `channel` is `EMAIL`,
+  `LETTER`, or `PORTAL`. Both are trimmed and upper-cased, and an unknown value
+  is 400 `INVALID_DUNNING_LEVEL` or `INVALID_DUNNING_CHANNEL`. `notes` is
+  optional, trimmed, treated as absent when blank, and capped at 2000
+  characters (400 `INVALID_DUNNING_NOTES`). A missing or blank `level` or
+  `channel` is 400 `VALIDATION_ERROR`.
+- Only an effective DUE or OVERDUE installment is dunnable. A stored DUE row
+  past its due date is effectively OVERDUE and stays dunnable; a PAID or WAIVED
+  installment is 409 `INSTALLMENT_NOT_DUNNABLE`. One action per escalation
+  level is allowed per installment, so a repeated level is 409
+  `DUNNING_ALREADY_SENT`; the unique `(tenantId, installmentId, level)` row is
+  the concurrency arbiter. Neither conflict writes a row or an event.
+- An unknown installment, another tenant's installment, or a non-DIRECT book is
+  404 (`INSTALLMENT_NOT_FOUND` or `BOOK_SCOPE_VIOLATION`); the domain currently
+  accepts an absent book header (M-38). A malformed tenant or `installmentId` is
+  400 `INVALID_PARAMETER`; a missing tenant is 400 `MISSING_TENANT_HEADER`.
+- The accepted action bumps the policy row version and writes
+  `policy.dunning.sent` in the same transaction. The command accepts no
+  `Idempotency-Key` or `If-Match`; the per-level uniqueness is the retry guard
+  (M-06, M-07).
+- SPEC 11.2.13 defines no public dunning route or `policy.dunning.sent` name:
+  it models dunning as an internal `POST .../dunning-status` command over the
+  SAP-sourced `billing_account` level and publishes
+  `policy.billing.dunning-changed`. The implemented level/vocabulary and route
+  are recorded in M-38; the event naming gap is also in M-22.
+- The two receivable members summarize the latest `SENT` action only;
+  `CANCELLED` history never contributes. Both are null until the installment is
+  first dunned.
 
 ### Policy renewal contract (2026-10-20)
 
@@ -979,6 +1028,7 @@ Every request carries a resolved tenant; no request body may override it.
 | `X-EIA-Tenant` | All public routes and some internal routes | Required, UUID. Missing or malformed is a 400. |
 | `X-EIA-Book` | Direct Claims, Assumed Claims, Cession, Retrocession | Required and fixed to the vertical's book. A different book is hidden as 404 `BOOK_SCOPE_VIOLATION` in all four, so the response cannot confirm existence (SPEC 3.6.2, WALL-06). A missing header is still a 400 `BOOK_REQUIRED` in Cession and Retrocession; that is a validation error, not a book mismatch. |
 | `X-EIA-Book` | Policy billing and receivables | Optional for compatibility with the other Policy proxy routes, but a supplied value must be DIRECT; another book is hidden as 404 `BOOK_SCOPE_VIOLATION`. An absent header is accepted. The guard runs before the expert call. |
+| `X-EIA-Book` | Policy installment dunning | Required and fixed to `DIRECT`. A missing header is a 400 and another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header, which M-38 records. |
 | `X-EIA-Book` | Policy renewal | Required and fixed to `DIRECT`. The contract makes a missing header a 400 and hides another book as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header, which M-28 records. |
 | `X-EIA-Book` | Contract technical accounts | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-29 records. |
 | `X-EIA-Book` | Contract period bordereaux | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-30 records. |
@@ -1352,8 +1402,9 @@ Rules:
   event name differ from the implemented `/billing` route and
   `policy.billing-plan.created` name; the two installment facts have no SPEC
   name. The naming difference and the still-unimplemented billing-account,
-  instruction, credit-note, dunning, dispute, and commission surfaces are
-  recorded in M-22 and M-27.
+  instruction, credit-note, dispute, and commission surfaces are recorded in
+  M-22 and M-27. The dunning history is implemented separately at
+  `/api/v1/billing/installments/{installmentId}/dunning` (M-38).
 
 ### Policy premium receivables
 
@@ -1388,6 +1439,66 @@ Rules:
 - The domain proxies the expert's `/internal/v1/billing/installments` read; the
   expert additionally accepts `?tenantId=` for that internal call. Neither is
   part of the public contract.
+
+### Policy installment dunning
+
+Dunning is the collections history of one premium installment (SPEC 11.2.13).
+The public surface is a domain proxy over the Policy expert; the expert also
+exposes the same resource under
+`/internal/v1/billing/installments/{installmentId}/dunning` for the domain
+adapter, but that internal route is not part of the public contract.
+
+| Operation | Path | Success | Errors |
+|---|---|---|---|
+| Read history | `GET /api/v1/billing/installments/{installmentId}/dunning` | 200 `DunningAction[]` | 400, 404 |
+| Record action | `POST /api/v1/billing/installments/{installmentId}/dunning` | 201 `DunningAction` | 400, 404, 409 |
+
+`DunningAction` is `{dunningId, installmentId, planId, policyId, level,
+channel, notes, status, sentAt}`. `notes` is nullable, `status` is `SENT` or
+`CANCELLED`, and `sentAt` is the instant the action was recorded. The request
+is `CreateDunningRequest`: `level` and `channel` are required and `notes` is
+optional.
+
+Rules:
+
+- `level` is `REMINDER`, `FIRST_NOTICE`, `SECOND_NOTICE`, or `COLLECTIONS`;
+  `channel` is `EMAIL`, `LETTER`, or `PORTAL`. Both are trimmed and upper-cased
+  before validation, so `first_notice` is accepted as `FIRST_NOTICE`. An unknown
+  value is 400 `INVALID_DUNNING_LEVEL` or `INVALID_DUNNING_CHANNEL`; a blank or
+  missing one is 400 `VALIDATION_ERROR`.
+- `notes` is trimmed and treated as absent when blank. The stored value is
+  capped at 2000 characters; a longer value is 400 `INVALID_DUNNING_NOTES`, and
+  the expert's `@Size` guard rejects it with a field error before the service
+  runs.
+- Only an effective DUE or OVERDUE installment can be dunned. A stored DUE row
+  past its due date is effectively OVERDUE and stays dunnable; PAID and WAIVED
+  are terminal, so dunning them is 409 `INSTALLMENT_NOT_DUNNABLE` with
+  `meta.currentStatus`.
+- One action per level per installment is allowed. A repeated level is 409
+  `DUNNING_ALREADY_SENT` with `meta.level`, including a level whose history row
+  is `CANCELLED`; the unique `(tenantId, installmentId, level)` constraint also
+  arbitrates a concurrent first attempt. A concurrent policy change is 409
+  `CONCURRENT_MODIFICATION`.
+- `X-EIA-Tenant` is required. The operation is a DIRECT-book command: the
+  canonical contract requires `X-EIA-Book: DIRECT`, and another book is hidden
+  as 404 `BOOK_SCOPE_VIOLATION`. The domain currently accepts an absent header
+  for compatibility with the other Policy proxy routes (M-38).
+- The accepted action bumps the policy row version and writes
+  `policy.dunning.sent` in the same transaction as the row. A rejected action
+  writes neither. The command accepts no `Idempotency-Key` or `If-Match`; the
+  per-level uniqueness is the retry guard (M-06, M-07).
+- The history read returns the action array newest first by `sentAt`, then
+  record time, then `dunningId`. An installment with no action returns `[]`, not
+  404. The read writes no event.
+- The two receivable members `lastDunningLevel` and `lastDunningAt` summarize
+  the latest `SENT` action for the installment and are null until the first
+  action. CANCELLED history is ignored.
+- SPEC 11.2.13 has no public dunning route and no `policy.dunning.sent` name.
+  Its dunning model is an internal `POST .../dunning-status` command over the
+  SAP-sourced `billing_account` level with the `CLEAR`/`REMINDER`/`DUNNING`/
+  `LEGAL`/`BLOCKED` vocabulary, and its published fact is
+  `policy.billing.dunning-changed`. The implemented route, level vocabulary, and
+  event name are recorded in M-22 and M-38.
 
 ### Global search
 
@@ -1532,7 +1643,15 @@ missing directory.
    field bounds and enums, the cross-policy receivable queue with its required
    `TenantHeader` and optional DIRECT book parameter, its DUE/OVERDUE `status`,
    `dueBefore`, default-20 1..200 `limit`, 200 `ReceivableSummary`, 400/404
-   responses, and the `Receivable` and `ReceivableSummary` schemas, the Policy
+   responses, and the `Receivable` and `ReceivableSummary` schemas, the
+   installment-dunning GET/POST with its required `TenantHeader` and
+   `BookHeaderDirect` parameters, its required uuid `installmentId`, the
+   `DunningAction` and `CreateDunningRequest` schemas and their field types,
+   the level, channel, and status enums, the 200 `DunningAction[]`, the 201
+   `DunningAction`, the 400/404/409 responses, the
+   `INSTALLMENT_NOT_DUNNABLE`/`DUNNING_ALREADY_SENT` documentation, and the
+   nullable `Receivable.lastDunningLevel` and `Receivable.lastDunningAt`
+   members, the Policy
    renewal operation with its required
    `TenantHeader` and `BookHeaderDirect` parameters, the `RenewPolicyRequest`
    required/optional field split, the 201 successor `Policy` with the shared
@@ -1566,6 +1685,8 @@ missing directory.
    every channel, the optional source fields on the payment created payload,
    the `PaymentAllocationCreatedData` payload with its required payment
    identity, target, component, money, and allocation-total members, the
+   `PolicyDunningSentData` payload with its required policy, installment,
+   level, channel, sent-at, and status members, the
    `PolicyMassTortProfileUpdatedData` payload with its required
    identity, status, tort, trigger, allocation, and coverage-block members, and
    the `ContractSecurityData` payload with its contract/security identity,
@@ -1581,7 +1702,8 @@ missing directory.
    `document.link.added`,
    `document.link.removed`, `policy.policy.renewed`,
    `policy.billing-plan.created`, `policy.installment.paid`,
-   `policy.installment.waived`, `policy.mass-tort-profile.updated`,
+   `policy.installment.waived`, `policy.dunning.sent`,
+   `policy.mass-tort-profile.updated`,
    `payment.allocation.created`,
    `contract.bordereau.received`, `contract.bordereau.processed`,
    `contract.bordereau.failed`, the four `contract.cash-call.*` facts
@@ -1679,8 +1801,18 @@ missing directory.
   with the flat `BillingPlan`/`Installment` projection, while SPEC 11.2.13 names
   the route `/installments` and defines the plan event as
   `policy.billing.plan-created`; the installment paid and waived facts have no
-  SPEC name. Billing accounts, instructions, credit notes, dunning, disputes,
-  and commission statements remain unimplemented (M-12, M-22, M-27);
+  SPEC name. Billing accounts, instructions, credit notes, disputes, and
+  commission statements remain unimplemented (M-12, M-22, M-27);
+- installment dunning is implemented as a per-installment history and command at
+  `GET/POST /api/v1/billing/installments/{installmentId}/dunning` with the
+  `REMINDER`/`FIRST_NOTICE`/`SECOND_NOTICE`/`COLLECTIONS` level vocabulary and
+  the new `policy.dunning.sent` event. SPEC 11.2.13 has no public dunning route,
+  models dunning as an internal `POST .../dunning-status` command over the
+  SAP-sourced `billing_account` level, and publishes
+  `policy.billing.dunning-changed`. The canonical contract requires
+  `X-EIA-Book: DIRECT` while the domain accepts an absent header, and the
+  command has no `Idempotency-Key`/`If-Match`; M-22 and M-38 record the
+  differences;
 - the premium-receivables queue is a tenant-wide read at
   `GET /api/v1/billing/installments`, outside `/api/v1/policies`, and returns the
   flat `Receivable`/`ReceivableSummary` projection. SPEC 11.2.13 describes the

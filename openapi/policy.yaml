@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Policy API
-  version: 2.6.0
+  version: 2.7.0
   summary: Direct-book policy administration and the Policy expert API.
   description: >
     This document describes the implemented public Policy domain API and the
@@ -83,6 +83,28 @@ info:
       The route is read-only and writes no event; the expert's `/internal/v1`
       alias is an implementation detail. The SPEC route and projection
       differences are recorded in MISMATCHES.md M-27.
+
+    The 2026-10-20 dunning slice adds the per-installment collections history on
+    the public domain API:
+
+    - `GET /api/v1/billing/installments/{installmentId}/dunning` returns the
+      actions recorded against one installment, newest first, and `POST` records
+      one escalation action as `DunningAction`. `level` is `REMINDER`,
+      `FIRST_NOTICE`, `SECOND_NOTICE`, or `COLLECTIONS`; `channel` is `EMAIL`,
+      `LETTER`, or `PORTAL`; `notes` is optional and capped at 2000 characters.
+    - Only an effective DUE or OVERDUE installment is dunnable, and each
+      escalation level can be sent at most once per installment. A settled
+      installment is 409 `INSTALLMENT_NOT_DUNNABLE` and a repeated level is 409
+      `DUNNING_ALREADY_SENT`; neither writes a row or an event.
+    - The accepted action bumps the policy row version and writes
+      `policy.dunning.sent` in the same transaction. The command accepts no
+      `Idempotency-Key` or `If-Match`; the unique level is the retry guard
+      (MISMATCHES.md M-06, M-07, M-38).
+    - The route is not policy-scoped because the collections workbench addresses
+      an installment directly. `X-EIA-Tenant` is required and `X-EIA-Book` is the
+      DIRECT book. SPEC 11.2.13 defines no public dunning route, uses a different
+      level vocabulary, and publishes `policy.billing.dunning-changed` instead of
+      the implemented `policy.dunning.sent` (MISMATCHES.md M-38).
 
     The 2026-10-20 renewal slice adds the renewal command on the public domain
     API:
@@ -1496,6 +1518,120 @@ paths:
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
           $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/billing/installments/{installmentId}/dunning:
+    get:
+      operationId: listInstallmentDunning
+      tags:
+        - Policy
+      summary: List the dunning history of one billing installment.
+      description: >
+        Returns the actions recorded against one premium installment (SPEC
+        11.2.13 collections and dunning), newest first by `sentAt`, then
+        record time, with `dunningId` breaking a tie. The route is not
+        policy-scoped because the collections workbench addresses an
+        installment directly; the installment resolves its plan and policy and
+        the tenant wall is applied to all three tables.
+
+        An installment with no action returns an empty array. An unknown
+        installment, an installment under another tenant, and a non-DIRECT
+        `X-EIA-Book` are all 404 (`INSTALLMENT_NOT_FOUND` or
+        `BOOK_SCOPE_VIOLATION`), so the response cannot confirm another
+        tenant's record; the domain currently accepts an absent book header for
+        compatibility with the other Policy proxy routes (MISMATCHES.md M-38).
+        A malformed tenant header or `installmentId` is 400
+        `INVALID_PARAMETER`; a missing tenant is 400 `MISSING_TENANT_HEADER`.
+
+        `status` is the action state: `SENT` for a delivered action, or
+        `CANCELLED` for superseded history. This read writes no event.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: installmentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The installment's dunning actions, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DunningAction'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: recordInstallmentDunning
+      tags:
+        - Policy
+      summary: Record a dunning action for one billing installment.
+      description: >
+        Records one escalation action against a collectible premium
+        installment and returns the created row with 201. `level` is trimmed
+        and upper-cased against `REMINDER`, `FIRST_NOTICE`, `SECOND_NOTICE`,
+        or `COLLECTIONS`; `channel` is trimmed and upper-cased against
+        `EMAIL`, `LETTER`, or `PORTAL`. An unknown value is 400
+        `INVALID_DUNNING_LEVEL` or `INVALID_DUNNING_CHANNEL`; a malformed body
+        is 400 `VALIDATION_ERROR`. `notes` is optional, trimmed, treated as
+        absent when blank, and capped at 2000 characters (400
+        `INVALID_DUNNING_NOTES`).
+
+        Only an installment whose effective status is DUE or OVERDUE is
+        collectible: a stored DUE row past its due date is effectively
+        OVERDUE and remains dunnable, while a PAID or WAIVED installment is
+        409 `INSTALLMENT_NOT_DUNNABLE` with `meta.currentStatus`. Each
+        escalation level can be sent at most once per installment, so a
+        repeated level is 409 `DUNNING_ALREADY_SENT` with `meta.level`; the
+        unique `(tenantId, installmentId, level)` constraint is the
+        concurrency arbiter. A concurrent policy change is 409
+        `CONCURRENT_MODIFICATION`.
+
+        An unknown installment, another tenant's installment, or a non-DIRECT
+        `X-EIA-Book` is 404 (`INSTALLMENT_NOT_FOUND` or
+        `BOOK_SCOPE_VIOLATION`); the domain currently accepts an absent book
+        header for compatibility with the other Policy proxy routes (M-38). The
+        accepted action bumps the policy row version and writes
+        `policy.dunning.sent` in the same transaction, so a rollback leaves
+        neither the row nor the event behind. The command is not idempotent and
+        accepts no `Idempotency-Key` or `If-Match`; the per-level uniqueness is
+        the retry guard (MISMATCHES.md M-06, M-07, M-38).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: installmentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDunningRequest'
+      responses:
+        '201':
+          description: Dunning action recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DunningAction'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /api/v1/policies/{policyId}/mass-tort-profile:
@@ -3510,6 +3646,10 @@ components:
         OVERDUE. `paidAt` and `paymentId` are null on this queue because only
         unsettled installments are returned; the members remain nullable so a
         future settled projection can populate them without a breaking change.
+
+        `lastDunningLevel` and `lastDunningAt` summarize the most recent SENT
+        dunning action for the installment and are null until one is recorded.
+        CANCELLED history never contributes to either member.
       required:
         - installmentId
         - planId
@@ -3567,6 +3707,17 @@ components:
         paymentId:
           type: [string, 'null']
           format: uuid
+        lastDunningLevel:
+          type: [string, 'null']
+          maxLength: 16
+          description: >
+            Level of the most recent SENT dunning action (`REMINDER`,
+            `FIRST_NOTICE`, `SECOND_NOTICE`, or `COLLECTIONS`); null until the
+            installment is dunned.
+        lastDunningAt:
+          type: [string, 'null']
+          format: date-time
+          description: Instant of the most recent SENT dunning action.
     ReceivableSummary:
       type: object
       description: >
@@ -3638,6 +3789,92 @@ components:
         paymentId:
           type: [string, 'null']
           format: uuid
+    DunningAction:
+      type: object
+      description: >
+        One recorded dunning action for a premium installment (SPEC 11.2.13
+        collections and dunning). The public projection is the domain's flat
+        DTO: the identity is `dunningId` and the plan and policy are resolved
+        from the installment. `status` is `SENT` for a delivered action and
+        `CANCELLED` only for superseded history; the create always records
+        `SENT`. The level, channel, and status values are the closed
+        vocabularies the expert enforces.
+      required:
+        - dunningId
+        - installmentId
+        - planId
+        - policyId
+        - level
+        - channel
+        - status
+        - sentAt
+      properties:
+        dunningId:
+          type: string
+          format: uuid
+        installmentId:
+          type: string
+          format: uuid
+        planId:
+          type: string
+          format: uuid
+        policyId:
+          type: string
+          format: uuid
+        level:
+          type: string
+          enum:
+            - REMINDER
+            - FIRST_NOTICE
+            - SECOND_NOTICE
+            - COLLECTIONS
+        channel:
+          type: string
+          enum:
+            - EMAIL
+            - LETTER
+            - PORTAL
+        notes:
+          type: [string, 'null']
+          maxLength: 2000
+          description: Optional free-text note stored with the action.
+        status:
+          type: string
+          enum:
+            - SENT
+            - CANCELLED
+        sentAt:
+          type: string
+          format: date-time
+    CreateDunningRequest:
+      type: object
+      description: >
+        Record one dunning action against a collectible installment. `level` and
+        `channel` are required, trimmed, and normalized to upper case; an
+        unknown value is 400 `INVALID_DUNNING_LEVEL` or
+        `INVALID_DUNNING_CHANNEL`. `notes` is optional, trimmed, treated as
+        absent when blank, and capped at 2000 characters. The action status,
+        the send instant, and the plan and policy identities are server-owned.
+      required:
+        - level
+        - channel
+      properties:
+        level:
+          type: string
+          enum:
+            - REMINDER
+            - FIRST_NOTICE
+            - SECOND_NOTICE
+            - COLLECTIONS
+        channel:
+          type: string
+          enum:
+            - EMAIL
+            - LETTER
+            - PORTAL
+        notes:
+          type: [string, 'null']
+          maxLength: 2000
     PolicyPage:
       type: object
       description: >
@@ -4356,6 +4593,10 @@ x-implementation:
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/ReceivableService.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/Receivable.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/ReceivableSummary.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/DunningController.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/DunningService.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/DunningAction.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/CreateDunningActionCommand.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/BookScope.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyMassTortProfileController.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyMassTortProfileService.java
@@ -4380,6 +4621,13 @@ x-implementation:
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/InstallmentReceivable.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/ReceivablesView.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/ReceivableRow.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/BillingDunningController.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/BillingDunningService.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/BillingDunningRules.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/BillingDunningRepository.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/BillingDunningAction.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/BillingDunningTarget.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/CreateDunningActionRequest.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyBillingPlan.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyInstallment.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/CreateBillingPlanRequest.java
@@ -4416,6 +4664,12 @@ x-implementation:
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/BillingServiceTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/BillingReceivablesControllerTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/BillingReceivablesServiceTest.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/DunningControllerTest.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/DunningServiceTest.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/PolicyDunningClientTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/BillingDunningControllerTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/BillingDunningServiceTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/BillingDunningRulesTest.java
   errorEnvelope: >
     Canonical RFC 9457 Problem with content type application/problem+json, from
     both the Policy domain and the Policy expert. The vertical keeps its legacy
@@ -4450,9 +4704,19 @@ x-implementation:
     rather than a child of `/api/v1/policies`. The domain normalizes the status
     filter and the 1..200 limit and recomputes the totals only when the expert
     omits them. Only unsettled installments are eligible, so `paidAt` and
-    `paymentId` are null on every returned item. The SPEC 11.2.13 per-policy
-    installment route and the remaining billing resource gaps are recorded in
-    MISMATCHES.md M-27.
+    `paymentId` are null on every returned item. `lastDunningLevel` and
+    `lastDunningAt` are the latest SENT action and are null until one is
+    recorded. The SPEC 11.2.13 per-policy installment route and the remaining
+    billing resource gaps are recorded in MISMATCHES.md M-27.
+
+    The dunning route addresses one installment directly, so it too sits outside
+    `/api/v1/policies`. The expert owns the level, channel, and status
+    vocabularies and the dunnable-state and per-level uniqueness rules; the
+    domain publishes the flat `DunningAction` projection, renames the expert row
+    id to `dunningId`, and preserves the expert 400/404/409 problems. The
+    action, the policy version bump, and `policy.dunning.sent` are written in
+    one transaction. The SPEC 11.2.13 route, level vocabulary, and event name
+    differences are recorded in MISMATCHES.md M-38.
 
     The mass tort profile is a one-per-policy child resource. The domain proxies
     the expert's `/internal/v1` alias with the tenant and DIRECT book; the
@@ -4464,21 +4728,23 @@ x-implementation:
     allocation notes; the policy is the event aggregate. The narrow profile
     against SPEC 11.2.11 is recorded in M-32.
 x-compatibility:
-  contractVersion: 2.6.0
-  previousContractVersion: 2.5.0
+  contractVersion: 2.7.0
+  previousContractVersion: 2.6.0
   breaking: []
   compatible:
-    - Adds GET /api/v1/policies/{policyId}/mass-tort-profile.
-    - Adds PUT /api/v1/policies/{policyId}/mass-tort-profile.
-    - Adds the MassTortProfile and UpdateMassTortProfileRequest schemas and the MassTortTortType, MassTortTriggerType, MassTortAllocationMethod, and MassTortProfileStatus enums.
+    - Adds GET /api/v1/billing/installments/{installmentId}/dunning.
+    - Adds POST /api/v1/billing/installments/{installmentId}/dunning.
+    - Adds the DunningAction and CreateDunningRequest schemas.
+    - Adds the nullable Receivable.lastDunningLevel and Receivable.lastDunningAt members.
     - Adds no required request field to an existing operation, changes no existing path, and removes no response field.
   note: >
-    The mass tort profile is additive over 2.5.0 and changes no existing path,
-    schema, ETag, or page envelope. The route is a new child of an existing
-    policy resource, so the HTTP API version stays /api/v1. The implemented
-    event joins the asyncapi/policy.yaml channels; the name was already
-    published in the catalog, so the platform published count is unchanged and
-    the Policy implemented subset grows by one.
+    The installment dunning surface is additive over 2.6.0: the two operations
+    and both schemas are new, and the two receivable members are nullable and
+    default to null until an action is recorded. The route is a new sibling of
+    the cross-policy receivable read, so the HTTP API version stays /api/v1.
+    The implemented event joins the asyncapi/policy.yaml channels as the new
+    name `policy.dunning.sent`; the platform published and implemented counts
+    each grow by one.
 x-planned-operations:
   - method: POST
     path: /api/v1/policies/{policyId}/bind

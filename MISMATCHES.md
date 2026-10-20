@@ -112,6 +112,7 @@ removed per the resolution policy.
 | M-35 | Payment allocations add a SPEC-less POST route and event name | L |
 | M-36 | Direct Claims allocation erosion retry swallows the expert conflict and record failure | M |
 | M-37 | Contract security/collateral uses a narrow derived-status projection and a wider legacy status vocabulary | L |
+| M-38 | Policy installment dunning adds a SPEC-less route and event name and a different level vocabulary and book rule | L |
 
 ## M-01 Public base paths
 
@@ -560,10 +561,11 @@ unimplemented fields and list the missing operations under
   schedules, aggregate erosion, endorsements, insureds, locations,
   cancellations, and reinstatements, so those are no longer gaps. The
   2026-10-20 billing slice adds the installment plan and settlement; billing
-  accounts, billing instructions, credit notes, dunning, disputes, and
-  commission statements from SPEC 11.2.13 remain gaps (M-27). The
-  premium-receivables slice adds the tenant-wide receivable queue over those
-  installments, so receivables are no longer a resource gap. The renewal
+  accounts, billing instructions, credit notes, disputes, and commission
+  statements from SPEC 11.2.13 remain gaps (M-27). The premium-receivables
+  slice adds the tenant-wide receivable queue and the dunning slice adds the
+  per-installment dunning history and command (M-38), so receivables and
+  dunning are no longer resource gaps. The renewal
   slice adds successor-term creation with `renewedFromPolicyId`; the reverse
   `renewed_by_policy_id` pointer, the renewal-bound source transition, the
   renewal batch, non-renewal reasons, and renewal invitations remain gaps
@@ -650,7 +652,7 @@ ten publishing verticals now emit a subset:
 | Vertical | Implemented event names | Source |
 |---|---|---|
 | Party | `party.party.created`, `party.party.updated` | `repos/eia-party-expert/.../PartyEvents.java` |
-| Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.billing-plan.created`, `policy.installment.paid`, `policy.installment.waived`, `policy.mass-tort-profile.updated` | `repos/eia-policy-expert/.../PolicyEvents.java` |
+| Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.billing-plan.created`, `policy.installment.paid`, `policy.installment.waived`, `policy.dunning.sent`, `policy.mass-tort-profile.updated` | `repos/eia-policy-expert/.../PolicyEvents.java` |
 | Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded`, `contract.technical-account.created`, `contract.technical-account.issued`, `contract.technical-account.settled`, `contract.bordereau.received`, `contract.bordereau.processed`, `contract.bordereau.failed`, `contract.cash-call.requested`, `contract.cash-call.issued`, `contract.cash-call.settled`, `contract.cash-call.cancelled`, `contract.security.recorded` | `repos/eia-contract-expert/.../ContractEvents.java` |
 | Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.assigned`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.closed`, `direct.claim.task-created`, `direct.claim.task-completed`, `direct.claim.task-updated`, `direct.claim.note-added`, `direct.claim.allocation-created` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
 | Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.assigned`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted`, `assumed.claim.task-created`, `assumed.claim.task-completed`, `assumed.claim.task-updated`, `assumed.claim.note-added` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
@@ -691,6 +693,13 @@ stores each event idempotently in `eia_platform.inbox_event`; the
 business subscriber: no vertical consumes another vertical's events, there is
 no subscription registry or gap detection, and the `consumed` lists in the
 catalog remain the planned SPEC subscriptions.
+
+The dunning fact is a policy-level action: `PolicyEvents.dunningSent` builds
+the payload from the policy, the dunned installment, the escalation level, the
+delivery channel, the send instant, and the action status. The policy row
+version advances with the action, so every dunning event is distinct. The name
+is `policy.dunning.sent`; SPEC 11.2.13 publishes
+`policy.billing.dunning-changed` instead, which remains planned (M-22, M-38).
 
 The Contract expert's generic status command can additionally emit the
 already-cataloged `contract.contract.signed`, `.endorsed`, `.expired`, and
@@ -816,7 +825,7 @@ tables. The differences are:
 | Vertical | Implemented | SPEC /
 planned name |
 |---|---|---|
-| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created`; `policy.installment.paid` / `.waived` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name. `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
+| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created`; `policy.installment.paid` / `.waived`; `policy.dunning.sent` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name; the dunning fact differs from SPEC 11.2.13 `policy.billing.dunning-changed`. `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
 | Contract | `contract.contract.updated`; `contract.technical-account.created` / `.issued` / `.settled`; `contract.bordereau.processed` / `.failed` | No SPEC name for updated, the technical-account facts, or the two terminal bordereau facts: SPEC 11.3.9 lists lifecycle verbs, the contract-level `contract.account.issued` / `.agreed` facts, and `contract.bordereau.posted` / `.rejected` instead. `created`, `bound`, `commuted`, `cession.recorded`, and `contract.bordereau.received` match SPEC. |
 | Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned`; `direct.claim.allocation-created` | No SPEC names: SPEC 11.4.9 defines no assignment, task, note, or allocation-created event; it names the allocation fact `direct.claim.allocated`, which remains planned. `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and `closed` match SPEC. |
 | Assumed Claims | `assumed.claim.updated`; `assumed.claim.assigned`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no assignment, task, or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
@@ -1156,7 +1165,8 @@ SPEC 11.2.13 defines the billing surface as
 `GET/POST /api/v1/policy/policies/{policyId}/installments` plus the billing
 account, billing-instruction, receivable, credit-note, dunning, dispute, and
 commission-statement routes. The 2026-10-20 slices implement the installment
-plan and its settlement plus a tenant-wide receivable read:
+plan and its settlement, the tenant-wide receivable read, and the
+per-installment dunning history:
 
 | Aspect | Implemented | SPEC 11.2.13 |
 |---|---|---|
@@ -1164,10 +1174,13 @@ plan and its settlement plus a tenant-wide receivable read:
 | Create plan | `POST /api/v1/policies/{policyId}/billing` | `POST /api/v1/policy/.../installments` |
 | Settle installment | `PATCH /api/v1/policies/{policyId}/billing/installments/{installmentId}` | No API row; billing instructions carry the status |
 | Receivable queue | `GET /api/v1/billing/installments` (tenant-wide, outside `/api/v1/policies`) | No API row; SPEC 11.2.13 defines the per-policy plan, not a cross-policy receivable read |
+| Dunning | `GET/POST /api/v1/billing/installments/{installmentId}/dunning` (per installment, outside `/api/v1/policies`) | No public API row; the only dunning command is the internal `POST /internal/v1/policies/{id}/dunning-status` |
 | Plan event | `policy.billing-plan.created` | `policy.billing.plan-created` |
 | Installment events | `policy.installment.paid`, `policy.installment.waived` | No SPEC name |
+| Dunning event | `policy.dunning.sent` | `policy.billing.dunning-changed` |
 | Plan status | `ACTIVE`, `COMPLETE`, `CANCELLED` | `DRAFT`, `ACTIVE`, `SUPERSEDED`, `CANCELLED` |
 | Installment status | `DUE`, `OVERDUE`, `PAID`, `WAIVED` | Billing-instruction status values |
+| Dunning level | `REMINDER`, `FIRST_NOTICE`, `SECOND_NOTICE`, `COLLECTIONS` | `billing_account.dunning_status`: `CLEAR`, `REMINDER`, `DUNNING`, `LEGAL`, `BLOCKED`; collections flow `CURRENT -> REMINDER -> DUNNING_1 -> DUNNING_2 -> NOTICE -> CANCELLATION_PENDING -> CANCELLED` |
 
 The projection is the domain's flat public DTO, which renames the plan identity
 `planId` and the installment identity `installmentId`; the expert's internal
@@ -1193,6 +1206,13 @@ policyId, policyNumber, insuredPartyId, installmentNumber, dueDate, amount,
 currency, status, daysPastDue, paidAt, paymentId}` inside `{items, totalAmount,
 overdueAmount, count}`.
 
+The dunning slice is a separate per-installment surface at
+`/api/v1/billing/installments/{installmentId}/dunning`: it records and lists
+actions instead of reading a SAP-sourced level, uses its own closed level and
+channel vocabularies, and its history is keyed by installment rather than by
+billing account. The route, vocabulary, book rule, and event naming are
+recorded in M-38.
+
 Evidence:
 
 - `repos/eia-policy-domain/.../PolicyBillingController.java` (public routes and
@@ -1213,12 +1233,13 @@ Evidence:
 - `repos/eia-policy-expert/src/main/resources/schema.sql:388-433` (plan and
   installment status check constraints).
 
-Resolution: either amend SPEC 11.2.13 to the implemented `/billing` and
-cross-policy `/api/v1/billing/installments` routes, flat projections, event
-names, and status vocabulary, or add the SPEC route and name as an alias with an
+Resolution: either amend SPEC 11.2.13 to the implemented `/billing`,
+`/billing/installments/{installmentId}/dunning`, and cross-policy
+`/api/v1/billing/installments` routes, flat projections, event names, and
+status/level vocabularies, or add the SPEC route and names as aliases with an
 EV-05 dual-publish window. The billing account, instruction, credit-note,
-dunning, dispute, and commission-statement routes remain unimplemented (M-12);
-the receivable queue is implemented as the tenant-wide read above.
+dispute, and commission-statement routes remain unimplemented (M-12); the
+receivable queue and the dunning history are implemented as above.
 
 ## M-28 Policy renewal creates a successor instead of transitioning the source
 
@@ -1788,10 +1809,88 @@ outside the SPEC status enum, so either the SPEC must add it or the public
 statuses must be renamed. `contract.security.recorded` already exists in SPEC
 11.3.9, so no dual-publish window is needed for the event.
 
+## M-38 Policy installment dunning is a SPEC-less per-installment route, vocabulary, and event
+
+SPEC 11.2.13 models dunning on the billing account: `billing_account.dunning_level`
+is an integer fed from SAP, `dunning_status` is one of `CLEAR`, `REMINDER`,
+`DUNNING`, `LEGAL`, `BLOCKED`, the collections flow is
+`CURRENT -> REMINDER -> DUNNING_1 -> DUNNING_2 -> NOTICE -> CANCELLATION_PENDING -> CANCELLED`,
+and the only dunning command is the internal
+`POST /internal/v1/policies/{id}/dunning-status`. The 2026-10-20 slice records
+and lists dunning actions against an installment:
+
+| Aspect | Implemented | SPEC 11.2.13 |
+|---|---|---|
+| Route | `GET/POST /api/v1/billing/installments/{installmentId}/dunning` (short public path, outside `/api/v1/policies`) | No public dunning route; internal `POST /internal/v1/policies/{id}/dunning-status` |
+| Subject | One premium installment resolved through its plan and policy | `billing_account` (policy, legal entity, company code, currency) |
+| Levels | `REMINDER`, `FIRST_NOTICE`, `SECOND_NOTICE`, `COLLECTIONS` (closed) | Integer SAP level plus `dunning_status` `CLEAR`, `REMINDER`, `DUNNING`, `LEGAL`, `BLOCKED` |
+| Channels | `EMAIL`, `LETTER`, `PORTAL` (closed) | No channel column or API field |
+| Status | `SENT`, `CANCELLED` | `dunning_status` is the SAP-sourced collection state, not an action state |
+| Projection | `{dunningId, installmentId, planId, policyId, level, channel, notes, status, sentAt}` | `dunning_status` row: policy, level, status, amount, currency, next action, SAP run |
+| Event | `policy.dunning.sent` | `policy.billing.dunning-changed` |
+| Book | Canonical contract requires `X-EIA-Book: DIRECT`; the domain accepts an absent header | The SPEC 3.6 book wall |
+| Idempotency | No `Idempotency-Key`/`If-Match`; the unique `(tenant, installment, level)` row is the retry guard | SPEC 12.6 |
+
+Consequences:
+
+- Dunning is per installment rather than per billing account, and there is no
+  `nextAction`, promise-to-pay, dispute hold, agency referral, write-off, or
+  cancellation trigger. The SPEC dunning workbench fields and the COL-01..COL-05
+  controls are not modelled.
+- The level vocabulary is not SAP's and does not map to the SPEC `dunning_status`
+  enum; a consumer must translate `REMINDER`/`FIRST_NOTICE`/`SECOND_NOTICE`/
+  `COLLECTIONS` itself. No SAP sync job writes these rows.
+- One action per level per installment is allowed, including after a CANCELLED
+  history row, so the action history cannot express a re-sent level.
+- A missing `X-EIA-Book` is accepted by the domain even though the canonical
+  contract requires DIRECT and the SPEC 3.6 wall expects it; another book is
+  still hidden as 404 `BOOK_SCOPE_VIOLATION`.
+- The event payload carries the policy identity, the dunned installment, level,
+  channel, sent instant, and status but not the amount, currency, due date,
+  notes, or SAP run, so it cannot drive a collections row without a follow-up
+  read.
+
+Evidence:
+
+- `repos/eia-policy-domain/.../DunningController.java` (`@RequestMapping` on the
+  public path, `@GetMapping` history, `@PostMapping` 201, tenant header,
+  `requireDirectWhenPresent`), `DunningService.java`, `DunningAction.java`
+  (`dunningId` projection), and `CreateDunningActionCommand.java` (level/channel
+  `@NotBlank`, notes `@Size(max = 2000)`).
+- `repos/eia-policy-domain/.../PolicyClient.java:511-564` (`/internal/v1` calls,
+  `ExpertDunningAction` alias of `id` to `dunningId`) and
+  `PolicyClient.java:886-903` (`lastDunningLevel`/`lastDunningAt` remap).
+- `repos/eia-policy-expert/.../BillingDunningController.java:25-60` (public and
+  internal aliases, 201, list), `BillingDunningService.java:58-106` (tenant
+  target, effective-status gate, duplicate level, policy touch, outbox insert),
+  `BillingDunningRules.java:16-85` (level/channel/status vocabularies,
+  2000-character notes, dunnable states), `BillingDunningRepository.java:62-109`
+  (tenant-safe target join, newest-first history, unique level), and
+  `CreateDunningActionRequest.java`.
+- `repos/eia-policy-expert/.../PolicyEvents.java:47,106-122` (`DUNNING_SENT` and
+  the seven-field `dunningSent` payload) and
+  `src/main/resources/schema.sql:453-480` (`billing_dunning_action`, the unique
+  level constraint, the level/channel/status checks, and the two indexes).
+- `repos/eia-policy-expert/.../BillingRepository.java:150-183` (latest-SENT
+  dunning subqueries on the receivables queue).
+- Tests: `DunningControllerTest`, `DunningServiceTest`,
+  `PolicyDunningClientTest`, `BillingDunningControllerTest`,
+  `BillingDunningServiceTest`, and `BillingDunningRulesTest`.
+- `openapi/policy.yaml` 2.7.0, `asyncapi/policy.yaml` 1.5.0, and
+  `asyncapi/event-catalog.yaml` 1.16.0 record the implemented shape.
+
+Resolution: the per-installment action history is canonical for now. Closing
+the gap means adding the SPEC billing-account dunning level/status and
+next-action fields, the `POST .../dunning-status` command, and the
+COL-01..COL-05 controls, or amending SPEC 11.2.13 to the per-installment route
+and vocabulary. Renaming `policy.dunning.sent` to
+`policy.billing.dunning-changed` requires the EV-05 dual-publish window;
+publishing the SPEC name alongside the implemented one is additive.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-Contract security/collateral contract:
+Policy installment dunning contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -1801,7 +1900,7 @@ python: 3.12.8 (standard library only)
 
 OpenAPI 3.1 documents
   OK openapi/party.yaml  5 paths, 7 operations
-  OK openapi/policy.yaml  42 paths, 54 operations
+  OK openapi/policy.yaml  43 paths, 56 operations
   OK openapi/contract.yaml  40 paths, 58 operations
   OK openapi/direct-claims.yaml  49 paths, 72 operations
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
@@ -1813,7 +1912,7 @@ OpenAPI 3.1 documents
 
 AsyncAPI 3 documents
   OK asyncapi/party.yaml  9 event channels
-  OK asyncapi/policy.yaml  23 event channels
+  OK asyncapi/policy.yaml  24 event channels
   OK asyncapi/contract.yaml  29 event channels
   OK asyncapi/direct-claims.yaml  26 event channels
   OK asyncapi/assumed-claims.yaml  21 event channels
@@ -1822,7 +1921,7 @@ AsyncAPI 3 documents
   OK asyncapi/document.yaml  20 event channels
   OK asyncapi/payment.yaml  19 event channels
   OK asyncapi/notifications.yaml  12 event channels
-  OK catalog: 193 unique published events across 10 verticals
+  OK catalog: 194 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -1830,7 +1929,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 11646 checks, 0 failures
+  PASS 11808 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -1958,6 +2057,14 @@ Additional checks and limits:
   `CreateContractSecurityRequest` properties, and dropping
   `contract.security.recorded` from the Contract catalog `implemented` list
   each fail with the specific missing operation, enum, caller-status, or
+  implemented-event message. All four were run on a throwaway copy and exited
+  non-zero (exit 1); the working copy was left unchanged. The Policy
+  installment-dunning pass added four more: renaming the
+  `/api/v1/billing/installments/{installmentId}/dunning` path, removing
+  `lastDunningAt` from the `Receivable` schema, widening the
+  `CreateDunningRequest.notes` cap from 2000 to 4000, and dropping
+  `policy.dunning.sent` from the Policy catalog `implemented` list each fail
+  with the specific missing operation, schema/nullability, notes-bound, or
   implemented-event message. All four were run on a throwaway copy and exited
   non-zero (exit 1); the working copy was left unchanged.
 

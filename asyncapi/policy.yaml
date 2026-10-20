@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:policy
 info:
   title: EIA Policy events
-  version: 1.4.0
+  version: 1.5.0
   summary: Published domain event names for the Policy vertical.
   description: >
     Event contract for the Policy vertical. The authoritative event names are
@@ -18,18 +18,21 @@ info:
     `policy.policy.updated`, `policy.policy.version-issued`,
     `policy.policy.endorsed`, `policy.policy.cancelled`,
     `policy.policy.reinstated`, `policy.policy.renewed`, the billing facts
-    `policy.billing-plan.created`, `policy.installment.paid`, and
-    `policy.installment.waived`, and `policy.mass-tort-profile.updated` through
+    `policy.billing-plan.created`, `policy.installment.paid`,
+    `policy.installment.waived`, and `policy.dunning.sent`, and
+    `policy.mass-tort-profile.updated` through
     the transactional outbox; those channels and operations are marked
     `x-status: implemented`. The `created` and `updated` names are additive: the
     catalog had no generic create or update fact. The billing plan name is
     `policy.billing-plan.created`; SPEC 11.2.13 calls the same fact
     `policy.billing.plan-created` and defines no installment paid or waived
     names, so the naming difference is recorded in MISMATCHES.md M-22 and M-27.
-    The renewal fact uses the SPEC 11.2.9 name and records the
-    source-to-successor lineage. The mass tort fact also uses the SPEC 11.2.9
-    name and carries the allocation context Direct Claims consumes. The
-    remaining SPEC 11.2.9 and 11.2.13 names are planned.
+    The dunning fact is `policy.dunning.sent`; SPEC 11.2.13 publishes
+    `policy.billing.dunning-changed` instead, so that naming difference is
+    recorded in M-22 and M-38. The renewal fact uses the SPEC 11.2.9 name and
+    records the source-to-successor lineage. The mass tort fact also uses the
+    SPEC 11.2.9 name and carries the allocation context Direct Claims consumes.
+    The remaining SPEC 11.2.9 and 11.2.13 names are planned.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -239,6 +242,26 @@ channels:
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
+  PolicyDunningSent:
+    address: policy.dunning.sent
+    title: policy.dunning.sent
+    description: >
+      Emitted when a dunning action is recorded against a collectible billing
+      installment, in the same transaction as the action row and the policy
+      version bump. The payload carries the policy identity and number, the
+      dunned installment id, the escalation level, the delivery channel, the
+      send instant, and the action status. A rejected action (a settled
+      installment or a repeated level) emits no event.
+    x-event-type: policy.dunning.sent
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.2.13
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      PolicyDunningSentData:
+        $ref: '#/components/messages/PolicyDunningSentData'
   PolicyPolicyRenewed:
     address: policy.policy.renewed
     title: policy.policy.renewed
@@ -525,6 +548,17 @@ operations:
       Publishes policy.installment.waived when an installment is settled as
       WAIVED.
     x-event-type: policy.installment.waived
+    x-status: implemented
+  publishPolicyDunningSent:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyDunningSent'
+    summary: Publish policy.dunning.sent
+    description: >
+      Publishes policy.dunning.sent when a dunning action is recorded against
+      an installment, in the same transaction as the action row and the
+      policy-version bump.
+    x-event-type: policy.dunning.sent
     x-status: implemented
   publishPolicyPolicyRenewed:
     action: send
@@ -828,6 +862,52 @@ components:
             format: uuid
           newPolicyNumber:
             type: string
+    PolicyDunningSentData:
+      name: PolicyDunningSentData
+      title: policy.dunning.sent data
+      summary: One recorded dunning action for a billing installment.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - policyId
+          - policyNumber
+          - installmentId
+          - level
+          - channel
+          - sentAt
+          - status
+        properties:
+          policyId:
+            type: string
+            format: uuid
+          policyNumber:
+            type: string
+          installmentId:
+            type: string
+            format: uuid
+          level:
+            type: string
+            enum:
+              - REMINDER
+              - FIRST_NOTICE
+              - SECOND_NOTICE
+              - COLLECTIONS
+          channel:
+            type: string
+            enum:
+              - EMAIL
+              - LETTER
+              - PORTAL
+          sentAt:
+            type: string
+            format: date-time
+          status:
+            type: string
+            enum:
+              - SENT
+              - CANCELLED
     PolicyMassTortProfileUpdatedData:
       name: PolicyMassTortProfileUpdatedData
       title: policy.mass-tort-profile.updated data
@@ -904,17 +984,19 @@ x-implementation:
   publisher: eia-policy-expert
   subscriber: none
   notes: >
-    Eleven Policy events are written to the transactional outbox in the same
+    Twelve Policy events are written to the transactional outbox in the same
     transaction as the aggregate write and dispatched by the platform outbox
     dispatcher when `eia.outbox.enabled=true`: `created`, `updated`,
     `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`,
-    `billing-plan.created`, `installment.paid`, `installment.waived`, and
-    `mass-tort-profile.updated`. The renewal event carries both policy
-    identities and the lineage link; the billing plan event carries the complete
-    schedule; the installment events carry the settled row and its payment
-    evidence; the mass tort profile event carries the allocation context and the
-    coverage block. The other SPEC 11.2.9 and 11.2.13 names remain planned.
-    There is no business subscriber or subscription registry yet.
+    `billing-plan.created`, `installment.paid`, `installment.waived`,
+    `dunning.sent`, and `mass-tort-profile.updated`. The renewal event carries
+    both policy identities and the lineage link; the billing plan event carries
+    the complete schedule; the installment events carry the settled row and its
+    payment evidence; the dunning event carries the dunned installment, the
+    escalation level and channel, the send instant, and the action status; the
+    mass tort profile event carries the allocation context and the coverage
+    block. The other SPEC 11.2.9 and 11.2.13 names remain planned. There is no
+    business subscriber or subscription registry yet.
 
 x-consumed-events:
   - direct.claim.registered

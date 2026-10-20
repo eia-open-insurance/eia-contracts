@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.15.0
+  version: 1.16.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -50,7 +50,12 @@ info:
     platform total to 193 published names (M-22, M-35). The Policy mass tort
     fact `policy.mass-tort-profile.updated` moves from planned to implemented;
     its SPEC 11.2.9 name was already published, so it adds no published name
-    and the Policy implemented subset grows to 11 of its 23 names. The platform
+    and the Policy implemented subset grows to 11 of its 23 names. The Policy
+    dunning fact `policy.dunning.sent` is a new name: SPEC 11.2.13 publishes
+    `policy.billing.dunning-changed` instead, so it adds one published and one
+    implemented name, bringing the platform totals to 194 published and 73
+    implemented; Policy becomes 24 published and 12 implemented (M-22, M-38).
+    The platform
     event-ingest service
     is the inbox:
     it validates the canonical envelope, verifies the HMAC signature when
@@ -170,6 +175,7 @@ x-event-catalog:
       - policy.billing-plan.created
       - policy.installment.paid
       - policy.installment.waived
+      - policy.dunning.sent
       - policy.policy.renewed
       - policy.policy.expired
       - policy.policy.non-renewed
@@ -192,6 +198,7 @@ x-event-catalog:
       - policy.billing-plan.created
       - policy.installment.paid
       - policy.installment.waived
+      - policy.dunning.sent
       - policy.mass-tort-profile.updated
     consumed:
       - direct.claim.registered

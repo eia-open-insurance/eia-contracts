@@ -754,6 +754,43 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   acceptance, and the release/status gaps, and updates M-14 with the event.
 - `python scripts/validate_contracts.py` passes 11,646 checks with 0 failures.
 
+### Added in the Policy installment dunning contract (2026-10-20)
+
+- `openapi/policy.yaml` is 2.7.0: adds `GET/POST
+  /api/v1/billing/installments/{installmentId}/dunning`, the `DunningAction`
+  projection (`dunningId`, `installmentId`, `planId`, `policyId`, `level`,
+  `channel`, `notes`, `status`, `sentAt`) and the `CreateDunningRequest` command
+  (`level` and `channel` required and closed to
+  `REMINDER`/`FIRST_NOTICE`/`SECOND_NOTICE`/`COLLECTIONS` and
+  `EMAIL`/`LETTER`/`PORTAL`; optional 2000-character `notes`). Both operations
+  require `X-EIA-Tenant` and `X-EIA-Book: DIRECT`; GET returns the bare
+  `DunningAction[]` newest first and documents 400/404, while POST documents
+  201/400/404/409 with the `INSTALLMENT_NOT_DUNNABLE` and
+  `DUNNING_ALREADY_SENT` conflict codes. The nullable
+  `Receivable.lastDunningLevel` and `Receivable.lastDunningAt` members summarize
+  the latest SENT action and stay null until the installment is first dunned.
+- `asyncapi/policy.yaml` is 1.5.0: adds the implemented `policy.dunning.sent`
+  channel and `send` operation with a `PolicyDunningSentData` payload
+  (`policyId`, `policyNumber`, `installmentId`, `level`, `channel`, `sentAt`,
+  `status`).
+- `asyncapi/event-catalog.yaml` is 1.16.0: `policy.dunning.sent` is published
+  and implemented (194 published in total; Policy becomes 24 published and 12
+  implemented, and the platform implemented total becomes 73).
+- `scripts/validate_contracts.py` requires the dunning GET/POST, the
+  `TenantHeader`/`BookHeaderDirect` parameters, the required uuid
+  `installmentId`, the `DunningAction` and `CreateDunningRequest` schemas and
+  their field types, enums, notes cap, and required/optional split, the 200
+  `DunningAction[]`, the 201 `DunningAction`, the 400/404/409 responses, the
+  `INSTALLMENT_NOT_DUNNABLE`/`DUNNING_ALREADY_SENT` documentation, the nullable
+  receivable dunning members, and the implemented event channel, payload, and
+  catalog entries.
+- `README.md` records the dunning routes, projection, vocabularies, state and
+  uniqueness rules, DIRECT book rule, event, receivable members, and the
+  additive versions; `MISMATCHES.md` adds M-38 for the SPEC 11.2.13 route,
+  level-vocabulary, book, and event-name differences and updates M-12, M-14,
+  M-22, and M-27.
+- `python scripts/validate_contracts.py` passes 11,808 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was
