@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:payment
 info:
   title: EIA Payment events
-  version: 1.2.0
+  version: 1.3.0
   summary: Published domain event names for the Payment vertical.
   description: >
     Event contract for the Payment vertical. The authoritative event names are
@@ -15,16 +15,20 @@ info:
     equals the event name; it is not a broker topic.
 
     The Payment expert now publishes `payment.payment.created`,
-    `payment.payment.updated`, and `payment.payment.status-changed` through the
-    transactional outbox; those channels and operations are marked
-    `x-status: implemented`. A status write emits `updated` and `status-changed`
-    together at the same aggregate version. `payment.payment.created` carries
-    the optional source link (`sourceType`, `sourceId`, `sourceReference`) in
-    its data object; a classified source always carries `sourceId`, and
-    `sourceReference` is the denormalized human label that lets a consumer link
-    the payment to its claim or policy without an N+1 lookup. The remaining
-    SPEC 11.7.10 names are planned. Payment is a shared financial service and
-    the current API has no book input, so these events are stamped DIRECT.
+    `payment.payment.updated`, `payment.payment.status-changed`, and
+    `payment.allocation.created` through the transactional outbox; those
+    channels and operations are marked `x-status: implemented`. A status write
+    emits `updated` and `status-changed` together at the same aggregate version.
+    `payment.payment.created` carries the optional source link (`sourceType`,
+    `sourceId`, `sourceReference`) in its data object; a classified source
+    always carries `sourceId`, and `sourceReference` is the denormalized human
+    label that lets a consumer link the payment to its claim or policy without
+    an N+1 lookup. `payment.allocation.created` is a new child-aggregate name
+    with no SPEC 11.7.10 equivalent (MISMATCHES.md M-22 and M-35); it carries
+    the parent payment identity, the allocation fields, and the payment-level
+    allocation totals. The remaining SPEC 11.7.10 names are planned. Payment is
+    a shared financial service and the current API has no book input, so these
+    events are stamped DIRECT.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -93,6 +97,29 @@ channels:
         $ref: '#/components/messages/DomainEvent'
       PaymentPaymentCreatedData:
         $ref: '#/components/messages/PaymentPaymentCreatedData'
+  PaymentAllocationCreated:
+    address: payment.allocation.created
+    title: payment.allocation.created
+    description: >
+      Emitted by the Payment expert when an allocation is persisted, in the same
+      transaction as the row. The payload carries the parent payment identity,
+      the allocation target and component, the allocation amount and currency,
+      and the payment-level `totalAllocated` and `paymentAmount` totals. An
+      allocation always uses the payment currency and is append-only. Because an
+      allocation never bumps the payment row version, the envelope uses the
+      allocation id as its own `PaymentAllocation` aggregate at version 1; that
+      keeps the outbox aggregate-version key unique when one payment receives
+      several allocations.
+    x-event-type: payment.allocation.created
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.7.10
+    x-implemented-by: repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      PaymentAllocationCreatedData:
+        $ref: '#/components/messages/PaymentAllocationCreatedData'
   PaymentPaymentAuthorized:
     address: payment.payment.authorized
     title: payment.payment.authorized
@@ -332,6 +359,17 @@ operations:
       Publishes payment.payment.status-changed on every accepted status
       transition.
     x-event-type: payment.payment.status-changed
+    x-status: implemented
+  publishPaymentAllocationCreated:
+    action: send
+    channel:
+      $ref: '#/channels/PaymentAllocationCreated'
+    summary: Publish payment.allocation.created
+    description: >
+      Publishes payment.allocation.created through the transactional outbox in
+      the same transaction as the allocation insert (SPEC 7.5.1). The aggregate
+      is the PaymentAllocation child at version 1.
+    x-event-type: payment.allocation.created
     x-status: implemented
   publishPaymentPaymentAuthorized:
     action: send
@@ -603,6 +641,65 @@ components:
               Human-readable source reference (for example
               `CLM-2026-0000001`) so consumers can link the source without an
               N+1 lookup. Never replaces `sourceId` for a classified source.
+    PaymentAllocationCreatedData:
+      name: PaymentAllocationCreatedData
+      title: payment.allocation.created data
+      summary: Minimal schema for the envelope data object of a created payment allocation.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - paymentId
+          - paymentNumber
+          - targetType
+          - targetId
+          - component
+          - amount
+          - currency
+          - totalAllocated
+          - paymentAmount
+        properties:
+          paymentId:
+            type: string
+            format: uuid
+            description: Parent payment id, which is also the outbox partition key.
+          paymentNumber:
+            type: string
+            pattern: '^PAY-[0-9]{4}-[0-9]{7}$'
+          targetType:
+            type: string
+            enum:
+              - DIRECT_CLAIM
+              - ASSUMED_CLAIM
+              - POLICY
+          targetId:
+            type: string
+            format: uuid
+          component:
+            type: string
+            enum:
+              - INDEMNITY
+              - DEFENSE_COST
+              - ALAE
+              - EXPENSE
+              - COMMISSION
+              - OTHER
+          amount:
+            type: string
+            description: Decimal string with up to four fraction digits (SPEC 10.3).
+          currency:
+            type: string
+            pattern: '^[A-Z]{3}$'
+            description: Always the parent payment currency.
+          totalAllocated:
+            type: string
+            description: >
+              Decimal string of the payment's total allocated amount after this
+              allocation (SPEC 10.3).
+          paymentAmount:
+            type: string
+            description: Decimal string of the parent payment amount (SPEC 10.3).
   securitySchemes:
     outboxSignature:
       type: httpApiKey
@@ -618,13 +715,16 @@ x-implementation:
   publisher: eia-payment-expert
   subscriber: none
   notes: >
-    Three implemented event names are written to the transactional outbox in
-    the same transaction as the payment write and dispatched by the platform
+    Four implemented event names are written to the transactional outbox in the
+    same transaction as the aggregate write and dispatched by the platform
     outbox dispatcher when `eia.outbox.enabled=true`.
     `payment.payment.created` carries the optional source link; the source
-    fields are absent or null on an unlinked payment. The other SPEC 11.7.10
-    names remain planned. There is no subscriber, inbox, or subscription
-    registry yet.
+    fields are absent or null on an unlinked payment. `payment.allocation.created`
+    is the child-aggregate fact for one append-only allocation: its envelope
+    aggregate id is the allocation id at version 1, while the payload carries
+    the parent payment identity and the payment-level allocation totals. The
+    other SPEC 11.7.10 names remain planned. There is no subscriber, inbox, or
+    subscription registry yet.
 
 x-consumed-events:
   - direct.claim.settlement-authorized

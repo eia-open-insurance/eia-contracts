@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.13.0
+  version: 1.14.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -39,11 +39,13 @@ info:
     Contract cash-call facts add `contract.cash-call.requested`, `.settled`,
     and `.cancelled` as new child-aggregate names alongside the
     already-published `contract.cash-call.issued`; the four move into the
-    implemented subset, bringing the platform total to 192 published names
-    (M-22, M-34). The Policy mass tort fact
-    `policy.mass-tort-profile.updated` moves from planned to implemented; its
-    SPEC 11.2.9 name was already published, so it adds no published name and
-    the Policy implemented subset grows to 11 of its 23 names. The platform
+    implemented subset (M-22, M-34). The Payment allocation fact
+    `payment.allocation.created` is also a new child-aggregate name with no
+    SPEC 11.7.10 equivalent; it is published and implemented, bringing the
+    platform total to 193 published names (M-22, M-35). The Policy mass tort
+    fact `policy.mass-tort-profile.updated` moves from planned to implemented;
+    its SPEC 11.2.9 name was already published, so it adds no published name
+    and the Policy implemented subset grows to 11 of its 23 names. The platform
     event-ingest service
     is the inbox:
     it validates the canonical envelope, verifies the HMAC signature when
@@ -425,10 +427,12 @@ x-event-catalog:
       - payment.recovery.received
       - payment.payment.updated
       - payment.payment.status-changed
+      - payment.allocation.created
     implemented:
       - payment.payment.created
       - payment.payment.updated
       - payment.payment.status-changed
+      - payment.allocation.created
     consumed:
       - direct.claim.settlement-authorized
       - direct.claim.reserve-changed

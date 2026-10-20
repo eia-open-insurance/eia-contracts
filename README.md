@@ -297,6 +297,30 @@ inside the caller's tenant and keeps the newest-first order. Because the pair is
 always required, `OTHER` cannot be listed by type alone. The full semantics are
 under [Payment source filter semantics](#payment-source-filter-semantics).
 
+### Payment allocations (2026-10-20)
+
+Payment 1.4.0 adds the allocation surface: a payment can be split across the
+claim or policy target and financial component it settles. The change is
+additive: no existing path, request field, response field, or event changed.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/payment.yaml` | 1.4.0 | Additive | `GET/POST /api/v1/payments/{paymentId}/allocations`, the `PaymentAllocation`, `PaymentAllocationSummary`, and `CreatePaymentAllocationRequest` schemas, the `PaymentAllocationTargetType` and `PaymentAllocationComponent` enums, and the 409 `ALLOCATION_EXCEEDS_PAYMENT`/`PAYMENT_NOT_ALLOCATABLE` guards. |
+| `asyncapi/payment.yaml` | 1.3.0 | Additive | The implemented `payment.allocation.created` channel, `send` operation, and `PaymentAllocationCreatedData` payload. |
+| `asyncapi/event-catalog.yaml` | 1.14.0 | Additive | `payment.allocation.created` is published and implemented (193 published in total; Payment 19 published and 4 implemented). |
+
+The allocation read is the reconciliation view of the payment amount: `items`
+oldest first, `paymentAmount`, `totalAllocated`, `unallocated`, and `currency`.
+An allocation is append-only and always uses the payment's currency. The create
+is guarded by the payment status and by the payment amount, so it can return
+409 `PAYMENT_NOT_ALLOCATABLE` or 409 `ALLOCATION_EXCEEDS_PAYMENT` without
+writing a row or an event.
+
+The SPEC 11.7.11 table lists only `GET .../allocations`, and SPEC 11.7.10 has
+no allocation-created name; the implemented POST and
+`payment.allocation.created` event are new names with no SPEC equivalent
+(`MISMATCHES.md` M-22 and M-35).
+
 ### Claim task and note idempotency (2026-10-20)
 
 Direct Claims and Assumed Claims 1.4.0 make task and note creation retry-safe
@@ -1098,6 +1122,61 @@ Rules and semantics:
   the public 400 code and message are the expert's. A missing tenant is 400
   `MISSING_TENANT_HEADER`; a malformed tenant is 400 `INVALID_PARAMETER`.
 
+### Payment allocations
+
+A payment may be split across the claim or policy target and financial component
+it settles:
+
+| Operation | Path | Success | Errors |
+|---|---|---|---|
+| List allocations | `GET /api/v1/payments/{paymentId}/allocations` | 200 `PaymentAllocationSummary` | 400, 404 |
+| Record allocation | `POST /api/v1/payments/{paymentId}/allocations` | 201 `PaymentAllocation` | 400, 404, 409 |
+
+The summary is `{items, paymentAmount, totalAllocated, unallocated, currency}`;
+`items` is ordered oldest first (`createdAt` ascending, allocation id as the
+tie-break), and `totalAllocated`/`unallocated` are derived from the payment
+amount. An allocation is `{allocationId, paymentId, targetType, targetId,
+component, amount, currency, createdAt}`. Amounts are decimal strings in the
+payment currency; the tenant is implied and is not part of the projection.
+
+Rules:
+
+- `X-EIA-Tenant` is required. The implemented route is tenant-scoped and not
+  book-scoped: a payment outside the caller's tenant is reported exactly like a
+  missing payment (404 `PAYMENT_NOT_FOUND`), so allocations never disclose
+  another tenant's records. SPEC 3.6.1 requires the book on every payment and
+  allocation; the implemented payment and allocation rows carry no book
+  (M-08, M-12, and M-35).
+- The create body is `CreatePaymentAllocationRequest`: all four fields are
+  required. `targetType` is `DIRECT_CLAIM`, `ASSUMED_CLAIM`, or `POLICY` and
+  `targetId` is the UUID of that record. `component` is `INDEMNITY`,
+  `DEFENSE_COST`, `ALAE`, `EXPENSE`, `COMMISSION`, or `OTHER`. Both vocabularies
+  are trimmed and matched case-insensitively, so `direct_claim` and `indemnity`
+  are accepted and normalized. `amount` must be greater than zero with at most
+  four fraction digits; the currency is never accepted from the caller because
+  an allocation always uses the payment's currency.
+- An allocation is append-only. The accumulated allocations plus the new amount
+  may not exceed the payment amount; an excess is 409
+  `ALLOCATION_EXCEEDS_PAYMENT` and writes no row and no event. A `CANCELLED`,
+  `REVERSED`, or `FAILED` payment is 409 `PAYMENT_NOT_ALLOCATABLE` and likewise
+  writes nothing.
+- A missing or unknown body member is 400 `VALIDATION_ERROR` with per-field
+  details. A missing tenant is 400 `MISSING_TENANT_HEADER`; a malformed tenant
+  or `paymentId` is 400 `INVALID_PARAMETER`.
+- The create returns the allocation and writes `payment.allocation.created` in
+  the same transaction. The allocation is a child aggregate: the envelope
+  carries the allocation id as the `PaymentAllocation` aggregate at version 1,
+  while the payload carries the parent payment identity, the allocation fields,
+  and the payment-level `totalAllocated`/`paymentAmount` totals. Because an
+  allocation never bumps the payment row version, using the allocation id keeps
+  the outbox aggregate-version key unique when one payment receives several
+  allocations.
+- The expert serves the same public path and an `/internal/v1` alias that the
+  domain calls; the alias is an implementation detail and is not part of the
+  public contract. The SPEC 11.7.11 table lists only the GET, and SPEC 11.7.10
+  has no `payment.allocation.created` name; the POST and the event are new
+  names recorded in M-22 and M-35.
+
 ### Policy billing
 
 Policy owns the premium installment plan (SPEC 11.2.13). The public billing
@@ -1307,8 +1386,14 @@ missing directory.
    codes on the Round 5 mutations, the payment source fields and their create
    rules, the optional `sourceType` + `sourceId` list filter on the public and
    expert payment lists with its enum, UUID, tenant parameter, 400 response, and
-   `INVALID_SOURCE_TYPE`/`INVALID_SOURCE_FILTER` documentation, the three Policy
-   billing operations, the optional shared
+   `INVALID_SOURCE_TYPE`/`INVALID_SOURCE_FILTER` documentation, the two payment
+   allocation operations with their 200/201 successes, the `PaymentAllocation`,
+   `PaymentAllocationSummary`, and `CreatePaymentAllocationRequest` schemas and
+   their field bounds and enums, the 400/404/409 responses, the 409
+   `ALLOCATION_EXCEEDS_PAYMENT`/`PAYMENT_NOT_ALLOCATABLE` documentation, the
+   absence of the implemented path from `x-planned-operations`, and the
+   implemented `payment.allocation.created` channel and payload, the three
+   Policy billing operations, the optional shared
    `BookHeaderDirectOptional` parameter, the `BillingPlan`, `Installment`,
    `CreateBillingPlanRequest`, and `UpdateInstallmentRequest` schemas and their
    field bounds and enums, the cross-policy receivable queue with its required
@@ -1340,7 +1425,9 @@ missing directory.
    `x-status: planned|implemented`, `x-implemented-by` on every implemented
    channel, one `send` operation per channel, a `DomainEvent` message on
    every channel, the optional source fields on the payment created payload,
-   and the `PolicyMassTortProfileUpdatedData` payload with its required
+   the `PaymentAllocationCreatedData` payload with its required payment
+   identity, target, component, money, and allocation-total members, and the
+   `PolicyMassTortProfileUpdatedData` payload with its required
    identity, status, tort, trigger, allocation, and coverage-block members.
 5. **Event catalog cross-check.** The published set in `event-catalog.yaml`
    must equal the channel addresses in the matching vertical document, event
@@ -1354,6 +1441,7 @@ missing directory.
    `document.link.removed`, `policy.policy.renewed`,
    `policy.billing-plan.created`, `policy.installment.paid`,
    `policy.installment.waived`, `policy.mass-tort-profile.updated`,
+   `payment.allocation.created`,
    `contract.bordereau.received`, `contract.bordereau.processed`,
    `contract.bordereau.failed`, and the four `contract.cash-call.*` facts
    (`requested`, `issued`, `settled`, and `cancelled`).
@@ -1417,6 +1505,13 @@ missing directory.
 - a payment carries a flat `sourceType`/`sourceId`/`sourceReference` link rather
   than the SPEC 11.7.4 `claim_vertical`/`claim_id`/`claim_number` projection, and
   the source is neither resolved nor checked for existence (M-12, M-24);
+- a payment can be split through the flat allocation surface
+  `GET/POST /api/v1/payments/{paymentId}/allocations`. The allocation records a
+  target type and component but does not resolve or validate the target record,
+  accepts zero or partial allocations instead of enforcing PAY-06's exact-sum
+  rule, and carries no book; it publishes the new `payment.allocation.created`
+  name. SPEC 11.7.11 lists only the GET, SPEC 11.7.10 has no allocation event,
+  and SPEC 3.6.1 requires the book on every allocation (M-22, M-35);
 - document associations are implemented as tenant-scoped `/links` with a flat
   `linkedType`/`linkedId` target and no role, book, or DOC-09 target-existence
   check, and publish `document.link.added`/`.removed` rather than the SPEC

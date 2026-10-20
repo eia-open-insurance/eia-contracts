@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-20 (Direct Claims list claimant filter).
+Status: open, reviewed 2026-10-20 (Payment allocations).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -38,7 +38,10 @@ where the running code does not meet it yet.
   domain claim client and projection. The Contract cash-call pass reads the
   domain cash-call controller, service, client, projection, and command rules
   plus the expert controller, rules, repository, status enum, event factory,
-  and `schema.sql`.
+  and `schema.sql`. The Payment allocation pass reads the domain payment
+  controller, service, client, allocation projection, summary, command, and
+  rules plus the expert allocation controller, service, repository, rules,
+  projection, summary, request, event factory, `schema.sql`, and tests.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -98,6 +101,7 @@ removed per the resolution policy.
 | M-32 | Policy mass tort profile is a narrow DRAFT/COMPLETE upsert with different vocabularies and route | L |
 | M-33 | Direct Claims list claimant filter is exact-match with no party reference check | L |
 | M-34 | Contract cash calls add a SPEC-less route, lifecycle, and event names and omit the cash-call limit gate | L |
+| M-35 | Payment allocations add a SPEC-less POST route and event name | L |
 
 ## M-01 Public base paths
 
@@ -1565,10 +1569,74 @@ dual-publish window before a SPEC name is introduced; renaming the route,
 statuses, or event names is breaking and needs an ADR and a `/v2` or dual-mount
 period.
 
+## M-35 Payment allocations add a SPEC-less POST route and event name
+
+SPEC 11.7.11 lists only `GET
+/api/v1/payment/payments/{paymentId}/allocations`; it defines no allocation
+create operation. SPEC 11.7.10 publishes no allocation event. The 2026-10-20
+slice implements a standalone allocation child aggregate:
+
+| Area | Implemented | SPEC / gap |
+|---|---|---|
+| Routes | `GET/POST /api/v1/payments/{paymentId}/allocations` (the M-01 short form) | SPEC 11.7.11 lists only the GET, under the longer `/api/v1/payment/payments` base. |
+| Projection | `PaymentAllocation` `{allocationId, paymentId, targetType, targetId, component, amount, currency, createdAt}` and `PaymentAllocationSummary` `{items, paymentAmount, totalAllocated, unallocated, currency}`; the expert row id is remapped to `allocationId` and `tenantId` is not exposed | SPEC 11.7.4 defines `claim_id`, `policy_id`, `policy_year`, `contract_id`, `layer_id`, `reserve_component`, `gl_account`, `company_code`, `cost_center`, `profit_center`, `business_area`, `tax_code`, and `allocation_pct`; the flat `targetType`/`targetId`/`component` trio replaces those columns, and the summary envelope is not in SPEC. |
+| Command | `CreatePaymentAllocationRequest` with `targetType` DIRECT_CLAIM/ASSUMED_CLAIM/POLICY, `targetId` UUID, `component` INDEMNITY/DEFENSE_COST/ALAE/EXPENSE/COMMISSION/OTHER, and `amount` greater than zero at numeric(19,4); the currency always comes from the payment | The target record is not resolved or validated against the Direct Claims, Assumed Claims, or Policy API; there is no policy-year, layer, contract, reserve-component, allocation-percentage, or SAP GL coding input. |
+| Status gate | 409 `PAYMENT_NOT_ALLOCATABLE` when the payment is CANCELLED, REVERSED, or FAILED | The SPEC lifecycle names the allocatable and terminal states but defines no error code. |
+| Overallocation | 409 `ALLOCATION_EXCEEDS_PAYMENT` when `totalAllocated + amount` exceeds the payment amount; zero or partial allocations are accepted | SPEC 11.7.7 PAY-06 requires at least one allocation and a total equal to the payment amount within 0.01. The implemented slice does not gate issue on an allocation or require the sum to reach the payment, and the error code is an implementation name. |
+| Event | `payment.allocation.created`; envelope aggregate is the allocation id at version 1, the payload carries the parent payment identity, allocation fields, and `totalAllocated`/`paymentAmount` | SPEC 11.7.10 publishes no allocation event, so the name is new (M-22). The outbox partition key stays the payment id. |
+| Book | Not book-scoped; `payment_allocation` has no book column and the routes require only `X-EIA-Tenant`; the event is stamped DIRECT | SPEC 3.6.1 says every payment and allocation carries the book. The implemented payment and allocation rows carry no book (M-08, M-12). |
+
+Evidence:
+
+- `repos/eia-payment-domain/.../PaymentController.java:73-85` (public GET/POST
+  allocation routes) and `PaymentService.java:122-139` (proxy and command
+  normalization).
+- `repos/eia-payment-domain/.../PaymentAllocationRules.java:29-102` (target,
+  component, and amount validation), `PaymentAllocation.java:20-29`,
+  `PaymentAllocationSummary.java:17-23`, and
+  `CreatePaymentAllocationCommand.java:11-16` (flat public projection).
+- `repos/eia-payment-domain/.../PaymentClient.java:121-168` (expert
+  `/internal/v1` calls, missing-total normalization, and upstream-error
+  translation).
+- `repos/eia-payment-expert/.../PaymentAllocationController.java:26-62` (same
+  public path plus the internal alias, tenant resolution, 201 create) and
+  `PaymentAllocationService.java:38-87` (tenant wall, status gate,
+  overallocation guard, allocation insert, and outbox write in one
+  transaction).
+- `repos/eia-payment-expert/.../PaymentAllocationRules.java:22-114` (closed
+  target and component sets, amount normalization, non-allocatable statuses),
+  `PaymentAllocationRepository.java:46-93` (oldest-first list and allocated
+  total), `PaymentAllocationItem.java:15-35`, and
+  `PaymentAllocationSummary.java:13-20` (public field names).
+- `repos/eia-payment-expert/.../PaymentEvents.java:37,101-136`
+  (`payment.allocation.created`, `PaymentAllocation` aggregate at version 1,
+  parent payment partition key) and `schema.sql:44-68` (`payment_allocation`
+  columns and the positive-amount, target-type, and component checks).
+- Tests: `PaymentAllocationControllerTest` (list totals, create, internal
+  alias, `TENANT_REQUIRED`, `VALIDATION_ERROR`, both 409 codes, 404),
+  `PaymentAllocationIntegrationTest` (oldest-first ordering, empty summary,
+  over-allocation and status guards, tenant wall, field validation, event
+  payload, rollback), and `PaymentAllocationRulesTest`.
+- `openapi/payment.yaml` 1.4.0, `asyncapi/payment.yaml` 1.3.0,
+  `asyncapi/event-catalog.yaml` 1.14.0, and the README payment allocation
+  section record the implemented shape.
+
+Resolution: the implemented slice is documented as canonical for now. Closing
+the gap means adding the SPEC allocation create operation and the
+`payment.allocation.created` event name (or recording the GET-only contract),
+enforcing PAY-06 (at least one allocation per payment and the exact
+payment-amount sum within 0.01), resolving and validating the target against
+the owning claim or policy API, adding the policy-year, layer, contract,
+reserve-component, allocation-percentage, and SAP GL coding fields, and
+carrying the book on the payment and allocation. A new event name needs an
+EV-05 dual-publish window before it can replace a SPEC name; renaming the route
+or event is breaking and needs an ADR and a `/v2` or dual-mount period. A
+`paymentId` outside the caller's tenant stays 404 `PAYMENT_NOT_FOUND`.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-Contract cash-call contract:
+Payment allocation contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -1585,7 +1653,7 @@ OpenAPI 3.1 documents
   OK openapi/cession.yaml  9 paths, 11 operations
   OK openapi/retrocession.yaml  9 paths, 11 operations
   OK openapi/document.yaml  11 paths, 15 operations
-  OK openapi/payment.yaml  10 paths, 12 operations
+  OK openapi/payment.yaml  11 paths, 14 operations
   OK openapi/notifications.yaml  7 paths, 9 operations
 
 AsyncAPI 3 documents
@@ -1597,9 +1665,9 @@ AsyncAPI 3 documents
   OK asyncapi/cession.yaml  17 event channels
   OK asyncapi/retrocession.yaml  17 event channels
   OK asyncapi/document.yaml  20 event channels
-  OK asyncapi/payment.yaml  18 event channels
+  OK asyncapi/payment.yaml  19 event channels
   OK asyncapi/notifications.yaml  12 event channels
-  OK catalog: 192 unique published events across 10 verticals
+  OK catalog: 193 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -1607,7 +1675,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 11292 checks, 0 failures
+  PASS 11477 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -1715,7 +1783,14 @@ Additional checks and limits:
   `contract.cash-call.settled` from the catalog `implemented` list each fail
   with the specific missing operation, schema, enum, or implemented-event
   message. All four were run on a throwaway copy and exited non-zero (exit 1);
-  the working copy was left unchanged.
+  the working copy was left unchanged. The Payment allocation pass added four
+  more: renaming the `/api/v1/payments/{paymentId}/allocations` path, renaming
+  the `PaymentAllocationSummary` schema, removing `ALLOCATION_EXCEEDS_PAYMENT`
+  from the create description, and dropping `payment.allocation.created` from
+  the Payment catalog `implemented` list each fail with the specific missing
+  operation, schema, conflict-code documentation, or implemented-event message.
+  All four were run on a throwaway copy and exited non-zero (exit 1); the
+  working copy was left unchanged.
 
 ## Resolution policy
 

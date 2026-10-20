@@ -1002,6 +1002,7 @@ IMPLEMENTED_EVENTS = {
         "payment.payment.created",
         "payment.payment.updated",
         "payment.payment.status-changed",
+        "payment.allocation.created",
     ],
     "notifications": [
         "notifications.notification.created",
@@ -1080,6 +1081,82 @@ PAYMENT_SOURCE_REFERENCE_MAX_LENGTH = 64
 # INVALID_SOURCE_FILTER.
 PAYMENT_SOURCE_FILTER_PARAMETERS = ("sourceType", "sourceId")
 PAYMENT_SOURCE_FILTER_ERRORS = ("INVALID_SOURCE_TYPE", "INVALID_SOURCE_FILTER")
+
+
+# Payment allocations (SPEC 11.7.11). The public domain exposes GET/POST
+# /api/v1/payments/{paymentId}/allocations; the expert serves the same path and
+# an /internal/v1 alias that the domain calls, but the alias is an
+# implementation detail and is not part of the public contract. An allocation
+# is append-only, always uses the payment currency, and may not take the
+# payment's allocated total above the payment amount.
+PAYMENT_ALLOCATION_OPENAPI_PATHS = [
+    (
+        "get",
+        "/api/v1/payments/{paymentId}/allocations",
+        "200",
+        "PaymentAllocationSummary",
+        None,
+    ),
+    (
+        "post",
+        "/api/v1/payments/{paymentId}/allocations",
+        "201",
+        "PaymentAllocation",
+        "CreatePaymentAllocationRequest",
+    ),
+]
+
+PAYMENT_ALLOCATION_FIELDS = (
+    "allocationId",
+    "paymentId",
+    "targetType",
+    "targetId",
+    "component",
+    "amount",
+    "currency",
+    "createdAt",
+)
+
+PAYMENT_ALLOCATION_SUMMARY_FIELDS = (
+    "items",
+    "paymentAmount",
+    "totalAllocated",
+    "unallocated",
+    "currency",
+)
+
+PAYMENT_ALLOCATION_REQUEST_FIELDS = (
+    "targetType",
+    "targetId",
+    "component",
+    "amount",
+)
+
+PAYMENT_ALLOCATION_TARGET_TYPES = ("DIRECT_CLAIM", "ASSUMED_CLAIM", "POLICY")
+PAYMENT_ALLOCATION_COMPONENTS = (
+    "INDEMNITY",
+    "DEFENSE_COST",
+    "ALAE",
+    "EXPENSE",
+    "COMMISSION",
+    "OTHER",
+)
+PAYMENT_ALLOCATION_CONFLICT_CODES = (
+    "ALLOCATION_EXCEEDS_PAYMENT",
+    "PAYMENT_NOT_ALLOCATABLE",
+)
+PAYMENT_ALLOCATION_EVENT = "payment.allocation.created"
+PAYMENT_ALLOCATION_EVENT_FIELDS = (
+    "paymentId",
+    "paymentNumber",
+    "targetType",
+    "targetId",
+    "component",
+    "amount",
+    "currency",
+    "totalAllocated",
+    "paymentAmount",
+)
 
 # Document association links. The three public routes are mirrored on the
 # expert's /internal/v1 base; both surfaces are mandatory. The link vocabulary
@@ -1973,6 +2050,352 @@ def check_payment_asyncapi_sources(contracts: ContractSet, document, relative: s
         == PAYMENT_SOURCE_REFERENCE_MAX_LENGTH,
         f"{relative}: PaymentPaymentCreatedData.sourceReference maxLength must be "
         f"{PAYMENT_SOURCE_REFERENCE_MAX_LENGTH}",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Payment allocation checks
+# ---------------------------------------------------------------------------
+
+
+def check_payment_allocations(contracts: ContractSet, document, relative: str):
+    """Require the payment allocation routes, schemas, and conflict codes.
+
+    The public GET/POST routes are mandatory. GET returns the
+    ``PaymentAllocationSummary`` read model; POST returns the created
+    ``PaymentAllocation`` and documents the two stable 409 guard codes. Both
+    operations are tenant-scoped and not book-scoped, and the implemented path
+    must not remain in ``x-planned-operations``.
+    """
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    allocation = schemas.get("PaymentAllocation") or {}
+    allocation_properties = allocation.get("properties") or {}
+    allocation_required = allocation.get("required") or []
+    contracts.check(
+        isinstance(allocation, dict) and allocation.get("type") == "object",
+        f"{relative}: PaymentAllocation must be an object schema",
+    )
+    for field in PAYMENT_ALLOCATION_FIELDS:
+        contracts.check(
+            isinstance(allocation_properties.get(field), dict),
+            f"{relative}: PaymentAllocation.{field} is required",
+        )
+        contracts.check(
+            field in allocation_required,
+            f"{relative}: PaymentAllocation.required must list {field}",
+        )
+    for field in ("allocationId", "paymentId", "targetId"):
+        contracts.check(
+            (allocation_properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: PaymentAllocation.{field} must be a uuid",
+        )
+    contracts.check(
+        str((allocation_properties.get("targetType") or {}).get("$ref", "")).endswith(
+            "/schemas/PaymentAllocationTargetType"
+        ),
+        f"{relative}: PaymentAllocation.targetType must reference "
+        "PaymentAllocationTargetType",
+    )
+    contracts.check(
+        str((allocation_properties.get("component") or {}).get("$ref", "")).endswith(
+            "/schemas/PaymentAllocationComponent"
+        ),
+        f"{relative}: PaymentAllocation.component must reference "
+        "PaymentAllocationComponent",
+    )
+    contracts.check(
+        str((allocation_properties.get("amount") or {}).get("$ref", "")).endswith(
+            "/schemas/MoneyAmount"
+        ),
+        f"{relative}: PaymentAllocation.amount must use the shared MoneyAmount schema",
+    )
+    contracts.check(
+        str((allocation_properties.get("currency") or {}).get("$ref", "")).endswith(
+            "/schemas/CurrencyCode"
+        ),
+        f"{relative}: PaymentAllocation.currency must use the shared CurrencyCode schema",
+    )
+    contracts.check(
+        (allocation_properties.get("createdAt") or {}).get("format") == "date-time",
+        f"{relative}: PaymentAllocation.createdAt must be a date-time",
+    )
+
+    for schema_name, expected in (
+        ("PaymentAllocationTargetType", PAYMENT_ALLOCATION_TARGET_TYPES),
+        ("PaymentAllocationComponent", PAYMENT_ALLOCATION_COMPONENTS),
+    ):
+        enum_schema = schemas.get(schema_name) or {}
+        contracts.check(
+            enum_schema.get("type") == "string",
+            f"{relative}: {schema_name} must be a string enum",
+        )
+        contracts.check(
+            set(enum_schema.get("enum") or []) == set(expected),
+            f"{relative}: {schema_name} must enumerate {list(expected)}",
+        )
+
+    summary = schemas.get("PaymentAllocationSummary") or {}
+    summary_properties = summary.get("properties") or {}
+    summary_required = summary.get("required") or []
+    contracts.check(
+        isinstance(summary, dict) and summary.get("type") == "object",
+        f"{relative}: PaymentAllocationSummary must be an object schema",
+    )
+    for field in PAYMENT_ALLOCATION_SUMMARY_FIELDS:
+        contracts.check(
+            isinstance(summary_properties.get(field), dict),
+            f"{relative}: PaymentAllocationSummary.{field} is required",
+        )
+        contracts.check(
+            field in summary_required,
+            f"{relative}: PaymentAllocationSummary.required must list {field}",
+        )
+    summary_items = summary_properties.get("items") or {}
+    contracts.check(
+        summary_items.get("type") == "array"
+        and str((summary_items.get("items") or {}).get("$ref", "")).endswith(
+            "/schemas/PaymentAllocation"
+        ),
+        f"{relative}: PaymentAllocationSummary.items must be an array of PaymentAllocation",
+    )
+    for field in ("paymentAmount", "totalAllocated", "unallocated"):
+        contracts.check(
+            str((summary_properties.get(field) or {}).get("$ref", "")).endswith(
+                "/schemas/MoneyAmount"
+            ),
+            f"{relative}: PaymentAllocationSummary.{field} must use the shared "
+            "MoneyAmount schema",
+        )
+    contracts.check(
+        str((summary_properties.get("currency") or {}).get("$ref", "")).endswith(
+            "/schemas/CurrencyCode"
+        ),
+        f"{relative}: PaymentAllocationSummary.currency must use the shared "
+        "CurrencyCode schema",
+    )
+
+    request = schemas.get("CreatePaymentAllocationRequest") or {}
+    request_properties = request.get("properties") or {}
+    request_required = request.get("required") or []
+    contracts.check(
+        isinstance(request, dict) and request.get("type") == "object",
+        f"{relative}: CreatePaymentAllocationRequest must be an object schema",
+    )
+    for field in PAYMENT_ALLOCATION_REQUEST_FIELDS:
+        contracts.check(
+            isinstance(request_properties.get(field), dict),
+            f"{relative}: CreatePaymentAllocationRequest.{field} is required",
+        )
+        contracts.check(
+            field in request_required,
+            f"{relative}: CreatePaymentAllocationRequest.required must list {field}",
+        )
+    contracts.check(
+        str((request_properties.get("targetType") or {}).get("$ref", "")).endswith(
+            "/schemas/PaymentAllocationTargetType"
+        ),
+        f"{relative}: CreatePaymentAllocationRequest.targetType must reference "
+        "PaymentAllocationTargetType",
+    )
+    contracts.check(
+        (request_properties.get("targetId") or {}).get("format") == "uuid",
+        f"{relative}: CreatePaymentAllocationRequest.targetId must be a uuid",
+    )
+    contracts.check(
+        str((request_properties.get("component") or {}).get("$ref", "")).endswith(
+            "/schemas/PaymentAllocationComponent"
+        ),
+        f"{relative}: CreatePaymentAllocationRequest.component must reference "
+        "PaymentAllocationComponent",
+    )
+    request_amount = request_properties.get("amount") or {}
+    contracts.check(
+        str(request_amount.get("$ref", "")).endswith("/schemas/MoneyAmount"),
+        f"{relative}: CreatePaymentAllocationRequest.amount must use the shared "
+        "MoneyAmount schema",
+    )
+    contracts.check(
+        "greater than zero" in str(request_amount.get("description") or "").lower(),
+        f"{relative}: CreatePaymentAllocationRequest.amount must document the "
+        "greater-than-zero rule",
+    )
+
+    paths = document.get("paths") or {}
+    for method, path, success_status, success_schema, request_schema in (
+        PAYMENT_ALLOCATION_OPENAPI_PATHS
+    ):
+        path_item = paths.get(path) if isinstance(paths, dict) else None
+        operation = path_item.get(method) if isinstance(path_item, dict) else None
+        where = f"{relative}: {method.upper()} {path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required payment allocation operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+        parameter_refs, inline_names = _parameter_names(operation)
+        contracts.check(
+            "TenantHeader" in parameter_refs,
+            f"{where}: must document the shared TenantHeader parameter",
+        )
+        contracts.check(
+            "paymentId" in inline_names,
+            f"{where}: must declare the paymentId path parameter",
+        )
+        contracts.check(
+            not ({"BookHeaderDirect", "BookHeaderAssumed"} & set(parameter_refs)),
+            f"{where}: payment allocations are not book-scoped and must not "
+            "declare a book header",
+        )
+        description = str(operation.get("description") or "")
+        contracts.check(
+            "PAYMENT_NOT_FOUND" in description,
+            f"{where}: description must document 404 PAYMENT_NOT_FOUND",
+        )
+        contracts.check(
+            "MISSING_TENANT_HEADER" in description,
+            f"{where}: description must document 400 MISSING_TENANT_HEADER",
+        )
+        if request_schema:
+            request_body = operation.get("requestBody") or {}
+            body_schema = (
+                ((request_body.get("content") or {}).get("application/json") or {})
+                .get("schema")
+                if isinstance(request_body, dict)
+                else None
+            )
+            contracts.check(
+                isinstance(request_body, dict)
+                and request_body.get("required") is True,
+                f"{where}: requestBody must be required",
+            )
+            contracts.check(
+                isinstance(body_schema, dict)
+                and str(body_schema.get("$ref", "")).endswith(
+                    f"/schemas/{request_schema}"
+                ),
+                f"{where}: request body must use the {request_schema} schema",
+            )
+            contracts.check(
+                "VALIDATION_ERROR" in description,
+                f"{where}: description must document 400 VALIDATION_ERROR",
+            )
+            for code in PAYMENT_ALLOCATION_CONFLICT_CODES:
+                contracts.check(
+                    code in description,
+                    f"{where}: description must document 409 {code}",
+                )
+            contracts.check(
+                PAYMENT_ALLOCATION_EVENT in description,
+                f"{where}: description must document the "
+                f"{PAYMENT_ALLOCATION_EVENT} event",
+            )
+        responses = operation.get("responses") or {}
+        success_body = _response_schema(operation, success_status)
+        contracts.check(
+            isinstance(success_body, dict)
+            and str(success_body.get("$ref", "")).endswith(f"/schemas/{success_schema}"),
+            f"{where}: {success_status} must return the {success_schema} schema",
+        )
+        for code, suffix in (
+            ("400", "/responses/BadRequest"),
+            ("404", "/responses/NotFound"),
+        ):
+            response = responses.get(code) if isinstance(responses, dict) else None
+            contracts.check(
+                isinstance(response, dict)
+                and str(response.get("$ref", "")).endswith(suffix),
+                f"{where}: {code} must reference the shared {suffix.rsplit('/', 1)[-1]} "
+                "response",
+            )
+        if request_schema:
+            conflict = responses.get("409") if isinstance(responses, dict) else None
+            contracts.check(
+                isinstance(conflict, dict)
+                and str(conflict.get("$ref", "")).endswith("/responses/Conflict"),
+                f"{where}: 409 must reference the shared Conflict response",
+            )
+
+    planned = document.get("x-planned-operations") or []
+    contracts.check(
+        not any(
+            isinstance(entry, dict)
+            and entry.get("path") == "/api/v1/payments/{paymentId}/allocations"
+            for entry in planned
+        ),
+        f"{relative}: x-planned-operations must not list the implemented payment "
+        "allocations path",
+    )
+
+
+def check_payment_allocation_asyncapi(contracts: ContractSet, document, relative: str):
+    """Require the implemented payment.allocation.created channel and payload."""
+    channels = document.get("channels") or {}
+    channel = channels.get("PaymentAllocationCreated") or {}
+    contracts.check(
+        channel.get("address") == PAYMENT_ALLOCATION_EVENT,
+        f"{relative}: payment allocation channel must address "
+        f"{PAYMENT_ALLOCATION_EVENT}",
+    )
+    contracts.check(
+        channel.get("x-status") == "implemented",
+        f"{relative}: {PAYMENT_ALLOCATION_EVENT} channel must be implemented",
+    )
+    contracts.check(
+        bool(channel.get("x-implemented-by")),
+        f"{relative}: {PAYMENT_ALLOCATION_EVENT} must name the emitting source",
+    )
+    messages = channel.get("messages") or {}
+    contracts.check(
+        (messages.get("PaymentAllocationCreatedData") or {}).get("$ref")
+        == "#/components/messages/PaymentAllocationCreatedData",
+        f"{relative}: {PAYMENT_ALLOCATION_EVENT} must reference "
+        "PaymentAllocationCreatedData",
+    )
+    send_events = {
+        operation.get("x-event-type")
+        for operation in (document.get("operations") or {}).values()
+        if isinstance(operation, dict) and operation.get("action") == "send"
+    }
+    contracts.check(
+        PAYMENT_ALLOCATION_EVENT in send_events,
+        f"{relative}: {PAYMENT_ALLOCATION_EVENT} must have a send operation",
+    )
+    message = (
+        ((document.get("components") or {}).get("messages") or {}).get(
+            "PaymentAllocationCreatedData"
+        )
+        or {}
+    )
+    payload = message.get("payload") or {}
+    properties = payload.get("properties") or {}
+    required = set(payload.get("required") or [])
+    for field in PAYMENT_ALLOCATION_EVENT_FIELDS:
+        contracts.check(
+            field in properties,
+            f"{relative}: PaymentAllocationCreatedData.properties.{field} "
+            "is required",
+        )
+        contracts.check(
+            field in required,
+            f"{relative}: PaymentAllocationCreatedData.required must list {field}",
+        )
+    contracts.check(
+        set((properties.get("targetType") or {}).get("enum") or [])
+        == set(PAYMENT_ALLOCATION_TARGET_TYPES),
+        f"{relative}: PaymentAllocationCreatedData.targetType must enumerate "
+        f"{list(PAYMENT_ALLOCATION_TARGET_TYPES)}",
+    )
+    contracts.check(
+        set((properties.get("component") or {}).get("enum") or [])
+        == set(PAYMENT_ALLOCATION_COMPONENTS),
+        f"{relative}: PaymentAllocationCreatedData.component must enumerate "
+        f"{list(PAYMENT_ALLOCATION_COMPONENTS)}",
+    )
+    contracts.check(
+        (properties.get("currency") or {}).get("pattern") == "^[A-Z]{3}$",
+        f"{relative}: PaymentAllocationCreatedData.currency must be an ISO 4217 code",
     )
 
 
@@ -4808,6 +5231,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
         if vertical == "payment":
             check_payment_openapi_sources(contracts, document, relative)
             check_payment_source_filter(contracts, document, relative)
+            check_payment_allocations(contracts, document, relative)
         if vertical == "document":
             check_document_links_openapi(contracts, document, relative)
         if vertical == "policy":
@@ -5101,6 +5525,7 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
             contracts.check(bool(EVENT_NAME_RE.fullmatch(event)), f"event-catalog.yaml: {event} is not a valid event name")
         if vertical == "payment":
             check_payment_asyncapi_sources(contracts, document, relative)
+            check_payment_allocation_asyncapi(contracts, document, relative)
         published_by_vertical[vertical] = set(published)
         if verbose:
             print(f"  OK {relative}  channels={len(channels)} operations={len(operations)}")

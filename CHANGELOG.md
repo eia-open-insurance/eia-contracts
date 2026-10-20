@@ -637,6 +637,46 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   evidence.
 - `python scripts/validate_contracts.py` passes 11,292 checks with 0 failures.
 
+### Added in the Payment allocations contract (2026-10-20)
+
+- `openapi/payment.yaml` is 1.4.0: adds `GET/POST
+  /api/v1/payments/{paymentId}/allocations`, the
+  `PaymentAllocationSummary` (`items`, `paymentAmount`, `totalAllocated`,
+  `unallocated`, `currency`), `PaymentAllocation` (`allocationId`, `paymentId`,
+  `targetType`, `targetId`, `component`, `amount`, `currency`, `createdAt`),
+  and `CreatePaymentAllocationRequest` (`targetType` DIRECT_CLAIM,
+  ASSUMED_CLAIM, or POLICY; `targetId` UUID; `component` INDEMNITY,
+  DEFENSE_COST, ALAE, EXPENSE, COMMISSION, or OTHER; `amount` greater than zero
+  with at most four fraction digits) schemas, and the
+  `PaymentAllocationTargetType` and `PaymentAllocationComponent` enums. GET
+  documents 200/400/404; POST documents 201/400/404/409 with the stable
+  `ALLOCATION_EXCEEDS_PAYMENT` and `PAYMENT_NOT_ALLOCATABLE` codes. Both
+  operations require `X-EIA-Tenant`, are not book-scoped, and the implemented
+  path is removed from `x-planned-operations`. The change is additive.
+- `asyncapi/payment.yaml` is 1.3.0: adds the implemented
+  `payment.allocation.created` channel, `send` operation, and a
+  `PaymentAllocationCreatedData` payload with the parent payment identity, the
+  target and component enums, the amount and currency, and the payment-level
+  `totalAllocated`/`paymentAmount` totals. The envelope uses the allocation id
+  as the `PaymentAllocation` aggregate at version 1.
+- `asyncapi/event-catalog.yaml` is 1.14.0: `payment.allocation.created` is
+  published and implemented (193 published in total; Payment 19 published and
+  4 implemented). The name is a new child-aggregate fact with no SPEC 11.7.10
+  equivalent.
+- `scripts/validate_contracts.py` requires the two public allocation
+  operations, the `TenantHeader` parameter, the 200/201 successes, the
+  400/404/409 responses, the `PaymentAllocation`, `PaymentAllocationSummary`,
+  and `CreatePaymentAllocationRequest` schemas with their field bounds and
+  enums, the `ALLOCATION_EXCEEDS_PAYMENT`/`PAYMENT_NOT_ALLOCATABLE`
+  documentation, the absence of the implemented path from
+  `x-planned-operations`, and the implemented `payment.allocation.created`
+  channel, payload, and implemented-event list entry.
+- `README.md` records the routes, projection, target and component vocabularies,
+  amount and currency rules, status and overallocation guards, tenant wall,
+  event, and additive versions; `MISMATCHES.md` adds M-35 for the new POST route
+  and event name and updates the validation evidence.
+- `python scripts/validate_contracts.py` passes 11,477 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

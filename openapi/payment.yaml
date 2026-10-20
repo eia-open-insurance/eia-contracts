@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Payment API
-  version: 1.3.0
+  version: 1.4.0
   summary: Payment instruction administration and the Payment expert API.
   description: >
     This document describes the implemented public Payment domain API and the
@@ -27,6 +27,12 @@ info:
     that returns only the payments linked to one source. The two values are
     required together: an unknown source type is 400 `INVALID_SOURCE_TYPE`, and
     half a pair is 400 `INVALID_SOURCE_FILTER`.
+
+    A payment may be split across the claim or policy target and financial
+    component it settles. The allocation routes list the split rows with the
+    payment reconciliation totals and append a new split. An allocation is
+    always in the payment's own currency, is append-only, and may not take the
+    sum of a payment's allocations above the payment amount.
 
     Amounts are decimal strings (SPEC 10.3) on this vertical, but they are flat
     `amount`/`currency` fields rather than the canonical Money object; see
@@ -338,6 +344,101 @@ paths:
           $ref: './components.yaml#/components/responses/BadGateway'
         default:
           $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/payments/{paymentId}/allocations:
+    get:
+      operationId: listPaymentAllocations
+      tags:
+        - Payment
+      summary: List a payment's allocations.
+      description: >
+        Returns the payment's allocation rows oldest first (`createdAt`
+        ascending, with the allocation id as the tie-break) plus the
+        reconciliation view of the payment amount. The summary carries `items`,
+        `paymentAmount`, `totalAllocated`, `unallocated`, and `currency`;
+        `unallocated` is `paymentAmount` minus `totalAllocated` and is never
+        negative. Every money value is a decimal string (SPEC 10.3) in the
+        payment's currency. A payment outside the caller's tenant is reported
+        exactly like a missing payment, so the route never discloses another
+        tenant's records: 404 `PAYMENT_NOT_FOUND`. A missing `X-EIA-Tenant` is
+        400 `MISSING_TENANT_HEADER`; a malformed tenant or `paymentId` is 400
+        `INVALID_PARAMETER`.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: paymentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Allocations of the payment, oldest first, with the payment totals.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentAllocationSummary'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createPaymentAllocation
+      tags:
+        - Payment
+      summary: Record an allocation of a payment.
+      description: >
+        Splits part of the payment across a target record and a financial
+        component. `targetType` is `DIRECT_CLAIM`, `ASSUMED_CLAIM`, or `POLICY`
+        and `targetId` is the UUID of that record. `component` is `INDEMNITY`,
+        `DEFENSE_COST`, `ALAE`, `EXPENSE`, `COMMISSION`, or `OTHER`. `amount`
+        must be greater than zero with at most four fraction digits. The
+        currency is not accepted from the caller: an allocation always uses the
+        payment's currency. Both vocabularies are trimmed and matched
+        case-insensitively, so `direct_claim` and `indemnity` are accepted and
+        normalized before they are stored.
+
+        Allocations are append-only and their sum on one payment may not exceed
+        the payment amount. The accumulated allocations plus `amount` is
+        checked before the insert: an excess is 409 `ALLOCATION_EXCEEDS_PAYMENT`
+        with no row and no event written. A payment in `CANCELLED`, `REVERSED`,
+        or `FAILED` is 409 `PAYMENT_NOT_ALLOCATABLE` and likewise writes
+        nothing. A successful create returns 201 with the allocation and writes
+        `payment.allocation.created` to the transactional outbox in the same
+        transaction. A missing or unknown member of the body is 400
+        `VALIDATION_ERROR` with per-field details; a missing `X-EIA-Tenant` is
+        400 `MISSING_TENANT_HEADER`; a payment outside the caller's tenant is
+        404 `PAYMENT_NOT_FOUND`.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: paymentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePaymentAllocationRequest'
+      responses:
+        '201':
+          description: Allocation recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentAllocation'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
   /internal/v1/payments:
     get:
       operationId: expertListPayments
@@ -626,6 +727,116 @@ components:
         - RECONCILED
         - ESCHEATED
         - VOID
+    PaymentAllocationTargetType:
+      type: string
+      description: >
+        Business record a payment split targets. DIRECT_CLAIM and
+        ASSUMED_CLAIM identify a claim in the corresponding book; POLICY
+        identifies a policy.
+      enum:
+        - DIRECT_CLAIM
+        - ASSUMED_CLAIM
+        - POLICY
+    PaymentAllocationComponent:
+      type: string
+      description: Financial component a payment split settles.
+      enum:
+        - INDEMNITY
+        - DEFENSE_COST
+        - ALAE
+        - EXPENSE
+        - COMMISSION
+        - OTHER
+    PaymentAllocation:
+      type: object
+      description: >
+        One split of a payment amount to the claim or policy target and
+        financial component it settles. The tenant is implied by the request
+        context and is not part of the public projection. An allocation is
+        append-only and its currency is always the parent payment's currency.
+        Money is a decimal string (SPEC 10.3).
+      required:
+        - allocationId
+        - paymentId
+        - targetType
+        - targetId
+        - component
+        - amount
+        - currency
+        - createdAt
+      properties:
+        allocationId:
+          type: string
+          format: uuid
+        paymentId:
+          type: string
+          format: uuid
+        targetType:
+          $ref: '#/components/schemas/PaymentAllocationTargetType'
+        targetId:
+          type: string
+          format: uuid
+        component:
+          $ref: '#/components/schemas/PaymentAllocationComponent'
+        amount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        createdAt:
+          type: string
+          format: date-time
+    PaymentAllocationSummary:
+      type: object
+      description: >
+        A payment's allocations plus the reconciliation view of its amount: the
+        payment total, the sum already allocated, and the amount still
+        unallocated. `items` is oldest first. The expert owns the persisted
+        totals and the overallocation guard; the domain proxies and normalizes
+        the read model. All money values are decimal strings in the payment's
+        currency.
+      required:
+        - items
+        - paymentAmount
+        - totalAllocated
+        - unallocated
+        - currency
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PaymentAllocation'
+        paymentAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        totalAllocated:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        unallocated:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+    CreatePaymentAllocationRequest:
+      type: object
+      description: >
+        Command that splits a payment across a claim or policy target and a
+        financial component. The currency is always the payment currency and is
+        deliberately not accepted from the caller. `targetType` and `component`
+        are trimmed and matched case-insensitively before validation.
+      required:
+        - targetType
+        - targetId
+        - component
+        - amount
+      properties:
+        targetType:
+          $ref: '#/components/schemas/PaymentAllocationTargetType'
+        targetId:
+          type: string
+          format: uuid
+          description: UUID of the claim or policy the split targets.
+        component:
+          $ref: '#/components/schemas/PaymentAllocationComponent'
+        amount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+          description: Greater than zero with at most four fraction digits (SPEC 10.3).
     CreatePaymentRequest:
       type: object
       description: >
@@ -825,14 +1036,28 @@ x-implementation:
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentDto.java
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/CreatePaymentCommand.java
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentRules.java
+    - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentAllocation.java
+    - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentAllocationSummary.java
+    - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentAllocationRules.java
+    - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/CreatePaymentAllocationCommand.java
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/ApiExceptionHandler.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentController.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/Payment.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/CreatePaymentRequest.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentRules.java
+    - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentAllocationController.java
+    - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentAllocation.java
+    - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentAllocationItem.java
+    - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentAllocationSummary.java
+    - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/CreatePaymentAllocationRequest.java
+    - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentAllocationRules.java
+    - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentAllocationService.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentEvents.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/ApiExceptionHandler.java
     - repos/eia-payment-expert/src/test/java/com/eia/payment/expert/PaymentSourceFilterIntegrationTest.java
+    - repos/eia-payment-expert/src/test/java/com/eia/payment/expert/PaymentAllocationControllerTest.java
+    - repos/eia-payment-expert/src/test/java/com/eia/payment/expert/PaymentAllocationIntegrationTest.java
+    - repos/eia-payment-domain/src/test/java/com/eia/payment/domain/PaymentAllocationRulesTest.java
   errorEnvelope: >
     Vertical-specific ApiError {timestamp, status, code, message, path,
     details[{field, message}]}. Not the canonical Problem envelope yet.
@@ -843,22 +1068,29 @@ x-implementation:
     source type, its UUID, and a human reference instead of embedding the claim
     or policy. The tenant-scoped list forwards an optional sourceType + sourceId
     pair to the expert, which owns the closed-set and pairing validation, so the
-    public route preserves the expert's 400 code and message. See MISMATCHES.md
-    M-12 and M-24.
+    public route preserves the expert's 400 code and message. Allocations are
+    append-only child rows owned by the expert: the domain forwards the tenant
+    and normalizes the read model, the expert enforces the payment currency, the
+    status gate (CANCELLED/REVERSED/FAILED are 409 PAYMENT_NOT_ALLOCATABLE), and
+    the overallocation guard (409 ALLOCATION_EXCEEDS_PAYMENT). The expert also
+    serves the same allocation path plus an /internal/v1 alias that the domain
+    calls; the alias is an implementation detail and is not part of this public
+    contract. See MISMATCHES.md M-12, M-24, and M-35.
 x-compatibility:
-  contractVersion: 1.3.0
-  previousContractVersion: 1.2.0
+  contractVersion: 1.4.0
+  previousContractVersion: 1.3.0
   breaking: []
   compatible:
-    - Adds the optional sourceType and sourceId query parameters to GET /api/v1/payments and GET /internal/v1/payments.
-    - Documents the source-filter pairing rule and the 400 INVALID_SOURCE_TYPE, INVALID_SOURCE_FILTER, and INVALID_PARAMETER codes.
-    - Documents the tenant-scoped, newest-first ordering of the filtered list.
+    - Adds GET and POST /api/v1/payments/{paymentId}/allocations.
+    - Adds the PaymentAllocation, PaymentAllocationSummary, CreatePaymentAllocationRequest, PaymentAllocationTargetType, and PaymentAllocationComponent schemas.
+    - Documents the append-only overallocation guard (409 ALLOCATION_EXCEEDS_PAYMENT) and the payment-status gate (409 PAYMENT_NOT_ALLOCATABLE).
+    - Removes the implemented allocations path from x-planned-operations.
   note: >
-    The filter is additive over 1.2.0: a caller that omits both parameters keeps
-    the unchanged unfiltered list, the Payment projection and create requests are
-    unchanged, and the response remains a bare JSON array. An unknown source type
-    or a partial pair is a classified 400, so a caller must send a complete
-    normalized pair.
+    The allocation surface is additive over 1.3.0: no existing path, request
+    field, response field, or event changes. A caller that never uses the new
+    routes is unaffected. The public routes require X-EIA-Tenant and are
+    tenant-scoped; the expert's /internal/v1 alias is not part of this public
+    contract.
 x-planned-operations:
   - method: POST
     path: /api/v1/payments/{paymentId}/void
@@ -876,10 +1108,6 @@ x-planned-operations:
     path: /api/v1/payments/{paymentId}/reverse
     spec: SPEC 11.7.11
     note: Reverse a payment.
-  - method: GET
-    path: /api/v1/payments/{paymentId}/allocations
-    spec: SPEC 11.7.11
-    note: Allocations.
   - method: GET
     path: /api/v1/payments/{paymentId}/sap
     spec: SPEC 11.7.11
