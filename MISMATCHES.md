@@ -35,7 +35,10 @@ where the running code does not meet it yet.
   controller, service, rules, repository, result, request, projection, event
   factory, `schema.sql`, and tests. The Direct Claims list-filter pass reads
   the public and expert claim controllers, services, and repository plus the
-  domain claim client and projection.
+  domain claim client and projection. The Contract cash-call pass reads the
+  domain cash-call controller, service, client, projection, and command rules
+  plus the expert controller, rules, repository, status enum, event factory,
+  and `schema.sql`.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -94,6 +97,7 @@ removed per the resolution policy.
 | M-31 | Direct Claims allocation error codes are remapped at the public surface | L |
 | M-32 | Policy mass tort profile is a narrow DRAFT/COMPLETE upsert with different vocabularies and route | L |
 | M-33 | Direct Claims list claimant filter is exact-match with no party reference check | L |
+| M-34 | Contract cash calls add a SPEC-less route, lifecycle, and event names and omit the cash-call limit gate | L |
 
 ## M-01 Public base paths
 
@@ -1291,7 +1295,7 @@ Evidence:
   (unique exact period, non-negative amounts, currency pattern, status check).
 - `repos/eia-contract-expert/.../ContractEvents.java:54-56,195-246`
   (event names, child-aggregate id/version, contract partition key).
-- `openapi/contract.yaml` (introduced in 2.2.0, now 3.0.0) and the README
+- `openapi/contract.yaml` (introduced in 2.2.0, now 3.1.0) and the README
   technical-account section record the implemented shape.
 
 Resolution: the implemented slice is documented as canonical for now. Closing
@@ -1348,7 +1352,7 @@ Evidence:
 - `repos/eia-contract-expert/src/main/resources/schema.sql:255-369`
   (`contract_bordereau` columns, status check with both vocabularies, period
   unique index, non-negative financial amounts).
-- `openapi/contract.yaml` 3.0.0 and the README period-bordereau section record
+- `openapi/contract.yaml` 3.1.0 and the README period-bordereau section record
   the implemented shape.
 
 Resolution: document the implemented period slice as canonical for now. Closing
@@ -1509,10 +1513,62 @@ become required, resolve the party and hide a foreign or unknown party; that
 would turn an empty result into a 404 and needs a contract revision.
 Pagination remains M-04.
 
+## M-34 Contract cash calls add a SPEC-less route, lifecycle, and event names
+
+SPEC 11.3.4 names the `ISSUE_CASH_CALL` command and the `cash_call_allowed` and
+`cash_call_limit_amount` terms, and SPEC 11.3.11 describes a cash call as an
+advance issued before the periodic account when a large loss exceeds the
+cash-loss limit and paid through Payment as a `CASH_CALL` linked to the contract
+and the claim. SPEC 11.3.9 publishes only `contract.cash-call.issued`, and SPEC
+11.3.10 defines no cash-call route. The 2026-10-20 slice implements a
+standalone cash-call child aggregate:
+
+| Area | Implemented | SPEC / gap |
+|---|---|---|
+| Routes | `GET/POST /api/v1/contracts/{contractId}/cash-calls` and `PATCH .../cash-calls/{cashCallId}/status` (the M-01 short form) | SPEC 11.3.10 has no cash-call operation; only the SPEC 11.3.4 command name and the 11.3.11 narrative exist. |
+| Projection | Flat `{cashCallId, callNumber, contractId, periodStart, periodEnd, amount, currency, dueDate, status, notes, createdAt}`; the expert row id is remapped to `cashCallId` and `tenantId` is not exposed | No claim link, Payment link, cash-call limit/remaining amount, contract-period relation, or settlement evidence. |
+| Status | `REQUESTED`, `ISSUED`, `SETTLED`, `CANCELLED`; only `REQUESTED -> ISSUED -> SETTLED` or `REQUESTED -> CANCELLED` | SPEC names no cash-call status vocabulary. `REQUESTED` as a target is 400 `INVALID_STATUS`; a skipped or repeated edge is 409 `INVALID_STATUS_TRANSITION`. |
+| Gate | `periodStart < periodEnd`, `amount > 0`, uppercase ISO 4217 currency, required `dueDate`, notes at most 4000 characters | No `cash_call_allowed` or `cash_call_limit_amount` term check, no large-loss-above-cash-loss-limit authorization, and no contract-window or contract-currency equality check. |
+| Events | `contract.cash-call.requested`, `.issued`, `.settled`, `.cancelled` | SPEC 11.3.9 publishes only `.issued`; the other three are new child-aggregate facts (M-22). The envelope uses the cash-call id and aggregate version 1/2/3 while the outbox partition key stays the contract id. |
+| Book | Canonical contract requires `X-EIA-Book: ASSUMED`; another book is 404 `BOOK_SCOPE_VIOLATION` | The domain's `requireAssumedBookWhenPresent` accepts an absent header, and the expert's `/internal/v1` alias checks no book at all (M-08). |
+
+Evidence:
+
+- `repos/eia-contract-domain/.../CashCallController.java:29-77` (public routes
+  and the book wall) and `CashCallClient.java:32-99` (tenant and ASSUMED
+  forwarding to the expert alias).
+- `repos/eia-contract-domain/.../CashCall.java:23-36` (`@JsonAlias("id")` remap
+  and the flat projection) and `ContractCommandRules.java:242-262` (domain
+  create and status validation).
+- `repos/eia-contract-expert/.../cashcall/CashCallController.java:50-156`
+  (public and internal prefixes, tenant resolution, create and status flow,
+  transactional outbox).
+- `repos/eia-contract-expert/.../cashcall/CashCallRules.java:29-103` (period
+  order, positive amount, currency, due date, notes, status parsing, and the
+  transition table), `CashCallStatus.java:11-37` (four statuses and event
+  versions), and `CashCallRepository.java:49-118` (newest-first list, unique
+  call number, compare-and-set status).
+- `repos/eia-contract-expert/src/main/resources/schema.sql:459-481`
+  (`contract_cash_call` columns, unique `(tenant_id, contract_id, call_number)`,
+  period/amount/currency/status checks).
+- `repos/eia-contract-expert/.../ContractEvents.java:67-70,248-318` (event names,
+  child-aggregate id/version, contract partition key).
+- `openapi/contract.yaml` 3.1.0 and the README cash-call section record the
+  implemented shape.
+
+Resolution: the implemented slice is documented as canonical for now. Closing
+the gap means adding the cash-call limit/term gate and the large-loss
+authorization, enforcing the contract window and currency equality, linking the
+call to the claim and the Payment settlement, and adding the SPEC route/status
+names or amending SPEC 11.3.10. The three new event names need an EV-05
+dual-publish window before a SPEC name is introduced; renaming the route,
+statuses, or event names is breaking and needs an ADR and a `/v2` or dual-mount
+period.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-Direct Claims list claimant filter contract:
+Contract cash-call contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -1523,7 +1579,7 @@ python: 3.12.8 (standard library only)
 OpenAPI 3.1 documents
   OK openapi/party.yaml  5 paths, 7 operations
   OK openapi/policy.yaml  42 paths, 54 operations
-  OK openapi/contract.yaml  38 paths, 55 operations
+  OK openapi/contract.yaml  40 paths, 58 operations
   OK openapi/direct-claims.yaml  48 paths, 71 operations
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
   OK openapi/cession.yaml  9 paths, 11 operations
@@ -1535,7 +1591,7 @@ OpenAPI 3.1 documents
 AsyncAPI 3 documents
   OK asyncapi/party.yaml  9 event channels
   OK asyncapi/policy.yaml  23 event channels
-  OK asyncapi/contract.yaml  26 event channels
+  OK asyncapi/contract.yaml  29 event channels
   OK asyncapi/direct-claims.yaml  26 event channels
   OK asyncapi/assumed-claims.yaml  21 event channels
   OK asyncapi/cession.yaml  17 event channels
@@ -1543,7 +1599,7 @@ AsyncAPI 3 documents
   OK asyncapi/document.yaml  20 event channels
   OK asyncapi/payment.yaml  18 event channels
   OK asyncapi/notifications.yaml  12 event channels
-  OK catalog: 189 unique published events across 10 verticals
+  OK catalog: 192 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -1551,7 +1607,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 11054 checks, 0 failures
+  PASS 11292 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -1652,7 +1708,14 @@ Additional checks and limits:
   `DirectClaimStatusFilter` from the public list each fail with the specific
   parameter, schema, or retained-filter message. All three were run on a
   throwaway copy and exited non-zero (exit 1); the working copy was left
-  unchanged.
+  unchanged. The Contract cash-call pass added four more: renaming the
+  `/api/v1/contracts/{contractId}/cash-calls/{cashCallId}/status` path,
+  renaming the `CashCall` schema, adding `REQUESTED` to the
+  `UpdateCashCallStatusRequest.status` enum, and dropping
+  `contract.cash-call.settled` from the catalog `implemented` list each fail
+  with the specific missing operation, schema, enum, or implemented-event
+  message. All four were run on a throwaway copy and exited non-zero (exit 1);
+  the working copy was left unchanged.
 
 ## Resolution policy
 

@@ -598,6 +598,45 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   check, and updates the validation evidence.
 - `python scripts/validate_contracts.py` passes 11,054 checks with 0 failures.
 
+### Added in the Contract cash-call contract (2026-10-20)
+
+- `openapi/contract.yaml` is 3.1.0: adds `GET/POST
+  /api/v1/contracts/{contractId}/cash-calls` and `PATCH
+  /api/v1/contracts/{contractId}/cash-calls/{cashCallId}/status`, the `CashCall`
+  projection (`cashCallId`, `callNumber`, `contractId`, `periodStart`,
+  `periodEnd`, `amount`, `currency`, `dueDate`, `status`, `notes`,
+  `createdAt`), the `CashCallStatus` enum (`REQUESTED`, `ISSUED`, `SETTLED`,
+  `CANCELLED`), the `CreateCashCallRequest` body (`periodStart`, `periodEnd`,
+  `amount`, `currency`, and `dueDate` required; optional nullable
+  4000-character `notes`), and `UpdateCashCallStatusRequest` (`status` is
+  `ISSUED`, `SETTLED`, or `CANCELLED`). GET documents 200/400/404; POST
+  documents 201/400/404/409 `DUPLICATE_CASH_CALL_NUMBER`; PATCH documents
+  200/400/404/409 `INVALID_STATUS_TRANSITION`. Both mutations require
+  `X-EIA-Tenant` and `X-EIA-Book: ASSUMED`. The change is additive.
+- `asyncapi/contract.yaml` is 1.4.0: `contract.cash-call.requested`, `.issued`,
+  `.settled`, and `.cancelled` become implemented child-aggregate channels with
+  `send` operations and the `ContractCashCallData` payload schema; the envelope
+  uses the cash-call id and aggregate version 1 (requested), 2 (issued or
+  cancelled), or 3 (settled) while the outbox partition key stays the contract
+  id. `.issued` moves from planned to implemented.
+- `asyncapi/event-catalog.yaml` is 1.13.0: `contract.cash-call.requested`,
+  `.settled`, and `.cancelled` are published, and all four cash-call names join
+  the Contract implemented subset (192 published in total; Contract 29
+  published and 15 implemented).
+- `scripts/validate_contracts.py` requires the three public cash-call
+  operations, the `TenantHeader` and `BookHeaderAssumed` parameters, the
+  201/200/400/404/409 responses, the `CashCall`, `CashCallStatus`,
+  `CreateCashCallRequest`, and `UpdateCashCallStatusRequest` schemas and their
+  field types, the notes nullability and 4000-character cap, the
+  ISSUED/SETTLED/CANCELLED request enum, the four implemented channels and
+  `send` operations, the `ContractCashCallData` payload fields, and the four
+  implemented event names.
+- `README.md` records the routes, projection, create and status rules, ASSUMED
+  book rule, event semantics, and additive versions; `MISMATCHES.md` adds M-34
+  for the SPEC route/event and cash-limit gaps and updates the validation
+  evidence.
+- `python scripts/validate_contracts.py` passes 11,292 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

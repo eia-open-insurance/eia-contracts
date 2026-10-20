@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.12.0
+  version: 1.13.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -35,11 +35,16 @@ info:
     `contract.bordereau.received` (already cataloged), plus the new terminal
     names `contract.bordereau.processed` and `contract.bordereau.failed`;
     SPEC 11.3.9 instead publishes `contract.bordereau.posted` and
-    `contract.bordereau.rejected`, which remain planned (M-22, M-30). The Policy
-    mass tort fact `policy.mass-tort-profile.updated` moves from planned to
-    implemented; its SPEC 11.2.9 name was already published, so the platform
-    total stays 189 published names and the Policy implemented subset grows to
-    11 of its 23 names. The platform event-ingest service
+    `contract.bordereau.rejected`, which remain planned (M-22, M-30). The
+    Contract cash-call facts add `contract.cash-call.requested`, `.settled`,
+    and `.cancelled` as new child-aggregate names alongside the
+    already-published `contract.cash-call.issued`; the four move into the
+    implemented subset, bringing the platform total to 192 published names
+    (M-22, M-34). The Policy mass tort fact
+    `policy.mass-tort-profile.updated` moves from planned to implemented; its
+    SPEC 11.2.9 name was already published, so it adds no published name and
+    the Policy implemented subset grows to 11 of its 23 names. The platform
+    event-ingest service
     is the inbox:
     it validates the canonical envelope, verifies the HMAC signature when
     configured, and stores each event idempotently. There is still no business
@@ -214,7 +219,10 @@ x-event-catalog:
       - contract.bordereau.rejected
       - contract.account.issued
       - contract.account.agreed
+      - contract.cash-call.requested
       - contract.cash-call.issued
+      - contract.cash-call.settled
+      - contract.cash-call.cancelled
       - contract.security.recorded
       - contract.security.breached
       - contract.reinstatement.applied
@@ -232,6 +240,10 @@ x-event-catalog:
       - contract.bordereau.received
       - contract.bordereau.processed
       - contract.bordereau.failed
+      - contract.cash-call.requested
+      - contract.cash-call.issued
+      - contract.cash-call.settled
+      - contract.cash-call.cancelled
     consumed:
       - policy.policy.issued
       - policy.policy.endorsed

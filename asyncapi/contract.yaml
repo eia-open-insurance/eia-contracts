@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:contract
 info:
   title: EIA Contract events
-  version: 1.3.0
+  version: 1.4.0
   summary: Published domain event names for the Contract vertical.
   description: >
     Event contract for the Contract vertical. The authoritative event names are
@@ -18,20 +18,23 @@ info:
     `contract.contract.updated`, `contract.contract.bound`,
     `contract.contract.commuted`, `contract.cession.recorded`, the three
     technical-account facts `contract.technical-account.created`, `.issued`,
-    and `.settled`, and the three period-bordereau facts
-    `contract.bordereau.received`, `.processed`, and `.failed` through the
-    transactional outbox; those channels and operations are marked
-    `x-status: implemented`. `contract.contract.updated` is additive: the
-    catalog had no generic update fact. A status write that targets a catalog
-    lifecycle state can also emit the already-cataloged `signed`, `endorsed`,
-    `expired`, or `cancelled` name; those names remain published and are not
-    part of the implemented subset recorded here. The remaining SPEC 11.3.9
-    names are planned. The technical-account names are new child-aggregate
-    facts with no SPEC 11.3.9 equivalent (M-22, M-29). The bordereau
-    `processed` and `failed` names are new terminal facts; SPEC 11.3.9 publishes
-    `contract.bordereau.posted` and `contract.bordereau.rejected` instead, so
-    both spellings are published and only the implemented ones are recorded
-    (M-22, M-30).
+    and `.settled`, the three period-bordereau facts
+    `contract.bordereau.received`, `.processed`, and `.failed`, and the four
+    cash-call facts `contract.cash-call.requested`, `.issued`, `.settled`, and
+    `.cancelled` through the transactional outbox; those channels and
+    operations are marked `x-status: implemented`. `contract.contract.updated`
+    is additive: the catalog had no generic update fact. A status write that
+    targets a catalog lifecycle state can also emit the already-cataloged
+    `signed`, `endorsed`, `expired`, or `cancelled` name; those names remain
+    published and are not part of the implemented subset recorded here. The
+    remaining SPEC 11.3.9 names are planned. The technical-account names are new
+    child-aggregate facts with no SPEC 11.3.9 equivalent (M-22, M-29). The
+    bordereau `processed` and `failed` names are new terminal facts; SPEC 11.3.9
+    publishes `contract.bordereau.posted` and `contract.bordereau.rejected`
+    instead, so both spellings are published and only the implemented ones are
+    recorded (M-22, M-30). SPEC 11.3.9 publishes only
+    `contract.cash-call.issued`; the `requested`, `settled`, and `cancelled`
+    child facts are new names (M-22, M-34).
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -368,20 +371,81 @@ channels:
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
+  ContractCashCallRequested:
+    address: contract.cash-call.requested
+    title: contract.cash-call.requested
+    description: >
+      Emitted when a cash call is requested, in the same transaction as the
+      row. The cash call is a child aggregate: the envelope uses the cash-call
+      id and aggregate version 1 while the outbox partition key remains the
+      contract id. The payload carries the contract and cash-call identities,
+      the period, the requested amount as a decimal string, the currency, the
+      due date, and the REQUESTED status.
+    x-event-type: contract.cash-call.requested
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.3.9
+    x-implemented-by: repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ContractEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      ContractCashCallData:
+        $ref: '#/components/messages/ContractCashCallData'
   ContractCashCallIssued:
     address: contract.cash-call.issued
     title: contract.cash-call.issued
     description: >
-      Declared domain event for this vertical (SPEC 11.3.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when a REQUESTED cash call is issued (SPEC 11.3.9). The
+      cash-call aggregate version is 2 and the payload carries the cash-call
+      identity, period, amount, currency, due date, and ISSUED status. The row
+      update and the event share one transaction.
     x-event-type: contract.cash-call.issued
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.3.9
+    x-implemented-by: repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ContractEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
+      ContractCashCallData:
+        $ref: '#/components/messages/ContractCashCallData'
+  ContractCashCallSettled:
+    address: contract.cash-call.settled
+    title: contract.cash-call.settled
+    description: >
+      Emitted when an ISSUED cash call is settled. The cash-call aggregate
+      version is 3 and the payload carries the SETTLED status with the same
+      contract identity, period, amount, currency, and due date. Settlement is
+      terminal and the row update shares the transaction with the event.
+    x-event-type: contract.cash-call.settled
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.3.9
+    x-implemented-by: repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ContractEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      ContractCashCallData:
+        $ref: '#/components/messages/ContractCashCallData'
+  ContractCashCallCancelled:
+    address: contract.cash-call.cancelled
+    title: contract.cash-call.cancelled
+    description: >
+      Emitted when a REQUESTED cash call is cancelled before issuance. The
+      cash-call aggregate version is 2, the same version as issuance, because
+      cancellation and issuance are alternatives. Both terminal states are
+      immutable and the status row update shares the transaction with the
+      event.
+    x-event-type: contract.cash-call.cancelled
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.3.9
+    x-implemented-by: repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ContractEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      ContractCashCallData:
+        $ref: '#/components/messages/ContractCashCallData'
   ContractSecurityRecorded:
     address: contract.security.recorded
     title: contract.security.recorded
@@ -654,16 +718,46 @@ operations:
       HTTPS (SPEC 7.5). Planned.
     x-event-type: contract.account.agreed
     x-status: planned
+  publishContractCashCallRequested:
+    action: send
+    channel:
+      $ref: '#/channels/ContractCashCallRequested'
+    summary: Publish contract.cash-call.requested
+    description: >
+      Publishes contract.cash-call.requested through the transactional outbox in
+      the same transaction as the cash-call insert (SPEC 7.5.1).
+    x-event-type: contract.cash-call.requested
+    x-status: implemented
   publishContractCashCallIssued:
     action: send
     channel:
       $ref: '#/channels/ContractCashCallIssued'
     summary: Publish contract.cash-call.issued
     description: >
-      Publishes contract.cash-call.issued through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes contract.cash-call.issued when a REQUESTED cash call is issued,
+      in the same transaction as the status row update.
     x-event-type: contract.cash-call.issued
-    x-status: planned
+    x-status: implemented
+  publishContractCashCallSettled:
+    action: send
+    channel:
+      $ref: '#/channels/ContractCashCallSettled'
+    summary: Publish contract.cash-call.settled
+    description: >
+      Publishes contract.cash-call.settled when an ISSUED cash call is settled,
+      in the same transaction as the status row update.
+    x-event-type: contract.cash-call.settled
+    x-status: implemented
+  publishContractCashCallCancelled:
+    action: send
+    channel:
+      $ref: '#/channels/ContractCashCallCancelled'
+    summary: Publish contract.cash-call.cancelled
+    description: >
+      Publishes contract.cash-call.cancelled when a REQUESTED cash call is
+      cancelled, in the same transaction as the status row update.
+    x-event-type: contract.cash-call.cancelled
+    x-status: implemented
   publishContractSecurityRecorded:
     action: send
     channel:
@@ -910,6 +1004,69 @@ components:
           lineCount:
             type: integer
             minimum: 0
+    ContractCashCallData:
+      name: ContractCashCallData
+      title: contract.cash-call.* data
+      summary: >
+        Minimal schema for the envelope data object of a contract cash-call fact.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - contractId
+          - cashCallId
+          - callNumber
+          - periodStart
+          - periodEnd
+          - amount
+          - currency
+          - dueDate
+          - status
+        properties:
+          contractId:
+            type: string
+            format: uuid
+          contractNumber:
+            type: string
+          cashCallId:
+            type: string
+            format: uuid
+          callNumber:
+            type: string
+            maxLength: 32
+          period:
+            type: object
+            additionalProperties: true
+            properties:
+              start:
+                type: string
+                format: date
+              end:
+                type: string
+                format: date
+          periodStart:
+            type: string
+            format: date
+          periodEnd:
+            type: string
+            format: date
+          amount:
+            type: string
+            pattern: '^[0-9]{1,15}(?:\.[0-9]{1,4})?$'
+          currency:
+            type: string
+            pattern: '^[A-Z]{3}$'
+          dueDate:
+            type: string
+            format: date
+          status:
+            type: string
+            enum:
+              - REQUESTED
+              - ISSUED
+              - SETTLED
+              - CANCELLED
   securitySchemes:
     outboxSignature:
       type: httpApiKey
@@ -925,21 +1082,24 @@ x-implementation:
   publisher: eia-contract-expert
   subscriber: none
   notes: >
-    Eleven Contract events are written to the transactional outbox in the same
+    Fifteen Contract events are written to the transactional outbox in the same
     transaction as the aggregate write: `created`, `updated`, `bound`,
     `commuted`, `cession.recorded`, `technical-account.created`,
     `technical-account.issued`, `technical-account.settled`,
-    `bordereau.received`, `bordereau.processed`, and `bordereau.failed`. The
-    three technical-account facts are child-aggregate events that use the
-    account id and its lifecycle version while the outbox partition key stays
-    the contract id. The three bordereau facts are child-aggregate events that
-    use the bordereau id and version 1 (received) or 2 (processed or failed)
-    while the partition key stays the contract id. A status write that targets
-    a catalog lifecycle state can additionally emit the cataloged `signed`,
-    `endorsed`, `expired`, or `cancelled` name; those names remain published
-    and are not part of the implemented subset recorded here. The remaining
-    SPEC 11.3.9 names are planned. There is no business subscriber or
-    subscription registry yet.
+    `bordereau.received`, `bordereau.processed`, `bordereau.failed`,
+    `cash-call.requested`, `cash-call.issued`, `cash-call.settled`, and
+    `cash-call.cancelled`. The three technical-account facts are child-aggregate
+    events that use the account id and its lifecycle version while the outbox
+    partition key stays the contract id. The three bordereau facts are
+    child-aggregate events that use the bordereau id and version 1 (received)
+    or 2 (processed or failed) while the partition key stays the contract id.
+    The four cash-call facts use the cash-call id and aggregate version 1
+    (requested), 2 (issued or cancelled), or 3 (settled) while the partition
+    key stays the contract id. A status write that targets a catalog lifecycle
+    state can additionally emit the cataloged `signed`, `endorsed`, `expired`,
+    or `cancelled` name; those names remain published and are not part of the
+    implemented subset recorded here. The remaining SPEC 11.3.9 names are
+    planned. There is no business subscriber or subscription registry yet.
 
 x-consumed-events:
   - policy.policy.issued

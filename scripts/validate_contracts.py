@@ -496,6 +496,79 @@ CONTRACT_BORDEREAU_REQUEST_STATUSES = ("PROCESSED", "FAILED")
 CONTRACT_BORDEREAU_NOTES_MAX_LENGTH = 4000
 
 
+# Contract cash calls. Each tuple is
+# (method, path, success status, success schema, request schema or None). All
+# three public operations must document the tenant header, the ASSUMED book
+# header, the path parameters, and the 400/404 problem responses; the two
+# mutations also document 409.
+CONTRACT_CASH_CALL_PATHS = [
+    (
+        "get",
+        "/api/v1/contracts/{contractId}/cash-calls",
+        "200",
+        "CashCall",
+        None,
+    ),
+    (
+        "post",
+        "/api/v1/contracts/{contractId}/cash-calls",
+        "201",
+        "CashCall",
+        "CreateCashCallRequest",
+    ),
+    (
+        "patch",
+        "/api/v1/contracts/{contractId}/cash-calls/{cashCallId}/status",
+        "200",
+        "CashCall",
+        "UpdateCashCallStatusRequest",
+    ),
+]
+
+CONTRACT_CASH_CALL_FIELDS = (
+    "cashCallId",
+    "callNumber",
+    "contractId",
+    "periodStart",
+    "periodEnd",
+    "amount",
+    "currency",
+    "dueDate",
+    "status",
+    "notes",
+    "createdAt",
+)
+
+CONTRACT_CASH_CALL_CREATE_FIELDS = (
+    "periodStart",
+    "periodEnd",
+    "amount",
+    "currency",
+    "dueDate",
+)
+
+CONTRACT_CASH_CALL_STATUSES = ("REQUESTED", "ISSUED", "SETTLED", "CANCELLED")
+CONTRACT_CASH_CALL_REQUEST_STATUSES = ("ISSUED", "SETTLED", "CANCELLED")
+CONTRACT_CASH_CALL_NOTES_MAX_LENGTH = 4000
+CONTRACT_CASH_CALL_EVENTS = (
+    "contract.cash-call.requested",
+    "contract.cash-call.issued",
+    "contract.cash-call.settled",
+    "contract.cash-call.cancelled",
+)
+CONTRACT_CASH_CALL_EVENT_FIELDS = (
+    "contractId",
+    "cashCallId",
+    "callNumber",
+    "periodStart",
+    "periodEnd",
+    "amount",
+    "currency",
+    "dueDate",
+    "status",
+)
+
+
 # Direct Claims and Assumed Claims task and note schemas. The public projection
 # and command shapes are the ones the domains serialize, so the names are
 # mandatory alongside the five public routes above.
@@ -873,6 +946,10 @@ IMPLEMENTED_EVENTS = {
         "contract.bordereau.received",
         "contract.bordereau.processed",
         "contract.bordereau.failed",
+        "contract.cash-call.requested",
+        "contract.cash-call.issued",
+        "contract.cash-call.settled",
+        "contract.cash-call.cancelled",
     ],
     "direct-claims": [
         "direct.claim.registered",
@@ -3587,6 +3664,221 @@ def check_contract_bordereaux(contracts: ContractSet, document, relative: str):
 
 
 # ---------------------------------------------------------------------------
+# Contract cash-call checks
+# ---------------------------------------------------------------------------
+
+
+def check_contract_cash_calls(contracts: ContractSet, document, relative: str):
+    """Require the cash-call operations, schemas, and field rules."""
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    for method, cash_call_path, success_status, response_schema_name, request_schema_name in (
+        CONTRACT_CASH_CALL_PATHS
+    ):
+        path_item = paths.get(cash_call_path) if isinstance(paths, dict) else None
+        operation = path_item.get(method) if isinstance(path_item, dict) else None
+        where = f"{relative}: {method.upper()} {cash_call_path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required cash-call operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+
+        parameter_refs, inline_names = _parameter_names(operation)
+        contracts.check(
+            "TenantHeader" in parameter_refs,
+            f"{where}: must document the shared TenantHeader parameter",
+        )
+        contracts.check(
+            "BookHeaderAssumed" in parameter_refs,
+            f"{where}: must document the shared BookHeaderAssumed parameter",
+        )
+        contracts.check(
+            "contractId" in inline_names,
+            f"{where}: must declare the contractId path parameter",
+        )
+        if method == "patch":
+            contracts.check(
+                "cashCallId" in inline_names,
+                f"{where}: must declare the cashCallId path parameter",
+            )
+
+        responses = operation.get("responses") or {}
+        for code in ("400", "404"):
+            contracts.check(
+                code in responses,
+                f"{where}: must document the {code} response",
+            )
+        if method in ("post", "patch"):
+            contracts.check(
+                "409" in responses,
+                f"{where}: must document the 409 response",
+            )
+
+        if method == "get":
+            ok_schema = _response_schema(operation, "200")
+            contracts.check(
+                isinstance(ok_schema, dict)
+                and ok_schema.get("type") == "array"
+                and str((ok_schema.get("items") or {}).get("$ref", "")).endswith(
+                    "/schemas/CashCall"
+                ),
+                f"{where}: 200 must return an array of CashCall",
+            )
+        else:
+            request_body = operation.get("requestBody") or {}
+            contracts.check(
+                isinstance(request_body, dict) and request_body.get("required") is True,
+                f"{where}: request body must be required",
+            )
+            request_schema = (
+                ((request_body.get("content") or {}).get("application/json") or {})
+                .get("schema")
+                if isinstance(request_body, dict)
+                else None
+            )
+            contracts.check(
+                isinstance(request_schema, dict)
+                and str(request_schema.get("$ref", "")).endswith(
+                    f"/schemas/{request_schema_name}"
+                ),
+                f"{where}: request body must use the {request_schema_name} schema",
+            )
+            success_schema = _response_schema(operation, success_status)
+            contracts.check(
+                isinstance(success_schema, dict)
+                and str(success_schema.get("$ref", "")).endswith(
+                    f"/schemas/{response_schema_name}"
+                ),
+                f"{where}: {success_status} must return the {response_schema_name} schema",
+            )
+
+    cash_call = schemas.get("CashCall") or {}
+    properties = cash_call.get("properties") or {}
+    required = set(cash_call.get("required") or [])
+    contracts.check(
+        isinstance(cash_call, dict) and cash_call.get("type") == "object",
+        f"{relative}: CashCall must be an object schema",
+    )
+    for field in CONTRACT_CASH_CALL_FIELDS:
+        contracts.check(
+            field in properties,
+            f"{relative}: CashCall.properties.{field} is required",
+        )
+        contracts.check(
+            field in required,
+            f"{relative}: CashCall.required must list {field}",
+        )
+    for field in ("cashCallId", "contractId"):
+        contracts.check(
+            (properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: CashCall.{field} must be a uuid",
+        )
+    for field in ("periodStart", "periodEnd", "dueDate"):
+        contracts.check(
+            (properties.get(field) or {}).get("format") == "date",
+            f"{relative}: CashCall.{field} must be a date",
+        )
+    contracts.check(
+        str((properties.get("amount") or {}).get("$ref", "")).endswith(
+            "/schemas/MoneyAmount"
+        ),
+        f"{relative}: CashCall.amount must reference MoneyAmount",
+    )
+    contracts.check(
+        str((properties.get("currency") or {}).get("$ref", "")).endswith(
+            "/schemas/CurrencyCode"
+        ),
+        f"{relative}: CashCall.currency must reference CurrencyCode",
+    )
+    contracts.check(
+        str((properties.get("status") or {}).get("$ref", "")).endswith(
+            "/schemas/CashCallStatus"
+        ),
+        f"{relative}: CashCall.status must reference CashCallStatus",
+    )
+    notes = properties.get("notes") or {}
+    contracts.check(
+        _schema_types(notes) == {"string", "null"}
+        and notes.get("maxLength") == CONTRACT_CASH_CALL_NOTES_MAX_LENGTH,
+        f"{relative}: CashCall.notes must be a nullable string of at most "
+        f"{CONTRACT_CASH_CALL_NOTES_MAX_LENGTH} characters",
+    )
+    contracts.check(
+        (properties.get("createdAt") or {}).get("format") == "date-time",
+        f"{relative}: CashCall.createdAt must be a date-time",
+    )
+
+    cash_call_status = schemas.get("CashCallStatus") or {}
+    contracts.check(
+        cash_call_status.get("type") == "string",
+        f"{relative}: CashCallStatus must be a string enum",
+    )
+    contracts.check(
+        set(cash_call_status.get("enum") or []) == set(CONTRACT_CASH_CALL_STATUSES),
+        f"{relative}: CashCallStatus must enumerate "
+        f"{list(CONTRACT_CASH_CALL_STATUSES)}",
+    )
+
+    create = schemas.get("CreateCashCallRequest") or {}
+    create_properties = create.get("properties") or {}
+    create_required = set(create.get("required") or [])
+    contracts.check(
+        isinstance(create, dict) and create.get("type") == "object",
+        f"{relative}: CreateCashCallRequest must be an object schema",
+    )
+    contracts.check(
+        create_required == set(CONTRACT_CASH_CALL_CREATE_FIELDS),
+        f"{relative}: CreateCashCallRequest must require "
+        f"{list(CONTRACT_CASH_CALL_CREATE_FIELDS)}",
+    )
+    for field in ("periodStart", "periodEnd", "dueDate"):
+        contracts.check(
+            (create_properties.get(field) or {}).get("format") == "date",
+            f"{relative}: CreateCashCallRequest.{field} must be a date",
+        )
+    contracts.check(
+        str((create_properties.get("amount") or {}).get("$ref", "")).endswith(
+            "/schemas/MoneyAmount"
+        ),
+        f"{relative}: CreateCashCallRequest.amount must reference MoneyAmount",
+    )
+    contracts.check(
+        str((create_properties.get("currency") or {}).get("$ref", "")).endswith(
+            "/schemas/CurrencyCode"
+        ),
+        f"{relative}: CreateCashCallRequest.currency must reference CurrencyCode",
+    )
+    create_notes = create_properties.get("notes") or {}
+    contracts.check(
+        _schema_types(create_notes) == {"string", "null"}
+        and create_notes.get("maxLength") == CONTRACT_CASH_CALL_NOTES_MAX_LENGTH,
+        f"{relative}: CreateCashCallRequest.notes must be an optional nullable string "
+        f"of at most {CONTRACT_CASH_CALL_NOTES_MAX_LENGTH} characters",
+    )
+
+    update = schemas.get("UpdateCashCallStatusRequest") or {}
+    update_properties = update.get("properties") or {}
+    update_required = set(update.get("required") or [])
+    contracts.check(
+        isinstance(update, dict) and update.get("type") == "object",
+        f"{relative}: UpdateCashCallStatusRequest must be an object schema",
+    )
+    contracts.check(
+        update_required == {"status"},
+        f"{relative}: UpdateCashCallStatusRequest must require only status",
+    )
+    contracts.check(
+        set((update_properties.get("status") or {}).get("enum") or [])
+        == set(CONTRACT_CASH_CALL_REQUEST_STATUSES),
+        f"{relative}: UpdateCashCallStatusRequest.status must enumerate "
+        f"{list(CONTRACT_CASH_CALL_REQUEST_STATUSES)}",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
 
@@ -4526,6 +4818,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
         if vertical == "contract":
             check_contract_technical_accounts(contracts, document, relative)
             check_contract_bordereaux(contracts, document, relative)
+            check_contract_cash_calls(contracts, document, relative)
         if vertical == "direct-claims":
             check_direct_claim_allocations(contracts, document, relative)
             check_direct_claim_list_filter(contracts, document, relative)
@@ -4712,6 +5005,68 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
                     f"{relative}: PolicyMassTortProfileUpdatedData.{field} must be a "
                     "nullable string",
                 )
+
+        if vertical == "contract":
+            contract_send_events = {
+                operation.get("x-event-type")
+                for operation in operations.values()
+                if isinstance(operation, dict)
+                and operation.get("action") == "send"
+            }
+            for event in CONTRACT_CASH_CALL_EVENTS:
+                contracts.check(
+                    event in addresses,
+                    f"{relative}: required cash-call event channel '{event}' is missing",
+                )
+                contracts.check(
+                    event in implemented_addresses,
+                    f"{relative}: cash-call event channel '{event}' must be implemented",
+                )
+                contracts.check(
+                    event in contract_send_events,
+                    f"{relative}: cash-call event '{event}' must have a send operation",
+                )
+                cash_call_channel = next(
+                    (
+                        channel
+                        for channel in channels.values()
+                        if isinstance(channel, dict) and channel.get("address") == event
+                    ),
+                    None,
+                )
+                cash_call_messages = (
+                    cash_call_channel.get("messages")
+                    if isinstance(cash_call_channel, dict)
+                    else None
+                ) or {}
+                contracts.check(
+                    "ContractCashCallData" in cash_call_messages,
+                    f"{relative}: {event} must reference ContractCashCallData",
+                )
+            cash_call_message = (
+                ((document.get("components") or {}).get("messages") or {}).get(
+                    "ContractCashCallData"
+                )
+                or {}
+            )
+            payload = cash_call_message.get("payload") or {}
+            payload_properties = payload.get("properties") or {}
+            payload_required = set(payload.get("required") or [])
+            for field in CONTRACT_CASH_CALL_EVENT_FIELDS:
+                contracts.check(
+                    field in payload_properties,
+                    f"{relative}: ContractCashCallData.properties.{field} is required",
+                )
+                contracts.check(
+                    field in payload_required,
+                    f"{relative}: ContractCashCallData.required must list {field}",
+                )
+            contracts.check(
+                set((payload_properties.get("status") or {}).get("enum") or [])
+                == set(CONTRACT_CASH_CALL_STATUSES),
+                f"{relative}: ContractCashCallData.status must enumerate "
+                f"{list(CONTRACT_CASH_CALL_STATUSES)}",
+            )
 
         entry = catalog_entries.get(vertical) or {}
         published = entry.get("published") or []

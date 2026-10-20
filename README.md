@@ -674,6 +674,62 @@ Semantics:
   detection, reconciliation to a declared total, the exception report, and the
   SPEC single-bordereau `GET` remain gaps (M-30).
 
+### Contract cash calls (2026-10-20)
+
+Contract 3.1.0 adds the interim cash-call funding request for an ASSUMED
+treaty. The change is additive: the three operations and four schemas are new,
+the three event names are new, and no existing path, request field, response
+field, or event changed. `contract.cash-call.issued` was already published and
+moves into the implemented subset.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/contract.yaml` | 3.1.0 | Additive | `GET/POST /api/v1/contracts/{contractId}/cash-calls`, `PATCH /api/v1/contracts/{contractId}/cash-calls/{cashCallId}/status`, and the `CashCall`, `CashCallStatus`, `CreateCashCallRequest`, and `UpdateCashCallStatusRequest` schemas. |
+| `asyncapi/contract.yaml` | 1.4.0 | Additive | Four implemented child-aggregate channels and `send` operations: `contract.cash-call.requested`, `.issued`, `.settled`, and `.cancelled`. |
+| `asyncapi/event-catalog.yaml` | 1.13.0 | Additive | Three requested/terminal names are published and all four join the Contract implemented subset (192 published in total; Contract 29 published and 15 implemented). |
+
+Cash-call semantics:
+
+- `GET .../cash-calls` returns a bare array of the contract's cash calls,
+  newest first (`createdAt` descending, then `callNumber` descending). The
+  tenant comes from `X-EIA-Tenant`; an unknown contract, another tenant's
+  contract, or a cash call under another contract is 404.
+- `POST .../cash-calls` creates the row in REQUESTED. `periodStart` must be
+  before `periodEnd`, `amount` must be greater than zero, `currency` must be an
+  uppercase ISO 4217 code, `dueDate` is required, and `notes` is optional and
+  capped at 4000 characters. `callNumber` is generated as
+  `CC-{year}-{sequence}` and the initial REQUESTED status is server-derived;
+  neither is accepted from the caller. Call numbers are unique per tenant and
+  contract, so a duplicate is 409 `DUPLICATE_CASH_CALL_NUMBER`.
+- `PATCH .../{cashCallId}/status` applies only
+  `REQUESTED -> ISSUED`, `REQUESTED -> CANCELLED`, or `ISSUED -> SETTLED`. The
+  request enum is `ISSUED`, `SETTLED`, or `CANCELLED`; `REQUESTED` is the
+  creation state and is 400 `INVALID_STATUS`, and a skipped, repeated, or
+  terminal edge is 409 `INVALID_STATUS_TRANSITION`. Both terminal statuses are
+  immutable.
+- The public projection is `{cashCallId, callNumber, contractId, periodStart,
+  periodEnd, amount, currency, dueDate, status, notes, createdAt}`. The expert
+  row id is serialized as `id` internally and remapped to `cashCallId` by the
+  domain; `tenantId` is not part of the public projection. Money is a decimal
+  string (SPEC 10.3).
+- `X-EIA-Tenant` is required. The canonical contract requires
+  `X-EIA-Book: ASSUMED`; another book is hidden as 404
+  `BOOK_SCOPE_VIOLATION`. The domain currently accepts an absent header for
+  compatibility with the other Contract proxy routes, and the expert's
+  `/internal/v1` alias does not check the book, which M-34 records.
+- Every accepted write appends its event in the same transaction as the row
+  change: `contract.cash-call.requested` on create, then `.issued`, `.settled`,
+  or `.cancelled`. The envelope uses the cash-call id and aggregate version 1
+  (requested), 2 (issued or cancelled), or 3 (settled) while the outbox
+  partition key stays the contract id. SPEC 11.3.9 publishes only
+  `contract.cash-call.issued`; the other three names are new child facts
+  (M-22, M-34).
+- A cash call is not a Payment: Payment and FS-RI own execution and settlement
+  (SPEC 11.3.11). The implemented slice has no cash-call limit or
+  `cash_call_allowed` term check, no contract-window or contract-currency
+  reconciliation, and no claim/Payment link, so the SPEC "large loss above the
+  cash-loss limit" gate and the SPEC 11.3.10 routes remain gaps (M-34).
+
 ### Policy mass tort profile contract (2026-10-20)
 
 Policy 2.6.0 adds the mass tort profile of a direct policy. The change is
@@ -803,6 +859,7 @@ Every request carries a resolved tenant; no request body may override it.
 | `X-EIA-Book` | Policy renewal | Required and fixed to `DIRECT`. The contract makes a missing header a 400 and hides another book as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header, which M-28 records. |
 | `X-EIA-Book` | Contract technical accounts | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-29 records. |
 | `X-EIA-Book` | Contract period bordereaux | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-30 records. |
+| `X-EIA-Book` | Contract cash calls | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-34 records. |
 | `X-EIA-Actor` | Claim assignment (`PATCH .../assignment`) | Optional acting identity, at most 128 characters. Recorded as `assignedBy` and in the claim audit trail; defaults to the assigned adjuster when absent or blank. The Direct Claims expert also accepts `X-EIA-User` as an alias (M-25). |
 | `?tenantId=` | Most internal expert routes | The expert is network-restricted and receives the tenant resolved by its domain service. |
 
@@ -1272,8 +1329,13 @@ missing directory.
    `CreateBordereauRequest`, and `UpdateBordereauStatusRequest` schemas and
    their field types, the nullability of `notes`/`technicalAccountId`, the
    `PROCESSED`/`FAILED` request enum, the 201/200 successes, and the
-   400/404/409 responses, and agreement between `info.version` and
-   `x-compatibility.contractVersion`.
+   400/404/409 responses, the three public cash-call operations with their
+   required `TenantHeader` and `BookHeaderAssumed` parameters, the `CashCall`,
+   `CashCallStatus`, `CreateCashCallRequest`, and
+   `UpdateCashCallStatusRequest` schemas and their field types, the nullable
+   4000-character `notes`, the `ISSUED`/`SETTLED`/`CANCELLED` request enum, the
+   201/200 successes, and the 400/404/409 responses, and agreement between
+   `info.version` and `x-compatibility.contractVersion`.
 4. **AsyncAPI structure.** `asyncapi: 3.0.0`, channel addresses, `x-event-type`,
    `x-status: planned|implemented`, `x-implemented-by` on every implemented
    channel, one `send` operation per channel, a `DomainEvent` message on
@@ -1292,8 +1354,9 @@ missing directory.
    `document.link.removed`, `policy.policy.renewed`,
    `policy.billing-plan.created`, `policy.installment.paid`,
    `policy.installment.waived`, `policy.mass-tort-profile.updated`,
-   `contract.bordereau.received`, `contract.bordereau.processed`, and
-   `contract.bordereau.failed`.
+   `contract.bordereau.received`, `contract.bordereau.processed`,
+   `contract.bordereau.failed`, and the four `contract.cash-call.*` facts
+   (`requested`, `issued`, `settled`, and `cancelled`).
 6. **JSON Schema checks.** All three files parse as JSON, declare the 2020-12
    dialect and an `$id`, carry the required members, keep required properties
    defined, and validate their own examples against a small schema subset.
@@ -1396,6 +1459,12 @@ missing directory.
   total, the exception report, and the SPEC single-bordereau `GET` remain gaps.
   The domain also accepts an absent `X-EIA-Book` and the expert has no book
   check of its own (M-22, M-30);
+- contract cash calls are an interim funding request with a
+  REQUESTED/ISSUED/SETTLED/CANCELLED lifecycle, while SPEC 11.3.9 publishes
+  only `contract.cash-call.issued` and SPEC 11.3.10 defines no cash-call route.
+  The slice has no cash-call limit or `cash_call_allowed` term check, no
+  contract-window or contract-currency reconciliation, and no claim or Payment
+  link; the domain also accepts an absent `X-EIA-Book` (M-22, M-34);
 - ten experts publish a subset of their events through the transactional
   outbox into the platform `event-ingest` inbox, but no vertical consumes
   another vertical's events, there is no subscription registry or gap

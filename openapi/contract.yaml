@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Contract API
-  version: 3.0.0
+  version: 3.1.0
   summary: Assumed-book reinsurance contract administration and the Contract expert API.
   description: >
     This document describes the implemented public Contract domain API and the
@@ -10,11 +10,11 @@ info:
 
     The Contract vertical is ASSUMED book only. Round 5 adds the second slice:
     layers, participants, terms, security, cessions, commutations, and the bind
-    command; the period-bordereau and technical-account slices follow. The
-    contract header, dates, currency, lifecycle, layers, participants, terms,
-    security, cessions, period bordereaux, commutations, and technical accounts
-    are implemented; endorsement, renewal, reinstatement, loss-aggregate, and
-    lineage remain planned.
+    command; the period-bordereau, technical-account, and cash-call slices
+    follow. The contract header, dates, currency, lifecycle, layers,
+    participants, terms, security, cessions, period bordereaux, commutations,
+    technical accounts, and cash calls are implemented; endorsement, renewal,
+    reinstatement, loss-aggregate, and lineage remain planned.
 
     A period bordereau is the cedent's financial schedule for one contract
     period. It is created in RECEIVED with the declared premium, loss,
@@ -31,6 +31,15 @@ info:
     DRAFT and moves DRAFT -> ISSUED -> SETTLED; the SPEC 11.3.4
     `technical_account_line` breakdown is not part of this slice, and the SPEC
     11.3.10 `/accounts` route is exposed as `/technical-accounts` (M-29).
+
+    A cash call is an interim funding request on one contract period. The expert
+    generates `callNumber` as `CC-{year}-{sequence}`, creates the row in
+    REQUESTED, and moves it REQUESTED -> ISSUED -> SETTLED or
+    REQUESTED -> CANCELLED; both terminal states are immutable. A cash call is
+    not a Payment: Payment and FS-RI own execution (SPEC 11.3.11). SPEC 11.3.10
+    defines no cash-call route and SPEC 11.3.9 publishes only
+    `contract.cash-call.issued`, so the implemented route and the three other
+    child facts are recorded in M-34.
 
     Bind is a command, not a status transition. `PATCH /status` to `BOUND` is
     rejected with 409 `BIND_REQUIRES_COMMAND`; `POST /bind` enforces the tower,
@@ -1086,6 +1095,151 @@ paths:
           description: >
             409. `INVALID_STATUS_TRANSITION` when the requested edge is not
             DRAFT -> ISSUED or ISSUED -> SETTLED, including a concurrent change.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/{contractId}/cash-calls:
+    get:
+      operationId: listContractCashCalls
+      tags:
+        - Contract
+      summary: List the contract's cash calls.
+      description: >
+        Returns a bare array ordered by `createdAt` descending, then
+        `callNumber` descending. A cash call is an interim funding request on
+        one contract period and is not a Payment (SPEC 11.3.11). The tenant
+        comes from `X-EIA-Tenant`. The Contract vertical is ASSUMED-only, so
+        `X-EIA-Book` must be ASSUMED; another book is hidden as 404
+        `BOOK_SCOPE_VIOLATION` (SPEC 3.6.2). A missing tenant is 400; an
+        unknown contract or another tenant's contract is 404.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Cash calls of the contract, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CashCall'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createContractCashCall
+      tags:
+        - Contract
+      summary: Request an interim cash call.
+      description: >
+        Creates the cash call in REQUESTED. `periodStart` must be before
+        `periodEnd`; `amount` must be greater than zero; `currency` must be an
+        uppercase ISO 4217 code; `dueDate` is required. `callNumber` is
+        generated as `CC-{year}-{sequence}` and the initial REQUESTED status is
+        server-derived, so neither is accepted from the caller. Call numbers are
+        unique per tenant and contract, so a duplicate is 409
+        `DUPLICATE_CASH_CALL_NUMBER`. The write and its
+        `contract.cash-call.requested` outbox event share one transaction.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCashCallRequest'
+      responses:
+        '201':
+          description: Cash call created in REQUESTED.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CashCall'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            409. `DUPLICATE_CASH_CALL_NUMBER` when the generated call number
+            already exists for the tenant and contract.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/{contractId}/cash-calls/{cashCallId}/status:
+    patch:
+      operationId: updateContractCashCallStatus
+      tags:
+        - Contract
+      summary: Advance a cash call through its lifecycle.
+      description: >
+        Applies only REQUESTED -> ISSUED, REQUESTED -> CANCELLED, or
+        ISSUED -> SETTLED. The request accepts `ISSUED`, `SETTLED`, or
+        `CANCELLED`; `REQUESTED` is the creation state and is 400
+        `INVALID_STATUS`. A skipped, repeated, or terminal edge is 409
+        `INVALID_STATUS_TRANSITION`. Each accepted transition appends
+        `contract.cash-call.issued`, `.settled`, or `.cancelled` to the outbox
+        in the same transaction as the row update.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: cashCallId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCashCallStatusRequest'
+      responses:
+        '200':
+          description: Cash call after the transition.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CashCall'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            409. `INVALID_STATUS_TRANSITION` when the requested edge is not
+            REQUESTED -> ISSUED, REQUESTED -> CANCELLED, or ISSUED -> SETTLED,
+            including a repeated terminal status.
           content:
             application/problem+json:
               schema:
@@ -3141,6 +3295,119 @@ components:
           enum:
             - ISSUED
             - SETTLED
+    CashCall:
+      type: object
+      description: >
+        Public projection of a contract cash call: an interim funding request
+        on one contract period (SPEC 11.3.4 `ISSUE_CASH_CALL`, SPEC 11.3.11).
+        The expert generates `callNumber` as `CC-{year}-{sequence}` and creates
+        the row in REQUESTED. `amount` is a decimal string (SPEC 10.3) and must
+        be greater than zero. `notes` is null until a note is supplied. The
+        status lifecycle is REQUESTED -> ISSUED -> SETTLED or
+        REQUESTED -> CANCELLED, with both terminal states immutable.
+      required:
+        - cashCallId
+        - callNumber
+        - contractId
+        - periodStart
+        - periodEnd
+        - amount
+        - currency
+        - dueDate
+        - status
+        - notes
+        - createdAt
+      properties:
+        cashCallId:
+          type: string
+          format: uuid
+        callNumber:
+          type: string
+          maxLength: 32
+          description: Generated as `CC-{year}-{sequence}` and unique per tenant and contract.
+        contractId:
+          type: string
+          format: uuid
+        periodStart:
+          type: string
+          format: date
+        periodEnd:
+          type: string
+          format: date
+        amount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        dueDate:
+          type: string
+          format: date
+        status:
+          $ref: '#/components/schemas/CashCallStatus'
+        notes:
+          type: [string, 'null']
+          maxLength: 4000
+        createdAt:
+          type: string
+          format: date-time
+    CashCallStatus:
+      type: string
+      description: >
+        Cash-call lifecycle. REQUESTED is the creation state; ISSUED and
+        CANCELLED are the alternatives at version 2, and SETTLED is the
+        version-3 terminal state after ISSUED.
+      enum:
+        - REQUESTED
+        - ISSUED
+        - SETTLED
+        - CANCELLED
+    CreateCashCallRequest:
+      type: object
+      description: >
+        Requests an interim cash call for one contract period. The tenant comes
+        from `X-EIA-Tenant`, the contract from the path, and the book is always
+        ASSUMED. The call number and the initial REQUESTED status are
+        server-derived. `periodStart` must be before `periodEnd`, `amount` must
+        be greater than zero, `currency` must be an uppercase ISO 4217 code,
+        and `dueDate` is required.
+      required:
+        - periodStart
+        - periodEnd
+        - amount
+        - currency
+        - dueDate
+      properties:
+        periodStart:
+          type: string
+          format: date
+        periodEnd:
+          type: string
+          format: date
+        amount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        dueDate:
+          type: string
+          format: date
+        notes:
+          type: [string, 'null']
+          maxLength: 4000
+    UpdateCashCallStatusRequest:
+      type: object
+      description: >
+        Lifecycle command for one cash call. Only `ISSUED`, `SETTLED`, and
+        `CANCELLED` are accepted; `REQUESTED` is the creation state and is
+        rejected with 400 `INVALID_STATUS`. A skipped or repeated edge is 409
+        `INVALID_STATUS_TRANSITION`.
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - ISSUED
+            - SETTLED
+            - CANCELLED
     TowerSummary:
       type: object
       required:
@@ -3734,6 +4001,19 @@ x-implementation:
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/technicalaccount/TechnicalAccountRepository.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/technicalaccount/TechnicalAccountStatus.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/technicalaccount/ContractTechnicalAccount.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/cashcall/CashCallController.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/cashcall/CashCallRules.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/cashcall/CashCallRepository.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/cashcall/CashCallStatus.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/cashcall/ContractCashCall.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/cashcall/CreateCashCallRequest.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/cashcall/UpdateCashCallStatusRequest.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/CashCallController.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/CashCallService.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/CashCallClient.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/CashCall.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/CreateCashCallCommand.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/UpdateCashCallStatusCommand.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ContractGuard.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ApiExceptionHandler.java
     - repos/eia-contract-domain/src/test/java/com/eia/contract/domain/ContractDetailControllerTest.java
@@ -3753,12 +4033,16 @@ x-implementation:
     bordereauId (the expert row id is remapped by the domain) and exclude
     tenantId; the expert generates bordereauNumber, the lifecycle is RECEIVED ->
     PROCESSED|FAILED, and PROCESSED links or creates the technical account for
-    the period. The domain accepts an absent X-EIA-Book on the bordereau and
-    technical-account routes even though the canonical contract requires
-    ASSUMED (M-29, M-30).
+    the period. Cash calls are projected with cashCallId (the expert row id is
+    remapped by the domain) and exclude tenantId; the expert generates
+    callNumber, the lifecycle is REQUESTED -> ISSUED -> SETTLED or
+    REQUESTED -> CANCELLED, and both terminal states are immutable. The domain
+    accepts an absent X-EIA-Book on the bordereau, technical-account, and
+    cash-call routes even though the canonical contract requires ASSUMED (M-29,
+    M-30, M-34).
 x-compatibility:
-  contractVersion: 3.0.0
-  previousContractVersion: 2.2.0
+  contractVersion: 3.1.0
+  previousContractVersion: 3.0.0
   breaking:
     - PATCH /api/v1/contracts/{contractId}/status no longer accepts BOUND (since 2.0.0); it returns 409 BIND_REQUIRES_COMMAND and bind must use POST /bind.
     - The public GET/POST /api/v1/contracts/{contractId}/bordereaux operations now use the period-bordereau Bordereau projection. The legacy source-document ingest header moved to the internal-only BordereauHeader schema and /internal/v1 routes; a client generated from the old public BordereauHeader shape must move to the period-bordereau fields.
@@ -3768,15 +4052,16 @@ x-compatibility:
     - Adds the expert routes that mirror the public second slice.
     - Adds PATCH /api/v1/contracts/{contractId}/bordereaux/{bordereauId}/status with the UpdateBordereauStatusRequest schema and the BordereauStatus lifecycle.
     - Adds GET/POST /api/v1/contracts/{contractId}/technical-accounts and PATCH /api/v1/contracts/{contractId}/technical-accounts/{accountId}/status with the TechnicalAccount, CreateTechnicalAccountRequest, UpdateTechnicalAccountStatusRequest, and TechnicalAccountStatus schemas.
+    - Adds GET/POST /api/v1/contracts/{contractId}/cash-calls and PATCH /api/v1/contracts/{contractId}/cash-calls/{cashCallId}/status with the CashCall, CashCallStatus, CreateCashCallRequest, and UpdateCashCallStatusRequest schemas.
   note: >
-    Search and technical accounts are additive. The period-bordereau slice
-    replaces the previously documented public bordereau header with the
-    financial period projection, so the contract takes a major version even
-    though the HTTP path is unchanged; the legacy ingest header stays available
-    on the internal expert surface. The bind guard is a deliberate breaking
-    change introduced in 2.0.0 for a client that used the status endpoint to
-    bind without approvals; it is the SPEC 11.3.8 command contract. The HTTP base
-    path stays /api/v1/contracts.
+    Search, technical accounts, and cash calls are additive. The
+    period-bordereau slice replaces the previously documented public bordereau
+    header with the financial period projection, so the contract takes a major
+    version even though the HTTP path is unchanged; the legacy ingest header
+    stays available on the internal expert surface. The bind guard is a
+    deliberate breaking change introduced in 2.0.0 for a client that used the
+    status endpoint to bind without approvals; it is the SPEC 11.3.8 command
+    contract. The HTTP base path stays /api/v1/contracts.
 x-planned-operations:
   - method: PATCH
     path: /api/v1/contracts/{contractId}
