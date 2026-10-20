@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:policy
 info:
   title: EIA Policy events
-  version: 1.2.0
+  version: 1.3.0
   summary: Published domain event names for the Policy vertical.
   description: >
     Event contract for the Policy vertical. The authoritative event names are
@@ -17,7 +17,7 @@ info:
     The Policy expert now publishes `policy.policy.created`,
     `policy.policy.updated`, `policy.policy.version-issued`,
     `policy.policy.endorsed`, `policy.policy.cancelled`,
-    `policy.policy.reinstated`, and the billing facts
+    `policy.policy.reinstated`, `policy.policy.renewed`, and the billing facts
     `policy.billing-plan.created`, `policy.installment.paid`, and
     `policy.installment.waived` through the transactional outbox; those channels
     and operations are marked `x-status: implemented`. The `created` and
@@ -25,8 +25,9 @@ info:
     fact. The billing plan name is `policy.billing-plan.created`; SPEC 11.2.13
     calls the same fact `policy.billing.plan-created` and defines no installment
     paid or waived names, so the naming difference is recorded in
-    MISMATCHES.md M-22 and M-27. The remaining SPEC 11.2.9 and 11.2.13 names
-    are planned.
+    MISMATCHES.md M-22 and M-27. The renewal fact uses the SPEC 11.2.9 name and
+    records the source-to-successor lineage. The remaining SPEC 11.2.9 and
+    11.2.13 names are planned.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -240,16 +241,24 @@ channels:
     address: policy.policy.renewed
     title: policy.policy.renewed
     description: >
-      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when a policy is renewed into a successor DRAFT term, in the same
+      transaction as the successor policy, its copied coverages, limits,
+      insureds, locations, and initial DRAFT version. The payload is the
+      successor policy identity, status, row version, term dates, premium, and
+      limit, plus `renewedFromPolicyId` and both sides of the lineage:
+      `sourcePolicyId` / `sourcePolicyNumber` and `newPolicyId` /
+      `newPolicyNumber`. The source policy is not mutated and the event is not
+      emitted for a rejected renewal.
     x-event-type: policy.policy.renewed
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.2.9
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
+      PolicyPolicyRenewedData:
+        $ref: '#/components/messages/PolicyPolicyRenewedData'
   PolicyPolicyExpired:
     address: policy.policy.expired
     title: policy.policy.expired
@@ -514,10 +523,11 @@ operations:
       $ref: '#/channels/PolicyPolicyRenewed'
     summary: Publish policy.policy.renewed
     description: >
-      Publishes policy.policy.renewed through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes policy.policy.renewed when a policy is renewed into a successor
+      DRAFT term, after the source eligibility check passes and in the same
+      transaction as the successor rows and its initial version.
     x-event-type: policy.policy.renewed
-    x-status: planned
+    x-status: implemented
   publishPolicyPolicyExpired:
     action: send
     channel:
@@ -744,6 +754,69 @@ components:
           limitCurrency:
             type: string
             pattern: '^[A-Z]{3}$'
+    PolicyPolicyRenewedData:
+      name: PolicyPolicyRenewedData
+      title: policy.policy.renewed data
+      summary: Minimal schema for the envelope data object of a renewed policy.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - policyId
+          - policyNumber
+          - status
+          - version
+          - renewedFromPolicyId
+          - sourcePolicyId
+          - sourcePolicyNumber
+          - newPolicyId
+          - newPolicyNumber
+        properties:
+          policyId:
+            type: string
+            format: uuid
+            description: Successor policy id; equals newPolicyId.
+          policyNumber:
+            type: string
+            description: Successor policy number; equals newPolicyNumber.
+          status:
+            type: string
+            description: Successor status, always DRAFT at renewal.
+          version:
+            type: integer
+            description: Successor row version, 0 at creation.
+          effectiveDate:
+            type: string
+            format: date
+          expirationDate:
+            type: string
+            format: date
+          premiumAmount:
+            type: string
+            description: Decimal string with up to four fraction digits (SPEC 10.3).
+          premiumCurrency:
+            type: string
+            pattern: '^[A-Z]{3}$'
+          limitAmount:
+            type: string
+          limitCurrency:
+            type: string
+            pattern: '^[A-Z]{3}$'
+          renewedFromPolicyId:
+            type: string
+            format: uuid
+            description: Source policy id recorded on the successor (SPEC 11.2.4).
+          sourcePolicyId:
+            type: string
+            format: uuid
+          sourcePolicyNumber:
+            type: string
+          newPolicyId:
+            type: string
+            format: uuid
+          newPolicyNumber:
+            type: string
   securitySchemes:
     outboxSignature:
       type: httpApiKey
@@ -759,11 +832,12 @@ x-implementation:
   publisher: eia-policy-expert
   subscriber: none
   notes: >
-    Nine Policy events are written to the transactional outbox in the same
+    Ten Policy events are written to the transactional outbox in the same
     transaction as the aggregate write and dispatched by the platform outbox
     dispatcher when `eia.outbox.enabled=true`: `created`, `updated`,
-    `version-issued`, `endorsed`, `cancelled`, `reinstated`,
+    `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`,
     `billing-plan.created`, `installment.paid`, and `installment.waived`. The
+    renewal event carries both policy identities and the lineage link; the
     billing plan event carries the complete schedule; the installment events
     carry the settled row and its payment evidence. The other SPEC 11.2.9 and
     11.2.13 names remain planned. There is no business subscriber or

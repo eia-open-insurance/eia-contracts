@@ -456,6 +456,63 @@ Billing semantics:
   disputes, and commission statements from SPEC 11.2.13 remain unimplemented
   (M-12, M-27).
 
+### Policy renewal contract (2026-10-20)
+
+Policy 2.4.0 adds the renewal command. The change is additive: the route, the
+request schema, and the nullable lineage field are new; no existing path,
+request field, response field, or event changed.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/policy.yaml` | 2.4.0 | Additive | `POST /api/v1/policies/{policyId}/renew`, the `RenewPolicyRequest` schema, the nullable `Policy.renewedFromPolicyId` lineage field, and the 201/400/404/409 responses. |
+| `asyncapi/policy.yaml` | 1.3.0 | Additive | The `policy.policy.renewed` channel and `send` operation become implemented and carry a `PolicyPolicyRenewedData` payload schema. |
+| `asyncapi/event-catalog.yaml` | 1.8.0 | Additive | `policy.policy.renewed` joins the Policy implemented subset (10 of 23 Policy names; the platform total stays 183 published events). |
+
+Renewal semantics:
+
+- `POST /api/v1/policies/{policyId}/renew` creates a **new DRAFT successor
+  term** and never mutates the source. The successor inherits the source
+  product, insured party, coverages, limit schedules, insureds, and locations;
+  each copied limit starts with a fresh zeroed erosion state, and the successor
+  gets its own initial DRAFT policy version.
+- The request body is `RenewPolicyRequest`: `effectiveDate` and
+  `expirationDate` are required; `premiumAmount`, `premiumCurrency`,
+  `limitAmount`, and `limitCurrency` are optional and default to the source
+  policy values. `effectiveDate` must be on or after the source expiration date
+  and `expirationDate` must be after `effectiveDate`.
+- Only a source in `ISSUED`, `IN_FORCE`, `ENDORSED`, or `REINSTATED` can be
+  renewed. Any other status (including `DRAFT`, `QUOTED`, `BOUND`, `RENEWED`,
+  `CANCELLED`, `EXPIRED`, `NON_RENEWED`, and `VOID`) is 409
+  `RENEWAL_NOT_ALLOWED` with `meta.sourcePolicyId`, `meta.sourceStatus`, and
+  `meta.allowedStatuses`; nothing is written. A malformed body or invalid term
+  is 400 `VALIDATION_ERROR`; an unknown policy or another tenant's policy is 404
+  `POLICY_NOT_FOUND`.
+- The 201 body is the **successor** `Policy`, not the source, and carries the
+  successor's strong `ETag` (`"<version>"`, which is `"0"` for the new DRAFT
+  row). The successor's nullable `renewedFromPolicyId` points at the source;
+  policies created directly keep it null. The source keeps its status and has
+  no forward pointer on the wire.
+- The command requires `X-EIA-Tenant` and `X-EIA-Book: DIRECT`. The older Policy
+  proxy routes keep the book header optional for compatibility (see Policy
+  billing); renewal, as a new DIRECT command, requires it.
+- The successor policy, its children, its initial version, and the
+  `policy.policy.renewed` outbox event are written in one transaction, so a
+  rollback leaves none of them behind. The event payload carries the successor
+  identity and term plus both lineage sides: `renewedFromPolicyId`,
+  `sourcePolicyId`/`sourcePolicyNumber`, and
+  `newPolicyId`/`newPolicyNumber`.
+- The command does not accept `If-Match` or `Idempotency-Key` in this slice.
+  The domain currently emits `Idempotent-Replayed: false` from its shared
+  mutation helper even though no key is accepted, the expert accepts an omitted
+  `effectiveDate` and defaults it, and the domain accepts an absent
+  `X-EIA-Book`; the canonical contract requires both dates and the DIRECT book.
+  `MISMATCHES.md` M-06, M-07, and M-28 record these differences.
+- SPEC 11.2.6 defines renewal as a source transition to `RENEWED`, and SPEC
+  11.2.10 mounts the route under `/api/v1/policy/policies/{policyId}/renew`.
+  The implementation instead creates a successor DRAFT and keeps the source
+  untouched, on the short `/api/v1/policies/{policyId}/renew` path. M-01 and
+  M-28 record the deviation.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -490,6 +547,7 @@ Every request carries a resolved tenant; no request body may override it.
 | `X-EIA-Tenant` | All public routes and some internal routes | Required, UUID. Missing or malformed is a 400. |
 | `X-EIA-Book` | Direct Claims, Assumed Claims, Cession, Retrocession | Required and fixed to the vertical's book. A different book is hidden as 404 `BOOK_SCOPE_VIOLATION` in all four, so the response cannot confirm existence (SPEC 3.6.2, WALL-06). A missing header is still a 400 `BOOK_REQUIRED` in Cession and Retrocession; that is a validation error, not a book mismatch. |
 | `X-EIA-Book` | Policy billing | Optional for compatibility with the other Policy proxy routes, but a supplied value must be DIRECT; another book is hidden as 404 `BOOK_SCOPE_VIOLATION`. An absent header is accepted. The guard runs before the expert call. |
+| `X-EIA-Book` | Policy renewal | Required and fixed to `DIRECT`. The contract makes a missing header a 400 and hides another book as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header, which M-28 records. |
 | `X-EIA-Actor` | Claim assignment (`PATCH .../assignment`) | Optional acting identity, at most 128 characters. Recorded as `assignedBy` and in the claim audit trail; defaults to the assigned adjuster when absent or blank. The Direct Claims expert also accepts `X-EIA-User` as an alias (M-25). |
 | `?tenantId=` | Most internal expert routes | The expert is network-restricted and receives the tenant resolved by its domain service. |
 
@@ -823,8 +881,12 @@ missing directory.
    rules, the three Policy billing operations, the optional shared
    `BookHeaderDirectOptional` parameter, the `BillingPlan`, `Installment`,
    `CreateBillingPlanRequest`, and `UpdateInstallmentRequest` schemas and their
-   field bounds and enums, and agreement between `info.version` and
-   `x-compatibility.contractVersion`.
+   field bounds and enums, the Policy renewal operation with its required
+   `TenantHeader` and `BookHeaderDirect` parameters, the `RenewPolicyRequest`
+   required/optional field split, the 201 successor `Policy` with the shared
+   `ETag`, the 400/404/409 responses with `RENEWAL_NOT_ALLOWED` on the 409, the
+   nullable `Policy.renewedFromPolicyId` lineage field, and agreement between
+   `info.version` and `x-compatibility.contractVersion`.
 4. **AsyncAPI structure.** `asyncapi: 3.0.0`, channel addresses, `x-event-type`,
    `x-status: planned|implemented`, `x-implemented-by` on every implemented
    channel, one `send` operation per channel, a `DomainEvent` message on
@@ -838,8 +900,9 @@ missing directory.
    `x-status: implemented`. The implemented event names for all ten publishing
    verticals are required explicitly, including `direct.claim.assigned`,
    `assumed.claim.assigned`, `document.link.added`,
-   `document.link.removed`, `policy.billing-plan.created`,
-   `policy.installment.paid`, and `policy.installment.waived`.
+   `document.link.removed`, `policy.policy.renewed`,
+   `policy.billing-plan.created`, `policy.installment.paid`, and
+   `policy.installment.waived`.
 6. **JSON Schema checks.** All three files parse as JSON, declare the 2020-12
    dialect and an `$id`, carry the required members, keep required properties
    defined, and validate their own examples against a small schema subset.
@@ -882,8 +945,8 @@ missing directory.
 - the Policy page envelope is offset-based (`items`, `page`, `size`, `total`,
   `_links`) rather than the cursor envelope in SPEC 7.6/12.2, and the other
   verticals still return bare arrays;
-- `ETag`/`If-Match` exist only in Policy, and the billing plan and installment
-  commands do not accept them. `Idempotency-Key` covers Policy plus
+- `ETag`/`If-Match` exist only in Policy, and the billing plan, installment, and
+  renewal commands do not accept them. `Idempotency-Key` covers Policy plus
   the Direct Claims and Assumed Claims task/note creates; the remaining vertical
   creates do not accept it, the claim task/note responses spell the marker
   `Idempotent-Replay`, and the Direct Claims reservation has a narrow concurrent
@@ -916,6 +979,14 @@ missing directory.
   `policy.billing.plan-created`; the installment paid and waived facts have no
   SPEC name. Billing accounts, instructions, receivables, credit notes, dunning,
   disputes, and commission statements remain unimplemented (M-12, M-22, M-27);
+- Policy renewal creates a successor DRAFT policy and leaves the source in its
+  current status, whereas SPEC 11.2.6 turns the source to `RENEWED`; the public
+  path is the short `/api/v1/policies/{policyId}/renew` rather than SPEC
+  11.2.10's `/api/v1/policy/policies/{policyId}/renew`. The canonical contract
+  requires both term dates and `X-EIA-Book: DIRECT`, but the expert defaults an
+  omitted `effectiveDate`, the domain accepts an absent book header, and the
+  domain emits `Idempotent-Replayed: false` without accepting a key (M-06, M-07,
+  M-28);
 - ten experts publish a subset of their events through the transactional
   outbox into the platform `event-ingest` inbox, but no vertical consumes
   another vertical's events, there is no subscription registry or gap

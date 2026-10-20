@@ -352,6 +352,39 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   route, event-name, and status-vocabulary differences.
 - `python scripts/validate_contracts.py` passes 10,105 checks with 0 failures.
 
+### Added in the Policy renewal contract (2026-10-20)
+
+- `openapi/policy.yaml` is 2.4.0: adds `POST
+  /api/v1/policies/{policyId}/renew`, the `RenewPolicyRequest` schema
+  (`effectiveDate` and `expirationDate` required; `premiumAmount`,
+  `premiumCurrency`, `limitAmount`, and `limitCurrency` optional and defaulting
+  to the source policy), the nullable `Policy.renewedFromPolicyId` lineage
+  field, and the 201 successor `Policy` with the shared `ETag`. The operation
+  requires `X-EIA-Tenant` and `X-EIA-Book: DIRECT` and documents 400
+  `VALIDATION_ERROR`, 404 `POLICY_NOT_FOUND`, and 409 `RENEWAL_NOT_ALLOWED` for
+  a source that is not `ISSUED`, `IN_FORCE`, `ENDORSED`, or `REINSTATED`. The
+  source policy is never mutated.
+- `asyncapi/policy.yaml` is 1.3.0: the existing `policy.policy.renewed` channel
+  and `send` operation are marked implemented, name `PolicyEvents.java`, and
+  carry a `PolicyPolicyRenewedData` payload schema with the successor identity
+  and term, `renewedFromPolicyId`, and both lineage sides.
+- `asyncapi/event-catalog.yaml` is 1.8.0: `policy.policy.renewed` joins the
+  Policy `implemented` subset. It was already published, so the platform total
+  stays 183 published events and the Policy subset becomes 10 of its 23 names.
+- `scripts/validate_contracts.py` requires the renewal path, the required tenant
+  and DIRECT book parameters, the `RenewPolicyRequest` required/optional split
+  and date/money/currency field types, the 201 successor `Policy` with the
+  shared ETag, the 400/404/409 responses with `RENEWAL_NOT_ALLOWED` on the 409,
+  the nullable `Policy.renewedFromPolicyId`, and `policy.policy.renewed` in the
+  Policy implemented event list.
+- `README.md` records the renewal route, request rules, successor semantics,
+  eligibility statuses, the required DIRECT book, the no-idempotency caveat, and
+  the additive versions; `MISMATCHES.md` adds M-28 for the SPEC 11.2.6 RENEWED
+  transition and SPEC 11.2.10 base-path deviations plus the relaxed expert
+  `effectiveDate`, and updates M-06, M-07, M-12, M-14, and M-22 with the renewal
+  command and event.
+- `python scripts/validate_contracts.py` passes 10,171 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

@@ -70,6 +70,7 @@ removed per the resolution policy.
 | M-25 | Claim assignment contract alignment: team is optional, negative expectedVersion is 400, and X-EIA-Actor is the only actor header. Resolved 2026-10-20. | — |
 | M-26 | Document association links are a flat tenant-scoped link, not the SPEC association | M |
 | M-27 | Policy billing routes, event names, and status vocabulary differ from SPEC 11.2.13 | L |
+| M-28 | Policy renewal creates a successor instead of transitioning the source, and the route/body are narrower than SPEC 11.2.6/11.2.10 | L |
 
 ## M-01 Public base paths
 
@@ -250,6 +251,7 @@ Policy now implements the SPEC 12.6 concurrency mechanism:
 | Policy public second-slice mutations (coverage, endorsement, insured, location, cancel, reinstate) | Accept optional `If-Match` and return the policy `ETag`; stale tag is 409 `CONCURRENT_MODIFICATION` |
 | Policy public erosion | Returns the policy `ETag`; the derived limit state is version-checked internally and a lost update is 409 |
 | Policy public billing | No `ETag`/`If-Match`; the expert still version-checks the policy row and a concurrent change is 409 `CONCURRENT_MODIFICATION` |
+| Policy public renewal | No `If-Match`; the 201 successor carries its own `ETag` and a replay path does not exist |
 | Policy expert GET/create/PATCH | Same ETag and If-Match behaviour as the public service |
 | Contract public PATCH | Required `expectedVersion` body field; no ETag |
 | Contract public bind and commutation | Required `expectedVersion` on bind; the commutation has no caller-supplied version |
@@ -367,9 +369,12 @@ Residual differences:
   scoped by tenant and are never replayed across tenants.
 - **Coverage.** Contract, Cession, Retrocession, Document, Payment, and
   Notifications create commands still accept no `Idempotency-Key` and emit no
-  replay marker. Policy billing's plan create and installment PATCH are also
-  outside the Policy idempotency mechanism. The header remains optional
-  everywhere it exists, so a client that omits it is unaffected.
+  replay marker. Policy billing's plan create and installment PATCH and the
+  Policy renewal command are also outside the Policy idempotency mechanism. The
+  domain's shared mutation helper still emits `Idempotent-Replayed: false` on
+  the renewal 201 even though no key is accepted, so a client must not read that
+  header as proof that a retry is safe. The header remains optional everywhere
+  it exists, so a client that omits it is unaffected.
 
 Evidence:
 
@@ -512,7 +517,11 @@ unimplemented fields and list the missing operations under
   cancellations, and reinstatements, so those are no longer gaps. The
   2026-10-20 billing slice adds the installment plan and settlement; billing
   accounts, billing instructions, receivables, credit notes, dunning, disputes,
-  and commission statements from SPEC 11.2.13 remain gaps (M-27).
+  and commission statements from SPEC 11.2.13 remain gaps (M-27). The renewal
+  slice adds successor-term creation with `renewedFromPolicyId`; the reverse
+  `renewed_by_policy_id` pointer, the renewal-bound source transition, the
+  renewal batch, non-renewal reasons, and renewal invitations remain gaps
+  (M-28).
 - Contract: no `treatyNumber`, `contractBasis`, inception-date naming,
   `contract_section`, `contract_version`, `contract_sliding_scale`,
   `contract_premium`, `contract_reinstatement`, `contract_wording`,
@@ -578,7 +587,7 @@ ten publishing verticals now emit a subset:
 | Vertical | Implemented event names | Source |
 |---|---|---|
 | Party | `party.party.created`, `party.party.updated` | `repos/eia-party-expert/.../PartyEvents.java` |
-| Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.billing-plan.created`, `policy.installment.paid`, `policy.installment.waived` | `repos/eia-policy-expert/.../PolicyEvents.java` |
+| Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.billing-plan.created`, `policy.installment.paid`, `policy.installment.waived` | `repos/eia-policy-expert/.../PolicyEvents.java` |
 | Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded` | `repos/eia-contract-expert/.../ContractEvents.java` |
 | Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.assigned`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.closed`, `direct.claim.task-created`, `direct.claim.task-completed`, `direct.claim.task-updated`, `direct.claim.note-added` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
 | Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.assigned`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted`, `assumed.claim.task-created`, `assumed.claim.task-completed`, `assumed.claim.task-updated`, `assumed.claim.note-added` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
@@ -731,7 +740,7 @@ tables. The differences are:
 | Vertical | Implemented | SPEC /
 planned name |
 |---|---|---|
-| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created`; `policy.installment.paid` / `.waived` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name. `version-issued`, `endorsed`, `cancelled`, and `reinstated` match SPEC. |
+| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created`; `policy.installment.paid` / `.waived` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name. `version-issued`, `endorsed`, `cancelled`, `reinstated`, and `renewed` match SPEC. |
 | Contract | `contract.contract.updated` | No SPEC name: SPEC 11.3.9 lists lifecycle verbs only. `created`, `bound`, `commuted`, and `cession.recorded` match SPEC. |
 | Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned` | No SPEC names: SPEC 11.4.9 defines no assignment, task, or note event. `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and `closed` match SPEC. |
 | Assumed Claims | `assumed.claim.updated`; `assumed.claim.assigned`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no assignment, task, or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
@@ -1091,10 +1100,70 @@ as an alias with an EV-05 dual-publish window. The billing account, instruction,
 receivable, credit-note, dunning, dispute, and commission-statement routes
 remain unimplemented (M-12).
 
+## M-28 Policy renewal creates a successor instead of transitioning the source
+
+SPEC 11.2.6 puts renewal on the policy lifecycle: `IN_FORCE` or `EXPIRED`
+transitions to `RENEWED` when the renewal is bound, and the SPEC `policy` table
+carries `renewal_of_policy_id` (prior) and `renewed_by_policy_id` (successor).
+SPEC 11.2.10 mounts the command at
+`POST /api/v1/policy/policies/{policyId}/renew`. The 2026-10-20 slice implements
+a successor-creation command instead:
+
+| Aspect | Implemented | SPEC |
+|---|---|---|
+| Public path | `/api/v1/policies/{policyId}/renew` | `/api/v1/policy/policies/{policyId}/renew` (the M-01 short form) |
+| Source effect | Unchanged: stays `ISSUED`, `IN_FORCE`, `ENDORSED`, or `REINSTATED` | Transition to `RENEWED` |
+| New term | Brand-new DRAFT policy row with its own number and initial DRAFT version | Renewal bound on the policy with a `RENEWAL` change type |
+| Lineage | One field, `renewedFromPolicyId` (successor -> source) | `renewal_of_policy_id` plus the reverse `renewed_by_policy_id` |
+| Eligibility | 409 `RENEWAL_NOT_ALLOWED` outside the four statuses | The transition table allows `IN_FORCE` and `EXPIRED` |
+| Body | `effectiveDate` and `expirationDate` required; premium and limit overrides optional | SPEC defines no renewal command body |
+| Headers | `X-EIA-Tenant` required and `X-EIA-Book: DIRECT` required | The SPEC 3.6 book wall |
+| Idempotency / concurrency | No `Idempotency-Key` or `If-Match` (M-06, M-07) | SPEC 12.6 |
+
+The expert's internal route also diverges from the public contract:
+
+- `repos/eia-policy-expert/.../RenewPolicyRequest.effectiveDate` is optional and
+  defaults to the source expiration plus one day, while the domain
+  `RenewPolicyCommand` marks both dates `@NotNull` and the public contract
+  requires both. The expert's `/internal/v1` alias and its relaxed default are
+  not part of the public contract.
+- The domain guard is `BookScope.requireDirectWhenPresent`, so an absent
+  `X-EIA-Book` is accepted even though the contract requires `DIRECT` and a
+  different book is hidden as 404 `BOOK_SCOPE_VIOLATION`.
+- The domain's shared mutation response helper emits
+  `Idempotent-Replayed: false` on the renewal 201 although the route accepts no
+  `Idempotency-Key`, so that header does not make a retry safe.
+
+Evidence:
+
+- `repos/eia-policy-expert/.../PolicyRenewalController.java`,
+  `PolicyRenewalService.java`, `PolicyRenewalRules.java`,
+  `RenewPolicyRequest.java`, `Policy.java`, and `PolicyEvents.java` (the
+  `renewed` factory).
+- `repos/eia-policy-expert/src/main/resources/schema.sql:24,40,44`
+  (`renewed_from_policy_id` and its index).
+- `repos/eia-policy-domain/.../PolicyContractController.java` (`/renew`),
+  `PolicyContractService.renewPolicy`/`validateRenewal`,
+  `PolicyClient.renewPolicy`/`mutateDirect`, `RenewPolicyCommand.java`, and
+  `PolicyDto.java` (`renewedFromPolicyId`).
+- Tests: `PolicyRenewalControllerTest`, `PolicyRenewalIntegrationTest`,
+  `PolicyRenewalRulesTest`, and `PolicyContractControllerTest`
+  (`renewsAPolicyAndReturnsTheSuccessor`, `validatesTheRenewalBody`,
+  `rejectsANonDirectBookBeforeCallingTheExpert`,
+  `preservesTheExpertRenewalConflictProblem`).
+
+Resolution: either implement the SPEC 11.2.6 source transition (mark the source
+`RENEWED`, issue a `RENEWAL` version, and expose the reverse
+`renewed_by_policy_id` pointer) plus the renewal batch, or amend SPEC
+11.2.4/11.2.6/11.2.10 to the successor-DRAFT lineage and the short public path.
+The contract documents the implemented successor creation, requires both dates
+and `DIRECT` on the new public route, and keeps the expert's relaxed default out
+of the public contract.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-Policy billing contract:
+Policy renewal contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -1104,7 +1173,7 @@ python: 3.12.8 (standard library only)
 
 OpenAPI 3.1 documents
   OK openapi/party.yaml  5 paths, 7 operations
-  OK openapi/policy.yaml  39 paths, 50 operations
+  OK openapi/policy.yaml  40 paths, 51 operations
   OK openapi/contract.yaml  36 paths, 52 operations
   OK openapi/direct-claims.yaml  47 paths, 69 operations
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
@@ -1133,7 +1202,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 10105 checks, 0 failures
+  PASS 10171 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -1183,7 +1252,13 @@ Additional checks and limits:
   the `/api/v1/policies/{policyId}/billing` path, renaming the `BillingPlan`
   schema, and dropping `policy.installment.paid` from the Policy `implemented`
   list each fail with the specific path, schema, or implemented-event message;
-  each exited non-zero and named the removed object.
+  each exited non-zero and named the removed object. The Policy renewal pass
+  added three more: renaming the `/api/v1/policies/{policyId}/renew` path,
+  removing `renewedFromPolicyId` from the `Policy` schema, and dropping
+  `policy.policy.renewed` from the Policy catalog entries each fail with the
+  specific path, schema, or implemented-event message. All three negatives were
+  run on a throwaway copy; the catalog negative removed the name from both lists
+  and produced the channel-set and implemented-event failures.
 
 ## Resolution policy
 

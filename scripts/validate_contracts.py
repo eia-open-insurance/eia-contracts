@@ -515,6 +515,22 @@ POLICY_BILLING_EVENTS = (
 )
 
 
+# Policy renewal (SPEC 11.2.4 renewal lineage, SPEC 11.2.10 renew). The public
+# route creates a successor DRAFT term, leaves the source policy unchanged, and
+# returns the successor with its own ETag. The request body carries the two term
+# dates as required fields and premium/limit overrides as optional fields.
+POLICY_RENEWAL_PATH = "/api/v1/policies/{policyId}/renew"
+POLICY_RENEWAL_REQUIRED_FIELDS = ("effectiveDate", "expirationDate")
+POLICY_RENEWAL_OPTIONAL_FIELDS = (
+    "premiumAmount",
+    "premiumCurrency",
+    "limitAmount",
+    "limitCurrency",
+)
+POLICY_RENEWAL_ALLOWED_STATUSES = ("ISSUED", "IN_FORCE", "ENDORSED", "REINSTATED")
+POLICY_RENEWAL_EVENT = "policy.policy.renewed"
+
+
 # Event names the transactional-outbox rollout actually emits. The catalog must
 # list each one as published and implemented, and the vertical document must
 # expose a channel for it. Round 5 covered the first six verticals; the rollout
@@ -532,6 +548,7 @@ IMPLEMENTED_EVENTS = {
         "policy.policy.endorsed",
         "policy.policy.cancelled",
         "policy.policy.reinstated",
+        "policy.policy.renewed",
         "policy.billing-plan.created",
         "policy.installment.paid",
         "policy.installment.waived",
@@ -2032,6 +2049,170 @@ def check_policy_billing_openapi(contracts: ContractSet, document, relative: str
 
 
 # ---------------------------------------------------------------------------
+# Policy renewal checks
+# ---------------------------------------------------------------------------
+
+
+def check_policy_renewal_openapi(contracts: ContractSet, document, relative: str):
+    """Require the renewal operation, its schemas, responses, and lineage field."""
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    path_item = paths.get(POLICY_RENEWAL_PATH) if isinstance(paths, dict) else None
+    operation = path_item.get("post") if isinstance(path_item, dict) else None
+    where = f"{relative}: POST {POLICY_RENEWAL_PATH}"
+    contracts.check(
+        isinstance(operation, dict),
+        f"{where}: required renewal operation is missing",
+    )
+    if isinstance(operation, dict):
+        parameter_refs, inline_names = _parameter_names(operation)
+        contracts.check(
+            "TenantHeader" in parameter_refs,
+            f"{where}: must require the shared TenantHeader",
+        )
+        contracts.check(
+            "BookHeaderDirect" in parameter_refs,
+            f"{where}: must require the shared BookHeaderDirect parameter",
+        )
+        contracts.check(
+            "policyId" in inline_names,
+            f"{where}: must declare the policyId path parameter",
+        )
+
+        request_body = operation.get("requestBody") or {}
+        contracts.check(
+            request_body.get("required") is True,
+            f"{where}: request body must be required",
+        )
+        request_schema = (
+            ((request_body.get("content") or {}).get("application/json") or {}).get("schema")
+            if isinstance(request_body, dict)
+            else None
+        )
+        contracts.check(
+            isinstance(request_schema, dict)
+            and str(request_schema.get("$ref", "")).endswith("/schemas/RenewPolicyRequest"),
+            f"{where}: request body must use the RenewPolicyRequest schema",
+        )
+
+        created = (operation.get("responses") or {}).get("201")
+        created_headers = created.get("headers") if isinstance(created, dict) else None
+        tag = created_headers.get("ETag") if isinstance(created_headers, dict) else None
+        contracts.check(
+            isinstance(tag, dict)
+            and str(tag.get("$ref", "")).endswith("/headers/ETag"),
+            f"{where}: 201 must declare the shared ETag header",
+        )
+        created_schema = _response_schema(operation, "201")
+        contracts.check(
+            isinstance(created_schema, dict)
+            and str(created_schema.get("$ref", "")).endswith("/schemas/Policy"),
+            f"{where}: 201 must return the successor Policy schema",
+        )
+
+        responses = operation.get("responses") or {}
+        for code, suffix in (("400", "BadRequest"), ("404", "NotFound")):
+            response = responses.get(code) if isinstance(responses, dict) else None
+            contracts.check(
+                isinstance(response, dict)
+                and str(response.get("$ref", "")).endswith(f"/responses/{suffix}"),
+                f"{where}: {code} must reference the shared {suffix} response",
+            )
+        conflict = responses.get("409") if isinstance(responses, dict) else None
+        conflict_text = (
+            str(conflict.get("description") or "") if isinstance(conflict, dict) else ""
+        )
+        contracts.check(
+            "RENEWAL_NOT_ALLOWED" in conflict_text,
+            f"{where}: 409 must document RENEWAL_NOT_ALLOWED",
+        )
+        conflict_schema = _response_schema(operation, "409", "application/problem+json")
+        contracts.check(
+            isinstance(conflict_schema, dict)
+            and str(conflict_schema.get("$ref", "")).endswith("/schemas/Problem"),
+            f"{where}: 409 must document the shared Problem schema",
+        )
+
+        description = str(operation.get("description") or "")
+        for status in POLICY_RENEWAL_ALLOWED_STATUSES:
+            contracts.check(
+                status in description,
+                f"{where}: description must name the renewable source status {status}",
+            )
+        contracts.check(
+            POLICY_RENEWAL_EVENT in description,
+            f"{where}: description must name {POLICY_RENEWAL_EVENT}",
+        )
+
+    request = schemas.get("RenewPolicyRequest") or {}
+    request_properties = request.get("properties") or {}
+    request_required = set(request.get("required") or [])
+    contracts.check(
+        isinstance(request, dict) and request.get("type") == "object",
+        f"{relative}: RenewPolicyRequest must be an object schema",
+    )
+    for field in POLICY_RENEWAL_REQUIRED_FIELDS:
+        contracts.check(
+            field in request_properties,
+            f"{relative}: RenewPolicyRequest.properties.{field} is required",
+        )
+        contracts.check(
+            field in request_required,
+            f"{relative}: RenewPolicyRequest.required must list {field}",
+        )
+        contracts.check(
+            (request_properties.get(field) or {}).get("format") == "date",
+            f"{relative}: RenewPolicyRequest.{field} must be a date",
+        )
+    for field in POLICY_RENEWAL_OPTIONAL_FIELDS:
+        contracts.check(
+            field in request_properties,
+            f"{relative}: RenewPolicyRequest.properties.{field} is required",
+        )
+        contracts.check(
+            field not in request_required,
+            f"{relative}: RenewPolicyRequest.{field} must stay optional",
+        )
+    for field in ("premiumAmount", "limitAmount"):
+        contracts.check(
+            str((request_properties.get(field) or {}).get("$ref", "")).endswith(
+                "/schemas/MoneyAmount"
+            ),
+            f"{relative}: RenewPolicyRequest.{field} must reference MoneyAmount",
+        )
+    for field in ("premiumCurrency", "limitCurrency"):
+        contracts.check(
+            str((request_properties.get(field) or {}).get("$ref", "")).endswith(
+                "/schemas/CurrencyCode"
+            ),
+            f"{relative}: RenewPolicyRequest.{field} must reference CurrencyCode",
+        )
+
+    policy = schemas.get("Policy") or {}
+    policy_properties = policy.get("properties") or {}
+    policy_required = set(policy.get("required") or [])
+    lineage = policy_properties.get("renewedFromPolicyId")
+    contracts.check(
+        isinstance(lineage, dict),
+        f"{relative}: Policy.renewedFromPolicyId is required",
+    )
+    if isinstance(lineage, dict):
+        contracts.check(
+            _schema_types(lineage) == {"string", "null"},
+            f"{relative}: Policy.renewedFromPolicyId must be a nullable string",
+        )
+        contracts.check(
+            lineage.get("format") == "uuid",
+            f"{relative}: Policy.renewedFromPolicyId must be a uuid",
+        )
+    contracts.check(
+        "renewedFromPolicyId" not in policy_required,
+        f"{relative}: Policy.renewedFromPolicyId must stay optional",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
 
@@ -2625,6 +2806,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_document_links_openapi(contracts, document, relative)
         if vertical == "policy":
             check_policy_billing_openapi(contracts, document, relative)
+            check_policy_renewal_openapi(contracts, document, relative)
         contracts.check_openapi_schemas(document, relative)
         if verbose:
             print(f"  OK {relative}  paths={len(paths)} operations={operation_count}")
