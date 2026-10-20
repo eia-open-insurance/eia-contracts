@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-20 (Direct Claims task and note contract).
+Status: open, reviewed 2026-10-20 (Direct Claims and Assumed Claims task and note contracts).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -252,6 +252,7 @@ Policy now implements the SPEC 12.6 concurrency mechanism:
 | Direct Claims expert PATCH | Optional body version |
 | Direct Claims child PATCH (injuries, exposures, litigation, recoveries, liens) | Required body `expectedVersion` on the public and expert routes; stale is 409 |
 | Assumed Claims public POST status | Required body version |
+| Assumed Claims task PATCH | Required body `version` (the task version, not the claim version); a stale value is 409 `EIA-RNS-7802` and a repeated status is a no-op |
 | Assumed Claims child mutations | No caller-supplied version on most child commands; reserves use an effective-date guard |
 | Cession/Retrocession public POST transition | Not accepted; the domain reads and forwards the current version |
 | Cession/Retrocession expert PUT status | Required `version` |
@@ -314,19 +315,28 @@ same header on both the public and the expert route:
   persists, or replays an idempotency key, and `Idempotent-Replayed` is not
   emitted elsewhere.
 
-Direct Claims task and note POSTs are the counter-example:
+Direct Claims and Assumed Claims task and note POSTs are the counter-example:
 
-- Neither `POST /api/v1/claims/{claimId}/tasks` nor
-  `POST /api/v1/claims/{claimId}/notes` accepts an `Idempotency-Key`, and
-  neither the domain nor the expert stores a request hash or a dedupe row.
-- The expert assigns a fresh `TSK-{year}-{7 digits}` or
+- None of the Direct Claims or Assumed Claims task and note POSTs accepts an
+  `Idempotency-Key`, and neither the domains nor the experts store a request
+  hash or a dedupe row. The Direct Claims routes are
+  `POST /api/v1/claims/{claimId}/tasks` and `POST /api/v1/claims/{claimId}/notes`;
+  the Assumed Claims routes are
+  `POST /api/v1/assumed-claims/claims/{claimId}/tasks` and
+  `POST /api/v1/assumed-claims/claims/{claimId}/notes`.
+- Each expert assigns a fresh `TSK-{year}-{7 digits}` or
   `NTE-{year}-{7 digits}` number and inserts a row on every accepted request. A
   client retry after a timeout therefore opens a second task or appends a second
-  note; the duplicate is visible in `GET .../tasks` or `GET .../notes`.
-- A concurrent parent-claim version bump is 409. The task `PATCH` is
-  version-checked against the task version and is retry-safe: a command that
-  repeats the current status returns the existing task and writes no event.
-- Clients must not blind-retry the two POSTs; they should read the collection
+  note; the duplicate is visible in the matching `GET .../tasks` or
+  `GET .../notes` collection.
+- The Direct Claims task write bumps the parent claim with an expected version,
+  so a concurrent parent-claim change is 409. The Assumed Claims task and note
+  writes bump the parent claim without a caller-supplied version; their task
+  `PATCH` is the version-checked write. A stale task version is 409
+  `EIA-RNS-7802` in Assumed Claims (Direct Claims uses its own conflict code),
+  and a command that repeats the current status returns the existing task and
+  writes no event.
+- Clients must not blind-retry the four POSTs; they should read the collection
   and reconcile before retrying. No `Idempotent-Replayed` header is emitted.
 
 Evidence:
@@ -337,7 +347,14 @@ Evidence:
 - `repos/eia-direct-claims-expert/.../ClaimTaskController.java`,
   `ClaimTaskService.create`/`changeStatus`, `ClaimNoteController.java`,
   `ClaimNoteService.add`.
-- `repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/ClaimTaskNoteEndpointTest.java`.
+- `repos/eia-assumed-claims-domain/.../ClaimTaskNoteController.java`,
+  `ClaimTaskNoteService.addTask`/`changeTaskStatus`/`addNote`,
+  `AssumedClaimClient.addTask`/`changeTaskStatus`/`addNote`.
+- `repos/eia-assumed-claims-expert/.../ClaimTaskController.java`,
+  `ClaimTaskService.create`/`changeStatus`, `ClaimNoteController.java`,
+  `ClaimNoteService.add`, `ApiException.taskVersionConflict`.
+- `repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/ClaimTaskNoteEndpointTest.java`,
+  `repos/eia-assumed-claims-expert/src/test/java/com/eia/assumedclaims/expert/ClaimTaskNoteEndpointTest.java`.
 
 - `repos/eia-policy-domain/.../IdempotencyKeys.java`,
   `PolicyController.java` (`Idempotency-Key` request header),
@@ -502,7 +519,7 @@ ten publishing verticals now emit a subset:
 | Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated` | `repos/eia-policy-expert/.../PolicyEvents.java` |
 | Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded` | `repos/eia-contract-expert/.../ContractEvents.java` |
 | Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.closed` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
-| Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
+| Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted`, `assumed.claim.task-created`, `assumed.claim.task-completed`, `assumed.claim.task-updated`, `assumed.claim.note-added` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
 | Cession | `cession.cession.created`, `cession.cession.updated`, `cession.cession.handed-off` | `repos/eia-cession-expert/.../CessionEvents.java` |
 | Retrocession | `retrocession.retrocession.created`, `retrocession.retrocession.updated`, `retrocession.retrocession.handed-off` | `repos/eia-retrocession-expert/.../RetrocessionEvents.java` |
 | Document | `document.document.created`, `document.document.updated`, `document.document.status-changed` | `repos/eia-document-expert/.../DocumentEvents.java` |
@@ -546,14 +563,16 @@ status rests on the source and the integration tests, not on inbox data.
 ## M-16 Assumed Claims path alias
 
 `AssumedClaimController`, `LossAdviceController`, `ReserveController`,
-`CashCallController`, `RecoveryController`, `CommutationController`, and
-`DisputeController` are each mapped to both `/api/v1/assumed-claims` and
-`/api/v1/assumed-claims/claims` (`@RequestMapping({...})` on every controller).
+`CashCallController`, `RecoveryController`, `CommutationController`,
+`DisputeController`, and `ClaimTaskNoteController` are each mapped to both
+`/api/v1/assumed-claims` and `/api/v1/assumed-claims/claims`
+(`@RequestMapping({...})` on every controller).
 The web remote calls the `/claims` form. Both are documented: the base routes
-under both path forms and the second-slice routes under the short form with an
-`x-path-alias` naming the `/claims` equivalent. The duplicate surface should be
-reduced to one path; the alias is compatible today because both are
-implemented.
+under both path forms, the second-slice routes under the short form with an
+`x-path-alias` naming the `/claims` equivalent, and the task/note routes under
+the `/claims` form with an `x-path-alias` naming the short equivalent. The
+duplicate surface should be reduced to one path; the alias is compatible today
+because both are implemented.
 
 ## M-17 Error content type
 
@@ -642,7 +661,7 @@ planned name |
 | Policy | `policy.policy.created` / `.updated` | No SPEC name: SPEC 11.2.9 starts at `policy.policy.quoted`. `version-issued`, `endorsed`, `cancelled`, and `reinstated` match SPEC. |
 | Contract | `contract.contract.updated` | No SPEC name: SPEC 11.3.9 lists lifecycle verbs only. `created`, `bound`, `commuted`, and `cession.recorded` match SPEC. |
 | Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC name: SPEC 11.4.9 defines no task or note event. `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and `closed` match SPEC. |
-| Assumed Claims | `assumed.claim.updated` | No SPEC name: SPEC 11.5.9 lists lifecycle verbs only. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
+| Assumed Claims | `assumed.claim.updated`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no task or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
 | Cession | `cession.cession.created` / `.updated` / `.handed-off` | `cession.case.created`, `cession.handoff.sent`/`.acknowledged` |
 | Retrocession | `retrocession.retrocession.created` / `.updated` / `.handed-off` | `retrocession.case.created`, `retrocession.handoff.sent`/`.acknowledged` |
 | Document | `document.document.created` / `.updated` / `.status-changed` | `document.document.registered`, plus the SPEC lifecycle verbs |
@@ -660,7 +679,7 @@ Evidence:
 - `repos/eia-policy-expert/.../PolicyEvents.java:37-42`
 - `repos/eia-contract-expert/.../ContractEvents.java:41-49`
 - `repos/eia-direct-claims-expert/.../ClaimEvents.java:59-62`
-- `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java:45-53`
+- `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java:52-65`
 - `repos/eia-cession-expert/.../CessionEvents.java:27-29`
 - `repos/eia-retrocession-expert/.../RetrocessionEvents.java:28-30`
 - `repos/eia-document-expert/.../DocumentEvents.java:29-31`
@@ -753,7 +772,7 @@ and every web remote already call the documented routes.
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-Direct Claims task and note contract:
+Direct Claims and Assumed Claims task and note contracts:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -766,7 +785,7 @@ OpenAPI 3.1 documents
   OK openapi/policy.yaml  37 paths, 47 operations
   OK openapi/contract.yaml  36 paths, 52 operations
   OK openapi/direct-claims.yaml  45 paths, 67 operations
-  OK openapi/assumed-claims.yaml  36 paths, 51 operations
+  OK openapi/assumed-claims.yaml  39 paths, 56 operations
   OK openapi/cession.yaml  9 paths, 11 operations
   OK openapi/retrocession.yaml  9 paths, 11 operations
   OK openapi/document.yaml  7 paths, 9 operations
@@ -778,13 +797,13 @@ AsyncAPI 3 documents
   OK asyncapi/policy.yaml  20 event channels
   OK asyncapi/contract.yaml  21 event channels
   OK asyncapi/direct-claims.yaml  24 event channels
-  OK asyncapi/assumed-claims.yaml  16 event channels
+  OK asyncapi/assumed-claims.yaml  20 event channels
   OK asyncapi/cession.yaml  17 event channels
   OK asyncapi/retrocession.yaml  17 event channels
   OK asyncapi/document.yaml  18 event channels
   OK asyncapi/payment.yaml  18 event channels
   OK asyncapi/notifications.yaml  12 event channels
-  OK catalog: 172 unique published events across 10 verticals
+  OK catalog: 176 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -792,7 +811,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 9155 checks, 0 failures
+  PASS 9361 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -812,11 +831,15 @@ Additional checks and limits:
   failure message. The 2026-10-20 pass added three more negative checks that
   each fail as expected: removing `/api/v1/parties/search`, dropping `items`
   from the required `SearchResponse` keys, and declaring a book header on the
-  non-book-scoped `/api/v1/documents/search`. The task/note pass added three
-  more: renaming the `/api/v1/claims/{claimId}/tasks` path, renaming the
-  `TaskCreate` schema, and dropping `direct.claim.task-created` from the Direct
-  Claims `implemented` list each fail with the specific path, schema, or
-  implemented-event message.
+  non-book-scoped `/api/v1/documents/search`. The Direct Claims task/note pass
+  added three more: renaming the `/api/v1/claims/{claimId}/tasks` path, renaming
+  the `TaskCreate` schema, and dropping `direct.claim.task-created` from the
+  Direct Claims `implemented` list each fail with the specific path, schema, or
+  implemented-event message. The Assumed Claims task/note pass added three more:
+  renaming the `/api/v1/assumed-claims/claims/{claimId}/tasks` path, renaming
+  the `TaskStatusChange` schema, and dropping
+  `assumed.claim.note-added` from the Assumed Claims `implemented` list each
+  fail with the specific path, schema, or implemented-event message.
 
 ## Resolution policy
 

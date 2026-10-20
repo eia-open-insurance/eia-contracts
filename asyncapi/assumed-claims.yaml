@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:assumed-claims
 info:
   title: EIA Assumed Claims events
-  version: 1.1.0
+  version: 1.2.0
   summary: Published domain event names for the Assumed Claims vertical.
   description: >
     Event contract for the Assumed Claims vertical. The authoritative event names are
@@ -17,11 +17,14 @@ info:
     The Assumed Claims expert now publishes `assumed.claim.registered`,
     `assumed.claim.updated`, `assumed.claim.closed`, `assumed.claim.reopened`,
     `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`,
-    `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, and
-    `assumed.claim.commuted` through the transactional outbox; those channels
+    `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`,
+    `assumed.claim.commuted`, `assumed.claim.task-created`,
+    `assumed.claim.task-completed`, `assumed.claim.task-updated`, and
+    `assumed.claim.note-added` through the transactional outbox; those channels
     and operations are marked `x-status: implemented`. `assumed.claim.updated`
-    is additive: the catalog had no generic update fact. The other SPEC 11.5.9
-    names are planned.
+    is additive: the catalog had no generic update fact. The four task and note
+    names are new in this slice and have no SPEC 11.5.9 equivalent
+    (MISMATCHES.md M-22). The other SPEC 11.5.9 names are planned.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -201,6 +204,74 @@ channels:
       and valuation dates, basis, release document, status, and approval
       evidence.
     x-event-type: assumed.claim.commuted
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.5.9
+    x-implemented-by: repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/AssumedClaimEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  AssumedClaimTaskCreated:
+    address: assumed.claim.task-created
+    title: assumed.claim.task-created
+    description: >
+      Emitted when a diary task is opened, in the same transaction as the task
+      row and the parent claim version bump. The payload carries the claim
+      identity and `claimStatus`, the task identity and number, title,
+      description, due date, priority, task status, assignee, task version,
+      task timestamps, and `completedAt` when set. This name is new in this
+      contract and has no SPEC 11.5.9 equivalent (MISMATCHES.md M-22).
+    x-event-type: assumed.claim.task-created
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.5.9
+    x-implemented-by: repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/AssumedClaimEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  AssumedClaimTaskCompleted:
+    address: assumed.claim.task-completed
+    title: assumed.claim.task-completed
+    description: >
+      Emitted when a task moves to COMPLETE. The payload carries the claim
+      identity and `claimStatus`, the task fields after the change,
+      `changedFields: [status]`, `from`, and `to`. This name is new in this
+      contract and has no SPEC 11.5.9 equivalent (MISMATCHES.md M-22).
+    x-event-type: assumed.claim.task-completed
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.5.9
+    x-implemented-by: repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/AssumedClaimEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  AssumedClaimTaskUpdated:
+    address: assumed.claim.task-updated
+    title: assumed.claim.task-updated
+    description: >
+      Emitted when a task is cancelled or reopened. The payload is the same
+      shape as `assumed.claim.task-completed` and carries `changedFields:
+      [status]`, `from`, and `to`; a transition to COMPLETE uses
+      `assumed.claim.task-completed` instead. This name is new in this contract
+      and has no SPEC 11.5.9 equivalent (MISMATCHES.md M-22).
+    x-event-type: assumed.claim.task-updated
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.5.9
+    x-implemented-by: repos/eia-assumed-claims-expert/src/main/java/com/eia/assumedclaims/expert/AssumedClaimEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  AssumedClaimNoteAdded:
+    address: assumed.claim.note-added
+    title: assumed.claim.note-added
+    description: >
+      Emitted when an append-only note is written in the same transaction as
+      the note row and the parent claim version bump. The payload carries
+      `noteId`, `noteNumber`, `noteType`, `body`, `author`, and `createdAt`
+      plus the claim identity and version. This name is new in this contract
+      and has no SPEC 11.5.9 equivalent (MISMATCHES.md M-22).
+    x-event-type: assumed.claim.note-added
     x-event-version: 1
     x-status: implemented
     x-spec-section: SPEC 11.5.9
@@ -389,6 +460,46 @@ operations:
       Publishes assumed.claim.commuted when a commutation is executed.
     x-event-type: assumed.claim.commuted
     x-status: implemented
+  publishAssumedClaimTaskCreated:
+    action: send
+    channel:
+      $ref: '#/channels/AssumedClaimTaskCreated'
+    summary: Publish assumed.claim.task-created
+    description: >
+      Publishes assumed.claim.task-created through the transactional outbox in
+      the same transaction as the task insert and the parent claim version
+      bump.
+    x-event-type: assumed.claim.task-created
+    x-status: implemented
+  publishAssumedClaimTaskCompleted:
+    action: send
+    channel:
+      $ref: '#/channels/AssumedClaimTaskCompleted'
+    summary: Publish assumed.claim.task-completed
+    description: >
+      Publishes assumed.claim.task-completed when a task status change reaches
+      COMPLETE.
+    x-event-type: assumed.claim.task-completed
+    x-status: implemented
+  publishAssumedClaimTaskUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/AssumedClaimTaskUpdated'
+    summary: Publish assumed.claim.task-updated
+    description: >
+      Publishes assumed.claim.task-updated when a task is cancelled or reopened.
+    x-event-type: assumed.claim.task-updated
+    x-status: implemented
+  publishAssumedClaimNoteAdded:
+    action: send
+    channel:
+      $ref: '#/channels/AssumedClaimNoteAdded'
+    summary: Publish assumed.claim.note-added
+    description: >
+      Publishes assumed.claim.note-added through the transactional outbox in the
+      same transaction as the note insert and the parent claim version bump.
+    x-event-type: assumed.claim.note-added
+    x-status: implemented
   publishAssumedClaimDisputeRaised:
     action: send
     channel:
@@ -518,12 +629,13 @@ x-implementation:
   publisher: eia-assumed-claims-expert
   subscriber: none
   notes: >
-    Nine Assumed Claims events are written to the transactional outbox in the
-    same transaction as the aggregate or child write: `registered`, `updated`,
-    `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`,
-    `cash-call-requested`, `recovery-recorded`, and `commuted`. The other SPEC
-    11.5.9 names remain planned. There is no business subscriber or
-    subscription registry yet.
+    Thirteen Assumed Claims events are written to the transactional outbox in
+    the same transaction as the aggregate or child write: `registered`,
+    `updated`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`,
+    `cash-call-requested`, `recovery-recorded`, `commuted`, `task-created`,
+    `task-completed`, `task-updated`, and `note-added`. The other SPEC 11.5.9
+    names remain planned. There is no business subscriber or subscription
+    registry yet.
 
 x-consumed-events:
   - contract.contract.bound

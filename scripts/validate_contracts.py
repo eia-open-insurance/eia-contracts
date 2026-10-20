@@ -291,6 +291,11 @@ ROUND5_OPENAPI_PATHS = {
         ("/api/v1/assumed-claims/{assumedClaimId}/disputes", "get"),
         ("/api/v1/assumed-claims/{assumedClaimId}/disputes", "post"),
         ("/api/v1/assumed-claims/{assumedClaimId}/disputes/{disputeId}/resolve", "post"),
+        ("/api/v1/assumed-claims/claims/{claimId}/tasks", "get"),
+        ("/api/v1/assumed-claims/claims/{claimId}/tasks", "post"),
+        ("/api/v1/assumed-claims/claims/{claimId}/tasks/{taskId}", "patch"),
+        ("/api/v1/assumed-claims/claims/{claimId}/notes", "get"),
+        ("/api/v1/assumed-claims/claims/{claimId}/notes", "post"),
         ("/internal/v1/assumed-claims/{assumedClaimId}/close", "post"),
         ("/internal/v1/assumed-claims/{assumedClaimId}/financials", "get"),
         ("/internal/v1/assumed-claims/{assumedClaimId}/audit", "get"),
@@ -352,11 +357,18 @@ SEARCH_RESPONSE_KEYS = ("query", "limit", "items")
 SEARCH_ITEM_KEYS = ("id", "type", "label", "secondary", "status", "href")
 
 
-# Direct Claims task and note schemas added with contract 1.3.0. The public
-# projection and command shapes are the ones the domain records serialize, so
-# the names are mandatory alongside the five public routes above.
+# Direct Claims and Assumed Claims task and note schemas. The public projection
+# and command shapes are the ones the domains serialize, so the names are
+# mandatory alongside the five public routes above.
 TASK_NOTE_REQUIRED_SCHEMAS = {
     "direct-claims": [
+        "Task",
+        "TaskCreate",
+        "TaskStatusChange",
+        "Note",
+        "NoteCreate",
+    ],
+    "assumed-claims": [
         "Task",
         "TaskCreate",
         "TaskStatusChange",
@@ -413,6 +425,10 @@ IMPLEMENTED_EVENTS = {
         "assumed.claim.cash-call-requested",
         "assumed.claim.recovery-recorded",
         "assumed.claim.commuted",
+        "assumed.claim.task-created",
+        "assumed.claim.task-completed",
+        "assumed.claim.task-updated",
+        "assumed.claim.note-added",
     ],
     "cession": [
         "cession.cession.created",

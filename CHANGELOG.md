@@ -170,6 +170,33 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   updates M-22 for the four names that have no SPEC equivalent.
 - `python scripts/validate_contracts.py` passes 9,155 checks with 0 failures.
 
+### Added in the Assumed Claims task and note contract (2026-10-20)
+
+- `openapi/assumed-claims.yaml` is 1.3.0: adds `GET/POST
+  /api/v1/assumed-claims/claims/{claimId}/tasks`, `PATCH
+  /api/v1/assumed-claims/claims/{claimId}/tasks/{taskId}`, and `GET/POST
+  /api/v1/assumed-claims/claims/{claimId}/notes`, and the `Task`, `TaskCreate`,
+  `TaskStatusChange`, `Note`, and `NoteCreate` schemas. Every route requires
+  `X-EIA-Tenant` and `X-EIA-Book: ASSUMED`, keeps the document-level
+  session-cookie security, and documents 400/404; the mutations also document
+  409. The short `/api/v1/assumed-claims/{claimId}/...` form is recorded in
+  `x-path-alias`.
+- `asyncapi/assumed-claims.yaml` is 1.2.0: adds implemented channels and `send`
+  operations for `assumed.claim.task-created`,
+  `assumed.claim.task-completed`, `assumed.claim.task-updated`, and
+  `assumed.claim.note-added`, each naming `AssumedClaimEvents.java` in
+  `x-implemented-by`.
+- `asyncapi/event-catalog.yaml` is 1.4.0: the four task/note names are added to
+  the Assumed Claims published and implemented lists (176 published in total).
+- `scripts/validate_contracts.py` requires the five Assumed Claims task/note
+  paths, the five schemas, and the four task/note events in the Assumed Claims
+  implemented list.
+- `README.md` records the task/note versions, routes, schemas, and the
+  idempotency caveat; `MISMATCHES.md` extends M-07 with the Assumed Claims
+  retry caveat, M-06 with the task version check, M-14 with the four implemented
+  events, and M-22 with the four names that have no SPEC 11.5.9 equivalent.
+- `python scripts/validate_contracts.py` passes 9,361 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was
