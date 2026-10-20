@@ -737,6 +737,35 @@ Semantics:
   fields, and the approval and allocation-percentage command steps are not
   implemented. The public path is the short M-01 form. M-32 records the gap.
 
+### Direct Claims list claimant filter (2026-10-20)
+
+Direct Claims 1.7.0 adds the optional claimant filter to the claim list. The
+change is additive: the query parameter is optional, no existing path, request
+body field, response body field, or event changed, and a caller that omits it
+keeps the unfiltered tenant list.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/direct-claims.yaml` | 1.7.0 | Additive | `GET /api/v1/claims` and `GET /internal/v1/claims` accept the optional `claimantPartyId` UUID query parameter alongside `status`; the public list documents the required tenant and DIRECT book, the bare `Claim[]` response, and the exact-match semantics. |
+
+Filter semantics:
+
+- `status` and `claimantPartyId` are independent optional filters. Supplying
+  either narrows the list; supplying both applies an AND; omitting both returns
+  every claim for the caller's tenant. The order stays newest first
+  (`created_at DESC`, then `claim_number DESC`).
+- `claimantPartyId` is matched exactly against the claim's stored claimant
+  party UUID. There is no Party-service lookup and no tenant check on the
+  party, so a well-formed UUID that matches no claim returns an empty array,
+  not a 404. A malformed UUID is a 400.
+- The public route takes `X-EIA-Tenant` and requires `X-EIA-Book: DIRECT`; a
+  missing or different book is hidden as 404 `BOOK_SCOPE_VIOLATION` (SPEC 3.6.2,
+  WALL-06). The response is the bare `Claim[]`, not the search envelope.
+- The expert alias reads the tenant from `?tenantId=` and forwards the filter
+  from the domain client. Both controllers and the expert repository already
+  implement the parameter; this contract release documents it. `MISMATCHES.md`
+  M-33 records the exact-match and no-reference-check caveat.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -1209,6 +1238,9 @@ missing directory.
    schemas with their field bounds, the 201/200 successes, the 400
    `POLICY_MISMATCH` and 409 `ALLOCATION_EXCEEDS_100` documentation, and the
    removal of the implemented allocations path from `x-planned-operations`,
+   the `claimantPartyId` filter on the public and expert Direct Claims lists
+   with its optional UUID query schema, tenant and DIRECT book parameters,
+   retained status filter, and bare `Claim` array response,
    the six document association-link operations on
    the public and expert surfaces, the `DocumentLink`, `CreateDocumentLinkRequest`,
    and `DocumentLinkedType` schemas, the `linkedType` + `linkedId` list filter,

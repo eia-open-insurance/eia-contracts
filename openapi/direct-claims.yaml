@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Direct Claims API
-  version: 1.6.0
+  version: 1.7.0
   summary: Direct-book claim administration and the Direct Claims expert API.
   description: >
     This document describes the implemented public Direct Claims domain API and
@@ -62,6 +62,15 @@ info:
     version and emits `direct.claim.allocation-created` in the same
     transaction. A missing or non-DIRECT book is hidden as 404 (SPEC 3.6.2,
     WALL-06).
+
+    The claim list accepts the optional `status` and `claimantPartyId` filters
+    on both the public and expert surfaces. The filters are independent:
+    supplying either narrows the list, supplying both combines them as an AND,
+    and omitting both returns every claim for the tenant. `claimantPartyId` is
+    matched exactly against the claim's stored claimant party UUID; an unknown
+    party returns an empty array rather than a 404. The public list requires
+    `X-EIA-Tenant` and `X-EIA-Book: DIRECT`, hides a missing or different book
+    as 404, and returns the bare `Claim` array (not the search envelope).
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -89,12 +98,34 @@ paths:
         - Direct Claims
       summary: List direct claims for the caller's tenant and book.
       description: >
-        Returns a bare JSON array, optionally filtered by status. Free-text
-        search is served by `GET /api/v1/claims/search`.
+        Returns a bare JSON array of the caller's DIRECT claims, newest first.
+        `status` and `claimantPartyId` are optional and independent filters:
+        supplying either narrows the list, supplying both applies an AND, and
+        omitting both returns every claim for the tenant. `claimantPartyId` is
+        matched exactly against the claim's stored claimant party UUID, so an
+        unknown party returns an empty array rather than a 404.
+
+        `X-EIA-Tenant` is required and `X-EIA-Book` is required and must be
+        DIRECT; a missing or different book is hidden as 404
+        `BOOK_SCOPE_VIOLATION` (SPEC 3.6.2, WALL-06). This operation returns
+        the bare `Claim` array; free-text search is served by
+        `GET /api/v1/claims/search`.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
         - $ref: './components.yaml#/components/parameters/DirectClaimStatusFilter'
+        - name: claimantPartyId
+          in: query
+          required: false
+          description: >
+            Restrict the list to claims whose claimant is this party. The value
+            is matched exactly against the stored claimant party UUID; a
+            malformed UUID is a 400, and a well-formed UUID that matches no
+            claim returns an empty array. Combine with `status` to narrow both
+            dimensions.
+          schema:
+            type: string
+            format: uuid
       responses:
         '200':
           description: Claims of the tenant.
@@ -1549,12 +1580,29 @@ paths:
       tags:
         - Direct Claims internal
       summary: List direct claims for a tenant and book (expert).
+      description: >
+        Returns a bare JSON array of the tenant's DIRECT claims, newest first.
+        `status` and `claimantPartyId` are optional and independent filters that
+        combine as an AND. The tenant comes from `?tenantId=`;
+        `X-EIA-Book` is required and must be DIRECT.
       security: []
       x-internal-api: true
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantIdQuery'
         - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
         - $ref: './components.yaml#/components/parameters/DirectClaimStatusFilter'
+        - name: claimantPartyId
+          in: query
+          required: false
+          description: >
+            Restrict the list to claims whose claimant is this party. The value
+            is matched exactly against the stored claimant party UUID; a
+            malformed UUID is a 400, and a well-formed UUID that matches no
+            claim returns an empty array. Combine with `status` to narrow both
+            dimensions.
+          schema:
+            type: string
+            format: uuid
       responses:
         '200':
           description: Claims of the tenant.
@@ -4415,6 +4463,9 @@ x-implementation:
     Vertical-specific ApiError {timestamp, status, code, message, path,
     details[{field, message}]}. Not the canonical Problem envelope yet.
   notes: >
+    The public and expert claim lists accept the optional `status` and
+    `claimantPartyId` filters; the expert applies both to the same
+    tenant-scoped, newest-first query, and the domain forwards them unchanged.
     The internal transition route takes the tenant from X-EIA-Tenant while the
     other internal GET routes take ?tenantId=; create and close take
     X-EIA-Tenant. Every internal route requires X-EIA-Book: DIRECT and hides a
@@ -4446,10 +4497,12 @@ x-implementation:
     equivalent and the SPEC `direct.claim.allocated` name remains planned
     (MISMATCHES.md M-22).
 x-compatibility:
-  contractVersion: 1.6.0
-  previousContractVersion: 1.5.0
+  contractVersion: 1.7.0
+  previousContractVersion: 1.6.0
   breaking: []
   compatible:
+    - Adds the optional claimantPartyId UUID query parameter to GET /api/v1/claims and GET /internal/v1/claims, alongside the existing status filter.
+    - Documents the exact-match claimant filter, the tenant and DIRECT book scope, the bare Claim array response, and the newest-first order.
     - Adds GET/POST /api/v1/claims/{claimId}/allocations.
     - Adds the AllocationSummary, Allocation, and CreateClaimAllocationRequest schemas.
     - Documents 200/201/400/404/409, the 400 POLICY_MISMATCH policy guard, and the 409 ALLOCATION_EXCEEDS_100 percentage guard.
@@ -4490,6 +4543,13 @@ x-compatibility:
     11.4.9 equivalent; the SPEC `direct.claim.allocated` channel remains
     planned. The domain's public error-code remap is recorded in MISMATCHES.md
     M-31.
+
+    Claimant filtering is additive over 1.6.0: both list parameters are
+    optional, no existing path, request body field, response body field, or
+    event changed, and a caller that omits the filter keeps the unfiltered
+    tenant list. The filter is an implementation extension already present in
+    both claim controllers; it does not resolve the party, so an unknown UUID
+    returns an empty array (MISMATCHES.md M-33).
 x-planned-operations:
   - method: PATCH
     path: /api/v1/claims/{claimId}

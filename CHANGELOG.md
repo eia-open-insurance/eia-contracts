@@ -576,6 +576,28 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   command-step differences, and updates M-06, M-07, M-12, M-13, and M-14.
 - `python scripts/validate_contracts.py` passes 11,032 checks with 0 failures.
 
+### Added in the Direct Claims list claimant filter contract (2026-10-20)
+
+- `openapi/direct-claims.yaml` is 1.7.0: `GET /api/v1/claims` and
+  `GET /internal/v1/claims` document the optional `claimantPartyId` UUID query
+  parameter alongside the existing optional `status` filter. The public
+  operation documents the required `X-EIA-Tenant` and `X-EIA-Book: DIRECT`
+  headers, the 404 `BOOK_SCOPE_VIOLATION` book wall, the bare `Claim[]`
+  response, the newest-first order, and the exact-match semantics (an unknown
+  party yields an empty array, not a 404). The expert operation documents the
+  `tenantId` query scope and the same two independent filters. The change is
+  additive: no path, request body field, response body field, or event changed.
+- `scripts/validate_contracts.py` requires the `claimantPartyId` inline query
+  parameter on both list operations, its optional `string`/`uuid` schema, the
+  retained shared `DirectClaimStatusFilter`, the tenant and
+  `BookHeaderDirect` parameters, the `DIRECT` scope in the operation
+  description, and the bare `Claim` array 200 schema.
+- `README.md` records the filter semantics, the AND combination, the
+  exact-match/no-Party-lookup caveat, and the 1.7.0 additive classification;
+  `MISMATCHES.md` adds M-33 for the exact-match filter and no party reference
+  check, and updates the validation evidence.
+- `python scripts/validate_contracts.py` passes 11,054 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-20 (Policy mass tort profile).
+Status: open, reviewed 2026-10-20 (Direct Claims list claimant filter).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -33,7 +33,9 @@ where the running code does not meet it yet.
   Policy mass tort profile pass reads the domain profile controller, service,
   projection, command, book scope, and client plus the expert profile
   controller, service, rules, repository, result, request, projection, event
-  factory, `schema.sql`, and tests.
+  factory, `schema.sql`, and tests. The Direct Claims list-filter pass reads
+  the public and expert claim controllers, services, and repository plus the
+  domain claim client and projection.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -91,6 +93,7 @@ removed per the resolution policy.
 | M-30 | Contract period bordereaux use a PROCESSED/FAILED vocabulary and event names, omit the SPEC line/exception staging, and accept an absent book header | L |
 | M-31 | Direct Claims allocation error codes are remapped at the public surface | L |
 | M-32 | Policy mass tort profile is a narrow DRAFT/COMPLETE upsert with different vocabularies and route | L |
+| M-33 | Direct Claims list claimant filter is exact-match with no party reference check | L |
 
 ## M-01 Public base paths
 
@@ -568,7 +571,8 @@ unimplemented fields and list the missing operations under
   queues. Round 5 adds injuries, exposures, reserve history, the coverage
   decision, litigation, settlements, recoveries, liens, and close. The
   allocation slice adds policy-year/layer splits with summary totals, so those
-  are no longer gaps.
+  are no longer gaps. The list accepts the optional exact-match
+  `claimantPartyId` filter in addition to `status` (M-33).
 - Assumed Claims: no policy-year allocations, documents, lineage, or work
   queues. Round 5 adds loss advices, bordereau ingest, reserve history, cash
   calls, recoveries, commutation, disputes, audit, financials, and close.
@@ -1468,10 +1472,47 @@ public domain controller, and either adding the SPEC 11.2.10 path alias or
 correcting the SPEC to the short path. Renaming the implemented vocabularies or
 the event is breaking and needs an ADR and an EV-05 dual-publish window.
 
+## M-33 Direct Claims list claimant filter is exact-match with no party reference check
+
+The 2026-10-20 Direct Claims contract adds the optional `claimantPartyId` UUID
+query parameter to `GET /api/v1/claims` and `GET /internal/v1/claims`. The
+running services already implement it: the domain controller accepts the
+parameter and forwards it through `ClaimService` and `ClaimClient`; the expert
+passes it to `ClaimRepository.findAll` alongside `status`. The two filters are
+independent and combine as an AND, and the query is ordered
+`created_at DESC, claim_number DESC`.
+
+The filter is an exact equality against the stored `claim.claimant_party_id`.
+Neither service calls the Party service, requires the party to belong to the
+caller's tenant, or distinguishes an unknown party from a party with no claims:
+a well-formed UUID that matches nothing returns an empty array, not a 404, and
+a malformed UUID is a 400. SPEC 11.4.10 does not name a claimant filter, so the
+parameter is an implementation extension that this contract release makes
+canonical. The list remains unpaginated (M-04) and the public path remains the
+short M-01 form.
+
+Evidence:
+
+- `repos/eia-direct-claims-domain/.../ClaimController.java:28-35` (public list
+  headers, optional `status` and `claimantPartyId` query parameters, DIRECT book
+  guard).
+- `repos/eia-direct-claims-domain/.../ClaimService.java:31-36` and
+  `ClaimClient.java:30-45` (filter forwarding to the expert).
+- `repos/eia-direct-claims-expert/.../ClaimController.java:28-35`,
+  `ClaimService.java:56-61`, and `ClaimRepository.java:70-94` (exact-match
+  predicates for status and claimant, tenant/book scope, newest-first order).
+- `openapi/direct-claims.yaml` 1.7.0 records the parameter on both list
+  operations and the validator requires it.
+
+Resolution: keep the exact-match filter. If cross-vertical referential checks
+become required, resolve the party and hide a foreign or unknown party; that
+would turn an empty result into a 404 and needs a contract revision.
+Pagination remains M-04.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-Policy mass tort profile contract:
+Direct Claims list claimant filter contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -1510,7 +1551,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 11032 checks, 0 failures
+  PASS 11054 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -1604,6 +1645,12 @@ Additional checks and limits:
   the Policy `implemented` list, and restoring the implemented route to
   `x-planned-operations` each fail with the specific missing operation,
   schema, implemented-event, or planned-route message. All four were run on a
+  throwaway copy and exited non-zero (exit 1); the working copy was left
+  unchanged. The Direct Claims list-filter pass added three more: removing the
+  `claimantPartyId` parameter from `GET /api/v1/claims`, changing its schema
+  `format` from `uuid` to no format, and removing the shared
+  `DirectClaimStatusFilter` from the public list each fail with the specific
+  parameter, schema, or retained-filter message. All three were run on a
   throwaway copy and exited non-zero (exit 1); the working copy was left
   unchanged.
 

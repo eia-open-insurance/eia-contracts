@@ -3859,6 +3859,89 @@ def check_direct_claim_allocations(contracts: ContractSet, document, relative: s
     )
 
 
+# ---------------------------------------------------------------------------
+# Direct Claims claim-list filter checks
+# ---------------------------------------------------------------------------
+
+
+DIRECT_CLAIM_LIST_FILTER_PARAM = "claimantPartyId"
+
+
+def check_direct_claim_list_filter(contracts: ContractSet, document, relative: str):
+    """Require the optional claimant filter on both claim list operations.
+
+    The public and expert lists accept ``status`` and ``claimantPartyId`` as
+    independent optional filters. The public list requires the tenant header;
+    the expert uses the tenantId query parameter. Both require the DIRECT book
+    header and return the bare Claim array.
+    """
+    paths = document.get("paths") or {}
+    for path, tenant_parameter in (
+        ("/api/v1/claims", "TenantHeader"),
+        ("/internal/v1/claims", "TenantIdQuery"),
+    ):
+        path_item = paths.get(path) if isinstance(paths, dict) else None
+        operation = path_item.get("get") if isinstance(path_item, dict) else None
+        where = f"{relative}: GET {path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required claim list operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+        parameter_refs, _ = _parameter_names(operation)
+        contracts.check(
+            tenant_parameter in parameter_refs,
+            f"{where}: must document the shared {tenant_parameter} parameter",
+        )
+        contracts.check(
+            "BookHeaderDirect" in parameter_refs,
+            f"{where}: must require the shared BookHeaderDirect parameter",
+        )
+        contracts.check(
+            "DirectClaimStatusFilter" in parameter_refs,
+            f"{where}: must keep the shared DirectClaimStatusFilter parameter",
+        )
+        claimant = _inline_parameter(operation, DIRECT_CLAIM_LIST_FILTER_PARAM)
+        contracts.check(
+            isinstance(claimant, dict),
+            f"{where}: must declare the optional claimantPartyId query parameter",
+        )
+        if isinstance(claimant, dict):
+            contracts.check(
+                claimant.get("in") == "query",
+                f"{where}: claimantPartyId must be a query parameter",
+            )
+            contracts.check(
+                claimant.get("required") is False,
+                f"{where}: claimantPartyId must stay optional",
+            )
+            claimant_schema = claimant.get("schema") or {}
+            contracts.check(
+                (claimant_schema.get("type"), claimant_schema.get("format"))
+                == ("string", "uuid"),
+                f"{where}: claimantPartyId must be a UUID string",
+            )
+        description = str(operation.get("description") or "")
+        contracts.check(
+            DIRECT_CLAIM_LIST_FILTER_PARAM in description,
+            f"{where}: description must document the claimantPartyId filter",
+        )
+        contracts.check(
+            "DIRECT" in description,
+            f"{where}: description must document the DIRECT book scope",
+        )
+        ok_schema = _response_schema(operation, "200")
+        contracts.check(
+            isinstance(ok_schema, dict)
+            and ok_schema.get("type") == "array"
+            and str((ok_schema.get("items") or {}).get("$ref", "")).endswith(
+                "/schemas/Claim"
+            ),
+            f"{where}: 200 must be a bare array of Claim",
+        )
+
+
 def check_openapi(contracts: ContractSet, verbose: bool):
     print("\nOpenAPI 3.1 documents")
     expected = {"components"} | set(VERTICAL_FILES)
@@ -4445,6 +4528,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_contract_bordereaux(contracts, document, relative)
         if vertical == "direct-claims":
             check_direct_claim_allocations(contracts, document, relative)
+            check_direct_claim_list_filter(contracts, document, relative)
         contracts.check_openapi_schemas(document, relative)
         if verbose:
             print(f"  OK {relative}  paths={len(paths)} operations={operation_count}")
