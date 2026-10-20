@@ -540,6 +540,42 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   implemented cross-policy receivable read and updates M-12.
 - `python scripts/validate_contracts.py` passes 10,847 checks with 0 failures.
 
+### Added in the Policy mass tort profile contract (2026-10-20)
+
+- `openapi/policy.yaml` is 2.6.0: adds `GET/PUT
+  /api/v1/policies/{policyId}/mass-tort-profile`, the `MassTortProfile`
+  projection (`profileId`, `policyId`, `tortType`, `triggerType`,
+  `allocationMethod`, `allocationNotes`, `coverageBlockStart`,
+  `coverageBlockEnd`, `status`, `updatedAt`), the
+  `UpdateMassTortProfileRequest` upsert body (`tortType`, `triggerType`,
+  `allocationMethod`, and `status` required; notes and both block dates
+  optional for DRAFT), and the `MassTortTortType`, `MassTortTriggerType`,
+  `MassTortAllocationMethod`, and `MassTortProfileStatus` enums. GET documents
+  200/400/404; PUT documents 200/201/400/404/409. Both operations require
+  `X-EIA-Tenant` and constrain a supplied `X-EIA-Book` to DIRECT. The
+  implemented path is removed from `x-planned-operations`. The canonical PUT
+  keeps the 201 create response; the domain currently returns 200 for both
+  outcomes, which M-32 records.
+- `asyncapi/policy.yaml` is 1.4.0: `policy.mass-tort-profile.updated` becomes
+  implemented and carries a `PolicyMassTortProfileUpdatedData` payload with the
+  policy identity, profile status, tort, trigger, allocation method, and
+  coverage-block dates.
+- `asyncapi/event-catalog.yaml` is 1.12.0: `policy.mass-tort-profile.updated`
+  joins the Policy `implemented` subset. The name was already in `published`,
+  so the platform total stays 189 published names; Policy becomes 23 published
+  and 11 implemented.
+- `scripts/validate_contracts.py` requires the two mass tort operations, the
+  tenant and optional DIRECT book parameters, the 200/201/400/404/409
+  responses, the `MassTortProfile` and `UpdateMassTortProfileRequest` schemas
+  and their field bounds, the four enum schemas, the event payload schema, the
+  implemented channel/operation, and the new implemented event name. It also
+  rejects the implemented route under `x-planned-operations`.
+- `README.md` records the routes, projection, vocabulary, COMPLETE gate,
+  DIRECT book rule, event, and additive versions; `MISMATCHES.md` adds M-32 for
+  the SPEC route, trigger/status vocabulary, tort catalog, projection, and
+  command-step differences, and updates M-06, M-07, M-12, M-13, and M-14.
+- `python scripts/validate_contracts.py` passes 11,032 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

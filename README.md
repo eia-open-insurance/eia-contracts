@@ -674,6 +674,69 @@ Semantics:
   detection, reconciliation to a declared total, the exception report, and the
   SPEC single-bordereau `GET` remain gaps (M-30).
 
+### Policy mass tort profile contract (2026-10-20)
+
+Policy 2.6.0 adds the mass tort profile of a direct policy. The change is
+additive: the two operations and the six schemas are new, and no existing path,
+request field, response field, or event changed. The event name was already
+published in the catalog, so it moves into the implemented subset without
+changing the published total.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/policy.yaml` | 2.6.0 | Additive | `GET/PUT /api/v1/policies/{policyId}/mass-tort-profile`, the `MassTortProfile` and `UpdateMassTortProfileRequest` schemas, and the `MassTortTortType`, `MassTortTriggerType`, `MassTortAllocationMethod`, and `MassTortProfileStatus` enums. |
+| `asyncapi/policy.yaml` | 1.4.0 | Additive | `policy.mass-tort-profile.updated` becomes implemented and carries a `PolicyMassTortProfileUpdatedData` payload schema. |
+| `asyncapi/event-catalog.yaml` | 1.12.0 | Additive | `policy.mass-tort-profile.updated` joins the Policy implemented subset (189 published names unchanged; Policy 23 published and 11 implemented). |
+
+Semantics:
+
+- A policy has exactly one profile. `GET` returns it; a policy without one is
+  404 `MASS_TORT_PROFILE_NOT_FOUND`, and an unknown or other-tenant policy is
+  404 `POLICY_NOT_FOUND`. `PUT` is an upsert: 201 when the row is created, 200
+  when an existing row is replaced, and the `profileId` is preserved on update.
+  The expert distinguishes the two outcomes; the public domain currently
+  returns 200 for both, which M-32 records.
+- The projection is `{profileId, policyId, tortType, triggerType,
+  allocationMethod, allocationNotes, coverageBlockStart, coverageBlockEnd,
+  status, updatedAt}`. `tortType`, `triggerType`, `allocationMethod`, and
+  `status` are always present. `allocationNotes` and the two inclusive
+  coverage-block dates are nullable; a DRAFT profile may omit them, while a
+  COMPLETE profile requires all three (400
+  `INCOMPLETE_MASS_TORT_PROFILE`). The coverage block is inclusive, so a
+  one-day block is valid and an end before the start is 400
+  `INVALID_COVERAGE_BLOCK`.
+- `tortType` is one of `ASBESTOS`, `SILICA`, `TALC`, `PFAS`, `OPIOIDS`,
+  `PRODUCT_LIABILITY`, `ENVIRONMENTAL`, or `OTHER`; `triggerType` is
+  `EXPOSURE`, `MANIFESTATION`, `INJURY`, or `REVISIONIST`; `allocationMethod`
+  is `ALL_SUMS`, `PRO_RATA_TIME_ON_RISK`, `PRO_RATA_PREMIUM`, `EQUAL_SHARES`,
+  `STACKED_LIMITS`, or `CUSTOM_MATRIX`; `status` is `DRAFT` or `COMPLETE`.
+  Values are trimmed and upper-cased before validation; an unknown value is 400
+  `INVALID_TORT_TYPE`, `INVALID_TRIGGER_TYPE`, `INVALID_ALLOCATION_METHOD`, or
+  `INVALID_MASS_TORT_PROFILE_STATUS`.
+- The 2000-character notes cap is enforced on the stored trimmed value. The
+  public domain also accepts `trigger` as an alias for `triggerType`, and
+  read-only response members sent in the body are ignored.
+- `X-EIA-Tenant` is required. The canonical contract requires
+  `X-EIA-Book: DIRECT`; an absent header is accepted for compatibility with the
+  other Policy proxy routes, a supplied value must be DIRECT, and another book
+  is hidden as 404 `BOOK_SCOPE_VIOLATION`. The domain always forwards DIRECT
+  to the expert.
+- A create race is 409 `MASS_TORT_PROFILE_ALREADY_EXISTS`, and a concurrent
+  policy or profile change is 409 `CONCURRENT_MODIFICATION`. The command
+  accepts neither `Idempotency-Key` nor `If-Match`; repeating the same PUT
+  rewrites the profile and emits another event (M-06, M-07, M-32).
+- Every accepted write bumps the policy row version and writes
+  `policy.mass-tort-profile.updated` in the same transaction. The payload
+  carries `policyId`, `policyNumber`, `status`, `tortType`, `triggerType`,
+  `allocationMethod`, `coverageBlockStart`, and `coverageBlockEnd`; the profile
+  id and allocation notes are deliberately not in the payload because the
+  policy is the aggregate and the event is keyed by the policy version.
+- The implemented profile is narrower than SPEC 11.2.11: the SPEC
+  `trigger_theory` and `ACTIVE`/`SUPERSEDED`/`UNDER_REVIEW` vocabularies, the
+  wider Appendix E tort catalog, the secondary tort/product/exposure/review
+  fields, and the approval and allocation-percentage command steps are not
+  implemented. The public path is the short M-01 form. M-32 records the gap.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -1167,7 +1230,11 @@ missing directory.
    `TenantHeader` and `BookHeaderDirect` parameters, the `RenewPolicyRequest`
    required/optional field split, the 201 successor `Policy` with the shared
    `ETag`, the 400/404/409 responses with `RENEWAL_NOT_ALLOWED` on the 409, the
-   nullable `Policy.renewedFromPolicyId` lineage field, the three public
+   nullable `Policy.renewedFromPolicyId` lineage field, the mass tort profile
+   GET/PUT with its required `TenantHeader` and optional DIRECT book parameter,
+   the `MassTortProfile` and `UpdateMassTortProfileRequest` schemas, the four
+   mass tort enum schemas, the 200/201/400/404/409 responses, the rejection of
+   the implemented route in `x-planned-operations`, the three public
    period-bordereau operations with their required `TenantHeader` and
    `BookHeaderAssumed` parameters, the `Bordereau`, `BordereauStatus`,
    `CreateBordereauRequest`, and `UpdateBordereauStatusRequest` schemas and
@@ -1178,8 +1245,9 @@ missing directory.
 4. **AsyncAPI structure.** `asyncapi: 3.0.0`, channel addresses, `x-event-type`,
    `x-status: planned|implemented`, `x-implemented-by` on every implemented
    channel, one `send` operation per channel, a `DomainEvent` message on
-   every channel, and the optional source fields on the payment created
-   payload.
+   every channel, the optional source fields on the payment created payload,
+   and the `PolicyMassTortProfileUpdatedData` payload with its required
+   identity, status, tort, trigger, allocation, and coverage-block members.
 5. **Event catalog cross-check.** The published set in `event-catalog.yaml`
    must equal the channel addresses in the matching vertical document, event
    names must be unique across the platform and must match
@@ -1191,8 +1259,9 @@ missing directory.
    `document.link.added`,
    `document.link.removed`, `policy.policy.renewed`,
    `policy.billing-plan.created`, `policy.installment.paid`,
-   `policy.installment.waived`, `contract.bordereau.received`,
-   `contract.bordereau.processed`, and `contract.bordereau.failed`.
+   `policy.installment.waived`, `policy.mass-tort-profile.updated`,
+   `contract.bordereau.received`, `contract.bordereau.processed`, and
+   `contract.bordereau.failed`.
 6. **JSON Schema checks.** All three files parse as JSON, declare the 2020-12
    dialect and an `$id`, carry the required members, keep required properties
    defined, and validate their own examples against a small schema subset.

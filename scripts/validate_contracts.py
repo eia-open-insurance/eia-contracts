@@ -768,6 +768,76 @@ POLICY_RENEWAL_ALLOWED_STATUSES = ("ISSUED", "IN_FORCE", "ENDORSED", "REINSTATED
 POLICY_RENEWAL_EVENT = "policy.policy.renewed"
 
 
+# Policy mass tort profile (SPEC 11.2.4 `policy_mass_tort_profile`, SPEC
+# 11.2.11). The public domain exposes the short /api/v1/policies route; GET
+# reads the one-per-policy profile and PUT is an upsert returning 201 on create
+# and 200 on replace. Tenant is required and a supplied book must be DIRECT.
+MASS_TORT_PROFILE_PATH = "/api/v1/policies/{policyId}/mass-tort-profile"
+MASS_TORT_PROFILE_SCHEMAS = (
+    "MassTortProfile",
+    "UpdateMassTortProfileRequest",
+    "MassTortTortType",
+    "MassTortTriggerType",
+    "MassTortAllocationMethod",
+    "MassTortProfileStatus",
+)
+MASS_TORT_PROFILE_FIELDS = (
+    "profileId",
+    "policyId",
+    "tortType",
+    "triggerType",
+    "allocationMethod",
+    "allocationNotes",
+    "coverageBlockStart",
+    "coverageBlockEnd",
+    "status",
+    "updatedAt",
+)
+MASS_TORT_UPDATE_REQUIRED_FIELDS = (
+    "tortType",
+    "triggerType",
+    "allocationMethod",
+    "status",
+)
+MASS_TORT_UPDATE_OPTIONAL_FIELDS = (
+    "allocationNotes",
+    "coverageBlockStart",
+    "coverageBlockEnd",
+)
+MASS_TORT_TORT_TYPES = (
+    "ASBESTOS",
+    "SILICA",
+    "TALC",
+    "PFAS",
+    "OPIOIDS",
+    "PRODUCT_LIABILITY",
+    "ENVIRONMENTAL",
+    "OTHER",
+)
+MASS_TORT_TRIGGER_TYPES = ("EXPOSURE", "MANIFESTATION", "INJURY", "REVISIONIST")
+MASS_TORT_ALLOCATION_METHODS = (
+    "ALL_SUMS",
+    "PRO_RATA_TIME_ON_RISK",
+    "PRO_RATA_PREMIUM",
+    "EQUAL_SHARES",
+    "STACKED_LIMITS",
+    "CUSTOM_MATRIX",
+)
+MASS_TORT_PROFILE_STATUSES = ("DRAFT", "COMPLETE")
+MASS_TORT_NOTES_MAX_LENGTH = 2000
+MASS_TORT_EVENT = "policy.mass-tort-profile.updated"
+MASS_TORT_EVENT_FIELDS = (
+    "policyId",
+    "policyNumber",
+    "status",
+    "tortType",
+    "triggerType",
+    "allocationMethod",
+    "coverageBlockStart",
+    "coverageBlockEnd",
+)
+
+
 # Event names the transactional-outbox rollout actually emits. The catalog must
 # list each one as published and implemented, and the vertical document must
 # expose a channel for it. Round 5 covered the first six verticals; the rollout
@@ -789,6 +859,7 @@ IMPLEMENTED_EVENTS = {
         "policy.billing-plan.created",
         "policy.installment.paid",
         "policy.installment.waived",
+        "policy.mass-tort-profile.updated",
     ],
     "contract": [
         "contract.contract.created",
@@ -2813,6 +2884,263 @@ def check_policy_renewal_openapi(contracts: ContractSet, document, relative: str
 
 
 # ---------------------------------------------------------------------------
+# Policy mass tort profile checks
+# ---------------------------------------------------------------------------
+
+
+def check_policy_mass_tort_profile_openapi(contracts: ContractSet, document, relative: str):
+    """Require the mass tort profile operations, schemas, enums, and event."""
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    path_item = paths.get(MASS_TORT_PROFILE_PATH) if isinstance(paths, dict) else None
+    get_operation = path_item.get("get") if isinstance(path_item, dict) else None
+    put_operation = path_item.get("put") if isinstance(path_item, dict) else None
+    where_get = f"{relative}: GET {MASS_TORT_PROFILE_PATH}"
+    where_put = f"{relative}: PUT {MASS_TORT_PROFILE_PATH}"
+    contracts.check(
+        isinstance(get_operation, dict),
+        f"{where_get}: required mass tort profile operation is missing",
+    )
+    contracts.check(
+        isinstance(put_operation, dict),
+        f"{where_put}: required mass tort profile upsert operation is missing",
+    )
+
+    for operation, where in ((get_operation, where_get), (put_operation, where_put)):
+        if not isinstance(operation, dict):
+            continue
+        parameter_refs, inline_names = _parameter_names(operation)
+        contracts.check(
+            "TenantHeader" in parameter_refs,
+            f"{where}: must require the shared TenantHeader",
+        )
+        contracts.check(
+            "BookHeaderDirectOptional" in parameter_refs,
+            f"{where}: must document the shared BookHeaderDirectOptional parameter",
+        )
+        contracts.check(
+            "policyId" in inline_names,
+            f"{where}: must declare the policyId path parameter",
+        )
+        responses = operation.get("responses") or {}
+        for code, suffix in (("400", "BadRequest"), ("404", "NotFound")):
+            response = responses.get(code) if isinstance(responses, dict) else None
+            contracts.check(
+                isinstance(response, dict)
+                and str(response.get("$ref", "")).endswith(f"/responses/{suffix}"),
+                f"{where}: {code} must reference the shared {suffix} response",
+            )
+
+    if isinstance(get_operation, dict):
+        contracts.check(
+            "requestBody" not in get_operation,
+            f"{where_get}: the read operation must not declare a request body",
+        )
+        get_schema = _response_schema(get_operation, "200")
+        contracts.check(
+            isinstance(get_schema, dict)
+            and str(get_schema.get("$ref", "")).endswith("/schemas/MassTortProfile"),
+            f"{where_get}: 200 must return the MassTortProfile schema",
+        )
+        get_description = str(get_operation.get("description") or "")
+        contracts.check(
+            "MASS_TORT_PROFILE_NOT_FOUND" in get_description,
+            f"{where_get}: description must document MASS_TORT_PROFILE_NOT_FOUND",
+        )
+        contracts.check(
+            "DIRECT" in get_description,
+            f"{where_get}: description must document the DIRECT book rule",
+        )
+
+    if isinstance(put_operation, dict):
+        request_body = put_operation.get("requestBody") or {}
+        contracts.check(
+            request_body.get("required") is True,
+            f"{where_put}: request body must be required",
+        )
+        request_schema = (
+            ((request_body.get("content") or {}).get("application/json") or {}).get("schema")
+            if isinstance(request_body, dict)
+            else None
+        )
+        contracts.check(
+            isinstance(request_schema, dict)
+            and str(request_schema.get("$ref", "")).endswith(
+                "/schemas/UpdateMassTortProfileRequest"
+            ),
+            f"{where_put}: request body must use the UpdateMassTortProfileRequest schema",
+        )
+        for code in ("200", "201"):
+            success_schema = _response_schema(put_operation, code)
+            contracts.check(
+                isinstance(success_schema, dict)
+                and str(success_schema.get("$ref", "")).endswith("/schemas/MassTortProfile"),
+                f"{where_put}: {code} must return the MassTortProfile schema",
+            )
+        responses = put_operation.get("responses") or {}
+        conflict = responses.get("409") if isinstance(responses, dict) else None
+        contracts.check(
+            isinstance(conflict, dict)
+            and str(conflict.get("$ref", "")).endswith("/responses/Conflict"),
+            f"{where_put}: 409 must reference the shared Conflict response",
+        )
+        put_description = str(put_operation.get("description") or "")
+        contracts.check(
+            "MASS_TORT_PROFILE_ALREADY_EXISTS" in put_description,
+            f"{where_put}: description must document MASS_TORT_PROFILE_ALREADY_EXISTS",
+        )
+        contracts.check(
+            MASS_TORT_EVENT in put_description,
+            f"{where_put}: description must name {MASS_TORT_EVENT}",
+        )
+
+    for schema_name in MASS_TORT_PROFILE_SCHEMAS:
+        contracts.check(
+            schema_name in schemas,
+            f"{relative}: required mass tort schema {schema_name} is missing",
+        )
+
+    profile = schemas.get("MassTortProfile") or {}
+    profile_properties = profile.get("properties") or {}
+    profile_required = set(profile.get("required") or [])
+    contracts.check(
+        isinstance(profile, dict) and profile.get("type") == "object",
+        f"{relative}: MassTortProfile must be an object schema",
+    )
+    for field in MASS_TORT_PROFILE_FIELDS:
+        contracts.check(
+            field in profile_properties,
+            f"{relative}: MassTortProfile.properties.{field} is required",
+        )
+        contracts.check(
+            field in profile_required,
+            f"{relative}: MassTortProfile.required must list {field}",
+        )
+    for field in ("profileId", "policyId"):
+        contracts.check(
+            (profile_properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: MassTortProfile.{field} must be a uuid",
+        )
+    for field, enum_name in (
+        ("tortType", "MassTortTortType"),
+        ("triggerType", "MassTortTriggerType"),
+        ("allocationMethod", "MassTortAllocationMethod"),
+        ("status", "MassTortProfileStatus"),
+    ):
+        contracts.check(
+            str((profile_properties.get(field) or {}).get("$ref", "")).endswith(
+                f"/schemas/{enum_name}"
+            ),
+            f"{relative}: MassTortProfile.{field} must reference {enum_name}",
+        )
+    notes = profile_properties.get("allocationNotes") or {}
+    contracts.check(
+        _schema_types(notes) == {"string", "null"},
+        f"{relative}: MassTortProfile.allocationNotes must be a nullable string",
+    )
+    contracts.check(
+        notes.get("maxLength") == MASS_TORT_NOTES_MAX_LENGTH,
+        f"{relative}: MassTortProfile.allocationNotes maxLength must be "
+        f"{MASS_TORT_NOTES_MAX_LENGTH}",
+    )
+    for field in ("coverageBlockStart", "coverageBlockEnd"):
+        field_schema = profile_properties.get(field) or {}
+        contracts.check(
+            _schema_types(field_schema) == {"string", "null"},
+            f"{relative}: MassTortProfile.{field} must be a nullable string",
+        )
+        contracts.check(
+            field_schema.get("format") == "date",
+            f"{relative}: MassTortProfile.{field} must be a date",
+        )
+    updated_at = profile_properties.get("updatedAt") or {}
+    contracts.check(
+        _schema_types(updated_at) == {"string"}
+        and updated_at.get("format") == "date-time",
+        f"{relative}: MassTortProfile.updatedAt must be a date-time",
+    )
+
+    for name, expected in (
+        ("MassTortTortType", MASS_TORT_TORT_TYPES),
+        ("MassTortTriggerType", MASS_TORT_TRIGGER_TYPES),
+        ("MassTortAllocationMethod", MASS_TORT_ALLOCATION_METHODS),
+        ("MassTortProfileStatus", MASS_TORT_PROFILE_STATUSES),
+    ):
+        schema = schemas.get(name) or {}
+        contracts.check(
+            isinstance(schema, dict) and schema.get("type") == "string",
+            f"{relative}: {name} must be a string schema",
+        )
+        contracts.check(
+            set(schema.get("enum") or []) == set(expected),
+            f"{relative}: {name}.enum must be {list(expected)}",
+        )
+
+    request = schemas.get("UpdateMassTortProfileRequest") or {}
+    request_properties = request.get("properties") or {}
+    request_required = set(request.get("required") or [])
+    contracts.check(
+        isinstance(request, dict) and request.get("type") == "object",
+        f"{relative}: UpdateMassTortProfileRequest must be an object schema",
+    )
+    for field in MASS_TORT_UPDATE_REQUIRED_FIELDS:
+        contracts.check(
+            field in request_properties,
+            f"{relative}: UpdateMassTortProfileRequest.properties.{field} is required",
+        )
+        contracts.check(
+            field in request_required,
+            f"{relative}: UpdateMassTortProfileRequest.required must list {field}",
+        )
+    for field in MASS_TORT_UPDATE_OPTIONAL_FIELDS:
+        contracts.check(
+            field in request_properties,
+            f"{relative}: UpdateMassTortProfileRequest.properties.{field} is required",
+        )
+        contracts.check(
+            field not in request_required,
+            f"{relative}: UpdateMassTortProfileRequest.{field} must stay optional",
+        )
+    for field, enum_name in (
+        ("tortType", "MassTortTortType"),
+        ("triggerType", "MassTortTriggerType"),
+        ("allocationMethod", "MassTortAllocationMethod"),
+        ("status", "MassTortProfileStatus"),
+    ):
+        contracts.check(
+            str((request_properties.get(field) or {}).get("$ref", "")).endswith(
+                f"/schemas/{enum_name}"
+            ),
+            f"{relative}: UpdateMassTortProfileRequest.{field} must reference {enum_name}",
+        )
+    request_notes = request_properties.get("allocationNotes") or {}
+    contracts.check(
+        _schema_types(request_notes) == {"string", "null"},
+        f"{relative}: UpdateMassTortProfileRequest.allocationNotes must be a nullable string",
+    )
+    contracts.check(
+        request_notes.get("maxLength") == MASS_TORT_NOTES_MAX_LENGTH,
+        f"{relative}: UpdateMassTortProfileRequest.allocationNotes maxLength must be "
+        f"{MASS_TORT_NOTES_MAX_LENGTH}",
+    )
+    for field in ("coverageBlockStart", "coverageBlockEnd"):
+        contracts.check(
+            (request_properties.get(field) or {}).get("format") == "date",
+            f"{relative}: UpdateMassTortProfileRequest.{field} must be a date",
+        )
+
+    planned = document.get("x-planned-operations") or []
+    contracts.check(
+        not any(
+            isinstance(entry, dict) and entry.get("path") == MASS_TORT_PROFILE_PATH
+            for entry in planned
+        ),
+        f"{relative}: {MASS_TORT_PROFILE_PATH} must not remain in x-planned-operations",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Contract technical-account checks
 # ---------------------------------------------------------------------------
 
@@ -4111,6 +4439,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_policy_billing_openapi(contracts, document, relative)
             check_policy_receivables_openapi(contracts, document, relative)
             check_policy_renewal_openapi(contracts, document, relative)
+            check_policy_mass_tort_profile_openapi(contracts, document, relative)
         if vertical == "contract":
             check_contract_technical_accounts(contracts, document, relative)
             check_contract_bordereaux(contracts, document, relative)
@@ -4224,6 +4553,80 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
                 contracts.check(
                     event in send_events,
                     f"{relative}: billing event '{event}' must have a send operation",
+                )
+
+            contracts.check(
+                MASS_TORT_EVENT in addresses,
+                f"{relative}: required mass tort event channel '{MASS_TORT_EVENT}' is missing",
+            )
+            contracts.check(
+                MASS_TORT_EVENT in implemented_addresses,
+                f"{relative}: mass tort event channel '{MASS_TORT_EVENT}' must be implemented",
+            )
+            contracts.check(
+                MASS_TORT_EVENT in send_events,
+                f"{relative}: mass tort event '{MASS_TORT_EVENT}' must have a send operation",
+            )
+            mass_tort_channel = next(
+                (
+                    channel
+                    for channel in channels.values()
+                    if isinstance(channel, dict)
+                    and channel.get("address") == MASS_TORT_EVENT
+                ),
+                None,
+            )
+            mass_tort_messages = (
+                mass_tort_channel.get("messages")
+                if isinstance(mass_tort_channel, dict)
+                else None
+            ) or {}
+            contracts.check(
+                "PolicyMassTortProfileUpdatedData" in mass_tort_messages,
+                f"{relative}: {MASS_TORT_EVENT} must reference "
+                "PolicyMassTortProfileUpdatedData",
+            )
+            mass_tort_message = (
+                ((document.get("components") or {}).get("messages") or {}).get(
+                    "PolicyMassTortProfileUpdatedData"
+                )
+                or {}
+            )
+            payload = mass_tort_message.get("payload") or {}
+            payload_properties = payload.get("properties") or {}
+            payload_required = set(payload.get("required") or [])
+            for field in MASS_TORT_EVENT_FIELDS:
+                contracts.check(
+                    field in payload_properties,
+                    f"{relative}: PolicyMassTortProfileUpdatedData.properties.{field} "
+                    "is required",
+                )
+                contracts.check(
+                    field in payload_required,
+                    f"{relative}: PolicyMassTortProfileUpdatedData.required must list {field}",
+                )
+            contracts.check(
+                (payload_properties.get("status") or {}).get("enum")
+                == list(MASS_TORT_PROFILE_STATUSES),
+                f"{relative}: PolicyMassTortProfileUpdatedData.status must enumerate "
+                f"{list(MASS_TORT_PROFILE_STATUSES)}",
+            )
+            for field, expected in (
+                ("tortType", MASS_TORT_TORT_TYPES),
+                ("triggerType", MASS_TORT_TRIGGER_TYPES),
+                ("allocationMethod", MASS_TORT_ALLOCATION_METHODS),
+            ):
+                contracts.check(
+                    set((payload_properties.get(field) or {}).get("enum") or [])
+                    == set(expected),
+                    f"{relative}: PolicyMassTortProfileUpdatedData.{field} must enumerate "
+                    f"{list(expected)}",
+                )
+            for field in ("coverageBlockStart", "coverageBlockEnd"):
+                contracts.check(
+                    _schema_types(payload_properties.get(field)) == {"string", "null"},
+                    f"{relative}: PolicyMassTortProfileUpdatedData.{field} must be a "
+                    "nullable string",
                 )
 
         entry = catalog_entries.get(vertical) or {}

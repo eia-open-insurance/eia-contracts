@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Policy API
-  version: 2.5.0
+  version: 2.6.0
   summary: Direct-book policy administration and the Policy expert API.
   description: >
     This document describes the implemented public Policy domain API and the
@@ -100,6 +100,25 @@ info:
       `/api/v1/policy/policies/{policyId}/renew` base path differ from the
       implemented successor-DRAFT lineage and short public path; MISMATCHES.md
       M-01 and M-28 record the deviation.
+
+    The 2026-10-20 mass tort slice adds the policy mass tort profile:
+
+    - `GET /api/v1/policies/{policyId}/mass-tort-profile` returns the profile
+      that records the tort and trigger theory, the allocation method, and the
+      coverage block Direct Claims uses to allocate a long-tail claim; `PUT`
+      upserts the one profile and returns 201 when it is created or 200 when an
+      existing row is replaced.
+    - The profile carries `profileId`, `policyId`, `tortType`, `triggerType`,
+      `allocationMethod`, `allocationNotes`, the inclusive
+      `coverageBlockStart`/`coverageBlockEnd` dates, `status`, and `updatedAt`.
+      A DRAFT profile may omit the notes and dates; a COMPLETE profile requires
+      them.
+    - `X-EIA-Tenant` is required and a supplied `X-EIA-Book` must be DIRECT.
+      Every accepted write bumps the policy row version and emits
+      `policy.mass-tort-profile.updated` in the same transaction. The SPEC
+      trigger and status vocabularies, the wider Appendix E tort catalog, and
+      the SPEC route form differ; MISMATCHES.md M-01 and M-32 record the
+      deviation.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -1477,6 +1496,125 @@ paths:
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
           $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/mass-tort-profile:
+    get:
+      operationId: getPolicyMassTortProfile
+      tags:
+        - Policy
+      summary: Get the mass tort profile of a direct policy.
+      description: >
+        Returns the single mass tort profile of a direct policy (SPEC 11.2.4
+        `policy_mass_tort_profile`, SPEC 11.2.11). The profile records the tort
+        and trigger theory, the allocation method, the coverage block that
+        Direct Claims uses to allocate a long-tail claim across policy years,
+        and the DRAFT/COMPLETE state.
+
+        A policy without a profile is 404 `MASS_TORT_PROFILE_NOT_FOUND`; an
+        unknown policy or a policy in another tenant is 404 `POLICY_NOT_FOUND`.
+        `X-EIA-Tenant` is required. The canonical contract requires
+        `X-EIA-Book: DIRECT`; an absent header is accepted for compatibility
+        with the other Policy proxy routes, a supplied value must be DIRECT, and
+        another book is hidden as 404 `BOOK_SCOPE_VIOLATION`. The domain always
+        forwards DIRECT to the expert, whose `/internal/v1` alias is an
+        implementation detail. The short public path differs from the SPEC
+        11.2.10 `/api/v1/policy/policies/...` form; MISMATCHES.md M-01 and M-32
+        record the deviation.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirectOptional'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The policy's mass tort profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MassTortProfile'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    put:
+      operationId: updatePolicyMassTortProfile
+      tags:
+        - Policy
+      summary: Create or replace the mass tort profile of a direct policy.
+      description: >
+        Upserts the single profile. A new row returns 201; an existing row is
+        rewritten in place and returns 200 with the same `profileId`. Every
+        accepted write bumps the policy row version and writes
+        `policy.mass-tort-profile.updated` in the same transaction. The expert
+        makes the 201/200 distinction, while the public domain controller
+        currently returns 200 for both outcomes; the canonical contract keeps
+        the create 201 and MISMATCHES.md M-32 records the gap.
+
+        `tortType`, `triggerType`, `allocationMethod`, and `status` are
+        required. `allocationNotes` and both coverage-block dates are optional
+        for a DRAFT profile and required for a COMPLETE profile; a COMPLETE body
+        that omits any of them is 400 `INCOMPLETE_MASS_TORT_PROFILE`. The
+        coverage block is inclusive, so the same start and end date is valid
+        while an end before the start is 400 `INVALID_COVERAGE_BLOCK`.
+
+        Values are trimmed and upper-cased. An unknown tort, trigger, or
+        allocation method is 400 `INVALID_TORT_TYPE`, `INVALID_TRIGGER_TYPE`, or
+        `INVALID_ALLOCATION_METHOD`; an unknown status is 400
+        `INVALID_MASS_TORT_PROFILE_STATUS`; notes longer than 2000 characters
+        are 400 `INVALID_ALLOCATION_NOTES`; and a blank required field is 400
+        `VALIDATION_ERROR`. The public domain also accepts `trigger` as an alias
+        for `triggerType` and ignores read-only response members sent in the
+        body.
+
+        A create race is 409 `MASS_TORT_PROFILE_ALREADY_EXISTS`, and a
+        concurrent policy or profile change is 409 `CONCURRENT_MODIFICATION`.
+        An unknown policy or a policy in another tenant is 404
+        `POLICY_NOT_FOUND`; another book is 404 `BOOK_SCOPE_VIOLATION`.
+
+        The command accepts neither `Idempotency-Key` nor `If-Match` in this
+        slice; repeating the same PUT rewrites the profile and emits another
+        event (MISMATCHES.md M-06, M-07, M-32).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirectOptional'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateMassTortProfileRequest'
+      responses:
+        '200':
+          description: The existing profile was replaced; its id is preserved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MassTortProfile'
+        '201':
+          description: The policy had no profile and one was created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MassTortProfile'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /internal/v1/policies:
@@ -4053,6 +4191,148 @@ components:
           $ref: './components.yaml#/components/schemas/MoneyAmount'
         limitCurrency:
           $ref: './components.yaml#/components/schemas/CurrencyCode'
+    MassTortProfile:
+      type: object
+      description: >
+        Public projection of the one mass tort profile of a direct policy
+        (SPEC 11.2.4 `policy_mass_tort_profile`, SPEC 11.2.11). The profile
+        records the tort and trigger theory, the allocation method, the
+        coverage block that Direct Claims uses to allocate a long-tail claim
+        across policy years, and the DRAFT/COMPLETE state. `allocationNotes`,
+        `coverageBlockStart`, and `coverageBlockEnd` are null while the profile
+        is DRAFT and not yet filled in; a COMPLETE profile always has all three.
+        `profileId` and `policyId` are server-owned, and `updatedAt` is the
+        instant of the last accepted write.
+      required:
+        - profileId
+        - policyId
+        - tortType
+        - triggerType
+        - allocationMethod
+        - allocationNotes
+        - coverageBlockStart
+        - coverageBlockEnd
+        - status
+        - updatedAt
+      properties:
+        profileId:
+          type: string
+          format: uuid
+        policyId:
+          type: string
+          format: uuid
+        tortType:
+          $ref: '#/components/schemas/MassTortTortType'
+        triggerType:
+          $ref: '#/components/schemas/MassTortTriggerType'
+        allocationMethod:
+          $ref: '#/components/schemas/MassTortAllocationMethod'
+        allocationNotes:
+          type: [string, 'null']
+          maxLength: 2000
+          description: >
+            Trimmed allocation notes. Null while a DRAFT profile has no notes;
+            required for COMPLETE.
+        coverageBlockStart:
+          type: [string, 'null']
+          format: date
+          description: >
+            Inclusive start of the coverage block. Null while a DRAFT profile
+            has no block; required for COMPLETE.
+        coverageBlockEnd:
+          type: [string, 'null']
+          format: date
+          description: >
+            Inclusive end of the coverage block. Null while a DRAFT profile has
+            no block; required for COMPLETE and never before the start.
+        status:
+          $ref: '#/components/schemas/MassTortProfileStatus'
+        updatedAt:
+          type: string
+          format: date-time
+    MassTortTortType:
+      type: string
+      description: >
+        Tort catalog enforced by the Policy expert. The broader SPEC Appendix E
+        catalog and the SPEC `direct_tort_code` list are not implemented;
+        MISMATCHES.md M-32 records the gap.
+      enum:
+        - ASBESTOS
+        - SILICA
+        - TALC
+        - PFAS
+        - OPIOIDS
+        - PRODUCT_LIABILITY
+        - ENVIRONMENTAL
+        - OTHER
+    MassTortTriggerType:
+      type: string
+      description: >
+        Coverage trigger theory. The SPEC `trigger_theory` values
+        `INJURY_IN_FACT`, `CONTINUOUS_TRIGGER`, `ALL_SUMS`, and `CLAIMS_MADE`
+        are not implemented; MISMATCHES.md M-32 records the gap.
+      enum:
+        - EXPOSURE
+        - MANIFESTATION
+        - INJURY
+        - REVISIONIST
+    MassTortAllocationMethod:
+      type: string
+      description: >
+        Method Direct Claims applies when allocating a long-tail claim. The
+        names match the SPEC 11.2.11 `allocation_method` set.
+      enum:
+        - ALL_SUMS
+        - PRO_RATA_TIME_ON_RISK
+        - PRO_RATA_PREMIUM
+        - EQUAL_SHARES
+        - STACKED_LIMITS
+        - CUSTOM_MATRIX
+    MassTortProfileStatus:
+      type: string
+      description: >
+        Profile state. DRAFT permits missing notes and coverage-block dates;
+        COMPLETE requires them. The SPEC `ACTIVE`, `SUPERSEDED`, and
+        `UNDER_REVIEW` values are not implemented; MISMATCHES.md M-32 records
+        the gap.
+      enum:
+        - DRAFT
+        - COMPLETE
+    UpdateMassTortProfileRequest:
+      type: object
+      description: >
+        Upsert body for a policy mass tort profile. `tortType`, `triggerType`,
+        `allocationMethod`, and `status` are always required; the notes and both
+        coverage-block dates are optional for DRAFT and required for COMPLETE.
+        Values are trimmed and upper-cased, and an unknown vocabulary member is
+        400. The public domain also accepts `trigger` as an alias for
+        `triggerType`, and read-only response members sent in the body are
+        ignored.
+      required:
+        - tortType
+        - triggerType
+        - allocationMethod
+        - status
+      properties:
+        tortType:
+          $ref: '#/components/schemas/MassTortTortType'
+        triggerType:
+          $ref: '#/components/schemas/MassTortTriggerType'
+        allocationMethod:
+          $ref: '#/components/schemas/MassTortAllocationMethod'
+        allocationNotes:
+          type: [string, 'null']
+          maxLength: 2000
+          description: Trimmed; a blank value is treated as absent.
+        coverageBlockStart:
+          type: [string, 'null']
+          format: date
+        coverageBlockEnd:
+          type: [string, 'null']
+          format: date
+          description: Must not be before coverageBlockStart when both are present.
+        status:
+          $ref: '#/components/schemas/MassTortProfileStatus'
 x-vertical: policy
 x-implementation:
   status: implemented
@@ -4077,6 +4357,10 @@ x-implementation:
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/Receivable.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/ReceivableSummary.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/BookScope.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyMassTortProfileController.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyMassTortProfileService.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/MassTortProfile.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/UpdateMassTortProfileCommand.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyClient.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/ItemPage.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/Mutation.java
@@ -4101,6 +4385,14 @@ x-implementation:
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/CreateBillingPlanRequest.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/UpdateInstallmentRequest.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/MassTortProfileController.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/MassTortProfileService.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/MassTortProfileRules.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/MassTortProfileRepository.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/MassTortProfileResult.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PutMassTortProfileRequest.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyMassTortProfile.java
+    - repos/eia-policy-expert/src/main/resources/schema.sql
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyVersionController.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/CoverageController.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/EndorsementController.java
@@ -4110,6 +4402,11 @@ x-implementation:
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/Problems.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/MutationGuard.java
     - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/PolicyContractControllerTest.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/PolicyMassTortProfileControllerTest.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/PolicyMassTortProfileClientTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/MassTortProfileControllerTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/MassTortProfileServiceTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/MassTortProfileRulesTest.java
     - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/PolicyBillingControllerTest.java
     - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/PolicyReceivableControllerTest.java
     - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/ReceivableServiceTest.java
@@ -4156,19 +4453,32 @@ x-implementation:
     `paymentId` are null on every returned item. The SPEC 11.2.13 per-policy
     installment route and the remaining billing resource gaps are recorded in
     MISMATCHES.md M-27.
+
+    The mass tort profile is a one-per-policy child resource. The domain proxies
+    the expert's `/internal/v1` alias with the tenant and DIRECT book; the
+    expert owns the vocabularies, the 2000-character notes cap, the inclusive
+    coverage-block order, and the COMPLETE gate. The expert returns 201 on
+    create and 200 on replace; the public domain controller currently returns
+    200 for both, which MISMATCHES.md M-32 records. The profile id is preserved
+    on every update. The event payload deliberately omits the profile id and the
+    allocation notes; the policy is the event aggregate. The narrow profile
+    against SPEC 11.2.11 is recorded in M-32.
 x-compatibility:
-  contractVersion: 2.5.0
-  previousContractVersion: 2.4.0
+  contractVersion: 2.6.0
+  previousContractVersion: 2.5.0
   breaking: []
   compatible:
-    - Adds GET /api/v1/billing/installments.
-    - Adds the Receivable and ReceivableSummary schemas.
+    - Adds GET /api/v1/policies/{policyId}/mass-tort-profile.
+    - Adds PUT /api/v1/policies/{policyId}/mass-tort-profile.
+    - Adds the MassTortProfile and UpdateMassTortProfileRequest schemas and the MassTortTortType, MassTortTriggerType, MassTortAllocationMethod, and MassTortProfileStatus enums.
     - Adds no required request field to an existing operation, changes no existing path, and removes no response field.
   note: >
-    Receivables is additive over 2.4.0 and changes no existing path, schema,
-    ETag, or page envelope. The new route sits outside /api/v1/policies because
-    it is a cross-policy read; the existing per-policy billing routes are
-    unchanged. The HTTP API version stays /api/v1 and no event is added.
+    The mass tort profile is additive over 2.5.0 and changes no existing path,
+    schema, ETag, or page envelope. The route is a new child of an existing
+    policy resource, so the HTTP API version stays /api/v1. The implemented
+    event joins the asyncapi/policy.yaml channels; the name was already
+    published in the catalog, so the platform published count is unchanged and
+    the Policy implemented subset grows by one.
 x-planned-operations:
   - method: POST
     path: /api/v1/policies/{policyId}/bind
@@ -4190,10 +4500,6 @@ x-planned-operations:
     path: /api/v1/policies/{policyId}/occurrences
     spec: SPEC 11.2.10
     note: Occurrences.
-  - method: GET
-    path: /api/v1/policies/{policyId}/mass-tort-profile
-    spec: SPEC 11.2.10
-    note: Mass tort profile.
   - method: GET
     path: /api/v1/policies/{policyId}/claims
     spec: SPEC 11.2.10

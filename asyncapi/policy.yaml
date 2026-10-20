@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:policy
 info:
   title: EIA Policy events
-  version: 1.3.0
+  version: 1.4.0
   summary: Published domain event names for the Policy vertical.
   description: >
     Event contract for the Policy vertical. The authoritative event names are
@@ -17,17 +17,19 @@ info:
     The Policy expert now publishes `policy.policy.created`,
     `policy.policy.updated`, `policy.policy.version-issued`,
     `policy.policy.endorsed`, `policy.policy.cancelled`,
-    `policy.policy.reinstated`, `policy.policy.renewed`, and the billing facts
+    `policy.policy.reinstated`, `policy.policy.renewed`, the billing facts
     `policy.billing-plan.created`, `policy.installment.paid`, and
-    `policy.installment.waived` through the transactional outbox; those channels
-    and operations are marked `x-status: implemented`. The `created` and
-    `updated` names are additive: the catalog had no generic create or update
-    fact. The billing plan name is `policy.billing-plan.created`; SPEC 11.2.13
-    calls the same fact `policy.billing.plan-created` and defines no installment
-    paid or waived names, so the naming difference is recorded in
-    MISMATCHES.md M-22 and M-27. The renewal fact uses the SPEC 11.2.9 name and
-    records the source-to-successor lineage. The remaining SPEC 11.2.9 and
-    11.2.13 names are planned.
+    `policy.installment.waived`, and `policy.mass-tort-profile.updated` through
+    the transactional outbox; those channels and operations are marked
+    `x-status: implemented`. The `created` and `updated` names are additive: the
+    catalog had no generic create or update fact. The billing plan name is
+    `policy.billing-plan.created`; SPEC 11.2.13 calls the same fact
+    `policy.billing.plan-created` and defines no installment paid or waived
+    names, so the naming difference is recorded in MISMATCHES.md M-22 and M-27.
+    The renewal fact uses the SPEC 11.2.9 name and records the
+    source-to-successor lineage. The mass tort fact also uses the SPEC 11.2.9
+    name and carries the allocation context Direct Claims consumes. The
+    remaining SPEC 11.2.9 and 11.2.13 names are planned.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -375,16 +377,23 @@ channels:
     address: policy.mass-tort-profile.updated
     title: policy.mass-tort-profile.updated
     description: >
-      Declared domain event for this vertical (SPEC 11.2.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when a policy mass tort profile is created or replaced, in the
+      same transaction as the profile write and the policy-version bump. The
+      payload carries the policy identity and status, the tort, trigger, and
+      allocation vocabulary, and the inclusive coverage-block dates. A DRAFT
+      profile may carry null dates. The profile id is deliberately not part of
+      the payload: the policy is the aggregate and the event is keyed by the
+      policy version.
     x-event-type: policy.mass-tort-profile.updated
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.2.9
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
+      PolicyMassTortProfileUpdatedData:
+        $ref: '#/components/messages/PolicyMassTortProfileUpdatedData'
   PolicyCoverageBlockUpdated:
     address: policy.coverage-block.updated
     title: policy.coverage-block.updated
@@ -614,10 +623,12 @@ operations:
       $ref: '#/channels/PolicyMassTortProfileUpdated'
     summary: Publish policy.mass-tort-profile.updated
     description: >
-      Publishes policy.mass-tort-profile.updated through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes policy.mass-tort-profile.updated through the transactional
+      outbox in the same transaction as the profile upsert and the policy-version
+      bump (SPEC 7.5.1). The payload is the allocation context Direct Claims
+      consumes for a long-tail claim.
     x-event-type: policy.mass-tort-profile.updated
-    x-status: planned
+    x-status: implemented
   publishPolicyCoverageBlockUpdated:
     action: send
     channel:
@@ -817,6 +828,67 @@ components:
             format: uuid
           newPolicyNumber:
             type: string
+    PolicyMassTortProfileUpdatedData:
+      name: PolicyMassTortProfileUpdatedData
+      title: policy.mass-tort-profile.updated data
+      summary: Mass tort allocation context for a direct policy.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - policyId
+          - policyNumber
+          - status
+          - tortType
+          - triggerType
+          - allocationMethod
+          - coverageBlockStart
+          - coverageBlockEnd
+        properties:
+          policyId:
+            type: string
+            format: uuid
+          policyNumber:
+            type: string
+          status:
+            type: string
+            enum:
+              - DRAFT
+              - COMPLETE
+          tortType:
+            type: string
+            enum:
+              - ASBESTOS
+              - SILICA
+              - TALC
+              - PFAS
+              - OPIOIDS
+              - PRODUCT_LIABILITY
+              - ENVIRONMENTAL
+              - OTHER
+          triggerType:
+            type: string
+            enum:
+              - EXPOSURE
+              - MANIFESTATION
+              - INJURY
+              - REVISIONIST
+          allocationMethod:
+            type: string
+            enum:
+              - ALL_SUMS
+              - PRO_RATA_TIME_ON_RISK
+              - PRO_RATA_PREMIUM
+              - EQUAL_SHARES
+              - STACKED_LIMITS
+              - CUSTOM_MATRIX
+          coverageBlockStart:
+            type: [string, 'null']
+            format: date
+          coverageBlockEnd:
+            type: [string, 'null']
+            format: date
   securitySchemes:
     outboxSignature:
       type: httpApiKey
@@ -832,16 +904,17 @@ x-implementation:
   publisher: eia-policy-expert
   subscriber: none
   notes: >
-    Ten Policy events are written to the transactional outbox in the same
+    Eleven Policy events are written to the transactional outbox in the same
     transaction as the aggregate write and dispatched by the platform outbox
     dispatcher when `eia.outbox.enabled=true`: `created`, `updated`,
     `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`,
-    `billing-plan.created`, `installment.paid`, and `installment.waived`. The
-    renewal event carries both policy identities and the lineage link; the
-    billing plan event carries the complete schedule; the installment events
-    carry the settled row and its payment evidence. The other SPEC 11.2.9 and
-    11.2.13 names remain planned. There is no business subscriber or
-    subscription registry yet.
+    `billing-plan.created`, `installment.paid`, `installment.waived`, and
+    `mass-tort-profile.updated`. The renewal event carries both policy
+    identities and the lineage link; the billing plan event carries the complete
+    schedule; the installment events carry the settled row and its payment
+    evidence; the mass tort profile event carries the allocation context and the
+    coverage block. The other SPEC 11.2.9 and 11.2.13 names remain planned.
+    There is no business subscriber or subscription registry yet.
 
 x-consumed-events:
   - direct.claim.registered

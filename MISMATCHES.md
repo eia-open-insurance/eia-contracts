@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-20 (Policy premium receivables).
+Status: open, reviewed 2026-10-20 (Policy mass tort profile).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -29,7 +29,11 @@ where the running code does not meet it yet.
   request, exception handler, event factory, repository, and tests. The Policy
   premium-receivables pass reads the domain receivable controller, service,
   book scope, projection, and client plus the expert billing-receivables
-  controller, service, projection, row mapper, query, rules, and tests.
+  controller, service, projection, row mapper, query, rules, and tests. The
+  Policy mass tort profile pass reads the domain profile controller, service,
+  projection, command, book scope, and client plus the expert profile
+  controller, service, rules, repository, result, request, projection, event
+  factory, `schema.sql`, and tests.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -86,6 +90,7 @@ removed per the resolution policy.
 | M-29 | Contract technical accounts use the `/technical-accounts` path, a narrow status set, and no period-overlap/window check | L |
 | M-30 | Contract period bordereaux use a PROCESSED/FAILED vocabulary and event names, omit the SPEC line/exception staging, and accept an absent book header | L |
 | M-31 | Direct Claims allocation error codes are remapped at the public surface | L |
+| M-32 | Policy mass tort profile is a narrow DRAFT/COMPLETE upsert with different vocabularies and route | L |
 
 ## M-01 Public base paths
 
@@ -267,6 +272,7 @@ Policy now implements the SPEC 12.6 concurrency mechanism:
 | Policy public erosion | Returns the policy `ETag`; the derived limit state is version-checked internally and a lost update is 409 |
 | Policy public billing | No `ETag`/`If-Match`; the expert still version-checks the policy row and a concurrent change is 409 `CONCURRENT_MODIFICATION` |
 | Policy public renewal | No `If-Match`; the 201 successor carries its own `ETag` and a replay path does not exist |
+| Policy public mass tort profile | No `ETag`/`If-Match`; a concurrent profile or policy change is 409 `CONCURRENT_MODIFICATION` |
 | Policy expert GET/create/PATCH | Same ETag and If-Match behaviour as the public service |
 | Contract public PATCH | Required `expectedVersion` body field; no ETag |
 | Contract public bind and commutation | Required `expectedVersion` on bind; the commutation has no caller-supplied version |
@@ -384,12 +390,14 @@ Residual differences:
   scoped by tenant and are never replayed across tenants.
 - **Coverage.** Contract, Cession, Retrocession, Document, Payment, and
   Notifications create commands still accept no `Idempotency-Key` and emit no
-  replay marker. Policy billing's plan create and installment PATCH and the
-  Policy renewal command are also outside the Policy idempotency mechanism. The
-  domain's shared mutation helper still emits `Idempotent-Replayed: false` on
-  the renewal 201 even though no key is accepted, so a client must not read that
-  header as proof that a retry is safe. The header remains optional everywhere
-  it exists, so a client that omits it is unaffected.
+  replay marker. Policy billing's plan create and installment PATCH, the Policy
+  renewal command, and the Policy mass tort profile upsert are also outside the
+  Policy idempotency mechanism. The domain's shared mutation helper still emits
+  `Idempotent-Replayed: false` on the renewal 201 even though no key is
+  accepted, so a client must not read that header as proof that a retry is
+  safe. A repeated mass tort PUT rewrites the profile and emits another event,
+  so it is not retry-safe either. The header remains optional everywhere it
+  exists, so a client that omits it is unaffected.
 
 Evidence:
 
@@ -526,7 +534,7 @@ unimplemented fields and list the missing operations under
   data, or merge. `partyType`, `status`, `sanctionsStatus`, and
   `confidentiality` are unvalidated strings, not SPEC 11.1.5 enums.
 - Policy: no `policyType`, `productLine`, `insured` object, `limits[]` array on
-  the header, `massTort`, `claimSummary`, occurrences, programs, or the
+  the header, `claimSummary`, occurrences, programs, or the
   claims/reinsurance projections. Round 5 adds versions, coverage and limit
   schedules, aggregate erosion, endorsements, insureds, locations,
   cancellations, and reinstatements, so those are no longer gaps. The
@@ -538,7 +546,9 @@ unimplemented fields and list the missing operations under
   slice adds successor-term creation with `renewedFromPolicyId`; the reverse
   `renewed_by_policy_id` pointer, the renewal-bound source transition, the
   renewal batch, non-renewal reasons, and renewal invitations remain gaps
-  (M-28).
+  (M-28). The mass tort slice adds the narrow one-per-policy DRAFT/COMPLETE
+  profile (M-32); the SPEC mass tort program, the wider profile columns, and
+  the SPEC trigger/status vocabularies remain gaps.
 - Contract: no `treatyNumber`, `contractBasis`, inception-date naming,
   `contract_section`, `contract_version`, `contract_sliding_scale`,
   `contract_premium`, `contract_reinstatement`, `contract_wording`,
@@ -599,6 +609,8 @@ unimplemented fields and list the missing operations under
 | Retrocession `cededPremium` + `cededLoss` + `currency` | two `Money` objects |
 | Assumed Claims `assumedClaimNumber` | `assumed_claim_number` (matches DB, not the SPEC JSON examples) |
 | Policy `coinsurancePct` | a decimal fraction (`0.150000`) |
+| Policy `tortType` | Policy `direct_tort_code` (SPEC 11.2.4) |
+| Policy `triggerType` | Policy `trigger_theory` (SPEC 11.2.4) |
 | Contract `sharePct`, `signedLinePct`, `cessionPct` | percentages of 100 (`15.000000`), not the SPEC 12.2 fraction |
 | Payment `sourceType` + `sourceId` + `sourceReference` | Payment `claim_vertical` + `claim_id` + `claim_number` (or the contract link) |
 
@@ -616,7 +628,7 @@ ten publishing verticals now emit a subset:
 | Vertical | Implemented event names | Source |
 |---|---|---|
 | Party | `party.party.created`, `party.party.updated` | `repos/eia-party-expert/.../PartyEvents.java` |
-| Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.billing-plan.created`, `policy.installment.paid`, `policy.installment.waived` | `repos/eia-policy-expert/.../PolicyEvents.java` |
+| Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.billing-plan.created`, `policy.installment.paid`, `policy.installment.waived`, `policy.mass-tort-profile.updated` | `repos/eia-policy-expert/.../PolicyEvents.java` |
 | Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded`, `contract.technical-account.created`, `contract.technical-account.issued`, `contract.technical-account.settled`, `contract.bordereau.received`, `contract.bordereau.processed`, `contract.bordereau.failed` | `repos/eia-contract-expert/.../ContractEvents.java` |
 | Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.assigned`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.closed`, `direct.claim.task-created`, `direct.claim.task-completed`, `direct.claim.task-updated`, `direct.claim.note-added`, `direct.claim.allocation-created` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
 | Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.assigned`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted`, `assumed.claim.task-created`, `assumed.claim.task-completed`, `assumed.claim.task-updated`, `assumed.claim.note-added` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
@@ -777,7 +789,7 @@ tables. The differences are:
 | Vertical | Implemented | SPEC /
 planned name |
 |---|---|---|
-| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created`; `policy.installment.paid` / `.waived` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name. `version-issued`, `endorsed`, `cancelled`, `reinstated`, and `renewed` match SPEC. |
+| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created`; `policy.installment.paid` / `.waived` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name. `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
 | Contract | `contract.contract.updated`; `contract.technical-account.created` / `.issued` / `.settled`; `contract.bordereau.processed` / `.failed` | No SPEC name for updated, the technical-account facts, or the two terminal bordereau facts: SPEC 11.3.9 lists lifecycle verbs, the contract-level `contract.account.issued` / `.agreed` facts, and `contract.bordereau.posted` / `.rejected` instead. `created`, `bound`, `commuted`, `cession.recorded`, and `contract.bordereau.received` match SPEC. |
 | Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned`; `direct.claim.allocation-created` | No SPEC names: SPEC 11.4.9 defines no assignment, task, note, or allocation-created event; it names the allocation fact `direct.claim.allocated`, which remains planned. `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and `closed` match SPEC. |
 | Assumed Claims | `assumed.claim.updated`; `assumed.claim.assigned`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no assignment, task, or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
@@ -1384,10 +1396,82 @@ contract keeps the stable expert codes because they are the only codes that
 distinguish the policy and percentage rules from generic validation and
 concurrency failures. The statuses and detail text already match.
 
+## M-32 Policy mass tort profile is a narrow DRAFT/COMPLETE upsert
+
+SPEC 11.2.4 defines `policy_mass_tort_profile` with `direct_tort_code`,
+`trigger_theory`, the six-value `allocation_method`, the optional secondary
+tort codes, product names, exposure period, claimant estimate, known claim
+count, defense strategy, settlement authority, claims-handling instructions,
+MDL and bankruptcy-trust references, coverage counsel, review dates, and
+`status` `ACTIVE`/`SUPERSEDED`/`UNDER_REVIEW`. SPEC 11.2.10 mounts GET/PUT at
+`/api/v1/policy/policies/{policyId}/mass-tort-profile`; SPEC 11.2.9 publishes
+`policy.mass-tort-profile.updated`; the SPEC command validates allocation
+percentages and requires a human approval. The 2026-10-20 slice implements a
+narrow one-per-policy profile:
+
+| Area | Implemented | SPEC / gap |
+|---|---|---|
+| Path | `GET/PUT /api/v1/policies/{policyId}/mass-tort-profile` (the M-01 short form) | SPEC 11.2.10 `/api/v1/policy/policies/{policyId}/mass-tort-profile` |
+| Projection | `{profileId, policyId, tortType, triggerType, allocationMethod, allocationNotes, coverageBlockStart, coverageBlockEnd, status, updatedAt}` | SPEC also has secondary tort codes, product names, exposure window, claimant estimate, known claim count, defense strategy, settlement authority, claims-handling instructions, MDL and bankruptcy-trust references, coverage counsel, review frequency and dates, and version. |
+| Tort catalog | `ASBESTOS`, `SILICA`, `TALC`, `PFAS`, `OPIOIDS`, `PRODUCT_LIABILITY`, `ENVIRONMENTAL`, `OTHER` | SPEC Appendix E adds `BENZENE`, `OPIOID` (singular), `GLYPHOSATE`, `HAIR_RELAXER`, `HERNIA_MESH`, `TV_MESH`, `IVC_FILTER`, `ESSure`, `CPAP`, `EARPLUG`, `ZANTAC`, `E_CIGARETTE`, `PARAQUAT`, `ACETAMINOPHEN`, `Zofran`, `DEPAKOTE`, `RISPERDAL`, `ROUNDUP`, `SEXUAL_ABUSE`, `CLERGY_ABUSE`, `CTE`, `WILDFIRE`, and `COVID_BI`, among others. `PRODUCT_LIABILITY` is not an Appendix E code. |
+| Trigger vocabulary | `EXPOSURE`, `MANIFESTATION`, `INJURY`, `REVISIONIST` | SPEC `EXPOSURE`, `INJURY_IN_FACT`, `MANIFESTATION`, `CONTINUOUS_TRIGGER`, `ALL_SUMS`, `CLAIMS_MADE` |
+| Status | `DRAFT`, `COMPLETE`; COMPLETE gates the notes and both block dates | SPEC `ACTIVE`, `SUPERSEDED`, `UNDER_REVIEW`; no COMPLETE gate |
+| Command | PUT upsert. The expert returns 201 on create and 200 on replace, but the public domain controller returns 200 for both. No approval step and no allocation percentages; 2000-character notes cap; inclusive date block. | SPEC `policy.update-mass-tort-profile` is an approval command and validates allocation percentages that sum to 1; the canonical contract keeps the 201 create response. |
+| Concurrency and idempotency | No `If-Match` or `Idempotency-Key`; `updatedAt` is informational; a concurrent write is 409 `CONCURRENT_MODIFICATION`, and a repeated PUT rewrites the profile and emits another event | SPEC 12.6 |
+| Book | `X-EIA-Book: DIRECT` when present; an absent header is accepted; another book is 404 `BOOK_SCOPE_VIOLATION` | The canonical contract requires DIRECT; `BookScope.requireDirectWhenPresent` accepts an absent header |
+| Event | `policy.mass-tort-profile.updated`; payload has the policy identity, status, tort, trigger, allocation method, and coverage-block dates; no profile id or notes | The name matches SPEC 11.2.9. The profile id is deliberately omitted because the policy is the aggregate; the notes are not part of the allocation context. |
+
+Evidence:
+
+- `repos/eia-policy-domain/.../PolicyMassTortProfileController.java:22-49`
+  (public GET/PUT, tenant header, optional DIRECT book guard; the PUT returns
+  the body directly, so the public success is always 200) and
+  `PolicyMassTortProfileService.java:20-27` (proxy).
+- `repos/eia-policy-domain/.../MassTortProfile.java:14-25` (flat public
+  projection), `UpdateMassTortProfileCommand.java:16-24` (required fields,
+  `trigger` alias, 2000-character notes cap, max-32 status), and
+  `PolicyClient.java:373-408` (expert `/internal/v1` calls and projection
+  remap).
+- `repos/eia-policy-expert/.../MassTortProfileController.java:24-64` (public
+  and internal prefixes, tenant resolution, 201/200 upsert) and
+  `MassTortProfileService.java:53-99` (tenant wall, 404, upsert, policy version
+  bump, outbox write).
+- `repos/eia-policy-expert/.../MassTortProfileRules.java:45-164` (tort, trigger,
+  allocation, and status vocabularies; notes cap; block order; COMPLETE gate)
+  and `MassTortProfileRepository.java:46-82` (tenant-scoped read, insert,
+  update).
+- `repos/eia-policy-expert/.../PutMassTortProfileRequest.java:14-22`,
+  `PolicyMassTortProfile.java:16-28`, `MassTortProfileResult.java:7`, and
+  `PolicyEvents.java:47,89-101` (event name and payload).
+- `repos/eia-policy-expert/src/main/resources/schema.sql:452-490`
+  (`policy_mass_tort_profile` uniqueness, vocabulary, block, and COMPLETE
+  constraints and the tenant index).
+- Tests: `PolicyMassTortProfileControllerTest`
+  (`returnsTheMassTortProfile`, `updatesTheMassTortProfile`,
+  `acceptsTheTriggerAliasUsedByThePolicyUi`,
+  `rejectsAnyOtherBookBeforeCallingTheExpert`, `validatesTheUpdateBody`),
+  `PolicyMassTortProfileClientTest`, `MassTortProfileControllerTest`
+  (`createsAProfileWith201`, `updatesAnExistingProfileWith200`,
+  `surfacesServiceValidationCodes`), `MassTortProfileRulesTest`, and
+  `MassTortProfileServiceTest` (`createsTheProfileAndWritesTheUpdatedEvent`,
+  `updatesTheExistingProfileInPlaceAndKeepsADistinctEventVersion`,
+  `completeRequiresNotesAndBothCoverageBlockDates`,
+  `enforcesTheTenantWallOnReadsAndWrites`).
+- `openapi/policy.yaml` 2.6.0, `asyncapi/policy.yaml` 1.4.0, and
+  `asyncapi/event-catalog.yaml` 1.12.0 record the implemented shape.
+
+Resolution: the narrow profile is canonical for now. Closing the gap means
+adding the SPEC `trigger_theory` and status vocabulary, the Appendix E tort
+catalog, the remaining profile columns, and the approval and
+allocation-percentage steps, propagating the expert's 201 create from the
+public domain controller, and either adding the SPEC 11.2.10 path alias or
+correcting the SPEC to the short path. Renaming the implemented vocabularies or
+the event is breaking and needs an ADR and an EV-05 dual-publish window.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-Policy premium receivables contract:
+Policy mass tort profile contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -1397,7 +1481,7 @@ python: 3.12.8 (standard library only)
 
 OpenAPI 3.1 documents
   OK openapi/party.yaml  5 paths, 7 operations
-  OK openapi/policy.yaml  41 paths, 52 operations
+  OK openapi/policy.yaml  42 paths, 54 operations
   OK openapi/contract.yaml  38 paths, 55 operations
   OK openapi/direct-claims.yaml  48 paths, 71 operations
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
@@ -1426,7 +1510,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 10847 checks, 0 failures
+  PASS 11032 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -1514,7 +1598,14 @@ Additional checks and limits:
   widening the receivable `limit` maximum from 200 to 500 each fail with the
   specific missing operation, schema, or limit-bounds message. All three were
   run on a throwaway copy and exited non-zero (exit 1); the working copy was
-  left unchanged.
+  left unchanged. The Policy mass tort profile pass added four more: renaming
+  the `/api/v1/policies/{policyId}/mass-tort-profile` path, renaming the
+  `MassTortProfile` schema, dropping `policy.mass-tort-profile.updated` from
+  the Policy `implemented` list, and restoring the implemented route to
+  `x-planned-operations` each fail with the specific missing operation,
+  schema, implemented-event, or planned-route message. All four were run on a
+  throwaway copy and exited non-zero (exit 1); the working copy was left
+  unchanged.
 
 ## Resolution policy
 
