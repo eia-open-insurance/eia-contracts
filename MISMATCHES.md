@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-20 (claim assignment contract).
+Status: open, reviewed 2026-10-20 (document association-link contract).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -68,6 +68,7 @@ removed per the resolution policy.
 | M-23 | Global search paths and validation differ from the SPEC naming and canonical limit rules | M |
 | M-24 | Payment source link is a flat triple, not the SPEC claim projection | M |
 | M-25 | Claim assignment contract alignment: team is optional, negative expectedVersion is 400, and X-EIA-Actor is the only actor header. Resolved 2026-10-20. | — |
+| M-26 | Document association links are a flat tenant-scoped link, not the SPEC association | M |
 
 ## M-01 Public base paths
 
@@ -575,7 +576,7 @@ ten publishing verticals now emit a subset:
 | Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.assigned`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted`, `assumed.claim.task-created`, `assumed.claim.task-completed`, `assumed.claim.task-updated`, `assumed.claim.note-added` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
 | Cession | `cession.cession.created`, `cession.cession.updated`, `cession.cession.handed-off` | `repos/eia-cession-expert/.../CessionEvents.java` |
 | Retrocession | `retrocession.retrocession.created`, `retrocession.retrocession.updated`, `retrocession.retrocession.handed-off` | `repos/eia-retrocession-expert/.../RetrocessionEvents.java` |
-| Document | `document.document.created`, `document.document.updated`, `document.document.status-changed` | `repos/eia-document-expert/.../DocumentEvents.java` |
+| Document | `document.document.created`, `document.document.updated`, `document.document.status-changed`, `document.link.added`, `document.link.removed` | `repos/eia-document-expert/.../DocumentEvents.java`, `DocumentLinkEvents.java` |
 | Payment | `payment.payment.created`, `payment.payment.updated`, `payment.payment.status-changed` | `repos/eia-payment-expert/.../PaymentEvents.java` |
 | Notifications | `notifications.notification.created`, `notifications.notification.sent` | `repos/eia-notifications-expert/.../NotificationEvents.java` |
 
@@ -584,6 +585,11 @@ The Payment `payment.payment.created` payload now also carries the optional
 They are additive: `eventVersion` stays 1, the fields are absent or null on an
 unlinked payment, and `payment.payment.updated` and `.status-changed` keep their
 existing identity-only payloads.
+
+The Document expert's link writes append `document.link.added` or
+`document.link.removed` from `DocumentLinkEvents.java` in the same transaction
+as the link row. Both use the `DocumentLink` aggregate with the link id and
+version 1; the three document metadata events are unchanged.
 
 Each controller or service calls `outbox.insert(OutboxEvent.fromEnvelope(...))`
 in the same transaction as the aggregate write; for example
@@ -723,7 +729,7 @@ planned name |
 | Assumed Claims | `assumed.claim.updated`; `assumed.claim.assigned`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no assignment, task, or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
 | Cession | `cession.cession.created` / `.updated` / `.handed-off` | `cession.case.created`, `cession.handoff.sent`/`.acknowledged` |
 | Retrocession | `retrocession.retrocession.created` / `.updated` / `.handed-off` | `retrocession.case.created`, `retrocession.handoff.sent`/`.acknowledged` |
-| Document | `document.document.created` / `.updated` / `.status-changed` | `document.document.registered`, plus the SPEC lifecycle verbs |
+| Document | `document.document.created` / `.updated` / `.status-changed`; `document.link.added` / `.removed` | `document.document.registered`, `document.document.associated`, plus the SPEC lifecycle verbs |
 | Payment | `payment.payment.updated` / `.status-changed` | the SPEC per-verb names such as `payment.payment.authorized` |
 | Notifications | `notifications.notification.created` / `.sent` | `notifications.notification.issued` / `.delivered` |
 
@@ -742,6 +748,7 @@ Evidence:
 - `repos/eia-cession-expert/.../CessionEvents.java:27-29`
 - `repos/eia-retrocession-expert/.../RetrocessionEvents.java:28-30`
 - `repos/eia-document-expert/.../DocumentEvents.java:29-31`
+- `repos/eia-document-expert/.../DocumentLinkEvents.java:26-28`
 - `repos/eia-payment-expert/.../PaymentEvents.java:31-33`
 - `repos/eia-notifications-expert/.../NotificationEvents.java:36-37`
 
@@ -972,10 +979,71 @@ expert. The contract documents the agreement (optional team, `expectedVersion >=
 0`, shared `X-EIA-Actor`); the service fixes should follow in their own
 repositories.
 
+## M-26 Document association links are flat, not the SPEC association
+
+SPEC 11.6.10 exposes `POST /api/v1/document/documents/{documentId}/associations`
+and `DELETE .../associations/{associationId}`. SPEC 7.9 and 11.6 model an
+association as a subject triple plus role, unique on `(document_id,
+subject_vertical, subject_type, subject_id, role)`, and DOC-09 requires the
+association to reference an existing subject, verified synchronously with the
+owning vertical.
+
+The implemented surface is a document-owned, tenant-scoped link:
+
+| Aspect | Implemented | SPEC 11.6.10 / 7.9 |
+|---|---|---|
+| Routes | `GET|POST /api/v1/documents/{documentId}/links`, `DELETE .../links/{linkId}`, plus the same three on `/internal/v1` | `POST .../associations`, `DELETE .../associations/{associationId}` |
+| Target | `linkedType` (closed enum) + `linkedId` UUID | `subject_vertical` + `subject_type` + `subject_id` |
+| Role | none | required association role (`AUTHORITATIVE`, `SUPPORTING`, and so on) |
+| Display | optional cached `linkedReference` (64 characters); `linkedLabel` is the reference or the first eight characters of `linkedId` | derived from the subject projection |
+| Uniqueness | `(tenant_id, document_id, linked_type, linked_id)` | `(document_id, subject_vertical, subject_type, subject_id, role)` |
+| Book | none; tenant-scoped only | the association carries the subject's book (SPEC 3.6) |
+| Existence check | none; `linkedId` is stored without a call to the owning vertical | DOC-09 synchronous validation |
+| Duplicate | 409 `DUPLICATE_LINK`, no second row or event | conflict |
+| Remove | 204; unknown link is 404 `LINK_NOT_FOUND` | removal |
+| Events | `document.link.added` / `document.link.removed` | `document.document.associated`; SPEC defines no removal event |
+
+Consequences:
+
+- The Document vertical owns the link and never resolves the target. A
+  well-formed `linkedId` that names no record is accepted, so DOC-09 and the
+  cross-vertical existence contract are not met.
+- There is no role, book, or subject-vertical column, so a link cannot express
+  the SPEC association role or be authorized by the subject's book.
+- The list `GET /api/v1/documents` accepts only a complete `linkedType` +
+  `linkedId` pair; a partial pair is 400 `INVALID_LINK_FILTER` and an unknown
+  type is 400 `INVALID_LINKED_TYPE`. Search forwards `q` to the expert and
+  matches document metadata or any link's `linkedReference`.
+- The two event names have no SPEC 11.6.9 equivalent (M-22). They are additive
+  under EV-05; the SPEC association fact remains planned.
+
+Evidence:
+
+- `repos/eia-document-domain/.../DocumentController.java:58-78` (public link
+  routes and tenant header), `DocumentService.java:47-58`,
+  `DocumentExpertClient.java` (link calls), `DocumentLinkDto.java:12-20`,
+  `CreateDocumentLinkCommand.java:13-21`.
+- `repos/eia-document-expert/.../DocumentLinkController.java:33-59` (public and
+  internal routes, `X-EIA-Tenant`/`tenantId` fallback),
+  `DocumentService.java:83-135` (list, duplicate guard, insert/delete plus
+  outbox), `LinkedType.java:13-20`, `DocumentLink.java:15-40`,
+  `CreateDocumentLinkRequest.java:16-20`, `DocumentLinkEvents.java:26-76`.
+- `repos/eia-document-expert/src/main/resources/schema.sql` (`document_link`
+  table, `uq_document_link_subject` unique key, `linked_type` check).
+- Tests: `DocumentLinkApiTest`, `DocumentLinkClientTest`,
+  `DocumentLinkControllerTest`, `DocumentLinkIntegrationTest`,
+  `DocumentLinkRepositoryPostgresTest`.
+
+Resolution: either model the SPEC association triple, role, and book, validate
+the target with its owning vertical (DOC-09), and publish
+`document.document.associated`, or accept the flat tenant-scoped link as the
+canonical shape and amend SPEC 7.9, 11.6.9, 11.6.10, and DOC-09. The contract
+documents the implemented link shape.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-claim assignment contract:
+document association-link contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -991,7 +1059,7 @@ OpenAPI 3.1 documents
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
   OK openapi/cession.yaml  9 paths, 11 operations
   OK openapi/retrocession.yaml  9 paths, 11 operations
-  OK openapi/document.yaml  7 paths, 9 operations
+  OK openapi/document.yaml  11 paths, 15 operations
   OK openapi/payment.yaml  10 paths, 12 operations
   OK openapi/notifications.yaml  7 paths, 9 operations
 
@@ -1003,10 +1071,10 @@ AsyncAPI 3 documents
   OK asyncapi/assumed-claims.yaml  21 event channels
   OK asyncapi/cession.yaml  17 event channels
   OK asyncapi/retrocession.yaml  17 event channels
-  OK asyncapi/document.yaml  18 event channels
+  OK asyncapi/document.yaml  20 event channels
   OK asyncapi/payment.yaml  18 event channels
   OK asyncapi/notifications.yaml  12 event channels
-  OK catalog: 178 unique published events across 10 verticals
+  OK catalog: 180 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -1014,7 +1082,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 9656 checks, 0 failures
+  PASS 9865 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -1056,6 +1124,10 @@ Additional checks and limits:
   `AssumedClaim` schema, making `assignedTeam` required in
   `AssignClaimRequest`, and dropping `direct.claim.assigned` from the Direct
   Claims `implemented` list each fail with the specific path, schema, field, or
+  implemented-event message. The document association-link pass added three
+  more: removing the `/api/v1/documents/{documentId}/links` path, renaming the
+  `DocumentLink` schema, and dropping `document.link.added` from the Document
+  `implemented` list each fail with the specific path, schema, or
   implemented-event message.
 
 ## Resolution policy

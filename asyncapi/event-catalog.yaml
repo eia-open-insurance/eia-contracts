@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.5.0
+  version: 1.6.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -22,6 +22,7 @@ info:
     `published` remains the full agreed contract, so an event is planned until
     it appears in both lists. The Direct Claims and Assumed Claims task, note,
     and assignment events are new names with no SPEC 11.4.9 or 11.5.9
+    equivalent, and the Document link events are new names with no SPEC 11.6.9
     equivalent (MISMATCHES.md M-22). The platform event-ingest service is the
     inbox:
     it validates the canonical envelope, verifies the HMAC signature when
@@ -332,10 +333,14 @@ x-event-catalog:
       - document.document.created
       - document.document.updated
       - document.document.status-changed
+      - document.link.added
+      - document.link.removed
     implemented:
       - document.document.created
       - document.document.updated
       - document.document.status-changed
+      - document.link.added
+      - document.link.removed
     consumed:
       - policy.policy.issued
       - policy.policy.endorsed

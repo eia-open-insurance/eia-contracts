@@ -1,18 +1,29 @@
 openapi: 3.1.0
 info:
   title: EIA Document API
-  version: 1.1.0
-  summary: Document metadata and lifecycle administration and the Document expert API.
+  version: 1.2.0
+  summary: Document metadata, lifecycle, and association-link administration and the Document expert API.
   description: >
     This document describes the implemented public Document domain API and the
     internal Document expert API. The authoritative requirement is SPEC 11.6
     and SPEC 12; the implemented surface is the first vertical slice.
 
-    The slice carries metadata and lifecycle only. Content, renditions,
-    versions, associations, OCR text, holds, packages, requests, signatures,
-    and retention disposition from SPEC 11.6 are planned and listed under
+    The slice carries metadata, lifecycle, and association links. Content,
+    renditions, versions, OCR text, holds, packages, requests, signatures, and
+    retention disposition from SPEC 11.6 are planned and listed under
     x-planned-operations. Only an authorized content endpoint may stream bytes;
     none is implemented yet.
+
+    The 2026-10-20 link slice adds `GET|POST
+    /api/v1/documents/{documentId}/links` and `DELETE
+    /api/v1/documents/{documentId}/links/{linkId}`, the same three operations on
+    the expert's `/internal/v1` base, the `DocumentLink` projection, the
+    `CreateDocumentLinkRequest` command, and the optional `linkedType` +
+    `linkedId` filter on the document list. Search `q` also matches any link's
+    `linkedReference`. The link is tenant-scoped and flat: the SPEC 11.6.10
+    `/associations` route, the subject triple and role, the association book,
+    and the DOC-09 synchronous target check are not implemented (MISMATCHES.md
+    M-26).
 
     The implemented Document services emit a compact `ApiError` body of
     `{code, message, details[]}` rather than the canonical Problem envelope;
@@ -44,11 +55,34 @@ paths:
         - Document
       summary: List documents for the caller's tenant.
       description: >
-        Returns a bare JSON array. Free-text search is served by
-        `GET /api/v1/documents/search`; filtering and cursor pagination remain
-        planned.
+        Returns a bare JSON array. The optional `linkedType` + `linkedId` pair
+        restricts the list to documents linked to that subject: the two
+        parameters are a pair, so supplying one without the other is 400
+        `INVALID_LINK_FILTER`, and an unknown `linkedType` is 400
+        `INVALID_LINKED_TYPE`. Free-text search over metadata and link
+        references is served by `GET /api/v1/documents/search`; cursor
+        pagination remains planned.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: linkedType
+          in: query
+          required: false
+          description: >
+            Optional association filter. Must be supplied with `linkedId`; see
+            `DocumentLinkedType` for the closed set. The expert rejects a
+            partial pair with 400 `INVALID_LINK_FILTER` and an unknown value
+            with 400 `INVALID_LINKED_TYPE`.
+          schema:
+            $ref: '#/components/schemas/DocumentLinkedType'
+        - name: linkedId
+          in: query
+          required: false
+          description: >
+            Optional target UUID of the association filter. Must be supplied
+            with `linkedType`.
+          schema:
+            type: string
+            format: uuid
       responses:
         '200':
           description: Documents of the tenant.
@@ -100,10 +134,11 @@ paths:
       description: >
         Global-search projection used by the shell and by the document pickers.
         Matching is a case-insensitive contains over `documentNumber`, `title`,
-        and `documentType`; an absent or blank `q` returns the most recently
-        updated documents. The response is the shared `SearchResponse`
-        envelope. A missing or malformed `X-EIA-Tenant` or a `limit` outside
-        1-25 is a 400 `application/problem+json` Problem.
+        `documentType`, and any association link's `linkedReference`; an absent
+        or blank `q` returns the most recently updated documents. The response
+        is the shared `SearchResponse` envelope. A missing or malformed
+        `X-EIA-Tenant` or a `limit` outside 1-25 is a 400
+        `application/problem+json` Problem.
       x-search-type: DOCUMENT
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
@@ -189,6 +224,129 @@ paths:
           $ref: './components.yaml#/components/responses/ServiceUnavailable'
         default:
           $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/documents/{documentId}/links:
+    get:
+      operationId: listDocumentLinks
+      tags:
+        - Document
+      summary: List the association links of a document.
+      description: >
+        Returns the document's links as a bare JSON array, ordered by creation
+        time. Each link carries the typed target (`linkedType` + `linkedId`) and
+        the cached `linkedReference` and `linkedLabel` used to render it without
+        a cross-vertical call. A document outside the caller's tenant is a 404,
+        indistinguishable from a missing document. The SPEC 11.6.10
+        `/associations` shape and its subject role are not implemented
+        (MISMATCHES.md M-26).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: documentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Links of the document.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DocumentLink'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createDocumentLink
+      tags:
+        - Document
+      summary: Associate a document with another record.
+      description: >
+        Creates one association link and writes `document.link.added` in the
+        same transaction. `linkedType` is the closed `DocumentLinkedType` set and
+        `linkedId` is the target UUID; both are required. `linkedReference` is an
+        optional display snapshot of at most 64 characters and is never used to
+        resolve the target. The target is not checked for existence with its
+        owning vertical yet (DOC-09; MISMATCHES.md M-26). A duplicate
+        `(documentId, linkedType, linkedId)` for the tenant is 409
+        `DUPLICATE_LINK` and writes no row or event; a document outside the
+        tenant is 404.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: documentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDocumentLinkRequest'
+      responses:
+        '201':
+          description: Link created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentLink'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            409. The document already has a link to this `(linkedType,
+            linkedId)` pair. The vertical `ApiError` carries code
+            `DUPLICATE_LINK`; no second row or event is written.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/documents/{documentId}/links/{linkId}:
+    delete:
+      operationId: deleteDocumentLink
+      tags:
+        - Document
+      summary: Remove an association link.
+      description: >
+        Deletes exactly one link inside the caller's tenant and document scope
+        and writes `document.link.removed` in the same transaction. A link that
+        is not visible under both the tenant and the document is a 404
+        `LINK_NOT_FOUND`, indistinguishable from a missing link. Success is 204
+        with no body.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: documentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: linkId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Link removed.
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
   /internal/v1/documents:
     get:
       operationId: expertListDocuments
@@ -199,6 +357,31 @@ paths:
       x-internal-api: true
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: linkedType
+          in: query
+          required: false
+          description: >
+            Optional association filter. Must be supplied with `linkedId`; an
+            unknown value is 400 `INVALID_LINKED_TYPE` and a partial pair is 400
+            `INVALID_LINK_FILTER`.
+          schema:
+            $ref: '#/components/schemas/DocumentLinkedType'
+        - name: linkedId
+          in: query
+          required: false
+          description: Optional target UUID of the association filter, paired with `linkedType`.
+          schema:
+            type: string
+            format: uuid
+        - name: q
+          in: query
+          required: false
+          description: >
+            Optional free-text term. The expert trims it and matches
+            case-insensitively as a contains over document metadata and any
+            link's `linkedReference`.
+          schema:
+            type: string
       responses:
         '200':
           description: Documents of the tenant.
@@ -300,6 +483,125 @@ paths:
           $ref: './components.yaml#/components/responses/NotFound'
         '409':
           $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/documents/{documentId}/links:
+    get:
+      operationId: expertListDocumentLinks
+      tags:
+        - Document internal
+      summary: List the association links of a document (expert).
+      security: []
+      x-internal-api: true
+      description: >
+        Expert alias of the public list, called by the Document domain service.
+        The tenant is the required `tenantId` query parameter; the domain also
+        forwards the resolved `X-EIA-Tenant` header, which the expert accepts as
+        a fallback. A document outside the tenant is 404.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: documentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Links of the document.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DocumentLink'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertCreateDocumentLink
+      tags:
+        - Document internal
+      summary: Associate a document with another record (expert).
+      security: []
+      x-internal-api: true
+      description: >
+        Expert alias of the public create. The domain forwards the tenant as
+        `?tenantId=` and the `X-EIA-Tenant` header. A duplicate
+        `(documentId, linkedType, linkedId)` is 409 `DUPLICATE_LINK` with no row
+        or event; a document outside the tenant is 404.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: documentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDocumentLinkRequest'
+      responses:
+        '201':
+          description: Link created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentLink'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            409. The document already has a link to this `(linkedType,
+            linkedId)` pair; the vertical `ApiError` carries code
+            `DUPLICATE_LINK` and no second row or event is written.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/documents/{documentId}/links/{linkId}:
+    delete:
+      operationId: expertDeleteDocumentLink
+      tags:
+        - Document internal
+      summary: Remove an association link (expert).
+      security: []
+      x-internal-api: true
+      description: >
+        Expert alias of the public delete. The link must be visible under both
+        the tenant and the document, so another document's or tenant's link id
+        is 404 `LINK_NOT_FOUND`; success is 204 with no body.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: documentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: linkId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Link removed.
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
         default:
           $ref: './components.yaml#/components/responses/Problem'
 components:
@@ -501,6 +803,82 @@ components:
           type: integer
           minimum: 0
           description: Optional. When supplied, a stale version returns 409 VERSION_CONFLICT.
+    DocumentLinkedType:
+      type: string
+      description: >
+        Closed set of target kinds a document can be linked to. This is the
+        implemented link vocabulary; the SPEC 11.6 association additionally
+        carries a subject vertical, subject type, and role (MISMATCHES.md M-26).
+      enum:
+        - DIRECT_CLAIM
+        - ASSUMED_CLAIM
+        - POLICY
+        - CONTRACT
+        - PARTY
+        - PAYMENT
+        - OTHER
+    DocumentLink:
+      type: object
+      description: >
+        Association link between a document and one target record. The Document
+        vertical owns the link and stores a display snapshot; the target's
+        owning vertical remains authoritative. `linkedLabel` is
+        `linkedReference` when present, otherwise the first eight characters of
+        `linkedId`.
+      required:
+        - id
+        - documentId
+        - linkedType
+        - linkedId
+        - linkedLabel
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        documentId:
+          type: string
+          format: uuid
+        linkedType:
+          $ref: '#/components/schemas/DocumentLinkedType'
+        linkedId:
+          type: string
+          format: uuid
+          description: Target record id in the vertical named by `linkedType`.
+        linkedReference:
+          type: [string, 'null']
+          maxLength: 64
+          description: >
+            Optional human-readable snapshot of the target (a policy or claim
+            number, for example). It is a label only and is never used to
+            resolve or validate the target.
+        linkedLabel:
+          type: string
+          description: >
+            Render label: `linkedReference` when present, otherwise the first
+            eight characters of `linkedId`.
+        createdAt:
+          type: string
+          format: date-time
+    CreateDocumentLinkRequest:
+      type: object
+      description: >
+        Public create command. The tenant comes from `X-EIA-Tenant` and is never
+        part of the body.
+      required:
+        - linkedType
+        - linkedId
+      properties:
+        linkedType:
+          $ref: '#/components/schemas/DocumentLinkedType'
+        linkedId:
+          type: string
+          format: uuid
+          description: Target record id in the vertical named by `linkedType`.
+        linkedReference:
+          type: string
+          maxLength: 64
+          description: Optional display snapshot, trimmed; it never resolves the target.
 x-vertical: document
 x-implementation:
   status: implemented
@@ -511,8 +889,16 @@ x-implementation:
     - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentSearchItem.java
     - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentService.java
     - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentExpertClient.java
+    - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentLinkDto.java
+    - repos/eia-document-domain/src/main/java/com/eia/document/domain/CreateDocumentLinkCommand.java
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentController.java
+    - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentQueryController.java
+    - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentLinkController.java
+    - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentLinkDto.java
+    - repos/eia-document-expert/src/main/java/com/eia/document/expert/CreateDocumentLinkRequest.java
+    - repos/eia-document-expert/src/main/java/com/eia/document/expert/LinkedType.java
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentRules.java
+    - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentLinkEvents.java
   errorEnvelope: >
     Vertical-specific ApiError {code, message, details[{field, message}]}. Not
     the canonical Problem envelope yet.
@@ -536,11 +922,15 @@ x-planned-operations:
   - method: POST
     path: /api/v1/documents/{documentId}/associations
     spec: SPEC 11.6.10
-    note: Associate to a subject.
+    note: >
+      SPEC association route (subject triple plus role); the implemented link
+      surface is /links (M-26).
   - method: DELETE
     path: /api/v1/documents/{documentId}/associations/{associationId}
     spec: SPEC 11.6.10
-    note: Remove an association.
+    note: >
+      SPEC association removal; the implemented link surface is
+      /links/{linkId} (M-26).
   - method: POST
     path: /api/v1/documents/{documentId}/reclassify
     spec: SPEC 11.6.10

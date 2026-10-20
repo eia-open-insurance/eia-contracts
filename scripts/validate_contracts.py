@@ -513,6 +513,8 @@ IMPLEMENTED_EVENTS = {
         "document.document.created",
         "document.document.updated",
         "document.document.status-changed",
+        "document.link.added",
+        "document.link.removed",
     ],
     "payment": [
         "payment.payment.created",
@@ -588,6 +590,31 @@ PAYMENT_SOURCE_FIELDS = ("sourceType", "sourceId", "sourceReference")
 PAYMENT_SOURCE_TYPES = ("DIRECT_CLAIM", "ASSUMED_CLAIM", "POLICY", "OTHER")
 PAYMENT_CLASSIFIED_SOURCE_TYPES = ("DIRECT_CLAIM", "ASSUMED_CLAIM", "POLICY")
 PAYMENT_SOURCE_REFERENCE_MAX_LENGTH = 64
+
+# Document association links. The three public routes are mirrored on the
+# expert's /internal/v1 base; both surfaces are mandatory. The link vocabulary
+# is the closed set the expert enforces, and linkedReference is an optional
+# display snapshot rather than a resolved target.
+DOCUMENT_LINK_OPENAPI_PATHS = [
+    ("/api/v1/documents/{documentId}/links", "get"),
+    ("/api/v1/documents/{documentId}/links", "post"),
+    ("/api/v1/documents/{documentId}/links/{linkId}", "delete"),
+    ("/internal/v1/documents/{documentId}/links", "get"),
+    ("/internal/v1/documents/{documentId}/links", "post"),
+    ("/internal/v1/documents/{documentId}/links/{linkId}", "delete"),
+]
+
+DOCUMENT_LINKED_TYPES = (
+    "DIRECT_CLAIM",
+    "ASSUMED_CLAIM",
+    "POLICY",
+    "CONTRACT",
+    "PARTY",
+    "PAYMENT",
+    "OTHER",
+)
+
+DOCUMENT_LINK_REFERENCE_MAX_LENGTH = 64
 
 EVENT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$")
 VALID_JSON_TYPES = {"null", "boolean", "object", "array", "number", "string", "integer"}
@@ -1365,6 +1392,265 @@ def check_payment_asyncapi_sources(contracts: ContractSet, document, relative: s
 
 
 # ---------------------------------------------------------------------------
+# Document association-link checks
+# ---------------------------------------------------------------------------
+
+
+def _link_parameters(operation):
+    """Return (referenced parameter names, inline parameter names)."""
+    references = []
+    names = []
+    for parameter in operation.get("parameters") or []:
+        if not isinstance(parameter, dict):
+            continue
+        reference = parameter.get("$ref")
+        if isinstance(reference, str):
+            references.append(reference.rsplit("/", 1)[-1])
+        if isinstance(parameter.get("name"), str):
+            names.append(parameter["name"])
+    return references, names
+
+
+def _link_parameter_schema(operation, name):
+    for parameter in operation.get("parameters") or []:
+        if isinstance(parameter, dict) and parameter.get("name") == name:
+            return parameter.get("schema") or {}
+    return {}
+
+
+def _link_response_schema(operation, status, media_type):
+    response = (operation.get("responses") or {}).get(status)
+    if not isinstance(response, dict):
+        return None
+    return ((response.get("content") or {}).get(media_type) or {}).get("schema")
+
+
+def check_document_links_openapi(contracts: ContractSet, document, relative: str):
+    """Require the document association-link operations, schemas, and filters."""
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    for link_path, link_method in DOCUMENT_LINK_OPENAPI_PATHS:
+        path_item = paths.get(link_path) if isinstance(paths, dict) else None
+        operation = path_item.get(link_method) if isinstance(path_item, dict) else None
+        where = f"{relative}: {link_method.upper()} {link_path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required document-link operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+        parameter_refs, inline_names = _link_parameters(operation)
+        tenant_parameter = (
+            "TenantHeader" if link_path.startswith("/api/v1/") else "TenantIdQuery"
+        )
+        contracts.check(
+            tenant_parameter in parameter_refs,
+            f"{where}: must document the shared {tenant_parameter} parameter",
+        )
+        contracts.check(
+            "documentId" in inline_names,
+            f"{where}: must declare the documentId path parameter",
+        )
+        if link_path.endswith("/{linkId}"):
+            contracts.check(
+                "linkId" in inline_names,
+                f"{where}: must declare the linkId path parameter",
+            )
+
+        responses = operation.get("responses") or {}
+        contracts.check("400" in responses, f"{where}: must document the 400 response")
+        contracts.check("404" in responses, f"{where}: must document the 404 response")
+        if link_method == "get":
+            ok_schema = _link_response_schema(operation, "200", "application/json")
+            contracts.check(
+                isinstance(ok_schema, dict)
+                and ok_schema.get("type") == "array"
+                and str((ok_schema.get("items") or {}).get("$ref", "")).endswith(
+                    "/schemas/DocumentLink"
+                ),
+                f"{where}: 200 must return an array of DocumentLink",
+            )
+        elif link_method == "post":
+            request_schema = (
+                ((operation.get("requestBody") or {}).get("content") or {})
+                .get("application/json", {})
+                .get("schema")
+            )
+            contracts.check(
+                isinstance(request_schema, dict)
+                and str(request_schema.get("$ref", "")).endswith(
+                    "/schemas/CreateDocumentLinkRequest"
+                ),
+                f"{where}: request body must use the CreateDocumentLinkRequest schema",
+            )
+            created_schema = _link_response_schema(operation, "201", "application/json")
+            contracts.check(
+                isinstance(created_schema, dict)
+                and str(created_schema.get("$ref", "")).endswith("/schemas/DocumentLink"),
+                f"{where}: 201 must return the DocumentLink schema",
+            )
+            conflict = responses.get("409")
+            conflict_text = (
+                str(conflict.get("description") or "") if isinstance(conflict, dict) else ""
+            )
+            contracts.check(
+                "DUPLICATE_LINK" in conflict_text,
+                f"{where}: 409 must document DUPLICATE_LINK",
+            )
+            conflict_schema = _link_response_schema(
+                operation, "409", "application/problem+json"
+            )
+            contracts.check(
+                isinstance(conflict_schema, dict)
+                and str(conflict_schema.get("$ref", "")).endswith("/schemas/Problem"),
+                f"{where}: 409 must document the shared Problem schema",
+            )
+        else:
+            contracts.check(
+                "204" in responses,
+                f"{where}: must document the 204 no-content response",
+            )
+
+    linked_type = schemas.get("DocumentLinkedType") or {}
+    contracts.check(
+        linked_type.get("type") == "string",
+        f"{relative}: DocumentLinkedType must be a string enum",
+    )
+    contracts.check(
+        set(linked_type.get("enum") or []) == set(DOCUMENT_LINKED_TYPES),
+        f"{relative}: DocumentLinkedType must enumerate {list(DOCUMENT_LINKED_TYPES)}",
+    )
+
+    link = schemas.get("DocumentLink") or {}
+    link_properties = link.get("properties") or {}
+    link_required = set(link.get("required") or [])
+    for field in (
+        "id",
+        "documentId",
+        "linkedType",
+        "linkedId",
+        "linkedReference",
+        "linkedLabel",
+        "createdAt",
+    ):
+        contracts.check(
+            field in link_properties,
+            f"{relative}: DocumentLink.properties.{field} is required",
+        )
+    for field in ("id", "documentId", "linkedType", "linkedId", "linkedLabel", "createdAt"):
+        contracts.check(
+            field in link_required,
+            f"{relative}: DocumentLink.required must list {field}",
+        )
+    contracts.check(
+        "linkedReference" not in link_required,
+        f"{relative}: DocumentLink.linkedReference must stay optional",
+    )
+    contracts.check(
+        str((link_properties.get("linkedType") or {}).get("$ref", "")).endswith(
+            "/schemas/DocumentLinkedType"
+        ),
+        f"{relative}: DocumentLink.linkedType must reference DocumentLinkedType",
+    )
+    for field in ("id", "documentId", "linkedId"):
+        contracts.check(
+            (link_properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: DocumentLink.{field} must be a uuid",
+        )
+    reference = link_properties.get("linkedReference") or {}
+    contracts.check(
+        _schema_types(reference) == {"string", "null"}
+        and reference.get("maxLength") == DOCUMENT_LINK_REFERENCE_MAX_LENGTH,
+        f"{relative}: DocumentLink.linkedReference must be a nullable string of at most "
+        f"{DOCUMENT_LINK_REFERENCE_MAX_LENGTH} characters",
+    )
+    contracts.check(
+        (link_properties.get("createdAt") or {}).get("format") == "date-time",
+        f"{relative}: DocumentLink.createdAt must be a date-time",
+    )
+
+    request = schemas.get("CreateDocumentLinkRequest") or {}
+    request_properties = request.get("properties") or {}
+    request_required = set(request.get("required") or [])
+    contracts.check(
+        {"linkedType", "linkedId"} <= request_required,
+        f"{relative}: CreateDocumentLinkRequest must require linkedType and linkedId",
+    )
+    contracts.check(
+        "linkedReference" not in request_required,
+        f"{relative}: CreateDocumentLinkRequest.linkedReference must stay optional",
+    )
+    for field in ("linkedType", "linkedId", "linkedReference"):
+        contracts.check(
+            field in request_properties,
+            f"{relative}: CreateDocumentLinkRequest.properties.{field} is required",
+        )
+    contracts.check(
+        str((request_properties.get("linkedType") or {}).get("$ref", "")).endswith(
+            "/schemas/DocumentLinkedType"
+        ),
+        f"{relative}: CreateDocumentLinkRequest.linkedType must reference DocumentLinkedType",
+    )
+    contracts.check(
+        (request_properties.get("linkedId") or {}).get("format") == "uuid",
+        f"{relative}: CreateDocumentLinkRequest.linkedId must be a uuid",
+    )
+    contracts.check(
+        (request_properties.get("linkedReference") or {}).get("maxLength")
+        == DOCUMENT_LINK_REFERENCE_MAX_LENGTH,
+        f"{relative}: CreateDocumentLinkRequest.linkedReference maxLength must be "
+        f"{DOCUMENT_LINK_REFERENCE_MAX_LENGTH}",
+    )
+
+    # The document list takes the optional linkedType + linkedId pair, the
+    # expert list takes the same pair plus q, and the public search documents
+    # that q matches a link's linkedReference.
+    list_path_item = paths.get("/api/v1/documents") if isinstance(paths, dict) else None
+    list_operation = list_path_item.get("get") if isinstance(list_path_item, dict) else None
+    _, list_names = _link_parameters(list_operation or {})
+    contracts.check(
+        "linkedType" in list_names and "linkedId" in list_names,
+        f"{relative}: GET /api/v1/documents must declare the linkedType and linkedId filter parameters",
+    )
+    contracts.check(
+        str(_link_parameter_schema(list_operation or {}, "linkedType").get("$ref", "")).endswith(
+            "/schemas/DocumentLinkedType"
+        ),
+        f"{relative}: GET /api/v1/documents linkedType must reference DocumentLinkedType",
+    )
+    contracts.check(
+        _link_parameter_schema(list_operation or {}, "linkedId").get("format") == "uuid",
+        f"{relative}: GET /api/v1/documents linkedId must be a uuid",
+    )
+
+    expert_list_path_item = (
+        paths.get("/internal/v1/documents") if isinstance(paths, dict) else None
+    )
+    expert_list = (
+        expert_list_path_item.get("get")
+        if isinstance(expert_list_path_item, dict)
+        else None
+    )
+    _, expert_list_names = _link_parameters(expert_list or {})
+    contracts.check(
+        {"linkedType", "linkedId", "q"} <= set(expert_list_names),
+        f"{relative}: the expert document list must declare linkedType, linkedId, and q",
+    )
+
+    search_path_item = (
+        paths.get("/api/v1/documents/search") if isinstance(paths, dict) else None
+    )
+    search_operation = (
+        search_path_item.get("get") if isinstance(search_path_item, dict) else None
+    )
+    contracts.check(
+        "linkedReference" in str((search_operation or {}).get("description") or ""),
+        f"{relative}: GET /api/v1/documents/search must document that q matches linkedReference",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
 
@@ -1934,6 +2220,8 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             )
         if vertical == "payment":
             check_payment_openapi_sources(contracts, document, relative)
+        if vertical == "document":
+            check_document_links_openapi(contracts, document, relative)
         contracts.check_openapi_schemas(document, relative)
         if verbose:
             print(f"  OK {relative}  paths={len(paths)} operations={operation_count}")

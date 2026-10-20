@@ -295,6 +295,34 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   event names.
 - `python scripts/validate_contracts.py` passes 9,656 checks with 0 failures.
 
+### Added in the document association-link contract (2026-10-20)
+
+- `openapi/document.yaml` is 1.2.0: adds `GET|POST
+  /api/v1/documents/{documentId}/links` and `DELETE
+  /api/v1/documents/{documentId}/links/{linkId}`, the same three operations on
+  the expert's `/internal/v1` base, the `DocumentLink` projection (`id`,
+  `documentId`, `linkedType`, `linkedId`, `linkedReference`, `linkedLabel`,
+  `createdAt`), the `CreateDocumentLinkRequest` command, and the closed
+  `DocumentLinkedType` enum. `GET /api/v1/documents` accepts the optional
+  `linkedType` + `linkedId` pair, search `q` matches a link's
+  `linkedReference`, and the link operations document 201/204/400/404/409
+  (`DUPLICATE_LINK`) with the required tenant header.
+- `asyncapi/document.yaml` is 1.2.0: adds implemented channels and `send`
+  operations for `document.link.added` and `document.link.removed`, naming
+  `DocumentLinkEvents.java` and describing the `DocumentLink` aggregate and
+  payload.
+- `asyncapi/event-catalog.yaml` is 1.6.0: the two link names are published and
+  implemented (180 published in total).
+- `scripts/validate_contracts.py` requires the six link operations, the
+  `DocumentLink`, `CreateDocumentLinkRequest`, and `DocumentLinkedType` schemas
+  and their bounds, the list `linkedType` + `linkedId` pair, the expert `q`,
+  the search `linkedReference` match, and the two implemented event names.
+- `README.md` records the link routes, projection, enum, filter, duplicate and
+  delete semantics, events, and versions; `MISMATCHES.md` adds M-26 for the
+  flat tenant-scoped link against the SPEC association triple, role, book, and
+  DOC-09 check, and updates M-14 and M-22 with the two new event names.
+- `python scripts/validate_contracts.py` passes 9,865 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

@@ -359,6 +359,55 @@ Ownership semantics:
   and the Assumed Claims domain still requires a team that the contract and
   expert make optional; both differences are recorded in M-25.
 
+### Document association links (2026-10-20)
+
+Document 1.2.0 adds the association-link surface. The change is additive: the
+link routes are new, the list filter pair is optional, and no existing path,
+request field, response field, or event changed.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/document.yaml` | 1.2.0 | Additive | `GET|POST /api/v1/documents/{documentId}/links`, `DELETE /api/v1/documents/{documentId}/links/{linkId}`, their three `/internal/v1` expert aliases, the `DocumentLink`, `CreateDocumentLinkRequest`, and `DocumentLinkedType` schemas, and the optional `linkedType` + `linkedId` filter on the document list. |
+| `asyncapi/document.yaml` | 1.2.0 | Additive | The implemented `document.link.added` and `document.link.removed` channels and operations. |
+| `asyncapi/event-catalog.yaml` | 1.6.0 | Additive | The two link names are published and implemented (180 published in total). |
+
+Link semantics:
+
+- A link is a tenant-scoped association from a document to one target record:
+  `linkedType` is one of `DIRECT_CLAIM`, `ASSUMED_CLAIM`, `POLICY`, `CONTRACT`,
+  `PARTY`, `PAYMENT`, or `OTHER`, and `linkedId` is the target UUID. Both are
+  required on create. `linkedReference` is an optional display snapshot of at
+  most 64 characters; it never resolves or validates the target.
+- The projection is `{id, documentId, linkedType, linkedId, linkedReference,
+  linkedLabel, createdAt}`. `linkedLabel` is the reference when present,
+  otherwise the first eight characters of `linkedId`, so a picker always has a
+  label without a cross-vertical call.
+- A duplicate `(documentId, linkedType, linkedId)` for the tenant is 409
+  `DUPLICATE_LINK` and writes no row or event. A document outside the tenant,
+  an unknown link id, and a link under another document are all 404, so the
+  response cannot confirm another tenant's or document's link.
+- Delete is 204 with no body. The create returns 201 with the link. An unknown
+  `linkedType` is 400 `INVALID_LINKED_TYPE`; a request body missing
+  `linkedType` or `linkedId` is 400 `VALIDATION_ERROR`.
+- `GET /api/v1/documents` accepts the optional `linkedType` + `linkedId` pair.
+  Supplying one without the other is 400 `INVALID_LINK_FILTER`; both absent
+  means no association filter. `GET /api/v1/documents/search` matches `q`
+  against document metadata and any link's `linkedReference`; the expert list
+  accepts the pair plus `q`.
+- `X-EIA-Tenant` is required on every public route. The expert aliases also use
+  the `tenantId` query parameter for the domain call and accept the
+  `X-EIA-Tenant` header as a fallback.
+- The link is deliberately flat and denormalized: it has no association role,
+  no book, and no subject-vertical column, and the create does not check the
+  target with its owning vertical (SPEC DOC-09). The SPEC 11.6.10
+  `/associations` route and the subject triple plus role remain unimplemented;
+  M-26 records the gap.
+- Link writes append `document.link.added` or `document.link.removed` to the
+  transactional outbox in the same transaction as the row. Both use the
+  `DocumentLink` aggregate with the link id and version 1. The names are new
+  and have no SPEC 11.6.9 equivalent (the SPEC association fact is
+  `document.document.associated`); M-22 records the naming gap.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -663,11 +712,15 @@ missing directory.
    the claim assignment paths on both claim verticals, the `AssignClaimRequest`
    schema and its field bounds, the nullable assignment fields on `Claim` and
    `AssumedClaim`, the optional shared `ActorHeader`, the assignment
-   200/400/404/409 responses, the search operations' shared
-   parameters and `SearchResponse`/400/404 responses, the `SearchResponse` and
-   `SearchItem` keys, the required 422/409/428 response codes on the Round 5
-   mutations, the payment source fields and their create rules, and agreement
-   between `info.version` and `x-compatibility.contractVersion`.
+   200/400/404/409 responses, the six document association-link operations on
+   the public and expert surfaces, the `DocumentLink`, `CreateDocumentLinkRequest`,
+   and `DocumentLinkedType` schemas, the `linkedType` + `linkedId` list filter,
+   the expert list `q`, and the search `linkedReference` match, the ten search
+   operations' shared parameters and `SearchResponse`/400/404 responses, the
+   `SearchResponse` and `SearchItem` keys, the required 422/409/428 response
+   codes on the Round 5 mutations, the payment source fields and their create
+   rules, and agreement between `info.version` and
+   `x-compatibility.contractVersion`.
 4. **AsyncAPI structure.** `asyncapi: 3.0.0`, channel addresses, `x-event-type`,
    `x-status: planned|implemented`, `x-implemented-by` on every implemented
    channel, one `send` operation per channel, a `DomainEvent` message on
@@ -679,8 +732,9 @@ missing directory.
    `{vertical}.{aggregate}.{verb}`, every consumed event must have a publisher,
    and the catalog `implemented` list must equal the channels marked
    `x-status: implemented`. The implemented event names for all ten publishing
-   verticals are required explicitly, including `direct.claim.assigned` and
-   `assumed.claim.assigned`.
+   verticals are required explicitly, including `direct.claim.assigned`,
+   `assumed.claim.assigned`, `document.link.added`, and
+   `document.link.removed`.
 6. **JSON Schema checks.** All three files parse as JSON, declare the 2020-12
    dialect and an `$id`, carry the required members, keep required properties
    defined, and validate their own examples against a small schema subset.
@@ -740,6 +794,10 @@ missing directory.
 - a payment carries a flat `sourceType`/`sourceId`/`sourceReference` link rather
   than the SPEC 11.7.4 `claim_vertical`/`claim_id`/`claim_number` projection, and
   the source is neither resolved nor checked for existence (M-12, M-24);
+- document associations are implemented as tenant-scoped `/links` with a flat
+  `linkedType`/`linkedId` target and no role, book, or DOC-09 target-existence
+  check, and publish `document.link.added`/`.removed` rather than the SPEC
+  `document.document.associated` (M-22, M-26);
 - claim assignment is implemented on both claim verticals but has no SPEC 11.4.10
   or 11.5.10 route or SPEC 11.4.9/11.5.9 event name. The Assumed Claims domain
   still requires a team the contract and expert make optional, the Direct Claims
