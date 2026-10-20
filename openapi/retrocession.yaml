@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Retrocession API
-  version: 1.1.0
+  version: 1.2.0
   summary: Assumed-book retrocession case administration, the FS-RI hand-off, and the Retrocession expert API.
   description: >
     This document describes the implemented public Retrocession domain API and
@@ -59,8 +59,9 @@ paths:
         - Retrocession
       summary: List retrocession cases for the caller's tenant and book.
       description: >
-        Returns a bare JSON array. Cursor pagination from SPEC 7.6 is planned
-        for this vertical; see MISMATCHES.md M-04.
+        Returns a bare JSON array. Free-text search is served by
+        `GET /api/v1/retrocessions/search`; cursor pagination from SPEC 7.6 is
+        planned for this vertical and is recorded in MISMATCHES.md M-04.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
@@ -105,6 +106,40 @@ paths:
                 $ref: '#/components/schemas/Retrocession'
         '400':
           $ref: './components.yaml#/components/responses/BadRequest'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/retrocessions/search:
+    get:
+      operationId: searchRetrocessions
+      tags:
+        - Retrocession
+      summary: Search retrocession cases for the caller's tenant and ASSUMED book.
+      description: >
+        Global-search projection used by the shell and by the retrocession
+        pickers. Matching is a case-insensitive contains over
+        `retrocessionNumber` and `contractId`; an absent or blank `q` returns
+        the most recently updated cases. The response is the shared
+        `SearchResponse` envelope. `X-EIA-Book` is required and must be
+        ASSUMED: a missing header is 400 `BOOK_REQUIRED` and a different book
+        is hidden as 404 `BOOK_SCOPE_VIOLATION` (SPEC 3.6.2). A missing tenant
+        or a `limit` outside 1-25 is a 400 `application/problem+json` Problem.
+      x-search-type: RETROCESSION
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - $ref: './components.yaml#/components/parameters/SearchQuery'
+        - $ref: './components.yaml#/components/parameters/SearchLimit'
+      responses:
+        '200':
+          description: Matching retrocession cases, most recently updated first.
+          content:
+            application/json:
+              schema:
+                $ref: './components.yaml#/components/schemas/SearchResponse'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /api/v1/retrocessions/{retrocessionId}:
@@ -712,10 +747,11 @@ x-fsri-error-mapping:
       meaning: HANDED_OFF cannot be requested directly.
 x-implementation:
   status: implemented
-  verifiedAt: '2026-10-19'
+  verifiedAt: '2026-10-20'
   verifiedAgainst:
     - repos/eia-retrocession-domain/src/main/java/com/eia/retrocession/domain/RetrocessionController.java
     - repos/eia-retrocession-domain/src/main/java/com/eia/retrocession/domain/RetrocessionService.java
+    - repos/eia-retrocession-domain/src/main/java/com/eia/retrocession/domain/SearchResult.java
     - repos/eia-retrocession-domain/src/main/java/com/eia/retrocession/domain/RetrocessionClient.java
     - repos/eia-retrocession-domain/src/main/java/com/eia/retrocession/domain/RetrocessionDto.java
     - repos/eia-retrocession-domain/src/main/java/com/eia/retrocession/domain/RetrocessionStatus.java

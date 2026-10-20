@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Document API
-  version: 1.0.0
+  version: 1.1.0
   summary: Document metadata and lifecycle administration and the Document expert API.
   description: >
     This document describes the implemented public Document domain API and the
@@ -43,7 +43,10 @@ paths:
       tags:
         - Document
       summary: List documents for the caller's tenant.
-      description: Returns a bare JSON array. Search, filtering, and cursor pagination are planned.
+      description: >
+        Returns a bare JSON array. Free-text search is served by
+        `GET /api/v1/documents/search`; filtering and cursor pagination remain
+        planned.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
       responses:
@@ -84,6 +87,35 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Document'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/documents/search:
+    get:
+      operationId: searchDocuments
+      tags:
+        - Document
+      summary: Search document metadata for the caller's tenant.
+      description: >
+        Global-search projection used by the shell and by the document pickers.
+        Matching is a case-insensitive contains over `documentNumber`, `title`,
+        and `documentType`; an absent or blank `q` returns the most recently
+        updated documents. The response is the shared `SearchResponse`
+        envelope. A missing or malformed `X-EIA-Tenant` or a `limit` outside
+        1-25 is a 400 `application/problem+json` Problem.
+      x-search-type: DOCUMENT
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/SearchQuery'
+        - $ref: './components.yaml#/components/parameters/SearchLimit'
+      responses:
+        '200':
+          description: Matching documents, most recently updated first.
+          content:
+            application/json:
+              schema:
+                $ref: './components.yaml#/components/schemas/SearchResponse'
         '400':
           $ref: './components.yaml#/components/responses/BadRequest'
         default:
@@ -472,9 +504,12 @@ components:
 x-vertical: document
 x-implementation:
   status: implemented
-  verifiedAt: '2026-10-19'
+  verifiedAt: '2026-10-20'
   verifiedAgainst:
     - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentController.java
+    - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentSearchResponse.java
+    - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentSearchItem.java
+    - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentService.java
     - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentExpertClient.java
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentController.java
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentRules.java

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Contract API
-  version: 2.0.0
+  version: 2.1.0
   summary: Assumed-book reinsurance contract administration and the Contract expert API.
   description: >
     This document describes the implemented public Contract domain API and the
@@ -51,8 +51,9 @@ paths:
         - Contract
       summary: List contracts for the caller's tenant.
       description: >
-        Returns a bare JSON array. Search and cursor pagination from SPEC
-        11.3.10 and SPEC 7.6 are planned.
+        Returns a bare JSON array. Free-text search is served by
+        `GET /api/v1/contracts/search`; filtering and cursor pagination from
+        SPEC 11.3.10 and SPEC 7.6 remain planned.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
       responses:
@@ -96,6 +97,40 @@ paths:
           $ref: './components.yaml#/components/responses/BadRequest'
         '409':
           $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/search:
+    get:
+      operationId: searchContracts
+      tags:
+        - Contract
+      summary: Search contracts for the caller's tenant and ASSUMED book.
+      description: >
+        Global-search projection used by the shell and by the contract pickers.
+        Matching is a case-insensitive contains over `contractNumber` and
+        `contractType`; an absent or blank `q` returns the most recently updated
+        contracts. The response is the shared `SearchResponse` envelope. The
+        Contract vertical is ASSUMED-only, so `X-EIA-Book` is required and must
+        be ASSUMED; another book is hidden as 404 `BOOK_SCOPE_VIOLATION`
+        (SPEC 3.6.2). A missing tenant or book or a `limit` outside 1-25 is a
+        400 `application/problem+json` Problem.
+      x-search-type: CONTRACT
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - $ref: './components.yaml#/components/parameters/SearchQuery'
+        - $ref: './components.yaml#/components/parameters/SearchLimit'
+      responses:
+        '200':
+          description: Matching contracts, most recently updated first.
+          content:
+            application/json:
+              schema:
+                $ref: './components.yaml#/components/schemas/SearchResponse'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /api/v1/contracts/{contractId}:
@@ -3171,9 +3206,11 @@ components:
 x-vertical: contract
 x-implementation:
   status: implemented
-  verifiedAt: '2026-10-19'
+  verifiedAt: '2026-10-20'
   verifiedAgainst:
     - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/ContractController.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/ContractSearch.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/SearchResult.java
     - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/ContractDetailController.java
     - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/ContractDetailClient.java
     - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/ContractResources.java
@@ -3204,17 +3241,19 @@ x-implementation:
     inception date. Cession source references are business strings, not UUIDs.
     Percentages are points of 100, not decimal fractions.
 x-compatibility:
-  contractVersion: 2.0.0
-  previousContractVersion: 1.0.0
+  contractVersion: 2.1.0
+  previousContractVersion: 2.0.0
   breaking:
-    - PATCH /api/v1/contracts/{contractId}/status no longer accepts BOUND; it returns 409 BIND_REQUIRES_COMMAND and bind must use POST /bind.
+    - PATCH /api/v1/contracts/{contractId}/status no longer accepts BOUND (since 2.0.0); it returns 409 BIND_REQUIRES_COMMAND and bind must use POST /bind.
   compatible:
+    - Adds GET /api/v1/contracts/search returning the shared SearchResponse envelope.
     - Adds the layers, participants, terms, security, cessions, bordereaux, commutations, bind-eligibility, and bind routes.
     - Adds the expert routes that mirror the public second slice.
   note: >
-    The bind guard is a deliberate breaking change for a client that used the
-    status endpoint to bind without approvals; it is the SPEC 11.3.8 command
-    contract. The HTTP path stays /api/v1/contracts.
+    Search is additive over 2.0.0 and changes no existing path or schema. The
+    bind guard is a deliberate breaking change introduced in 2.0.0 for a client
+    that used the status endpoint to bind without approvals; it is the SPEC
+    11.3.8 command contract. The HTTP path stays /api/v1/contracts.
 x-planned-operations:
   - method: PATCH
     path: /api/v1/contracts/{contractId}

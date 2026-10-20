@@ -30,7 +30,7 @@ standard).
 
 | Path | Contents |
 |---|---|
-| `openapi/components.yaml` | Shared parameters, headers, responses, and schemas: canonical `Problem` error envelope, money, offset page envelope, ETag/If-Match, Idempotency-Key, audit fields, entity references, tenant and book headers. |
+| `openapi/components.yaml` | Shared parameters, headers, responses, and schemas: canonical `Problem` error envelope, money, offset page envelope, global-search envelope, ETag/If-Match, Idempotency-Key, audit fields, entity references, tenant and book headers. |
 | `openapi/party.yaml` … `openapi/notifications.yaml` | One OpenAPI 3.1 document per vertical. Ten documents, each covering `/api/v1/**` and `/internal/v1/**`. |
 | `asyncapi/event-catalog.yaml` | Authoritative catalog of the published event names, their publisher, and the subscribers named in SPEC 11. |
 | `asyncapi/{vertical}.yaml` | Published event channels for one vertical. One channel and one `send` operation per event name. |
@@ -168,6 +168,30 @@ name. The Contract status command can also emit the cataloged `signed`,
 `endorsed`, `expired`, and `cancelled` names; those remain published but
 outside the declared implemented subset recorded by this change (M-14).
 
+### Global-search compatibility notes (2026-10-20)
+
+The ten public search operations are additive. No existing path, parameter,
+response field, or event changed.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/components.yaml` | 1.3.0 | Additive | `SearchResponse`, `SearchItem`, `SearchType`, `SearchQuery`, and `SearchLimit` become shared components. |
+| `openapi/party.yaml` | 1.1.0 | Additive | `GET /api/v1/parties/search`. |
+| `openapi/policy.yaml` | 2.2.0 | Additive | `GET /api/v1/policies/search` on the DIRECT book. |
+| `openapi/contract.yaml` | 2.1.0 | Additive | `GET /api/v1/contracts/search` on the ASSUMED book. |
+| `openapi/direct-claims.yaml` | 1.2.0 | Additive | `GET /api/v1/claims/search` on the DIRECT book. |
+| `openapi/assumed-claims.yaml` | 1.2.0 | Additive | `GET /api/v1/assumed-claims/search` and its `/claims/search` alias on the ASSUMED book. |
+| `openapi/cession.yaml` | 1.2.0 | Additive | `GET /api/v1/cessions/search` on the DIRECT book. |
+| `openapi/retrocession.yaml` | 1.2.0 | Additive | `GET /api/v1/retrocessions/search` on the ASSUMED book. |
+| `openapi/document.yaml` | 1.1.0 | Additive | `GET /api/v1/documents/search`. |
+| `openapi/payment.yaml` | 1.1.0 | Additive | `GET /api/v1/payments/search`. |
+| `openapi/notifications.yaml` | 1.1.0 | Additive | `GET /api/v1/notifications/search`. |
+
+`q` is optional, so a client that never calls search is unaffected. The new
+`limit` maximum of 25 applies only to the search envelope and does not change
+the Policy page envelope. The search operations keep the document-level
+security and add no required request field outside the tenant and book headers.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -293,6 +317,66 @@ collections. SPEC 7.6 and 12.2 specify a different, cursor-based envelope
 contract; the divergence and the migration choice are recorded in
 `MISMATCHES.md` M-04.
 
+### Global search
+
+The shell's `/search` page fans out to one search operation per vertical. Every
+search route is public, is `GET /api/v1/{resource}/search`, and returns the
+shared `SearchResponse` envelope from `openapi/components.yaml`.
+
+| Vertical | Search path | Book |
+|---|---|---|
+| Party | `/api/v1/parties/search` | none |
+| Policy | `/api/v1/policies/search` | `DIRECT` |
+| Contract | `/api/v1/contracts/search` | `ASSUMED` |
+| Direct Claims | `/api/v1/claims/search` | `DIRECT` |
+| Assumed Claims | `/api/v1/assumed-claims/search` (alias `/api/v1/assumed-claims/claims/search`) | `ASSUMED` |
+| Cession | `/api/v1/cessions/search` | `DIRECT` |
+| Retrocession | `/api/v1/retrocessions/search` | `ASSUMED` |
+| Document | `/api/v1/documents/search` | none |
+| Payment | `/api/v1/payments/search` | none |
+| Notifications | `/api/v1/notifications/search` | none |
+
+Request rules:
+
+- `q` is optional. It is trimmed and matched case-insensitively as a contains
+  over the searchable fields named in the vertical's operation description. An
+  absent or blank `q` returns the most recently updated records.
+- `limit` is optional, defaults to 10, and must be between 1 and 25. A
+  non-integer or out-of-range value is a 400.
+- `X-EIA-Tenant` is required on every search. `X-EIA-Book` is required and
+  fixed on the six book-scoped verticals; another book is hidden as 404
+  `BOOK_SCOPE_VIOLATION` (SPEC 3.6.2).
+- The contract requires a missing tenant, a missing book, or an invalid limit
+  to be a 400 `application/problem+json` `Problem`; a different book is hidden
+  as 404 `BOOK_SCOPE_VIOLATION`. Security is the document-level session cookie,
+  the same requirement as the list operation.
+
+Response shape:
+
+```json
+{
+  "query": "ACME",
+  "limit": 10,
+  "items": [
+    {
+      "id": "0192f3a4-...",
+      "type": "PARTY",
+      "label": "PTY-000000001",
+      "secondary": "Acme Holdings · ORGANIZATION",
+      "status": "ACTIVE",
+      "href": "/party?record=0192f3a4-..."
+    }
+  ]
+}
+```
+
+`type` is one of `PARTY`, `POLICY`, `CONTRACT`, `DIRECT_CLAIM`,
+`ASSUMED_CLAIM`, `CESSION`, `RETROCESSION`, `DOCUMENT`, `PAYMENT`, or
+`NOTIFICATION`. `href` is relative to the shell origin. The services currently
+clamp an over-limit value instead of returning 400, and the claim verticals
+hide a missing book as 404; the canonical target and the divergence are
+recorded in `MISMATCHES.md` M-23.
+
 ## Validation
 
 ### Run the validator
@@ -324,8 +408,11 @@ missing directory.
    content types, internal-route security markers, the required shared
    components (schemas, parameters, headers, and responses), the complete table
    of required paths and methods per vertical (including the Round 5 second
-   slice), the required 422/409/428 response codes on the Round 5 mutations, and
-   agreement between `info.version` and `x-compatibility.contractVersion`.
+   slice and the ten global-search routes), the search operations' shared
+   parameters and `SearchResponse`/400/404 responses, the `SearchResponse` and
+   `SearchItem` keys, the required 422/409/428 response codes on the Round 5
+   mutations, and agreement between `info.version` and
+   `x-compatibility.contractVersion`.
 4. **AsyncAPI structure.** `asyncapi: 3.0.0`, channel addresses, `x-event-type`,
    `x-status: planned|implemented`, `x-implemented-by` on every implemented
    channel, one `send` operation per channel, and a `DomainEvent` message on
@@ -384,6 +471,12 @@ missing directory.
   illegal lifecycle edge;
 - the Cession/Retrocession FS-RI hand-off is synchronous, with no hand-off
   queue or hand-off resource (SPEC 7.18.3/HAND-05);
+- the ten global-search routes are implemented under the short
+  `/api/v1/{resource}/search` form. SPEC defines global search only as the shell
+  `/search` page and the `?q=` convention, not as a per-vertical API; the
+  services also clamp an over-limit `limit` instead of returning 400 and the
+  claim verticals hide a missing book as 404. The contract records the canonical
+  400/1-25 behaviour and `MISMATCHES.md` M-23 records the divergence;
 - ten experts publish a subset of their events through the transactional
   outbox into the platform `event-ingest` inbox, but no vertical consumes
   another vertical's events, there is no subscription registry or gap

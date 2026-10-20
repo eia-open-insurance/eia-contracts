@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Cession API
-  version: 1.1.0
+  version: 1.2.0
   summary: Direct-book cession case administration, the FS-RI hand-off, and the Cession expert API.
   description: >
     This document describes the implemented public Cession domain API and the
@@ -59,8 +59,9 @@ paths:
         - Cession
       summary: List cession cases for the caller's tenant and book.
       description: >
-        Returns a bare JSON array. Cursor pagination from SPEC 7.6 is planned
-        for this vertical; see MISMATCHES.md M-04.
+        Returns a bare JSON array. Free-text search is served by
+        `GET /api/v1/cessions/search`; cursor pagination from SPEC 7.6 is
+        planned for this vertical and is recorded in MISMATCHES.md M-04.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
@@ -105,6 +106,40 @@ paths:
                 $ref: '#/components/schemas/Cession'
         '400':
           $ref: './components.yaml#/components/responses/BadRequest'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/cessions/search:
+    get:
+      operationId: searchCessions
+      tags:
+        - Cession
+      summary: Search cession cases for the caller's tenant and DIRECT book.
+      description: >
+        Global-search projection used by the shell and by the cession pickers.
+        Matching is a case-insensitive contains over `cessionNumber`,
+        `policyId`, and `cessionContractId`; an absent or blank `q` returns the
+        most recently updated cases. The response is the shared
+        `SearchResponse` envelope. `X-EIA-Book` is required and must be DIRECT:
+        a missing header is 400 `BOOK_REQUIRED` and a different book is hidden
+        as 404 `BOOK_SCOPE_VIOLATION` (SPEC 3.6.2). A missing tenant or a
+        `limit` outside 1-25 is a 400 `application/problem+json` Problem.
+      x-search-type: CESSION
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - $ref: './components.yaml#/components/parameters/SearchQuery'
+        - $ref: './components.yaml#/components/parameters/SearchLimit'
+      responses:
+        '200':
+          description: Matching cession cases, most recently updated first.
+          content:
+            application/json:
+              schema:
+                $ref: './components.yaml#/components/schemas/SearchResponse'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /api/v1/cessions/{cessionId}:
@@ -710,10 +745,11 @@ x-fsri-error-mapping:
       meaning: HANDED_OFF cannot be requested directly.
 x-implementation:
   status: implemented
-  verifiedAt: '2026-10-19'
+  verifiedAt: '2026-10-20'
   verifiedAgainst:
     - repos/eia-cession-domain/src/main/java/com/eia/cession/domain/CessionController.java
     - repos/eia-cession-domain/src/main/java/com/eia/cession/domain/CessionService.java
+    - repos/eia-cession-domain/src/main/java/com/eia/cession/domain/SearchResult.java
     - repos/eia-cession-domain/src/main/java/com/eia/cession/domain/CessionClient.java
     - repos/eia-cession-domain/src/main/java/com/eia/cession/domain/CessionDto.java
     - repos/eia-cession-domain/src/main/java/com/eia/cession/domain/CessionStatus.java

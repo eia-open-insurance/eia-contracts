@@ -116,6 +116,36 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
 - `README.md` records the completed rollout and its additive compatibility
   class.
 
+### Added in the global-search contract (2026-10-20)
+
+- `openapi/components.yaml` is contract 1.3.0: adds the shared
+  `SearchResponse` (`query`, `limit`, `items`), `SearchItem` (`id`, `type`,
+  `label`, `secondary`, `status`, `href`), and `SearchType` schemas and the
+  `SearchQuery` (`q`) and `SearchLimit` (`limit`, default 10, minimum 1,
+  maximum 25) parameters.
+- The ten vertical OpenAPI documents add one public search operation each:
+  `GET /api/v1/parties/search`, `/policies/search`, `/contracts/search`,
+  `/claims/search`, `/assumed-claims/search`, `/cessions/search`,
+  `/retrocessions/search`, `/documents/search`, `/payments/search`, and
+  `/notifications/search`. Each requires `X-EIA-Tenant`, requires and validates
+  `X-EIA-Book` on the six book-scoped verticals, documents the shared
+  `SearchResponse` 200, and documents a problem+json 400 for a missing tenant
+  or book or an invalid limit. Each operation keeps the document-level
+  security and the list operation's security requirement, and carries an
+  `x-search-type` naming the `SearchType` it emits.
+- Document versions are additive: party 1.1.0, policy 2.2.0, contract 2.1.0,
+  direct-claims 1.2.0, assumed-claims 1.2.0, cession 1.2.0, retrocession 1.2.0,
+  document 1.1.0, payment 1.1.0, and notifications 1.1.0.
+- `scripts/validate_contracts.py` now requires the ten search paths, the shared
+  search parameters and `SearchResponse` schema, the `SearchResponse` and
+  `SearchItem` keys, the operation-level `x-search-type`, the 200 schema
+  reference, the problem+json 400, the 404 book-scope response on the six
+  book-scoped verticals, and security parity with each list operation.
+- `README.md` documents the ten routes, request rules, response shape, the book
+  matrix, and the additive compatibility classification; `MISMATCHES.md` adds
+  M-23 for the SPEC naming gap and the current limit/book validation divergence.
+- `python scripts/validate_contracts.py` passes 8,874 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

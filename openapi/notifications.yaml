@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Notifications API
-  version: 1.0.0
+  version: 1.1.0
   summary: Notification drafting and delivery administration and the Notifications expert API.
   description: >
     This document describes the implemented public Notifications domain API and
@@ -41,7 +41,9 @@ paths:
       tags:
         - Notifications
       summary: List notifications for the caller's tenant.
-      description: Returns a bare JSON array. Inbox filtering is planned.
+      description: >
+        Returns a bare JSON array. Free-text search is served by
+        `GET /api/v1/notifications/search`; inbox filtering is planned.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
       responses:
@@ -87,6 +89,36 @@ paths:
           $ref: './components.yaml#/components/responses/BadRequest'
         '502':
           $ref: './components.yaml#/components/responses/BadGateway'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/notifications/search:
+    get:
+      operationId: searchNotifications
+      tags:
+        - Notifications
+      summary: Search notifications for the caller's tenant.
+      description: >
+        Global-search projection used by the shell and by the notification
+        links. Matching is a case-insensitive contains over
+        `notificationNumber`, `subject`, and `recipientPartyId`; an absent or
+        blank `q` returns the most recently updated notifications. The response
+        is the shared `SearchResponse` envelope. A missing or malformed
+        `X-EIA-Tenant` or a `limit` outside 1-25 is a 400
+        `application/problem+json` Problem.
+      x-search-type: NOTIFICATION
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/SearchQuery'
+        - $ref: './components.yaml#/components/parameters/SearchLimit'
+      responses:
+        '200':
+          description: Matching notifications, most recently updated first.
+          content:
+            application/json:
+              schema:
+                $ref: './components.yaml#/components/schemas/SearchResponse'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /api/v1/notifications/{notificationId}:
@@ -505,9 +537,12 @@ components:
 x-vertical: notifications
 x-implementation:
   status: implemented
-  verifiedAt: '2026-10-19'
+  verifiedAt: '2026-10-20'
   verifiedAgainst:
     - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationController.java
+    - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationSearchResponse.java
+    - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationSearchItem.java
+    - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationService.java
     - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationExpertClient.java
     - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/ApiExceptionHandler.java
     - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationController.java

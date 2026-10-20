@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Assumed Claims API
-  version: 1.1.0
+  version: 1.2.0
   summary: Assumed-book reinsurance claim administration and the Assumed Claims expert API.
   description: >
     This document describes the implemented public Assumed Claims domain API
@@ -52,7 +52,9 @@ paths:
       tags:
         - Assumed Claims
       summary: List assumed claims for the caller's tenant and book.
-      description: Returns a bare JSON array.
+      description: >
+        Returns a bare JSON array. Free-text search is served by
+        `GET /api/v1/assumed-claims/search`.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
@@ -95,6 +97,41 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AssumedClaim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/assumed-claims/search:
+    get:
+      operationId: searchAssumedClaims
+      tags:
+        - Assumed Claims
+      summary: Search assumed claims for the caller's tenant and ASSUMED book.
+      description: >
+        Global-search projection used by the shell and by the claim pickers.
+        Matching is a case-insensitive contains over `assumedClaimNumber`,
+        `cedentClaimNumber`, and `contractId`; an absent or blank `q` returns
+        the most recently updated claims. The response is the shared
+        `SearchResponse` envelope. `X-EIA-Book` is required and must be
+        ASSUMED; a missing or different book is hidden as 404
+        `BOOK_SCOPE_VIOLATION` (SPEC 3.6.2, WALL-06). A missing tenant or a
+        `limit` outside 1-25 is a 400 `application/problem+json` Problem.
+      x-search-type: ASSUMED_CLAIM
+      x-path-alias: /api/v1/assumed-claims/claims/search
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - $ref: './components.yaml#/components/parameters/SearchQuery'
+        - $ref: './components.yaml#/components/parameters/SearchLimit'
+      responses:
+        '200':
+          description: Matching assumed claims, most recently updated first.
+          content:
+            application/json:
+              schema:
+                $ref: './components.yaml#/components/schemas/SearchResponse'
         '400':
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
@@ -3096,9 +3133,12 @@ components:
 x-vertical: assumed-claims
 x-implementation:
   status: implemented
-  verifiedAt: '2026-10-19'
+  verifiedAt: '2026-10-20'
   verifiedAgainst:
     - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/AssumedClaimController.java
+    - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/AssumedClaimSearchResponse.java
+    - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/AssumedClaimService.java
+    - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/BookScopeFilter.java
     - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/LossAdviceController.java
     - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/ReserveController.java
     - repos/eia-assumed-claims-domain/src/main/java/com/eia/assumedclaims/domain/CashCallController.java
@@ -3127,15 +3167,16 @@ x-implementation:
     and all second-slice expert reads take the tenant from X-EIA-Tenant. The
     domain preserves the expert's 409, 422, and 428 statuses and EIA-RNS codes.
 x-compatibility:
-  contractVersion: 1.1.0
-  previousContractVersion: 1.0.0
+  contractVersion: 1.2.0
+  previousContractVersion: 1.1.0
   breaking: []
   compatible:
+    - Adds GET /api/v1/assumed-claims/search (alias /api/v1/assumed-claims/claims/search) returning the shared SearchResponse envelope.
     - Adds advices, bordereaux, reserves, cash calls, recoveries, commutation, disputes, financials, audit, and close.
     - Adds the 422 and 428 responses to the new mutation operations.
   note: >
-    The second Assumed Claims slice is additive over 1.0.0. The HTTP path alias
-    and the Problem envelope are unchanged.
+    Search is additive over 1.1.0. The HTTP path alias and the Problem envelope
+    are unchanged.
 x-planned-operations:
   - method: GET
     path: /api/v1/assumed-claims/claims/{assumedClaimId}/allocations

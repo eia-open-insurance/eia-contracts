@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Party API
-  version: 1.0.0
+  version: 1.1.0
   summary: Party identity, reference data, and the Party expert API.
   description: >
     Party is shared identity data across both books. This document describes the
@@ -43,8 +43,9 @@ paths:
         - Party
       summary: List parties for the caller's tenant.
       description: >
-        Returns all parties of the tenant as a bare JSON array. Cursor
-        pagination and filtering from SPEC 7.6 are planned and not implemented.
+        Returns all parties of the tenant as a bare JSON array. Free-text search
+        is served by `GET /api/v1/parties/search`; cursor pagination and
+        filtering from SPEC 7.6 remain planned.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
       responses:
@@ -83,6 +84,35 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Party'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/parties/search:
+    get:
+      operationId: searchParties
+      tags:
+        - Party
+      summary: Search parties for the caller's tenant.
+      description: >
+        Global-search projection used by the shell and by the party pickers.
+        Matching is a case-insensitive contains over `partyNumber`,
+        `displayName`, and `legalName`; an absent or blank `q` returns the most
+        recently updated parties. The response is the shared `SearchResponse`
+        envelope. A missing or malformed `X-EIA-Tenant` or a `limit` outside
+        1-25 is a 400 `application/problem+json` Problem.
+      x-search-type: PARTY
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/SearchQuery'
+        - $ref: './components.yaml#/components/parameters/SearchLimit'
+      responses:
+        '200':
+          description: Matching parties, most recently updated first.
+          content:
+            application/json:
+              schema:
+                $ref: './components.yaml#/components/schemas/SearchResponse'
         '400':
           $ref: './components.yaml#/components/responses/BadRequest'
         default:
@@ -282,9 +312,12 @@ components:
 x-vertical: party
 x-implementation:
   status: implemented
-  verifiedAt: '2026-10-19'
+  verifiedAt: '2026-10-20'
   verifiedAgainst:
     - repos/eia-party-domain/src/main/java/com/eia/party/domain/PartyController.java
+    - repos/eia-party-domain/src/main/java/com/eia/party/domain/PartySearchController.java
+    - repos/eia-party-domain/src/main/java/com/eia/party/domain/PartySearchService.java
+    - repos/eia-party-domain/src/main/java/com/eia/party/domain/PartySearchRepository.java
     - repos/eia-party-domain/src/main/java/com/eia/party/domain/PartyClient.java
     - repos/eia-party-expert/src/main/java/com/eia/party/expert/PartyController.java
     - repos/eia-party-expert/src/main/java/com/eia/party/expert/ApiExceptionHandler.java

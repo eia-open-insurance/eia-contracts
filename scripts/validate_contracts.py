@@ -10,7 +10,8 @@ contributor would have to install. The script provides:
    folded and literal block scalars, comments). Constructs outside that subset
    are rejected with a line number instead of being guessed.
 2. Structural checks for every OpenAPI 3.1 and AsyncAPI 3 document: the
-   required paths and methods, operation metadata, response presence.
+   required paths and methods, operation metadata, response presence, and the
+   ten global-search operations with their shared SearchResponse envelope.
 3. Cross-document checks: every JSON Reference resolves, the AsyncAPI catalog
    and the per-vertical event documents name the same events, and the JSON
    Schemas contain the canonical required members and validate their own
@@ -321,6 +322,26 @@ ROUND5_REQUIRED_RESPONSES = {
 }
 
 
+# Global-search routes added by the 2026-10-20 contract. Each tuple is
+# (path, required book-header component or None, SearchItem.type value). Every
+# entry is mandatory; the operation must use the shared SearchResponse schema.
+SEARCH_OPENAPI_PATHS = {
+    "party": ("/api/v1/parties/search", None, "PARTY"),
+    "policy": ("/api/v1/policies/search", "BookHeaderDirect", "POLICY"),
+    "contract": ("/api/v1/contracts/search", "BookHeaderAssumed", "CONTRACT"),
+    "direct-claims": ("/api/v1/claims/search", "BookHeaderDirect", "DIRECT_CLAIM"),
+    "assumed-claims": ("/api/v1/assumed-claims/search", "BookHeaderAssumed", "ASSUMED_CLAIM"),
+    "cession": ("/api/v1/cessions/search", "BookHeaderDirect", "CESSION"),
+    "retrocession": ("/api/v1/retrocessions/search", "BookHeaderAssumed", "RETROCESSION"),
+    "document": ("/api/v1/documents/search", None, "DOCUMENT"),
+    "payment": ("/api/v1/payments/search", None, "PAYMENT"),
+    "notifications": ("/api/v1/notifications/search", None, "NOTIFICATION"),
+}
+
+SEARCH_RESPONSE_KEYS = ("query", "limit", "items")
+SEARCH_ITEM_KEYS = ("id", "type", "label", "secondary", "status", "href")
+
+
 # Event names the transactional-outbox rollout actually emits. The catalog must
 # list each one as published and implemented, and the vertical document must
 # expose a channel for it. Round 5 covered the first six verticals; the rollout
@@ -406,6 +427,9 @@ REQUIRED_COMPONENTS = {
         "Link",
         "EntityRef",
         "VerticalId",
+        "SearchResponse",
+        "SearchItem",
+        "SearchType",
     ],
     "parameters": [
         "TenantHeader",
@@ -414,6 +438,8 @@ REQUIRED_COMPONENTS = {
         "TenantIdQuery",
         "PageParam",
         "PageSizeParam",
+        "SearchQuery",
+        "SearchLimit",
         "CorrelationId",
         "IdempotencyKey",
         "IfMatch",
@@ -1082,6 +1108,60 @@ def check_openapi(contracts: ContractSet, verbose: bool):
         for name in names:
             contracts.check(name in actual, f"components.yaml: missing components.{section}.{name}")
 
+    # Shared global-search contract: every search operation references these
+    # schemas, so their keys and parameter bounds are checked once here.
+    search_schemas = component_sections.get("schemas") or {}
+    search_response = search_schemas.get("SearchResponse") or {}
+    search_properties = search_response.get("properties") or {}
+    search_required = search_response.get("required") or []
+    contracts.check(search_response.get("type") == "object", "components.yaml: SearchResponse.type must be object")
+    for key in SEARCH_RESPONSE_KEYS:
+        contracts.check(key in search_properties, f"components.yaml: SearchResponse.properties.{key} is required")
+        contracts.check(key in search_required, f"components.yaml: SearchResponse.required must list {key}")
+    search_items = search_properties.get("items") or {}
+    contracts.check(search_items.get("type") == "array", "components.yaml: SearchResponse.items.type must be array")
+    contracts.check(
+        (search_items.get("items") or {}).get("$ref") == "#/components/schemas/SearchItem",
+        "components.yaml: SearchResponse.items must reference SearchItem",
+    )
+    search_item = search_schemas.get("SearchItem") or {}
+    search_item_properties = search_item.get("properties") or {}
+    search_item_required = search_item.get("required") or []
+    contracts.check(search_item.get("type") == "object", "components.yaml: SearchItem.type must be object")
+    for key in SEARCH_ITEM_KEYS:
+        contracts.check(key in search_item_properties, f"components.yaml: SearchItem.properties.{key} is required")
+        contracts.check(key in search_item_required, f"components.yaml: SearchItem.required must list {key}")
+    contracts.check(
+        (search_item_properties.get("id") or {}).get("format") == "uuid",
+        "components.yaml: SearchItem.id must be a uuid",
+    )
+    contracts.check(
+        (search_item_properties.get("type") or {}).get("$ref") == "#/components/schemas/SearchType",
+        "components.yaml: SearchItem.type must reference SearchType",
+    )
+    search_limit = (component_sections.get("parameters") or {}).get("SearchLimit") or {}
+    search_limit_schema = search_limit.get("schema") or {}
+    contracts.check(search_limit.get("name") == "limit", "components.yaml: SearchLimit.name must be limit")
+    contracts.check(search_limit.get("in") == "query", "components.yaml: SearchLimit.in must be query")
+    contracts.check(
+        (search_limit_schema.get("type"), search_limit_schema.get("minimum"),
+         search_limit_schema.get("maximum"), search_limit_schema.get("default")) == ("integer", 1, 25, 10),
+        "components.yaml: SearchLimit must be an integer defaulting to 10 with minimum 1 and maximum 25",
+    )
+    search_query = (component_sections.get("parameters") or {}).get("SearchQuery") or {}
+    contracts.check(search_query.get("name") == "q", "components.yaml: SearchQuery.name must be q")
+    contracts.check(search_query.get("in") == "query", "components.yaml: SearchQuery.in must be query")
+    contracts.check(
+        (search_query.get("schema") or {}).get("type") == "string",
+        "components.yaml: SearchQuery.schema.type must be string",
+    )
+    search_types = set(((search_schemas.get("SearchType") or {}).get("enum") or []))
+    expected_search_types = {entry[2] for entry in SEARCH_OPENAPI_PATHS.values()}
+    contracts.check(
+        expected_search_types <= search_types,
+        f"components.yaml: SearchType.enum is missing {sorted(expected_search_types - search_types)}",
+    )
+
     operation_ids = {}
     for vertical in VERTICAL_FILES:
         path = OPENAPI_DIR / f"{vertical}.yaml"
@@ -1189,6 +1269,77 @@ def check_openapi(contracts: ContractSet, verbose: bool):
                     isinstance(responses, dict) and code in responses,
                     f"{relative}: {required_method.upper()} {required_path} must document response {code}",
                 )
+
+        search_path, search_book, search_type = SEARCH_OPENAPI_PATHS[vertical]
+        search_path_item = paths.get(search_path) if isinstance(paths, dict) else None
+        search_operation = search_path_item.get("get") if isinstance(search_path_item, dict) else None
+        contracts.check(
+            isinstance(search_operation, dict),
+            f"{relative}: required search operation GET {search_path} is missing",
+        )
+        if isinstance(search_operation, dict):
+            parameter_refs = []
+            for parameter in search_operation.get("parameters") or []:
+                reference = parameter.get("$ref") if isinstance(parameter, dict) else None
+                if isinstance(reference, str):
+                    parameter_refs.append(reference.rsplit("/", 1)[-1])
+            contracts.check(
+                "TenantHeader" in parameter_refs,
+                f"{relative}: GET {search_path} must require the shared TenantHeader",
+            )
+            if search_book:
+                contracts.check(
+                    search_book in parameter_refs,
+                    f"{relative}: GET {search_path} must require the shared {search_book}",
+                )
+            else:
+                contracts.check(
+                    not ({"BookHeaderDirect", "BookHeaderAssumed"} & set(parameter_refs)),
+                    f"{relative}: GET {search_path} is not book-scoped and must not declare a book header",
+                )
+            contracts.check(
+                "SearchQuery" in parameter_refs,
+                f"{relative}: GET {search_path} must document the shared SearchQuery parameter",
+            )
+            contracts.check(
+                "SearchLimit" in parameter_refs,
+                f"{relative}: GET {search_path} must document the shared SearchLimit parameter",
+            )
+            contracts.check(
+                search_operation.get("x-search-type") == search_type,
+                f"{relative}: GET {search_path} must declare x-search-type: {search_type}",
+            )
+            list_path, list_method = REQUIRED_OPENAPI_PATHS[vertical][0]
+            list_path_item = paths.get(list_path) if isinstance(paths, dict) else None
+            list_operation = list_path_item.get(list_method) if isinstance(list_path_item, dict) else None
+            contracts.check(
+                isinstance(list_operation, dict)
+                and search_operation.get("security") == list_operation.get("security"),
+                f"{relative}: GET {search_path} security must match GET {list_path}",
+            )
+            search_responses = search_operation.get("responses") or {}
+            ok_response = search_responses.get("200") if isinstance(search_responses, dict) else None
+            ok_schema = None
+            if isinstance(ok_response, dict):
+                ok_schema = (((ok_response.get("content") or {}).get("application/json") or {})
+                             .get("schema"))
+            contracts.check(
+                isinstance(ok_schema, dict)
+                and ok_schema.get("$ref") == "./components.yaml#/components/schemas/SearchResponse",
+                f"{relative}: GET {search_path} 200 must use the shared SearchResponse schema",
+            )
+            bad_request = search_responses.get("400") if isinstance(search_responses, dict) else None
+            contracts.check(
+                isinstance(bad_request, dict)
+                and str(bad_request.get("$ref", "")).endswith("/responses/BadRequest"),
+                f"{relative}: GET {search_path} must document the shared problem+json BadRequest",
+            )
+            if search_book:
+                contracts.check(
+                    "404" in search_responses,
+                    f"{relative}: GET {search_path} must document the 404 book-scope response",
+                )
+
         compatibility = document.get("x-compatibility") or {}
         if isinstance(compatibility, dict) and compatibility.get("contractVersion"):
             contracts.check(

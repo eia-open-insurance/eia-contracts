@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Policy API
-  version: 2.1.0
+  version: 2.2.0
   summary: Direct-book policy administration and the Policy expert API.
   description: >
     This document describes the implemented public Policy domain API and the
@@ -80,7 +80,8 @@ paths:
         `_links.self`, `_links.next`, and `_links.prev`. `page` is zero-based
         and defaults to 0; `size` defaults to 20 and must be between 1 and 100.
         `next` is omitted on the last page and `prev` on the first page.
-        Filtering and free-text search from SPEC 11.2.10 remain planned.
+        Filtering from SPEC 11.2.10 and cursor pagination remain planned;
+        free-text search is served by `GET /api/v1/policies/search`.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - $ref: './components.yaml#/components/parameters/PageParam'
@@ -153,6 +154,39 @@ paths:
           $ref: './components.yaml#/components/responses/BadRequest'
         '409':
           $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/search:
+    get:
+      operationId: searchPolicies
+      tags:
+        - Policy
+      summary: Search policies for the caller's tenant and DIRECT book.
+      description: >
+        Global-search projection used by the shell and by the policy pickers.
+        Matching is a case-insensitive contains over `policyNumber` and
+        `productCode`; an absent or blank `q` returns the most recently updated
+        policies. The response is the shared `SearchResponse` envelope.
+        `X-EIA-Book` is required and must be DIRECT; another book is hidden as
+        404 `BOOK_SCOPE_VIOLATION` (SPEC 3.6.2). A missing tenant or book or a
+        `limit` outside 1-25 is a 400 `application/problem+json` Problem.
+      x-search-type: POLICY
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - $ref: './components.yaml#/components/parameters/SearchQuery'
+        - $ref: './components.yaml#/components/parameters/SearchLimit'
+      responses:
+        '200':
+          description: Matching policies, most recently updated first.
+          content:
+            application/json:
+              schema:
+                $ref: './components.yaml#/components/schemas/SearchResponse'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /api/v1/policies/{policyId}:
@@ -3393,9 +3427,12 @@ components:
 x-vertical: policy
 x-implementation:
   status: implemented
-  verifiedAt: '2026-10-19'
+  verifiedAt: '2026-10-20'
   verifiedAgainst:
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyController.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicySearchController.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicySearchService.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicySearchRepository.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyContractController.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyContractService.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyService.java
@@ -3431,17 +3468,17 @@ x-implementation:
     domain unchanged. The list envelope is offset-based (page/size) rather than
     the SPEC 7.6 cursor envelope; see MISMATCHES.md M-04.
 x-compatibility:
-  contractVersion: 2.1.0
-  previousContractVersion: 2.0.0
+  contractVersion: 2.2.0
+  previousContractVersion: 2.1.0
   breaking: []
   compatible:
+    - Adds GET /api/v1/policies/search returning the shared SearchResponse envelope.
     - Adds the 15 second-slice paths, their schemas, and the 422/428 responses.
     - Adds the 422 and 428 statuses to existing mutation responses; no response shape changed.
     - Adds no required request field and removes no response field.
   note: >
-    The second Policy slice is additive over 2.0.0. The HTTP path remains
-    /api/v1/policies and the existing ETag, If-Match, Idempotency-Key, page
-    envelope, and Problem schemas are unchanged.
+    Search is additive over 2.1.0 and changes no existing path, schema, ETag, or
+    page envelope. The HTTP path remains /api/v1/policies.
 x-planned-operations:
   - method: POST
     path: /api/v1/policies/{policyId}/bind

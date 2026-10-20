@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-20 (outbox completion).
+Status: open, reviewed 2026-10-20 (global-search contract).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -15,7 +15,9 @@ where the running code does not meet it yet.
   `eia-party-*`, `eia-policy-*`, `eia-contract-*`, `eia-direct-claims-*`,
   `eia-assumed-claims-*`, `eia-cession-*`, `eia-retrocession-*`,
   `eia-document-*`, `eia-payment-*`, `eia-notifications-*` - plus the Round 2
-  FS-RI hand-off in `eia-cession-domain` and `eia-retrocession-domain`.
+  FS-RI hand-off in `eia-cession-domain` and `eia-retrocession-domain`. The
+  2026-10-20 pass additionally reads the ten global-search controllers, their
+  services, their query repositories, and the shell's `GlobalSearch.jsx`.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -63,6 +65,7 @@ removed per the resolution policy.
 | M-20 | Audit actor fields (`createdBy`, `updatedBy`) are not returned | L |
 | M-21 | Cession/Retrocession FS-RI hand-off is synchronous | M |
 | M-22 | Implemented outbox event names differ from the SPEC catalog names | M |
+| M-23 | Global search paths and validation differ from the SPEC naming and canonical limit rules | M |
 
 ## M-01 Public base paths
 
@@ -82,6 +85,10 @@ remotes agree with the implementation, so the SPEC tables are the outlier.
 | Document | `/api/v1/documents` | `/api/v1/document/documents` |
 | Payment | `/api/v1/payments` | `/api/v1/payment/payments` |
 | Notifications | `/api/v1/notifications` | `/api/v1/notifications/...` (matches) |
+
+The ten global-search routes follow the same shorter form
+(`/api/v1/{resource}/search`); their SPEC naming gap and validation differences
+are recorded in M-23.
 
 Evidence:
 
@@ -641,10 +648,89 @@ Resolution: either align the implemented names with the SPEC (with a
 dual-publish window) or amend the SPEC event tables. The contracts document
 both until that decision.
 
+## M-23 Global search paths and validation
+
+The ten domain controllers expose a public search operation under the short
+`/api/v1/{resource}/search` form and return the shared `SearchResponse`
+envelope. The endpoints are implemented, routed by the gateway, and called by
+the shell and the web remotes.
+
+**SPEC naming.** SPEC has no per-vertical search API. SPEC 5.6 lists `/search`
+as the shell page provided by "Shell + all", and SPEC 7.6 defines search only
+as the `?q=` collection convention (minimum two characters, result highlights).
+The SPEC 11 vertical tables name resources as `/api/v1/{vertical}/{resource}`.
+Every search path therefore differs from the SPEC section naming, in the same
+way as M-01. The contracts document the implemented short form because the
+gateway, the shell, and every web remote already use it.
+
+| Vertical | Documented path | Book | Implemented `limit` outside 1-25 |
+|---|---|---|---|
+| Party | `/api/v1/parties/search` | none | `< 1` is 400; `> 25` becomes 25 |
+| Policy | `/api/v1/policies/search` | DIRECT | `< 1` is 400; `> 25` becomes 25 |
+| Contract | `/api/v1/contracts/search` | ASSUMED | clamped to 1 or 25 |
+| Direct Claims | `/api/v1/claims/search` | DIRECT | `<= 0` becomes 10; `> 25` becomes 25 |
+| Assumed Claims | `/api/v1/assumed-claims/search` | ASSUMED | `<= 0` becomes 10; `> 25` becomes 25 |
+| Cession | `/api/v1/cessions/search` | DIRECT | clamped to 1 or 25 |
+| Retrocession | `/api/v1/retrocessions/search` | ASSUMED | clamped to 1 or 25 |
+| Document | `/api/v1/documents/search` | none | clamped to 1 or 25 |
+| Payment | `/api/v1/payments/search` | none | clamped to 1 or 25 |
+| Notifications | `/api/v1/notifications/search` | none | clamped to 1 or 25 |
+
+The canonical contract states the target: `limit` defaults to 10, must be
+between 1 and 25, and an invalid value is 400 `application/problem+json`. No
+service returns 400 for `limit > 25`; only Party and Policy return 400 for
+`limit < 1`. The services therefore do not yet implement the documented
+validation.
+
+**Book wall.** Policy, Contract, Cession, and Retrocession return 400
+`BOOK_REQUIRED` for a missing header and 404 `BOOK_SCOPE_VIOLATION` for a
+different book, which matches the contract. Direct Claims and Assumed Claims
+return 404 for both a missing and a different header; their documents therefore
+describe 400 for the missing header as the canonical target and 404 for the
+book mismatch. Tenant validation is 400 in all ten.
+
+**Query semantics.** Every service trims `q` and performs a case-insensitive
+contains; an absent or blank term returns the latest records. SPEC 7.6 requires
+at least two characters and result highlights, neither of which is implemented.
+The contract keeps `q` optional because the shell's empty-search landing state
+depends on the blank-query behaviour.
+
+Evidence:
+
+- `repos/eia-party-domain/.../PartySearchController.java`, `SearchQuery.java`,
+  `PartySearchRepository.java`
+- `repos/eia-policy-domain/.../PolicySearchController.java`, `SearchQuery.java`,
+  `PolicySearchRepository.java`
+- `repos/eia-contract-domain/.../ContractController.java` (`search`),
+  `ContractSearch.java`, `SearchResult.java`
+- `repos/eia-direct-claims-domain/.../ClaimController.java` (`search`),
+  `ClaimService.search`/`normalizeLimit`, `RequestGuard.java`
+- `repos/eia-assumed-claims-domain/.../AssumedClaimController.java` (`search`),
+  `AssumedClaimService.search`/`normalizeLimit`, `BookScopeFilter.java`
+- `repos/eia-cession-domain/.../CessionController.java` (`search`),
+  `CessionService.search`, `SearchResult.effectiveLimit`
+- `repos/eia-retrocession-domain/.../RetrocessionController.java` (`search`),
+  `RetrocessionService.search`, `SearchResult.effectiveLimit`
+- `repos/eia-document-domain/.../DocumentController.java` (`search`),
+  `DocumentService.search`
+- `repos/eia-payment-domain/.../PaymentController.java` (`search`),
+  `PaymentService.search`
+- `repos/eia-notifications-domain/.../NotificationController.java` (`search`),
+  `NotificationService.search`
+- `repos/eia-frontend/shell/src/GlobalSearch.jsx` - the shell calls the ten
+  documented paths and sends the book shown in the matrix.
+
+Resolution: either implement the 400 for an out-of-range limit and the 400 for
+a missing book in Direct Claims and Assumed Claims, or amend the contract and
+SPEC 7.6 to the clamp and 404 behaviour. Add a per-vertical search section to
+SPEC 11 (or a global-search section to SPEC 7.6) so the canonical paths have a
+normative home. No path change is proposed now because the gateway, the shell,
+and every web remote already call the documented routes.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-outbox completion:
+global-search contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -653,16 +739,16 @@ repository: .../repos/eia-contracts
 python: 3.12.8 (standard library only)
 
 OpenAPI 3.1 documents
-  OK openapi/party.yaml  4 paths, 6 operations
-  OK openapi/policy.yaml  36 paths, 46 operations
-  OK openapi/contract.yaml  35 paths, 51 operations
-  OK openapi/direct-claims.yaml  38 paths, 56 operations
-  OK openapi/assumed-claims.yaml  35 paths, 50 operations
-  OK openapi/cession.yaml  8 paths, 10 operations
-  OK openapi/retrocession.yaml  8 paths, 10 operations
-  OK openapi/document.yaml  6 paths, 8 operations
-  OK openapi/payment.yaml  9 paths, 11 operations
-  OK openapi/notifications.yaml  6 paths, 8 operations
+  OK openapi/party.yaml  5 paths, 7 operations
+  OK openapi/policy.yaml  37 paths, 47 operations
+  OK openapi/contract.yaml  36 paths, 52 operations
+  OK openapi/direct-claims.yaml  39 paths, 57 operations
+  OK openapi/assumed-claims.yaml  36 paths, 51 operations
+  OK openapi/cession.yaml  9 paths, 11 operations
+  OK openapi/retrocession.yaml  9 paths, 11 operations
+  OK openapi/document.yaml  7 paths, 9 operations
+  OK openapi/payment.yaml  10 paths, 12 operations
+  OK openapi/notifications.yaml  7 paths, 9 operations
 
 AsyncAPI 3 documents
   OK asyncapi/party.yaml  9 event channels
@@ -683,7 +769,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 8607 checks, 0 failures
+  PASS 8874 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -700,7 +786,10 @@ Additional checks and limits:
   `/api/v1/policies/{policyId}/coverages` path, changing an implemented event
   channel back to `x-status: planned` without updating the catalog, and
   inventing an event in the catalog each produce a non-zero exit and a specific
-  failure message.
+  failure message. The 2026-10-20 pass added three more negative checks that
+  each fail as expected: removing `/api/v1/parties/search`, dropping `items`
+  from the required `SearchResponse` keys, and declaring a book header on the
+  non-book-scoped `/api/v1/documents/search`.
 
 ## Resolution policy
 

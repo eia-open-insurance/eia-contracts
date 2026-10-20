@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Payment API
-  version: 1.0.0
+  version: 1.1.0
   summary: Payment instruction administration and the Payment expert API.
   description: >
     This document describes the implemented public Payment domain API and the
@@ -43,7 +43,10 @@ paths:
       tags:
         - Payment
       summary: List payments for the caller's tenant.
-      description: Returns a bare JSON array. Search, filtering, and cursor pagination are planned.
+      description: >
+        Returns a bare JSON array. Free-text search is served by
+        `GET /api/v1/payments/search`; filtering and cursor pagination remain
+        planned.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
       responses:
@@ -87,6 +90,35 @@ paths:
           $ref: './components.yaml#/components/responses/BadRequest'
         '502':
           $ref: './components.yaml#/components/responses/BadGateway'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/payments/search:
+    get:
+      operationId: searchPayments
+      tags:
+        - Payment
+      summary: Search payments for the caller's tenant.
+      description: >
+        Global-search projection used by the shell and by the payment pickers.
+        Matching is a case-insensitive contains over `paymentNumber`,
+        `paymentType`, and `payeePartyId`; an absent or blank `q` returns the
+        most recently updated payments. The response is the shared
+        `SearchResponse` envelope. A missing or malformed `X-EIA-Tenant` or a
+        `limit` outside 1-25 is a 400 `application/problem+json` Problem.
+      x-search-type: PAYMENT
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/SearchQuery'
+        - $ref: './components.yaml#/components/parameters/SearchLimit'
+      responses:
+        '200':
+          description: Matching payments, most recently updated first.
+          content:
+            application/json:
+              schema:
+                $ref: './components.yaml#/components/schemas/SearchResponse'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /api/v1/payments/{paymentId}:
@@ -547,11 +579,13 @@ components:
 x-vertical: payment
 x-implementation:
   status: implemented
-  verifiedAt: '2026-10-19'
+  verifiedAt: '2026-10-20'
   verifiedAgainst:
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentController.java
-    - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentClient.java
+    - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentSearchResponse.java
+    - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentSearchItem.java
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentService.java
+    - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentClient.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentController.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/ApiExceptionHandler.java
   errorEnvelope: >

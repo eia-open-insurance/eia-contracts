@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: EIA canonical shared API components
-  version: 1.2.0
-  summary: Shared error, money, paging, concurrency, idempotency, audit, and tenant/book components for every EIA API.
+  version: 1.3.0
+  summary: Shared error, money, paging, global-search, concurrency, idempotency, audit, and tenant/book components for every EIA API.
   description: >
     Shared OpenAPI 3.1 components referenced by the per-vertical contract
     documents in this directory. The components are the canonical definitions
@@ -19,6 +19,12 @@ info:
     the Policy second-slice collections. The remaining verticals still return
     bare arrays and their own error bodies; the divergence is tracked in
     MISMATCHES.md.
+
+    The 2026-10-20 global-search contract (1.3.0) adds the shared
+    `SearchResponse`, `SearchItem`, and `SearchType` schemas and the
+    `SearchQuery` and `SearchLimit` parameters used by the ten public
+    `GET /api/v1/{resource}/search` operations. The addition is compatible: it
+    changes no existing page, response, or error component.
 
     Authority is SPEC.md sections 6.11, 7.6, 7.18-7.23, 10.3, 12.2, and 12.6.
     Where an implemented service deviates from a component, the deviation is
@@ -124,6 +130,35 @@ components:
         minimum: 1
         maximum: 100
         default: 20
+    SearchQuery:
+      name: q
+      in: query
+      required: false
+      description: >
+        Free-text term for the global-search operation. The term is trimmed and
+        matched case-insensitively as a contains over the vertical's documented
+        searchable fields. An absent or blank term returns the most recently
+        updated records, which is the shell's empty-search landing state.
+        SPEC 7.6 asks for at least two characters and result highlights; this
+        contract keeps `q` optional and highlights are not implemented yet
+        (MISMATCHES.md M-23).
+      schema:
+        type: string
+        default: ''
+    SearchLimit:
+      name: limit
+      in: query
+      required: false
+      description: >
+        Maximum number of search items to return. Default 10; the value must be
+        between 1 and 25 inclusive. A non-integer, a value below 1, or a value
+        above 25 is a 400 `application/problem+json` Problem with a field error
+        naming `limit`.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 25
+        default: 10
     DirectClaimStatusFilter:
       name: status
       in: query
@@ -356,6 +391,88 @@ components:
       x-status: planned
       additionalProperties:
         $ref: '#/components/schemas/Link'
+    SearchResponse:
+      type: object
+      description: >
+        Shared global-search envelope returned by `GET /api/v1/{resource}/search`
+        on every search-enabled vertical. `query` echoes the trimmed term and
+        `limit` echoes the effective limit after defaulting. `items` is already
+        tenant- and book-scoped by the service and is ordered most recently
+        updated first.
+      additionalProperties: false
+      required:
+        - query
+        - limit
+        - items
+      properties:
+        query:
+          type: string
+          description: Trimmed search term; empty when the caller omitted `q`.
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 25
+          default: 10
+          description: Effective page size after defaulting; never above 25.
+        items:
+          type: array
+          maxItems: 25
+          description: Matching records, most recently updated first.
+          items:
+            $ref: '#/components/schemas/SearchItem'
+    SearchItem:
+      type: object
+      description: >
+        One projection row of the shared global-search envelope. The payload is
+        intentionally projection-only, so a search never leaks the full
+        aggregate. `href` is the relative shell route that opens the record.
+      additionalProperties: false
+      required:
+        - id
+        - type
+        - label
+        - secondary
+        - status
+        - href
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Record identity, used as the stable merge and dedupe key.
+        type:
+          $ref: '#/components/schemas/SearchType'
+        label:
+          type: string
+          description: >
+            Primary human-readable business key, for example POL-2026-0000001.
+        secondary:
+          type: string
+          description: >
+            Secondary descriptor, for example product code and status joined by
+            a middle dot.
+        status:
+          type: string
+          description: Current lifecycle status of the record.
+        href:
+          type: string
+          pattern: '^/'
+          description: Relative shell route, for example /policy?record=<uuid>.
+    SearchType:
+      type: string
+      description: >
+        Resource type of a search item. It is the uppercase form of the vertical
+        aggregate and is stable across the ten search-enabled verticals.
+      enum:
+        - PARTY
+        - POLICY
+        - CONTRACT
+        - DIRECT_CLAIM
+        - ASSUMED_CLAIM
+        - CESSION
+        - RETROCESSION
+        - DOCUMENT
+        - PAYMENT
+        - NOTIFICATION
     EntityRef:
       type: object
       description: Cross-vertical reference (SPEC 12.2).
@@ -451,7 +568,10 @@ components:
         INVALID_ENDORSEMENT_TYPE, INVALID_COVERAGE_CHANGE,
         INVALID_INSURED_ROLE, INVALID_CANCELLATION_TYPE, INVALID_CHANGE_TYPE,
         and INVALID_PARAMETER. Other verticals add MISSING_TENANT_HEADER,
-        INVALID_TENANT_HEADER, FSRI_VALIDATION, and FSRI_REJECTED.
+        INVALID_TENANT_HEADER, FSRI_VALIDATION, and FSRI_REJECTED. The ten
+        global-search operations use this response for a missing or malformed
+        tenant, a missing or invalid book header, and an out-of-range `limit`;
+        the field error names `limit`.
       content:
         application/problem+json:
           schema:

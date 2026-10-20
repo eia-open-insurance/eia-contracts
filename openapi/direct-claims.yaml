@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Direct Claims API
-  version: 1.1.0
+  version: 1.2.0
   summary: Direct-book claim administration and the Direct Claims expert API.
   description: >
     This document describes the implemented public Direct Claims domain API and
@@ -51,7 +51,9 @@ paths:
       tags:
         - Direct Claims
       summary: List direct claims for the caller's tenant and book.
-      description: Returns a bare JSON array, optionally filtered by status.
+      description: >
+        Returns a bare JSON array, optionally filtered by status. Free-text
+        search is served by `GET /api/v1/claims/search`.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
@@ -97,6 +99,40 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Claim'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/search:
+    get:
+      operationId: searchClaims
+      tags:
+        - Direct Claims
+      summary: Search direct claims for the caller's tenant and DIRECT book.
+      description: >
+        Global-search projection used by the shell and by the claim pickers.
+        Matching is a case-insensitive contains over `claimNumber`, `claimType`,
+        `causeCode`, and `policyId`; an absent or blank `q` returns the most
+        recently updated claims. The response is the shared `SearchResponse`
+        envelope. `X-EIA-Book` is required and must be DIRECT; a missing or
+        different book is hidden as 404 `BOOK_SCOPE_VIOLATION` (SPEC 3.6.2,
+        WALL-06). A missing tenant or a `limit` outside 1-25 is a 400
+        `application/problem+json` Problem.
+      x-search-type: DIRECT_CLAIM
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - $ref: './components.yaml#/components/parameters/SearchQuery'
+        - $ref: './components.yaml#/components/parameters/SearchLimit'
+      responses:
+        '200':
+          description: Matching direct claims, most recently updated first.
+          content:
+            application/json:
+              schema:
+                $ref: './components.yaml#/components/schemas/SearchResponse'
         '400':
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
@@ -3306,9 +3342,12 @@ components:
 x-vertical: direct-claims
 x-implementation:
   status: implemented
-  verifiedAt: '2026-10-19'
+  verifiedAt: '2026-10-20'
   verifiedAgainst:
     - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimController.java
+    - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimSearchResponse.java
+    - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimService.java
+    - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/RequestGuard.java
     - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimDetailController.java
     - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimDetailService.java
     - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimCommands.java
@@ -3336,16 +3375,17 @@ x-implementation:
     missing or different book as 404. The public transition has no
     expectedVersion; every public child PATCH requires it.
 x-compatibility:
-  contractVersion: 1.1.0
-  previousContractVersion: 1.0.0
+  contractVersion: 1.2.0
+  previousContractVersion: 1.1.0
   breaking: []
   compatible:
+    - Adds GET /api/v1/claims/search returning the shared SearchResponse envelope.
     - Adds the injury, exposure, reserve, coverage, litigation, settlement, recovery, lien, and close routes.
     - Adds claimType, settlementAuthorityAmount, settlementAuthorityCurrency, litigationFlag, and currentReserveAmount to the claim projection.
     - Corrects the claim money fields to decimal strings; the services already serialize them as strings.
   note: >
-    The second Direct Claims slice is additive over 1.0.0. The HTTP path and the
-    error envelope are unchanged.
+    Search is additive over 1.1.0. The HTTP path and the error envelope are
+    unchanged.
 x-planned-operations:
   - method: PATCH
     path: /api/v1/claims/{claimId}
