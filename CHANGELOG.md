@@ -1053,6 +1053,52 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   evidence.
 - `python scripts/validate_contracts.py` passes 12,857 checks with 0 failures.
 
+### Added in the Policy legal entity contract (2026-10-21)
+
+- `openapi/policy.yaml` is 2.10.0: adds `GET/POST /api/v1/legal-entities`,
+  `GET /api/v1/legal-entities/{legalEntityId}`, and
+  `PATCH /api/v1/policies/{policyId}/legal-entity`; the `LegalEntity`
+  projection (`legalEntityId`, `code`, `name`, `entityType`, `jurisdiction`,
+  `regulator`, `licenseNumber`, `status`, `createdAt`), the
+  `LegalEntityType` enum (`INSURER`, `MGA`, `CAPTIVE`, `POOL`, `FRONTER`), the
+  `LegalEntityStatus` enum (`ACTIVE`, `INACTIVE`), the
+  `CreateLegalEntityRequest` create body, the
+  `UpdatePolicyLegalEntityRequest` nullable assignment body, and the nullable
+  `Policy.legalEntityId`. The list and detail return 200, the create returns
+  201 with `Location`, and the assignment returns 200 with the updated `Policy`
+  and the shared `ETag`. Every operation requires `X-EIA-Tenant` and accepts an
+  optional `X-EIA-Book` that must be DIRECT when present; the catalog reads
+  document 400/404, the create documents 400/404/409, and the assignment
+  documents 400/404/409. The change is additive: three new paths, four new
+  operations, five new schemas, one nullable `Policy` property, and no changed
+  existing path, request field, response field, or event.
+- `asyncapi/policy.yaml` is 1.8.0: adds the implemented
+  `policy.legal-entity.created` and `policy.policy.legal-entity-assigned`
+  channels and `send` operations with the `PolicyLegalEntityCreatedData` and
+  `PolicyPolicyLegalEntityAssignedData` payloads. The created fact is keyed by
+  the `LegalEntity` aggregate at version 1; the assignment fact is keyed by the
+  `Policy` aggregate at the new version and carries the nullable new and
+  previous entity ids plus `changedFields: ["legalEntityId"]`. Both names are
+  new and have no SPEC 11.2.9 equivalent (M-22, M-43).
+- `asyncapi/event-catalog.yaml` is 1.23.0: both names are published and
+  implemented (205 published and 84 implemented in total; Policy becomes 31
+  published and 19 implemented).
+- `scripts/validate_contracts.py` requires the three paths and four operations,
+  the required tenant and optional DIRECT book parameters, the
+  `legalEntityId`/`policyId` path parameters, the `LegalEntity`,
+  `LegalEntityType`, `LegalEntityStatus`, `CreateLegalEntityRequest`, and
+  `UpdatePolicyLegalEntityRequest` schemas with their field bounds, nullability,
+  and enums, the nullable optional `Policy.legalEntityId`, the 201 `Location`,
+  the assignment 200 `ETag`, the 201/200/400/404/409 responses, the absence of
+  the implemented paths from `x-planned-operations`, the two implemented
+  channels and payloads, and the two catalog entries.
+- `README.md` records the routes, projection, create and assignment semantics,
+  the DIRECT book rule, the two events, the additive versions, and the
+  validation count; `MISMATCHES.md` adds M-43 for the narrow catalog, the
+  nullable assignment against LE-01, the path and vocabulary differences, and
+  the two new event names, and updates M-01, M-12, M-13, M-14, and M-22.
+- `python scripts/validate_contracts.py` passes 13,143 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

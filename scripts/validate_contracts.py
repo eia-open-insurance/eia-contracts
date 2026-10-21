@@ -1312,6 +1312,112 @@ POLICY_CREDIT_NOTE_EVENT_MESSAGE = "PolicyCreditNoteData"
 POLICY_CREDIT_NOTE_EVENT_IMPLEMENTED_BY = "PolicyEvents.java"
 
 
+# Policy legal entity catalog and issuing-entity assignment. Each tuple is
+# (method, path, success status, success schema, request schema or None,
+# required error codes). The catalog list is a bare newest-first array; the
+# create returns 201 with a Location, the detail 200, and the assignment 200
+# with the updated Policy and the shared ETag. Every operation requires the
+# tenant header and accepts the optional DIRECT book parameter. A duplicate code
+# is 409 DUPLICATE_LEGAL_ENTITY_CODE and a concurrent policy change is 409
+# CONCURRENT_MODIFICATION.
+POLICY_LEGAL_ENTITY_OPENAPI_PATHS = [
+    (
+        "get",
+        "/api/v1/legal-entities",
+        "200",
+        "LegalEntity",
+        None,
+        ("400", "404"),
+    ),
+    (
+        "post",
+        "/api/v1/legal-entities",
+        "201",
+        "LegalEntity",
+        "CreateLegalEntityRequest",
+        ("400", "404", "409"),
+    ),
+    (
+        "get",
+        "/api/v1/legal-entities/{legalEntityId}",
+        "200",
+        "LegalEntity",
+        None,
+        ("400", "404"),
+    ),
+    (
+        "patch",
+        "/api/v1/policies/{policyId}/legal-entity",
+        "200",
+        "Policy",
+        "UpdatePolicyLegalEntityRequest",
+        ("400", "404", "409"),
+    ),
+]
+
+POLICY_LEGAL_ENTITY_FIELDS = (
+    "legalEntityId",
+    "code",
+    "name",
+    "entityType",
+    "jurisdiction",
+    "regulator",
+    "licenseNumber",
+    "status",
+    "createdAt",
+)
+
+POLICY_LEGAL_ENTITY_NULLABLE_FIELDS = ("regulator", "licenseNumber")
+POLICY_LEGAL_ENTITY_TYPES = ("INSURER", "MGA", "CAPTIVE", "POOL", "FRONTER")
+POLICY_LEGAL_ENTITY_STATUSES = ("ACTIVE", "INACTIVE")
+POLICY_LEGAL_ENTITY_CODE_MAX_LENGTH = 32
+POLICY_LEGAL_ENTITY_NAME_MAX_LENGTH = 200
+POLICY_LEGAL_ENTITY_REGULATOR_MAX_LENGTH = 120
+POLICY_LEGAL_ENTITY_LICENSE_MAX_LENGTH = 80
+POLICY_LEGAL_ENTITY_JURISDICTION_PATTERN = "^[A-Z]{2}$"
+POLICY_LEGAL_ENTITY_CREATE_REQUIRED_FIELDS = (
+    "code",
+    "name",
+    "entityType",
+    "jurisdiction",
+)
+POLICY_LEGAL_ENTITY_CREATE_OPTIONAL_FIELDS = ("regulator", "licenseNumber")
+
+POLICY_LEGAL_ENTITY_EVENTS = (
+    "policy.legal-entity.created",
+    "policy.policy.legal-entity-assigned",
+)
+POLICY_LEGAL_ENTITY_CREATED_EVENT_FIELDS = (
+    "legalEntityId",
+    "code",
+    "name",
+    "entityType",
+    "jurisdiction",
+    "regulator",
+    "licenseNumber",
+    "status",
+    "createdAt",
+)
+POLICY_LEGAL_ENTITY_ASSIGNED_EVENT_FIELDS = (
+    "policyId",
+    "policyNumber",
+    "status",
+    "version",
+    "effectiveDate",
+    "expirationDate",
+    "premiumAmount",
+    "premiumCurrency",
+    "limitAmount",
+    "limitCurrency",
+    "legalEntityId",
+    "previousLegalEntityId",
+    "changedFields",
+)
+POLICY_LEGAL_ENTITY_CREATED_EVENT_MESSAGE = "PolicyLegalEntityCreatedData"
+POLICY_LEGAL_ENTITY_ASSIGNED_EVENT_MESSAGE = "PolicyPolicyLegalEntityAssignedData"
+POLICY_LEGAL_ENTITY_EVENT_IMPLEMENTED_BY = "PolicyEvents.java"
+
+
 # Event names the transactional-outbox rollout actually emits. The catalog must
 # list each one as published and implemented, and the vertical document must
 # expose a channel for it. Round 5 covered the first six verticals; the rollout
@@ -1340,6 +1446,8 @@ IMPLEMENTED_EVENTS = {
         "policy.credit-note.issued",
         "policy.credit-note.applied",
         "policy.credit-note.cancelled",
+        "policy.legal-entity.created",
+        "policy.policy.legal-entity-assigned",
     ],
     "contract": [
         "contract.contract.created",
@@ -5590,6 +5698,497 @@ def check_policy_credit_notes_asyncapi(contracts: ContractSet, document, relativ
 
 
 # ---------------------------------------------------------------------------
+# Policy legal entity checks
+# ---------------------------------------------------------------------------
+
+
+def check_policy_legal_entities_openapi(contracts: ContractSet, document, relative: str):
+    """Require the legal-entity catalog and assignment operations and schemas."""
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    legal_entity = schemas.get("LegalEntity") or {}
+    legal_entity_properties = legal_entity.get("properties") or {}
+    legal_entity_required = set(legal_entity.get("required") or [])
+    contracts.check(
+        legal_entity.get("type") == "object",
+        f"{relative}: LegalEntity must be an object schema",
+    )
+    for field in POLICY_LEGAL_ENTITY_FIELDS:
+        contracts.check(
+            field in legal_entity_properties,
+            f"{relative}: LegalEntity.properties.{field} is required",
+        )
+        contracts.check(
+            field in legal_entity_required,
+            f"{relative}: LegalEntity.required must list {field}",
+        )
+    contracts.check(
+        (legal_entity_properties.get("legalEntityId") or {}).get("format") == "uuid",
+        f"{relative}: LegalEntity.legalEntityId must be a uuid",
+    )
+    contracts.check(
+        (legal_entity_properties.get("code") or {}).get("maxLength")
+        == POLICY_LEGAL_ENTITY_CODE_MAX_LENGTH,
+        f"{relative}: LegalEntity.code maxLength must be "
+        f"{POLICY_LEGAL_ENTITY_CODE_MAX_LENGTH}",
+    )
+    contracts.check(
+        (legal_entity_properties.get("name") or {}).get("maxLength")
+        == POLICY_LEGAL_ENTITY_NAME_MAX_LENGTH,
+        f"{relative}: LegalEntity.name maxLength must be "
+        f"{POLICY_LEGAL_ENTITY_NAME_MAX_LENGTH}",
+    )
+    contracts.check(
+        (legal_entity_properties.get("entityType") or {}).get("$ref")
+        == "#/components/schemas/LegalEntityType",
+        f"{relative}: LegalEntity.entityType must reference LegalEntityType",
+    )
+    jurisdiction = legal_entity_properties.get("jurisdiction") or {}
+    contracts.check(
+        (
+            jurisdiction.get("type"),
+            jurisdiction.get("minLength"),
+            jurisdiction.get("maxLength"),
+            jurisdiction.get("pattern"),
+        )
+        == (
+            "string",
+            2,
+            2,
+            POLICY_LEGAL_ENTITY_JURISDICTION_PATTERN,
+        ),
+        f"{relative}: LegalEntity.jurisdiction must be a two-letter uppercase code",
+    )
+    for field, maximum in (
+        ("regulator", POLICY_LEGAL_ENTITY_REGULATOR_MAX_LENGTH),
+        ("licenseNumber", POLICY_LEGAL_ENTITY_LICENSE_MAX_LENGTH),
+    ):
+        field_schema = legal_entity_properties.get(field) or {}
+        contracts.check(
+            _schema_types(field_schema) == {"string", "null"},
+            f"{relative}: LegalEntity.{field} must be a nullable string",
+        )
+        contracts.check(
+            field_schema.get("maxLength") == maximum,
+            f"{relative}: LegalEntity.{field} maxLength must be {maximum}",
+        )
+    contracts.check(
+        (legal_entity_properties.get("status") or {}).get("$ref")
+        == "#/components/schemas/LegalEntityStatus",
+        f"{relative}: LegalEntity.status must reference LegalEntityStatus",
+    )
+    contracts.check(
+        (legal_entity_properties.get("createdAt") or {}).get("format") == "date-time",
+        f"{relative}: LegalEntity.createdAt must be a date-time",
+    )
+
+    entity_type = schemas.get("LegalEntityType") or {}
+    contracts.check(
+        entity_type.get("type") == "string"
+        and tuple(entity_type.get("enum") or []) == POLICY_LEGAL_ENTITY_TYPES,
+        f"{relative}: LegalEntityType.enum must be "
+        f"{list(POLICY_LEGAL_ENTITY_TYPES)}",
+    )
+    status = schemas.get("LegalEntityStatus") or {}
+    contracts.check(
+        status.get("type") == "string"
+        and tuple(status.get("enum") or []) == POLICY_LEGAL_ENTITY_STATUSES,
+        f"{relative}: LegalEntityStatus.enum must be "
+        f"{list(POLICY_LEGAL_ENTITY_STATUSES)}",
+    )
+
+    create = schemas.get("CreateLegalEntityRequest") or {}
+    create_properties = create.get("properties") or {}
+    create_required = set(create.get("required") or [])
+    contracts.check(
+        create.get("type") == "object",
+        f"{relative}: CreateLegalEntityRequest must be an object schema",
+    )
+    for field in POLICY_LEGAL_ENTITY_CREATE_REQUIRED_FIELDS:
+        contracts.check(
+            field in create_properties,
+            f"{relative}: CreateLegalEntityRequest.properties.{field} is required",
+        )
+        contracts.check(
+            field in create_required,
+            f"{relative}: CreateLegalEntityRequest.required must list {field}",
+        )
+    for field in POLICY_LEGAL_ENTITY_CREATE_OPTIONAL_FIELDS:
+        contracts.check(
+            field in create_properties,
+            f"{relative}: CreateLegalEntityRequest.properties.{field} is required",
+        )
+        contracts.check(
+            field not in create_required,
+            f"{relative}: CreateLegalEntityRequest.{field} must stay optional",
+        )
+    contracts.check(
+        (create_properties.get("code") or {}).get("maxLength")
+        == POLICY_LEGAL_ENTITY_CODE_MAX_LENGTH,
+        f"{relative}: CreateLegalEntityRequest.code maxLength must be "
+        f"{POLICY_LEGAL_ENTITY_CODE_MAX_LENGTH}",
+    )
+    contracts.check(
+        (create_properties.get("name") or {}).get("maxLength")
+        == POLICY_LEGAL_ENTITY_NAME_MAX_LENGTH,
+        f"{relative}: CreateLegalEntityRequest.name maxLength must be "
+        f"{POLICY_LEGAL_ENTITY_NAME_MAX_LENGTH}",
+    )
+    contracts.check(
+        (create_properties.get("entityType") or {}).get("$ref")
+        == "#/components/schemas/LegalEntityType",
+        f"{relative}: CreateLegalEntityRequest.entityType must reference "
+        "LegalEntityType",
+    )
+    create_jurisdiction = create_properties.get("jurisdiction") or {}
+    contracts.check(
+        (
+            create_jurisdiction.get("minLength"),
+            create_jurisdiction.get("maxLength"),
+            create_jurisdiction.get("pattern"),
+        )
+        == (2, 2, POLICY_LEGAL_ENTITY_JURISDICTION_PATTERN),
+        f"{relative}: CreateLegalEntityRequest.jurisdiction must be a "
+        "two-letter uppercase code",
+    )
+    for field, maximum in (
+        ("regulator", POLICY_LEGAL_ENTITY_REGULATOR_MAX_LENGTH),
+        ("licenseNumber", POLICY_LEGAL_ENTITY_LICENSE_MAX_LENGTH),
+    ):
+        field_schema = create_properties.get(field) or {}
+        contracts.check(
+            _schema_types(field_schema) == {"string", "null"},
+            f"{relative}: CreateLegalEntityRequest.{field} must be a nullable "
+            "string",
+        )
+        contracts.check(
+            field_schema.get("maxLength") == maximum,
+            f"{relative}: CreateLegalEntityRequest.{field} maxLength must be "
+            f"{maximum}",
+        )
+
+    update = schemas.get("UpdatePolicyLegalEntityRequest") or {}
+    update_properties = update.get("properties") or {}
+    contracts.check(
+        update.get("type") == "object",
+        f"{relative}: UpdatePolicyLegalEntityRequest must be an object schema",
+    )
+    update_legal_entity = update_properties.get("legalEntityId") or {}
+    contracts.check(
+        _schema_types(update_legal_entity) == {"string", "null"}
+        and update_legal_entity.get("format") == "uuid",
+        f"{relative}: UpdatePolicyLegalEntityRequest.legalEntityId must be a "
+        "nullable uuid",
+    )
+    contracts.check(
+        "legalEntityId" not in set(update.get("required") or []),
+        f"{relative}: UpdatePolicyLegalEntityRequest.legalEntityId must stay "
+        "optional so an empty object clears the link",
+    )
+
+    policy = schemas.get("Policy") or {}
+    policy_properties = policy.get("properties") or {}
+    policy_required = set(policy.get("required") or [])
+    policy_legal_entity = policy_properties.get("legalEntityId") or {}
+    contracts.check(
+        _schema_types(policy_legal_entity) == {"string", "null"}
+        and policy_legal_entity.get("format") == "uuid",
+        f"{relative}: Policy.legalEntityId must be a nullable uuid",
+    )
+    contracts.check(
+        "legalEntityId" not in policy_required,
+        f"{relative}: Policy.legalEntityId must stay optional",
+    )
+
+    for (
+        method,
+        legal_entity_path,
+        success_status,
+        response_schema_name,
+        request_schema_name,
+        error_codes,
+    ) in POLICY_LEGAL_ENTITY_OPENAPI_PATHS:
+        path_item = paths.get(legal_entity_path) if isinstance(paths, dict) else None
+        operation = path_item.get(method) if isinstance(path_item, dict) else None
+        where = f"{relative}: {method.upper()} {legal_entity_path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required legal-entity operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+        parameter_refs, _ = _parameter_names(operation)
+        for required_parameter in ("TenantHeader", "BookHeaderDirectOptional"):
+            contracts.check(
+                required_parameter in parameter_refs,
+                f"{where}: must document the shared {required_parameter} parameter",
+            )
+        path_parameter_name = None
+        if "{policyId}" in legal_entity_path:
+            path_parameter_name = "policyId"
+        elif "{legalEntityId}" in legal_entity_path:
+            path_parameter_name = "legalEntityId"
+        if path_parameter_name:
+            path_parameter = _inline_parameter(operation, path_parameter_name)
+            contracts.check(
+                isinstance(path_parameter, dict),
+                f"{where}: must declare the {path_parameter_name} path parameter",
+            )
+            if isinstance(path_parameter, dict):
+                contracts.check(
+                    path_parameter.get("in") == "path"
+                    and path_parameter.get("required") is True
+                    and (path_parameter.get("schema") or {}).get("format") == "uuid",
+                    f"{where}: {path_parameter_name} must be a required uuid path "
+                    "parameter",
+                )
+        responses = operation.get("responses") or {}
+        contracts.check(
+            success_status in responses,
+            f"{where}: must document response {success_status}",
+        )
+        success_schema = _response_schema(operation, success_status)
+        success_ref = (
+            str(success_schema.get("$ref", ""))
+            if isinstance(success_schema, dict)
+            else ""
+        )
+        array_item_ref = (
+            str((success_schema.get("items") or {}).get("$ref", ""))
+            if isinstance(success_schema, dict)
+            and success_schema.get("type") == "array"
+            else ""
+        )
+        contracts.check(
+            success_ref.endswith(f"/schemas/{response_schema_name}")
+            or array_item_ref.endswith(f"/schemas/{response_schema_name}"),
+            f"{where}: {success_status} must return the {response_schema_name} "
+            "schema",
+        )
+        if success_status == "201":
+            created = responses.get("201") if isinstance(responses, dict) else None
+            headers = created.get("headers") if isinstance(created, dict) else None
+            contracts.check(
+                isinstance(headers, dict) and "Location" in headers,
+                f"{where}: 201 must declare the Location header",
+            )
+        if method == "patch":
+            ok = responses.get("200") if isinstance(responses, dict) else None
+            headers = ok.get("headers") if isinstance(ok, dict) else None
+            contracts.check(
+                isinstance(headers, dict) and "ETag" in headers,
+                f"{where}: 200 must declare the shared ETag header",
+            )
+            contracts.check(
+                not ({"IfMatch", "IdempotencyKey"} & set(parameter_refs)),
+                f"{where}: must not accept If-Match or Idempotency-Key in this "
+                "slice",
+            )
+        for code in error_codes:
+            contracts.check(
+                code in responses,
+                f"{where}: must document response {code}",
+            )
+        if request_schema_name:
+            request_body = operation.get("requestBody") or {}
+            request_schema = (
+                ((request_body.get("content") or {}).get("application/json") or {})
+                .get("schema")
+                if isinstance(request_body, dict)
+                else None
+            )
+            contracts.check(
+                isinstance(request_schema, dict)
+                and str(request_schema.get("$ref", "")).endswith(
+                    f"/schemas/{request_schema_name}"
+                ),
+                f"{where}: request body must use the {request_schema_name} schema",
+            )
+
+    implemented_paths = sorted(
+        {entry[1] for entry in POLICY_LEGAL_ENTITY_OPENAPI_PATHS}
+    )
+    for entry in document.get("x-planned-operations") or []:
+        if isinstance(entry, dict) and entry.get("path") in implemented_paths:
+            contracts.check(
+                False,
+                f"{relative}: {entry.get('path')} must not remain in "
+                "x-planned-operations",
+            )
+
+
+def check_policy_legal_entities_asyncapi(contracts: ContractSet, document, relative: str):
+    """Require the two implemented legal-entity channels and payloads."""
+    channels = document.get("channels") or {}
+    operations = document.get("operations") or {}
+    messages = (document.get("components") or {}).get("messages") or {}
+    channel_by_address = {}
+    implemented_addresses = set()
+    for channel in channels.values():
+        if not isinstance(channel, dict):
+            continue
+        address = channel.get("address")
+        if address:
+            channel_by_address[address] = channel
+            if channel.get("x-status") == "implemented":
+                implemented_addresses.add(address)
+    send_events = {
+        operation.get("x-event-type")
+        for operation in operations.values()
+        if isinstance(operation, dict) and operation.get("action") == "send"
+    }
+
+    for event in POLICY_LEGAL_ENTITY_EVENTS:
+        contracts.check(
+            event in channel_by_address,
+            f"{relative}: required legal-entity event channel '{event}' is "
+            "missing",
+        )
+        contracts.check(
+            event in implemented_addresses,
+            f"{relative}: legal-entity event channel '{event}' must be "
+            "implemented",
+        )
+        contracts.check(
+            event in send_events,
+            f"{relative}: legal-entity event '{event}' must have a send "
+            "operation",
+        )
+        channel = channel_by_address.get(event) or {}
+        channel_messages = channel.get("messages") or {}
+        contracts.check(
+            str(channel.get("x-implemented-by", "")).endswith(
+                POLICY_LEGAL_ENTITY_EVENT_IMPLEMENTED_BY
+            ),
+            f"{relative}: {event} must name "
+            f"{POLICY_LEGAL_ENTITY_EVENT_IMPLEMENTED_BY} in x-implemented-by",
+        )
+        if event == "policy.legal-entity.created":
+            contracts.check(
+                POLICY_LEGAL_ENTITY_CREATED_EVENT_MESSAGE in channel_messages,
+                f"{relative}: {event} must reference "
+                f"{POLICY_LEGAL_ENTITY_CREATED_EVENT_MESSAGE}",
+            )
+        else:
+            contracts.check(
+                POLICY_LEGAL_ENTITY_ASSIGNED_EVENT_MESSAGE in channel_messages,
+                f"{relative}: {event} must reference "
+                f"{POLICY_LEGAL_ENTITY_ASSIGNED_EVENT_MESSAGE}",
+            )
+
+    created_message = messages.get(POLICY_LEGAL_ENTITY_CREATED_EVENT_MESSAGE) or {}
+    created_payload = created_message.get("payload") or {}
+    created_properties = created_payload.get("properties") or {}
+    created_required = set(created_payload.get("required") or [])
+    for field in POLICY_LEGAL_ENTITY_CREATED_EVENT_FIELDS:
+        contracts.check(
+            field in created_properties,
+            f"{relative}: {POLICY_LEGAL_ENTITY_CREATED_EVENT_MESSAGE}."
+            f"properties.{field} is required",
+        )
+        contracts.check(
+            field in created_required,
+            f"{relative}: {POLICY_LEGAL_ENTITY_CREATED_EVENT_MESSAGE}.required "
+            f"must list {field}",
+        )
+    contracts.check(
+        (created_properties.get("legalEntityId") or {}).get("format") == "uuid",
+        f"{relative}: {POLICY_LEGAL_ENTITY_CREATED_EVENT_MESSAGE}.legalEntityId "
+        "must be a uuid",
+    )
+    contracts.check(
+        tuple((created_properties.get("entityType") or {}).get("enum") or [])
+        == POLICY_LEGAL_ENTITY_TYPES,
+        f"{relative}: {POLICY_LEGAL_ENTITY_CREATED_EVENT_MESSAGE}.entityType "
+        f"must enumerate {list(POLICY_LEGAL_ENTITY_TYPES)}",
+    )
+    contracts.check(
+        tuple((created_properties.get("status") or {}).get("enum") or [])
+        == POLICY_LEGAL_ENTITY_STATUSES,
+        f"{relative}: {POLICY_LEGAL_ENTITY_CREATED_EVENT_MESSAGE}.status must "
+        f"enumerate {list(POLICY_LEGAL_ENTITY_STATUSES)}",
+    )
+    contracts.check(
+        (created_properties.get("jurisdiction") or {}).get("pattern")
+        == POLICY_LEGAL_ENTITY_JURISDICTION_PATTERN,
+        f"{relative}: {POLICY_LEGAL_ENTITY_CREATED_EVENT_MESSAGE}.jurisdiction "
+        "must be a two-letter uppercase code",
+    )
+    for field in POLICY_LEGAL_ENTITY_NULLABLE_FIELDS:
+        contracts.check(
+            _schema_types(created_properties.get(field)) == {"string", "null"},
+            f"{relative}: {POLICY_LEGAL_ENTITY_CREATED_EVENT_MESSAGE}.{field} "
+            "must be a nullable string",
+        )
+    contracts.check(
+        (created_properties.get("createdAt") or {}).get("format") == "date-time",
+        f"{relative}: {POLICY_LEGAL_ENTITY_CREATED_EVENT_MESSAGE}.createdAt "
+        "must be a date-time",
+    )
+
+    assigned_message = messages.get(POLICY_LEGAL_ENTITY_ASSIGNED_EVENT_MESSAGE) or {}
+    assigned_payload = assigned_message.get("payload") or {}
+    assigned_properties = assigned_payload.get("properties") or {}
+    assigned_required = set(assigned_payload.get("required") or [])
+    for field in POLICY_LEGAL_ENTITY_ASSIGNED_EVENT_FIELDS:
+        contracts.check(
+            field in assigned_properties,
+            f"{relative}: {POLICY_LEGAL_ENTITY_ASSIGNED_EVENT_MESSAGE}."
+            f"properties.{field} is required",
+        )
+        contracts.check(
+            field in assigned_required,
+            f"{relative}: {POLICY_LEGAL_ENTITY_ASSIGNED_EVENT_MESSAGE}.required "
+            f"must list {field}",
+        )
+    contracts.check(
+        (assigned_properties.get("policyId") or {}).get("format") == "uuid",
+        f"{relative}: {POLICY_LEGAL_ENTITY_ASSIGNED_EVENT_MESSAGE}.policyId "
+        "must be a uuid",
+    )
+    for field in ("legalEntityId", "previousLegalEntityId"):
+        field_schema = assigned_properties.get(field) or {}
+        contracts.check(
+            _schema_types(field_schema) == {"string", "null"}
+            and field_schema.get("format") == "uuid",
+            f"{relative}: {POLICY_LEGAL_ENTITY_ASSIGNED_EVENT_MESSAGE}.{field} "
+            "must be a nullable uuid",
+        )
+    changed_fields = assigned_properties.get("changedFields") or {}
+    contracts.check(
+        changed_fields.get("type") == "array"
+        and (changed_fields.get("items") or {}).get("type") == "string"
+        and "legalEntityId" in str(changed_fields.get("description") or ""),
+        f"{relative}: {POLICY_LEGAL_ENTITY_ASSIGNED_EVENT_MESSAGE}.changedFields "
+        "must be a string array naming legalEntityId",
+    )
+    contracts.check(
+        (assigned_properties.get("version") or {}).get("type") == "integer",
+        f"{relative}: {POLICY_LEGAL_ENTITY_ASSIGNED_EVENT_MESSAGE}.version must "
+        "be an integer",
+    )
+    for field in ("premiumAmount", "limitAmount"):
+        contracts.check(
+            (assigned_properties.get(field) or {}).get("type") == "string",
+            f"{relative}: {POLICY_LEGAL_ENTITY_ASSIGNED_EVENT_MESSAGE}.{field} "
+            "must be a decimal string",
+        )
+    for field in ("premiumCurrency", "limitCurrency"):
+        contracts.check(
+            (assigned_properties.get(field) or {}).get("pattern") == "^[A-Z]{3}$",
+            f"{relative}: {POLICY_LEGAL_ENTITY_ASSIGNED_EVENT_MESSAGE}.{field} "
+            "must be a three-letter uppercase currency",
+        )
+    for field in ("effectiveDate", "expirationDate"):
+        contracts.check(
+            (assigned_properties.get(field) or {}).get("format") == "date",
+            f"{relative}: {POLICY_LEGAL_ENTITY_ASSIGNED_EVENT_MESSAGE}.{field} "
+            "must be a date",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Contract technical-account checks
 # ---------------------------------------------------------------------------
 
@@ -8151,6 +8750,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_policy_mass_tort_profile_openapi(contracts, document, relative)
             check_policy_programs(contracts, document, relative)
             check_policy_credit_notes_openapi(contracts, document, relative)
+            check_policy_legal_entities_openapi(contracts, document, relative)
         if vertical == "contract":
             check_contract_security(contracts, document, relative)
             check_contract_security_status(contracts, document, relative)
@@ -8426,6 +9026,7 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
                 )
             check_policy_programs_asyncapi(contracts, document, relative)
             check_policy_credit_notes_asyncapi(contracts, document, relative)
+            check_policy_legal_entities_asyncapi(contracts, document, relative)
 
         if vertical == "contract":
             check_contract_technical_account_lines_asyncapi(

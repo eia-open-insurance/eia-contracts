@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:policy
 info:
   title: EIA Policy events
-  version: 1.7.0
+  version: 1.8.0
   summary: Published domain event names for the Policy vertical.
   description: >
     Event contract for the Policy vertical. The authoritative event names are
@@ -41,7 +41,13 @@ info:
     recorded in M-22 and M-39. The three credit-note facts are new names as
     well: SPEC 11.2.13 publishes only `policy.billing.credit-note-issued`, and
     the implemented lifecycle has no approval or SAP step, so the names and the
-    narrower status model are recorded in M-22 and M-41. The remaining SPEC
+    narrower status model are recorded in M-22 and M-41. The two legal-entity
+    facts `policy.legal-entity.created` and
+    `policy.policy.legal-entity-assigned` are also new names: the catalog create
+    and the policy assignment both have SPEC 10.11.2/11.2.16 models but no SPEC
+    11.2.9 event, and SPEC 11.2.16 names no event at all. The names, the nullable
+    assignment, and the narrow catalog vocabulary are recorded in M-22 and M-43.
+    The remaining SPEC
     11.2.9 and 11.2.13 names are planned.
   contact:
     name: EIA Architecture
@@ -527,6 +533,48 @@ channels:
         $ref: '#/components/messages/DomainEvent'
       PolicyPolicyProgramAssignedData:
         $ref: '#/components/messages/PolicyPolicyProgramAssignedData'
+  PolicyLegalEntityCreated:
+    address: policy.legal-entity.created
+    title: policy.legal-entity.created
+    description: >
+      Emitted when a legal entity is created in the tenant's DIRECT-book
+      catalog, in the same transaction as the `legal_entity` row. The legal
+      entity is a catalog aggregate in the policy vertical, so the event is keyed
+      by the legal entity id at aggregate version 1 and carries the business
+      code, name, entity type, two-letter jurisdiction, the nullable regulator
+      and license number, status ACTIVE, and the creation instant. The name has
+      no SPEC 11.2.9 equivalent (M-22, M-43).
+    x-event-type: policy.legal-entity.created
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 10.11.2, SPEC 11.2.16
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      PolicyLegalEntityCreatedData:
+        $ref: '#/components/messages/PolicyLegalEntityCreatedData'
+  PolicyPolicyLegalEntityAssigned:
+    address: policy.policy.legal-entity-assigned
+    title: policy.policy.legal-entity-assigned
+    description: >
+      Emitted when a policy is assigned to a legal entity or its legal-entity
+      link is cleared, in the same transaction as the policy row update and
+      version bump. The payload carries the policy identity, status, row
+      version, term dates, premium, and limit, plus the nullable
+      `legalEntityId`, the nullable `previousLegalEntityId`, and
+      `changedFields`. A clear emits `legalEntityId: null` and the previous id;
+      the name has no SPEC 11.2.9 equivalent (M-22, M-43).
+    x-event-type: policy.policy.legal-entity-assigned
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.2.4, SPEC 11.2.16
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      PolicyPolicyLegalEntityAssignedData:
+        $ref: '#/components/messages/PolicyPolicyLegalEntityAssignedData'
   PolicyCoverageBlockUpdated:
     address: policy.coverage-block.updated
     title: policy.coverage-block.updated
@@ -826,6 +874,27 @@ operations:
       program or the link is cleared, in the same transaction as the policy row
       update and version bump.
     x-event-type: policy.policy.program-assigned
+    x-status: implemented
+  publishPolicyLegalEntityCreated:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyLegalEntityCreated'
+    summary: Publish policy.legal-entity.created
+    description: >
+      Publishes policy.legal-entity.created through the transactional outbox in
+      the same transaction as the legal entity insert (SPEC 7.5.1).
+    x-event-type: policy.legal-entity.created
+    x-status: implemented
+  publishPolicyPolicyLegalEntityAssigned:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyPolicyLegalEntityAssigned'
+    summary: Publish policy.policy.legal-entity-assigned
+    description: >
+      Publishes policy.policy.legal-entity-assigned when a policy is assigned to
+      a legal entity or the link is cleared, in the same transaction as the
+      policy row update and version bump.
+    x-event-type: policy.policy.legal-entity-assigned
     x-status: implemented
   publishPolicyCoverageBlockUpdated:
     action: send
@@ -1290,6 +1359,125 @@ components:
             items:
               type: string
             description: Always ["programId"] for this event.
+    PolicyLegalEntityCreatedData:
+      name: PolicyLegalEntityCreatedData
+      title: policy.legal-entity.created data
+      summary: The legal entity catalog row created by the command.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - legalEntityId
+          - code
+          - name
+          - entityType
+          - jurisdiction
+          - regulator
+          - licenseNumber
+          - status
+          - createdAt
+        properties:
+          legalEntityId:
+            type: string
+            format: uuid
+          code:
+            type: string
+            maxLength: 32
+            description: Tenant-scoped business code, normalized upper-case.
+          name:
+            type: string
+            maxLength: 200
+          entityType:
+            type: string
+            enum:
+              - INSURER
+              - MGA
+              - CAPTIVE
+              - POOL
+              - FRONTER
+          jurisdiction:
+            type: string
+            pattern: '^[A-Z]{2}$'
+            description: Two-letter ISO 3166-1 alpha-2 code, upper-case.
+          regulator:
+            type: [string, 'null']
+            maxLength: 120
+          licenseNumber:
+            type: [string, 'null']
+            maxLength: 80
+          status:
+            type: string
+            enum:
+              - ACTIVE
+              - INACTIVE
+          createdAt:
+            type: string
+            format: date-time
+    PolicyPolicyLegalEntityAssignedData:
+      name: PolicyPolicyLegalEntityAssignedData
+      title: policy.policy.legal-entity-assigned data
+      summary: The policy issuing-entity change after an assign or clear command.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - policyId
+          - policyNumber
+          - status
+          - version
+          - effectiveDate
+          - expirationDate
+          - premiumAmount
+          - premiumCurrency
+          - limitAmount
+          - limitCurrency
+          - legalEntityId
+          - previousLegalEntityId
+          - changedFields
+        properties:
+          policyId:
+            type: string
+            format: uuid
+          policyNumber:
+            type: string
+          status:
+            type: string
+            description: Policy status at the time of the assignment.
+          version:
+            type: integer
+            description: Policy row version after the accepted assignment.
+          effectiveDate:
+            type: string
+            format: date
+          expirationDate:
+            type: string
+            format: date
+          premiumAmount:
+            type: string
+            description: Decimal string with up to four fraction digits (SPEC 10.3).
+          premiumCurrency:
+            type: string
+            pattern: '^[A-Z]{3}$'
+          limitAmount:
+            type: string
+          limitCurrency:
+            type: string
+            pattern: '^[A-Z]{3}$'
+          legalEntityId:
+            type: [string, 'null']
+            format: uuid
+            description: New legal-entity link; null when the assignment was cleared.
+          previousLegalEntityId:
+            type: [string, 'null']
+            format: uuid
+            description: Legal-entity link before the command; null on a first assignment.
+          changedFields:
+            type: array
+            items:
+              type: string
+            description: Always ["legalEntityId"] for this event.
   securitySchemes:
     outboxSignature:
       type: httpApiKey
@@ -1305,15 +1493,17 @@ x-implementation:
   publisher: eia-policy-expert
   subscriber: none
   notes: >
-    Seventeen Policy events are written to the transactional outbox in the same
+    Nineteen Policy events are written to the transactional outbox in the same
     transaction as the aggregate write and dispatched by the platform outbox
     dispatcher when `eia.outbox.enabled=true`: `created`, `updated`,
     `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`,
     `billing-plan.created`, `installment.paid`, `installment.waived`,
     `dunning.sent`, `mass-tort-profile.updated`, the program facts
-    `policy.program.created` and `policy.policy.program-assigned`, and the
+    `policy.program.created` and `policy.policy.program-assigned`, the
     credit-note facts `policy.credit-note.issued`,
-    `policy.credit-note.applied`, and `policy.credit-note.cancelled`. The renewal
+    `policy.credit-note.applied`, and `policy.credit-note.cancelled`, and the
+    legal-entity facts `policy.legal-entity.created` and
+    `policy.policy.legal-entity-assigned`. The renewal
     event carries both policy identities and the lineage link; the billing plan
     event carries the complete schedule; the installment events carry the
     settled row and its payment evidence; the dunning event carries the dunned
@@ -1324,7 +1514,10 @@ x-implementation:
     credit-note events carry the policy and note identity, the note number, the
     amount as a decimal string, the currency, and the new status; they are
     keyed by the policy aggregate because every transition bumps the policy
-    version. The other
+    version. The legal-entity created fact is keyed by the `LegalEntity`
+    aggregate at version 1 and carries the catalog row; the assignment fact is
+    keyed by the policy aggregate at the new version and carries the nullable
+    new and previous entity ids and `changedFields`. The other
     SPEC 11.2.9 and 11.2.13 names remain planned. There is no
     business subscriber or subscription registry yet.
 

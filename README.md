@@ -1378,6 +1378,63 @@ Credit-note semantics:
   the implemented routes from `x-planned-operations`. The full run passes
   12,561 checks.
 
+### Policy legal entities (2026-10-21)
+
+Policy 2.10.0 adds the issuing legal entity catalog and the policy assignment
+command. The change is additive: three new paths, four new operations, five new
+schemas, and one nullable `Policy` property; no existing path, request field,
+response field, or event changed.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/policy.yaml` | 2.10.0 | Additive | `GET/POST /api/v1/legal-entities`, `GET /api/v1/legal-entities/{legalEntityId}`, `PATCH /api/v1/policies/{policyId}/legal-entity`, the `LegalEntity`, `LegalEntityType`, `LegalEntityStatus`, `CreateLegalEntityRequest`, and `UpdatePolicyLegalEntityRequest` schemas, and the nullable `Policy.legalEntityId`. |
+| `asyncapi/policy.yaml` | 1.8.0 | Additive | The implemented `policy.legal-entity.created` and `policy.policy.legal-entity-assigned` channels and `send` operations with the `PolicyLegalEntityCreatedData` and `PolicyPolicyLegalEntityAssignedData` payloads. |
+| `asyncapi/event-catalog.yaml` | 1.23.0 | Additive | Both names are published and implemented (205 published and 84 implemented in total; Policy 31 published and 19 implemented). |
+
+Legal-entity semantics:
+
+- `GET /api/v1/legal-entities` returns the tenant's legal entities newest first
+  (`createdAt DESC`, then `legalEntityId ASC`) as a bare array (M-04);
+  `GET .../{legalEntityId}` returns one. The projection is exactly
+  `{legalEntityId, code, name, entityType, jurisdiction, regulator,
+  licenseNumber, status, createdAt}` and never includes `tenantId`.
+- `POST /api/v1/legal-entities` returns 201 with `Location` and the stored
+  projection. `code` is trimmed, upper-cased, capped at 32 characters, and
+  unique per tenant; a duplicate is 409 `DUPLICATE_LEGAL_ENTITY_CODE`. `name` is
+  trimmed and capped at 200 characters. `entityType` is `INSURER`, `MGA`,
+  `CAPTIVE`, `POOL`, or `FRONTER`; `jurisdiction` is a two-letter upper-case
+  ISO 3166-1 alpha-2 code. `regulator` (120 characters) and `licenseNumber`
+  (80 characters) are optional, trimmed, and stored as null when blank. A legal
+  entity is created ACTIVE; INACTIVE is reserved for a later retirement command
+  and no operation writes it.
+- `PATCH /api/v1/policies/{policyId}/legal-entity` assigns the entity or clears
+  the link with a null (or absent) id. The accepted command bumps the policy
+  version, returns the updated `Policy` and its strong `ETag`, and writes the
+  event. An unknown policy or legal entity is 404 `POLICY_NOT_FOUND` or
+  `LEGAL_ENTITY_NOT_FOUND`; a concurrent policy change is 409
+  `CONCURRENT_MODIFICATION`. The command accepts neither `If-Match` nor
+  `Idempotency-Key` in this slice (M-06, M-07).
+- `X-EIA-Tenant` is required. A supplied `X-EIA-Book` must be DIRECT and another
+  book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain and expert accept an
+  absent book for compatibility with the other Policy proxy routes (M-43).
+- The create writes `policy.legal-entity.created` against the `LegalEntity`
+  aggregate at version 1. The assignment writes
+  `policy.policy.legal-entity-assigned` against the policy at its new version,
+  with nullable `legalEntityId`/`previousLegalEntityId` and
+  `changedFields: [legalEntityId]`. Both events are written in the same
+  transaction as the row change. The names are new and have no SPEC 11.2.9
+  equivalent (M-22, M-43).
+- SPEC 11.2.16 mounts the catalog at `/api/v1/policy/legal-entities`, and LE-01
+  requires every policy to reference one issuing legal entity. The implemented
+  short path, the five-type catalog against the wider SPEC 10.11.2 row, and the
+  nullable assignment are recorded in M-01, M-12, and M-43.
+- The validator requires the three paths, the four operations, the tenant and
+  optional DIRECT book parameters, the path parameters, the five schemas and
+  their field bounds and enums, the nullable `Policy.legalEntityId`, the
+  201/200/400/404/409 responses, the two implemented channels and payloads, the
+  catalog entries, and the absence of the implemented paths from
+  `x-planned-operations`. The full run passes 13,143 checks.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -1416,6 +1473,7 @@ Every request carries a resolved tenant; no request body may override it.
 | `X-EIA-Book` | Policy renewal | Required and fixed to `DIRECT`. The contract makes a missing header a 400 and hides another book as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header, which M-28 records. |
 | `X-EIA-Book` | Policy programs | Required and fixed to `DIRECT`. The contract makes a missing header a 400 and hides another book as 404 `BOOK_SCOPE_VIOLATION`; the domain and expert currently accept an absent header, which M-39 records. |
 | `X-EIA-Book` | Policy credit notes | Required and fixed to `DIRECT`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`. The domain currently accepts an absent header for compatibility with the other Policy proxy routes, which M-41 records. |
+| `X-EIA-Book` | Policy legal entities and assignment | Optional for compatibility with the other Policy proxy routes, but a supplied value must be `DIRECT`; another book is hidden as 404 `BOOK_SCOPE_VIOLATION`. An absent header is accepted, which M-43 records against the canonical DIRECT-book rule. |
 | `X-EIA-Book` | Contract technical accounts | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-29 records. |
 | `X-EIA-Book` | Contract technical-account lines | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-29 and M-42 record. |
 | `X-EIA-Book` | Contract period bordereaux | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-30 records. |
@@ -1946,6 +2004,55 @@ Rules:
   `policy.billing.credit-note-issued` fact. The implemented narrow shape and the
   three new event names are recorded in M-22 and M-41.
 
+### Policy legal entities
+
+The legal entity catalog is policy master data (SPEC 10.11.2, SPEC 11.2.16).
+The public surface is a domain proxy over the Policy expert; the expert also
+exposes the same resources under `/internal/v1` for the domain adapter, but
+those aliases are not part of the public contract.
+
+| Operation | Path | Success | Errors |
+|---|---|---|---|
+| List entities | `GET /api/v1/legal-entities` | 200 `LegalEntity[]` | 400, 404 |
+| Create entity | `POST /api/v1/legal-entities` | 201 `LegalEntity` | 400, 404, 409 |
+| Get entity | `GET /api/v1/legal-entities/{legalEntityId}` | 200 `LegalEntity` | 400, 404 |
+| Assign or clear | `PATCH /api/v1/policies/{policyId}/legal-entity` | 200 `Policy` | 400, 404, 409 |
+
+`LegalEntity` is `{legalEntityId, code, name, entityType, jurisdiction,
+regulator, licenseNumber, status, createdAt}`. `regulator` and `licenseNumber`
+are nullable; `status` is ACTIVE or INACTIVE and a row is created ACTIVE. The
+create body is `CreateLegalEntityRequest`; the assignment body is
+`UpdatePolicyLegalEntityRequest`, whose nullable `legalEntityId` assigns the
+entity and whose null or absent value clears it.
+
+Rules:
+
+- The list is tenant-scoped and bare, newest first; an empty tenant is `[]`.
+  There is no search, filter, or page envelope in this slice (M-04).
+- `code` is trimmed and upper-cased, at most 32 characters, and unique per
+  tenant; a duplicate is 409 `DUPLICATE_LEGAL_ENTITY_CODE`. `name` is trimmed
+  and at most 200 characters. `entityType` is INSURER, MGA, CAPTIVE, POOL, or
+  FRONTER; `jurisdiction` is a two-letter upper-case ISO 3166-1 alpha-2 code.
+  `regulator` is at most 120 characters and `licenseNumber` at most 80; a blank
+  optional value is stored as null.
+- The assignment checks that the policy and legal entity share the caller's
+  tenant. An unknown policy or entity is 404 `POLICY_NOT_FOUND` or
+  `LEGAL_ENTITY_NOT_FOUND`; a concurrent policy change is 409
+  `CONCURRENT_MODIFICATION` with the current and expected versions. The
+  assignment accepts no `If-Match` or `Idempotency-Key` (M-06, M-07).
+- `X-EIA-Tenant` is required. A supplied `X-EIA-Book` must be DIRECT and another
+  book is hidden as 404 `BOOK_SCOPE_VIOLATION`; an absent header is accepted for
+  compatibility with the other Policy proxy routes (M-43).
+- The create writes `policy.legal-entity.created`; the accepted assignment
+  writes `policy.policy.legal-entity-assigned`. Both are in the same transaction
+  as the row change. The created event is keyed by the `LegalEntity` aggregate
+  at version 1; the assignment event is keyed by the policy at its new version
+  and carries both sides of the link and `changedFields`.
+- SPEC 11.2.16 mounts the catalog at `/api/v1/policy/legal-entities` and LE-01
+  requires one issuing legal entity per policy. The implemented short path, the
+  reduced entity-type/status vocabulary, and the nullable clear are recorded in
+  M-01, M-12, M-13, and M-43.
+
 ### Global search
 
 The shell's `/search` page fans out to one search operation per vertical. Every
@@ -2155,7 +2262,14 @@ missing directory.
    `CreateCreditNoteRequest.amount` pattern and optional 500-character reason,
    the three-value `UpdateCreditNoteStatusRequest` enum, the
    201/200/400/404/409 responses, the documented transition and event rules,
-   and agreement between
+   the three legal-entity paths and four operations with their required
+   `TenantHeader` and optional `BookHeaderDirectOptional` parameters, the
+   `LegalEntity`, `LegalEntityType`, `LegalEntityStatus`,
+   `CreateLegalEntityRequest`, and `UpdatePolicyLegalEntityRequest` schemas and
+   their field bounds, nullability, and enums, the nullable optional
+   `Policy.legalEntityId`, the 201 `Location`, the assignment 200 `ETag`, the
+   201/200/400/404/409 responses, and the absence of the implemented paths from
+   `x-planned-operations`, and agreement between
    `info.version` and `x-compatibility.contractVersion`.
 4. **AsyncAPI structure.** `asyncapi: 3.0.0`, channel addresses, `x-event-type`,
    `x-status: planned|implemented`, `x-implemented-by` on every implemented
@@ -2176,7 +2290,10 @@ missing directory.
    `ContractTechnicalAccountLineData` payload with its contract, account, line,
    type, and amount members, and the
    `PolicyCreditNoteData` payload with its policy and note identity, note
-   number, amount, currency, and status members.
+   number, amount, currency, and status members, and the
+   `PolicyLegalEntityCreatedData` and
+   `PolicyPolicyLegalEntityAssignedData` payloads with their catalog-row,
+   enum, nullable-link, changed-fields, and policy/money members.
 5. **Event catalog cross-check.** The published set in `event-catalog.yaml`
    must equal the channel addresses in the matching vertical document, event
    names must be unique across the platform and must match
@@ -2198,8 +2315,9 @@ missing directory.
    `contract.security.recorded`, `contract.security.status-changed`,
    `contract.technical-account.line-added`,
    `contract.technical-account.line-removed`,
-   `policy.credit-note.issued`, `policy.credit-note.applied`, and
-   `policy.credit-note.cancelled`. The Document document must also keep
+   `policy.credit-note.issued`, `policy.credit-note.applied`,
+   `policy.credit-note.cancelled`, `policy.legal-entity.created`, and
+   `policy.policy.legal-entity-assigned`. The Document document must also keep
    `document.content.uploaded` as its only `document.content.*` event, so the
    content-version slice cannot add an event name silently.
 6. **JSON Schema checks.** All three files parse as JSON, declare the 2020-12
@@ -2336,6 +2454,18 @@ missing directory.
   `X-EIA-Book: DIRECT` while the domain accepts an absent header, and the
   command has no `Idempotency-Key`/`If-Match`; M-22 and M-38 record the
   differences;
+- policy legal entities are implemented at the short
+  `GET/POST /api/v1/legal-entities` and
+  `GET /api/v1/legal-entities/{legalEntityId}` paths plus
+  `PATCH /api/v1/policies/{policyId}/legal-entity`, while SPEC 11.2.16 mounts
+  the catalog at `/api/v1/policy/legal-entities` and defines no assignment
+  command. The catalog uses a five-value type set
+  (`INSURER`/`MGA`/`CAPTIVE`/`POOL`/`FRONTER`) with ACTIVE/INACTIVE and a
+  two-letter jurisdiction, narrower than SPEC 10.11.2's wider type set,
+  LIQUIDATING status, three-letter domicile country, and finance/effective-dating
+  columns; `Policy.legalEntityId` is nullable and clearable although LE-01
+  requires one issuing entity. The two new event names have no SPEC equivalent
+  (M-01, M-12, M-13, M-22, M-43);
 - the program catalog is implemented at the short `GET/POST /api/v1/programs`
   and `GET /api/v1/programs/{programId}` paths, with
   `PATCH /api/v1/policies/{policyId}/program` as the membership command, while

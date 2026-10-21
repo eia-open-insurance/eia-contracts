@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-21 (Contract technical-account lines).
+Status: open, reviewed 2026-10-21 (Policy legal entity catalog).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -76,6 +76,11 @@ where the running code does not meet it yet.
   projection, commands, book scope, and client plus the expert credit-note
   controller, service, rules, repository, entity, requests, event factory,
   `schema.sql`, and the domain and expert tests.
+  The Policy legal-entity pass reads the domain legal-entity and
+  policy-assignment controllers, services, DTO/commands, `PolicyDto`, and
+  `PolicyClient` plus the expert legal-entity controller, service, rules,
+  repository, entity, view, create and assignment requests, event factory,
+  `schema.sql`, and the domain and expert tests.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -143,6 +148,7 @@ removed per the resolution policy.
 | M-40 | Document content keeps a current pointer plus revisions under `/content/versions`, not the SPEC `/versions` store | L |
 | M-41 | Policy credit notes use a short path, a four-state lifecycle, free-text reason, and new event names, with no approval or SAP step | L |
 | M-42 | Contract technical-account lines use four header-component types, a DRAFT-only write guard, and an issue-time reconciliation instead of the full SPEC line vocabulary | L |
+| M-43 | Policy legal entity catalog is a narrow five-type slice with a nullable issuing-entity link | M |
 
 ## M-01 Public base paths
 
@@ -154,6 +160,7 @@ remotes agree with the implementation, so the SPEC tables are the outlier.
 |---|---|---|
 | Party | `/api/v1/parties` | `/api/v1/party/parties` |
 | Policy | `/api/v1/policies` | `/api/v1/policy/policies` |
+| Policy legal entities | `/api/v1/legal-entities` | `/api/v1/policy/legal-entities` |
 | Contract | `/api/v1/contracts` | `/api/v1/contract/contracts` |
 | Direct Claims | `/api/v1/claims` | `/api/v1/direct-claims/claims` |
 | Assumed Claims | `/api/v1/assumed-claims` (alias `/api/v1/assumed-claims/claims`) | `/api/v1/assumed-claims/claims` |
@@ -169,6 +176,10 @@ Policy programs add a second short-form row: the implemented catalog is
 Policy credit notes add another short-form row: the implemented
 `/api/v1/policies/{policyId}/credit-notes` versus SPEC 11.2.13's
 `/api/v1/policy/policies/{policyId}/credit-notes` (M-41).
+Policy legal entities add the short-form catalog row: the implemented
+`/api/v1/legal-entities` versus SPEC 11.2.16's
+`/api/v1/policy/legal-entities`; the implemented assignment command
+`PATCH /api/v1/policies/{policyId}/legal-entity` has no SPEC route (M-43).
 
 The ten global-search routes follow the same shorter form
 (`/api/v1/{resource}/search`); their SPEC naming gap and validation differences
@@ -192,6 +203,12 @@ Evidence:
   `/api/v1/policies/{policyId}/credit-notes`, and
   `repos/eia-policy-expert/.../CreditNoteController.java:27-31` - the same
   public path plus the internal alias.
+- `repos/eia-policy-domain/.../LegalEntityController.java:26`,
+  `PolicyLegalEntityController.java:21`, and
+  `repos/eia-policy-expert/.../LegalEntityController.java:29` -
+  `/api/v1/legal-entities` and
+  `/api/v1/policies/{policyId}/legal-entity` (the expert also maps the
+  `/internal/v1` alias).
 - `repos/eia-platform/gateway/src/main/resources/application.yml:18-48` - the
   same public prefixes are routed.
 - Web remotes call the implemented prefixes, for example
@@ -620,7 +637,11 @@ unimplemented fields and list the missing operations under
   renewal batch, non-renewal reasons, and renewal invitations remain gaps
   (M-28). The mass tort slice adds the narrow one-per-policy DRAFT/COMPLETE
   profile (M-32); the SPEC mass tort program, the wider profile columns, and
-  the SPEC trigger/status vocabularies remain gaps.
+  the SPEC trigger/status vocabularies remain gaps. The legal-entity slice adds
+  the five-type catalog and the nullable issuing-entity assignment (M-43); the
+  NAIC/SAP company codes, LEI, tax id, functional currency, parent, effective
+  dates, organization-unit/capacity links, the entity update/retire commands,
+  and the LE-01 bind-time issuer gate remain gaps.
 - Contract: no `treatyNumber`, `contractBasis`, inception-date naming,
   `contract_section`, `contract_version`, `contract_sliding_scale`,
   `contract_premium`, `contract_reinstatement`, `contract_wording`,
@@ -684,6 +705,8 @@ unimplemented fields and list the missing operations under
 | Policy `coinsurancePct` | a decimal fraction (`0.150000`) |
 | Policy `tortType` | Policy `direct_tort_code` (SPEC 11.2.4) |
 | Policy `triggerType` | Policy `trigger_theory` (SPEC 11.2.4) |
+| Policy legal entity `code` / `name` | `legal_entity.entity_code` (varchar 16) / `legal_name` (varchar 300) |
+| Policy legal entity `jurisdiction` | `legal_entity.domicile_country` (ISO 3166-1 char 3) |
 | Contract `sharePct`, `signedLinePct`, `cessionPct` | percentages of 100 (`15.000000`), not the SPEC 12.2 fraction |
 | Payment `sourceType` + `sourceId` + `sourceReference` | Payment `claim_vertical` + `claim_id` + `claim_number` (or the contract link) |
 
@@ -701,7 +724,7 @@ ten publishing verticals now emit a subset:
 | Vertical | Implemented event names | Source |
 |---|---|---|
 | Party | `party.party.created`, `party.party.updated` | `repos/eia-party-expert/.../PartyEvents.java` |
-| Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.billing-plan.created`, `policy.installment.paid`, `policy.installment.waived`, `policy.dunning.sent`, `policy.mass-tort-profile.updated`, `policy.program.created`, `policy.policy.program-assigned`, `policy.credit-note.issued`, `policy.credit-note.applied`, `policy.credit-note.cancelled` | `repos/eia-policy-expert/.../PolicyEvents.java` |
+| Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.billing-plan.created`, `policy.installment.paid`, `policy.installment.waived`, `policy.dunning.sent`, `policy.mass-tort-profile.updated`, `policy.program.created`, `policy.policy.program-assigned`, `policy.credit-note.issued`, `policy.credit-note.applied`, `policy.credit-note.cancelled`, `policy.legal-entity.created`, `policy.policy.legal-entity-assigned` | `repos/eia-policy-expert/.../PolicyEvents.java` |
 | Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded`, `contract.technical-account.created`, `contract.technical-account.issued`, `contract.technical-account.settled`, `contract.technical-account.line-added`, `contract.technical-account.line-removed`, `contract.bordereau.received`, `contract.bordereau.processed`, `contract.bordereau.failed`, `contract.cash-call.requested`, `contract.cash-call.issued`, `contract.cash-call.settled`, `contract.cash-call.cancelled`, `contract.security.recorded`, `contract.security.status-changed` | `repos/eia-contract-expert/.../ContractEvents.java` |
 | Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.assigned`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.closed`, `direct.claim.task-created`, `direct.claim.task-completed`, `direct.claim.task-updated`, `direct.claim.note-added`, `direct.claim.allocation-created` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
 | Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.assigned`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted`, `assumed.claim.task-created`, `assumed.claim.task-completed`, `assumed.claim.task-updated`, `assumed.claim.note-added` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
@@ -762,6 +785,16 @@ a decimal string, the currency, and the status. Each accepted transition bumps
 the policy row version, so every event is distinct. Creating the DRAFT note
 bumps the policy version but writes no event; SPEC 11.2.13 publishes only
 `policy.billing.credit-note-issued` (M-22, M-41).
+
+The two legal-entity facts are catalog and policy commands:
+`PolicyEvents.legalEntityCreated` writes `policy.legal-entity.created` against
+the `LegalEntity` aggregate at version 1, with the legal entity id as the
+partition key and the full catalog row (including the nullable regulator and
+license number) in the payload. `PolicyEvents.legalEntityAssigned` writes
+`policy.policy.legal-entity-assigned` against the policy aggregate at the new
+version, with the new and previous entity ids (either may be null) and
+`changedFields: [legalEntityId]`. Both are inserted in the same transaction as
+the row change; the names have no SPEC 11.2.9 equivalent (M-22, M-43).
 
 The Contract expert's generic status command can additionally emit the
 already-cataloged `contract.contract.signed`, `.endorsed`, `.expired`, and
@@ -893,7 +926,7 @@ tables. The differences are:
 | Vertical | Implemented | SPEC /
 planned name |
 |---|---|---|
-| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created`; `policy.installment.paid` / `.waived`; `policy.dunning.sent`; `policy.program.created` / `policy.policy.program-assigned`; `policy.credit-note.issued` / `.applied` / `.cancelled` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name; the dunning fact differs from SPEC 11.2.13 `policy.billing.dunning-changed`; the two program facts have no SPEC name because SPEC defines no program create or policy-assignment event. SPEC 11.2.13 publishes only `policy.billing.credit-note-issued` and defines no applied or cancelled fact, so all three credit-note names are new (M-41). `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
+| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created`; `policy.installment.paid` / `.waived`; `policy.dunning.sent`; `policy.program.created` / `policy.policy.program-assigned`; `policy.credit-note.issued` / `.applied` / `.cancelled`; `policy.legal-entity.created` / `policy.policy.legal-entity-assigned` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name; the dunning fact differs from SPEC 11.2.13 `policy.billing.dunning-changed`; the two program facts have no SPEC name because SPEC defines no program create or policy-assignment event. SPEC 11.2.13 publishes only `policy.billing.credit-note-issued` and defines no applied or cancelled fact, so all three credit-note names are new (M-41). The two legal-entity facts are new because SPEC 10.11.2/11.2.16 define the model and link but SPEC 11.2.9 names no catalog-create or assignment event (M-43). `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
 | Contract | `contract.contract.updated`; `contract.technical-account.created` / `.issued` / `.settled`; `contract.bordereau.processed` / `.failed`; `contract.security.status-changed` | No SPEC name for updated, the technical-account facts, the two terminal bordereau facts, or the security status fact: SPEC 11.3.9 lists lifecycle verbs, the contract-level `contract.account.issued` / `.agreed` facts, `contract.bordereau.posted` / `.rejected`, and only the `contract.security.recorded` / `.breached` security facts. `created`, `bound`, `commuted`, `cession.recorded`, `contract.bordereau.received`, and `contract.security.recorded` match SPEC. |
 | Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned`; `direct.claim.allocation-created` | No SPEC names: SPEC 11.4.9 defines no assignment, task, note, or allocation-created event; it names the allocation fact `direct.claim.allocated`, which remains planned. `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and `closed` match SPEC. |
 | Assumed Claims | `assumed.claim.updated`; `assumed.claim.assigned`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no assignment, task, or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
@@ -2392,10 +2425,83 @@ reduced component model. The two event names follow EV-05 and can be aligned to
 a SPEC name only through a dual-publish window. The description bound should be
 aligned between the domain and expert before it is treated as a stable 300.
 
+## M-43 Policy legal entity catalog is a narrow, nullable-assignment slice
+
+The Policy expert now owns a tenant-scoped DIRECT-book legal entity catalog and
+the policy issuing-entity assignment. The implemented shape is narrower than
+SPEC 10.11.2 and SPEC 11.2.16:
+
+- The public paths are `/api/v1/legal-entities`,
+  `/api/v1/legal-entities/{legalEntityId}`, and
+  `PATCH /api/v1/policies/{policyId}/legal-entity`. SPEC 11.2.16 lists the
+  catalog under `/api/v1/policy/legal-entities` and defines no assignment
+  command (M-01).
+- `LegalEntity` is `{legalEntityId, code, name, entityType, jurisdiction,
+  regulator, licenseNumber, status, createdAt}`. SPEC 10.11.2 names
+  `entity_code` (varchar 16), `legal_name` (varchar 300), and
+  `domicile_country` (ISO 3166-1 char 3), and defines no public `jurisdiction`,
+  `regulator`, or `license_number` column; the implemented code allows 32
+  characters and the name 200. The implemented `jurisdiction` is a two-letter
+  ISO 3166-1 alpha-2 code, not the three-letter `domicile_country`.
+- `entityType` is closed to `INSURER`, `MGA`, `CAPTIVE`, `POOL`, or `FRONTER`.
+  SPEC 10.11.5 seeds `HOLDING`, `INSURER`, `REINSURER`, `MGA`, `TPA`, `CAPTIVE`,
+  `SYNDICATE`, and `SERVICE_COMPANY`, so `POOL` and `FRONTER` are additions and
+  the other five are missing. `status` is `ACTIVE` or `INACTIVE`; SPEC 10.11.2
+  also defines `LIQUIDATING`. No retirement, update, or delete command exists,
+  so `INACTIVE` is reserved and never written.
+- A policy's `legalEntityId` is nullable, and
+  `PATCH /api/v1/policies/{policyId}/legal-entity` clears it with a null or
+  absent id. SPEC 11.2.16 `LE-01` requires every policy to reference exactly one
+  issuing legal entity, and the domain `PolicyClient` comment says the expert
+  rejects a null member, but the expert and its integration test accept and
+  persist the clear. No bind-time or lifecycle gate requires an entity before
+  `ISSUED` or `IN_FORCE`.
+- The create trims and upper-cases `code`, `entityType`, and `jurisdiction`, and
+  trims `name`, `regulator`, and `licenseNumber`; a blank optional value becomes
+  null. The code is unique per tenant after normalization, and a duplicate is
+  409 `DUPLICATE_LEGAL_ENTITY_CODE`. No NAIC company code, SAP company code,
+  LEI, tax id, functional currency, parent, effective dates, or
+  organization-unit/capacity link is implemented. The catalog is a bare
+  newest-first array with no filter, search, or page envelope (M-04).
+- The expert accepts `tenantId` as a query parameter and either
+  `X-EIA-Tenant` or the query; the public domain requires the tenant header.
+  The domain and expert accept an absent `X-EIA-Book`, and another book is
+  hidden as 404 `BOOK_SCOPE_VIOLATION`.
+- The two events are new names: `policy.legal-entity.created` (the
+  `LegalEntity` aggregate at version 1) and
+  `policy.policy.legal-entity-assigned` (the policy aggregate at the new
+  version). SPEC 11.2.9 defines neither and SPEC 11.2.16 names no event, so the
+  M-22 naming difference applies.
+
+Evidence:
+
+- `repos/eia-policy-domain/.../LegalEntityController.java:26`,
+  `LegalEntityService.java`, `LegalEntityDto.java`,
+  `CreateLegalEntityCommand.java`, `PolicyLegalEntityController.java:21`,
+  `PolicyLegalEntityService.java`, `UpdatePolicyLegalEntityCommand.java`,
+  `PolicyDto.java:28`, `PolicyClient.java:496-581`,
+  `src/test/java/com/eia/policy/domain/LegalEntityControllerTest.java`,
+  `PolicyLegalEntityControllerTest.java`, and `LegalEntityClientTest.java`.
+- `repos/eia-policy-expert/.../LegalEntityController.java:29`,
+  `LegalEntityService.java:56-123`, `LegalEntityRules.java:17-128`,
+  `LegalEntityRepository.java:43-70`, `LegalEntity.java`,
+  `LegalEntityView.java`, `CreateLegalEntityRequest.java`,
+  `AssignPolicyLegalEntityRequest.java`, `Policy.java:45`,
+  `PolicyRepository.java:188-195`, `PolicyEvents.java:55-56,163-232`,
+  `src/main/resources/schema.sql:89-125`, and the expert
+  `LegalEntityControllerTest`, `LegalEntityServiceTest`,
+  `LegalEntityRulesTest`, and `LegalEntityIntegrationTest`.
+
+Resolution: either widen the catalog to the SPEC 10.11.2 columns and
+vocabularies, add the SPEC path and an LE-01 assignment gate (a policy must have
+an issuing entity before bind/issue), or amend SPEC 10.11.2/11.2.16 to the
+implemented five-type catalog and nullable link. The two event names need the
+EV-05 dual-publish treatment if they are aligned to SPEC names.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-21
-Contract technical-account lines contract:
+Policy legal entity contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -2405,7 +2511,7 @@ python: 3.12.8 (standard library only)
 
 OpenAPI 3.1 documents
   OK openapi/party.yaml  5 paths, 7 operations
-  OK openapi/policy.yaml  48 paths, 63 operations
+  OK openapi/policy.yaml  51 paths, 67 operations
   OK openapi/contract.yaml  43 paths, 62 operations
   OK openapi/direct-claims.yaml  49 paths, 72 operations
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
@@ -2417,7 +2523,7 @@ OpenAPI 3.1 documents
 
 AsyncAPI 3 documents
   OK asyncapi/party.yaml  9 event channels
-  OK asyncapi/policy.yaml  29 event channels
+  OK asyncapi/policy.yaml  31 event channels
   OK asyncapi/contract.yaml  32 event channels
   OK asyncapi/direct-claims.yaml  26 event channels
   OK asyncapi/assumed-claims.yaml  21 event channels
@@ -2426,7 +2532,7 @@ AsyncAPI 3 documents
   OK asyncapi/document.yaml  21 event channels
   OK asyncapi/payment.yaml  19 event channels
   OK asyncapi/notifications.yaml  12 event channels
-  OK catalog: 203 unique published events across 10 verticals
+  OK catalog: 205 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -2434,7 +2540,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 12857 checks, 0 failures
+  PASS 13143 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -2620,7 +2726,14 @@ Additional checks and limits:
   `contract.technical-account.line-added` from the Contract catalog
   `implemented` list each fail with the specific missing-operation, schema,
   enum, or implemented-event message. All four were run on a throwaway copy and
-  exited non-zero (exit 1); the working copy was left unchanged.
+  exited non-zero (exit 1); the working copy was left unchanged. The Policy
+  legal-entity pass added four more: renaming the
+  `/api/v1/legal-entities/{legalEntityId}` path, renaming the `LegalEntity`
+  schema, making the nullable `Policy.legalEntityId` non-nullable, and dropping
+  `policy.legal-entity.created` from the Policy catalog `implemented` list each
+  fail with the specific missing-operation, schema/nullability, or
+  implemented-event message. All four were run on a throwaway copy and exited
+  non-zero (exit 1); the working copy was left unchanged.
 
 ## Resolution policy
 

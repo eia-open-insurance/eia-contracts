@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.22.0
+  version: 1.23.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -91,6 +91,13 @@ info:
     They add two published and two implemented names, bringing the platform
     totals to 203 published and 82 implemented; Contract becomes 32 published
     and 19 implemented (M-22, M-42).
+    The two Policy legal-entity facts `policy.legal-entity.created` and
+    `policy.policy.legal-entity-assigned` are new names with no SPEC 11.2.9
+    equivalent: SPEC 10.11.2/11.2.16 define the legal entity model and the
+    issuing-entity link, but SPEC 11.2.9 names no catalog-create or assignment
+    event. They add two published and two implemented names, bringing the
+    platform totals to 205 published and 84 implemented; Policy becomes 31
+    published and 19 implemented (M-22, M-43).
     The platform
     event-ingest service
     is the inbox:
@@ -228,6 +235,8 @@ x-event-catalog:
       - policy.coverage-block.updated
       - policy.program.created
       - policy.policy.program-assigned
+      - policy.legal-entity.created
+      - policy.policy.legal-entity-assigned
     implemented:
       - policy.policy.created
       - policy.policy.updated
@@ -246,6 +255,8 @@ x-event-catalog:
       - policy.mass-tort-profile.updated
       - policy.program.created
       - policy.policy.program-assigned
+      - policy.legal-entity.created
+      - policy.policy.legal-entity-assigned
     consumed:
       - direct.claim.registered
       - direct.claim.allocated
