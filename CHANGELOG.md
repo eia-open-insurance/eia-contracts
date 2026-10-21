@@ -858,6 +858,46 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   and the absent-book acceptance, and updates M-01, M-14, and M-22.
 - `python scripts/validate_contracts.py` passes 12,109 checks with 0 failures.
 
+### Added in the document content contract (2026-10-20)
+
+- `openapi/document.yaml` is 1.3.0: adds `PUT|GET
+  /api/v1/documents/{documentId}/content` and `GET
+  /api/v1/documents/{documentId}/content/metadata`, the `DocumentContent`
+  projection (`documentId`, `fileName`, `contentType`, `sizeBytes`, `sha256`,
+  `uploadedAt`), and the raw-byte upload and download representations. The
+  upload documents the `Content-Type` header (optional, default
+  `application/octet-stream`) and the required URL-encoded `X-File-Name`
+  header, the 200 `DocumentContent` response, 400 `EMPTY_CONTENT` and the
+  filename/content-type rule codes, 404, and 413 `FILE_TOO_LARGE` above
+  10 MiB. The download documents the binary response and the `Content-Type`,
+  `Content-Disposition`, and `X-Content-SHA256` headers. All three operations
+  require the shared `TenantHeader`; the implemented content path leaves
+  `x-planned-operations`. The change is additive.
+- `asyncapi/document.yaml` is 1.3.0: adds the implemented
+  `document.content.uploaded` channel and `send` operation with a
+  `DocumentContentUploadedData` payload (document identity and number,
+  filename, MIME type, size, and SHA-256). The event is keyed by the
+  `DocumentContent` aggregate on the document id with the content version, and
+  names `DocumentContentEvents.java` in `x-implemented-by`.
+- `asyncapi/event-catalog.yaml` is 1.18.0: `document.content.uploaded` is
+  published and implemented (197 published in total; Document becomes 21
+  published and 6 implemented, and the platform implemented total becomes 76).
+  The name is new and has no SPEC 11.6.9 equivalent.
+- `scripts/validate_contracts.py` requires the three content operations, the
+  shared tenant and `documentId` parameters, the `Content-Type` and
+  `X-File-Name` upload headers, the binary request and response bodies, the
+  `Content-Disposition` and `X-Content-SHA256` download headers, the
+  `DocumentContent` fields and bounds, the 400 `EMPTY_CONTENT` and 413
+  `FILE_TOO_LARGE` documentation, the implemented content channel and payload,
+  the catalog entry, and the absence of the implemented path from
+  `x-planned-operations`. The raw request-body rule is now explicit: an
+  operation marked `x-raw-body: true` must declare a binary string body.
+- `README.md` records the routes, metadata projection, upload and download
+  headers, 10 MiB and empty-body rules, tenant wall, event, and additive
+  versions; `MISMATCHES.md` adds M-40 for the SPEC download, content-fact, and
+  lifecycle gaps, and updates M-14, M-22, and the validation evidence.
+- `python scripts/validate_contracts.py` passes 12,255 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

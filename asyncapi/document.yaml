@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:document
 info:
   title: EIA Document events
-  version: 1.2.0
+  version: 1.3.0
   summary: Published domain event names for the Document vertical.
   description: >
     Event contract for the Document vertical. The authoritative event names are
@@ -16,18 +16,21 @@ info:
 
     The Document expert now publishes `document.document.created`,
     `document.document.updated`, `document.document.status-changed`,
-    `document.link.added`, and `document.link.removed` through the
-    transactional outbox; those channels and operations are marked
-    `x-status: implemented`. A status write emits `updated` and
-    `status-changed` together at the same aggregate version. A link write emits
-    one `added` or `removed` fact with the `DocumentLink` aggregate at version
-    1. The SPEC 11.6.9 names remain planned. Document metadata is shared by both
-    books and the current API has no book input, so these events are stamped
-    DIRECT.
+    `document.link.added`, `document.link.removed`, and
+    `document.content.uploaded` through the transactional outbox; those
+    channels and operations are marked `x-status: implemented`. A status write
+    emits `updated` and `status-changed` together at the same aggregate
+    version. A link write emits one `added` or `removed` fact with the
+    `DocumentLink` aggregate at version 1. A content write emits one
+    `uploaded` fact with the `DocumentContent` aggregate at the content
+    version, in the same transaction as the content upsert. The SPEC 11.6.9
+    names remain planned. Document metadata is shared by both books and the
+    current API has no book input, so these events are stamped DIRECT.
 
-    The two link names are new and have no SPEC 11.6.9 equivalent: the SPEC
-    association fact is `document.document.associated`, and the SPEC defines no
-    removal event (MISMATCHES.md M-22, M-26).
+    The two link names and `document.content.uploaded` are new and have no
+    SPEC 11.6.9 equivalent: the SPEC association fact is
+    `document.document.associated`, and SPEC 11.6.9 defines no content-upload
+    fact (MISMATCHES.md M-22, M-26, M-40).
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -126,6 +129,29 @@ channels:
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
+  DocumentContentUploaded:
+    address: document.content.uploaded
+    title: document.content.uploaded
+    description: >
+      Emitted by the Document expert when the current content of a document is
+      stored or replaced, in the same transaction as the content row. The
+      payload carries the document identity and number, the stored display
+      filename, the stored MIME type, the exact size in bytes, and the
+      lowercase SHA-256 digest. `DocumentContent` is its own aggregate, keyed
+      by the document id, and the aggregate version is the content version, so
+      replacing the content produces a new event. The fact is stamped DIRECT.
+      The name is new and has no SPEC 11.6.9 equivalent (MISMATCHES.md M-22
+      and M-40).
+    x-event-type: document.content.uploaded
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.6.9
+    x-implemented-by: repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentContentEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      DocumentContentUploadedData:
+        $ref: '#/components/messages/DocumentContentUploadedData'
   DocumentDocumentRegistered:
     address: document.document.registered
     title: document.document.registered
@@ -386,6 +412,18 @@ operations:
       same transaction as the link delete.
     x-event-type: document.link.removed
     x-status: implemented
+  publishDocumentContentUploaded:
+    action: send
+    channel:
+      $ref: '#/channels/DocumentContentUploaded'
+    summary: Publish document.content.uploaded
+    description: >
+      Publishes document.content.uploaded through the transactional outbox in
+      the same transaction as the content upsert. The aggregate is
+      DocumentContent keyed by the document id; the aggregate version is the
+      stored content version.
+    x-event-type: document.content.uploaded
+    x-status: implemented
   publishDocumentDocumentRegistered:
     action: send
     channel:
@@ -562,6 +600,42 @@ components:
             type: string
       payload:
         $ref: '../schemas/event-envelope.schema.json'
+    DocumentContentUploadedData:
+      name: DocumentContentUploadedData
+      title: document.content.uploaded data
+      summary: The stored content row and its digest.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - documentId
+          - documentNumber
+          - fileName
+          - contentType
+          - sizeBytes
+          - sha256
+        properties:
+          documentId:
+            type: string
+            format: uuid
+          documentNumber:
+            type: string
+            description: Tenant-visible document number of the owning document.
+          fileName:
+            type: string
+            description: Stored display filename, with directory components removed.
+          contentType:
+            type: string
+            description: Stored file MIME type without parameters.
+          sizeBytes:
+            type: integer
+            minimum: 0
+            maximum: 10485760
+          sha256:
+            type: string
+            pattern: '^[a-f0-9]{64}$'
+            description: Lowercase SHA-256 of the exact stored bytes.
   securitySchemes:
     outboxSignature:
       type: httpApiKey
@@ -577,13 +651,14 @@ x-implementation:
   publisher: eia-document-expert
   subscriber: none
   notes: >
-    Five implemented event names are written to the transactional outbox in the
-    same transaction as the document or link write and dispatched by the
-    platform outbox dispatcher when `eia.outbox.enabled=true`: the three
-    document metadata facts by DocumentEvents.java and the two link facts by
-    DocumentLinkEvents.java. The SPEC 11.6.9 names remain planned and the two
-    link names have no SPEC equivalent (M-22, M-26). There is no subscriber,
-    inbox, or subscription registry yet.
+    Six implemented event names are written to the transactional outbox in the
+    same transaction as the document, link, or content write and dispatched by
+    the platform outbox dispatcher when `eia.outbox.enabled=true`: the three
+    document metadata facts by DocumentEvents.java, the two link facts by
+    DocumentLinkEvents.java, and the content fact by DocumentContentEvents.java.
+    The SPEC 11.6.9 names remain planned and the two link names plus
+    `document.content.uploaded` have no SPEC equivalent (M-22, M-26, M-40).
+    There is no subscriber, inbox, or subscription registry yet.
 
 x-consumed-events:
   - policy.policy.issued

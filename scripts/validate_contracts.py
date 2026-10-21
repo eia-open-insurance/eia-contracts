@@ -1239,6 +1239,7 @@ IMPLEMENTED_EVENTS = {
         "document.document.status-changed",
         "document.link.added",
         "document.link.removed",
+        "document.content.uploaded",
     ],
     "payment": [
         "payment.payment.created",
@@ -1424,6 +1425,25 @@ DOCUMENT_LINKED_TYPES = (
 )
 
 DOCUMENT_LINK_REFERENCE_MAX_LENGTH = 64
+
+# Document content. One document owns one current content row (the upload is an
+# upsert), and the public surface is three routes. The metadata projection is
+# named DocumentContent because the bytes are not part of it.
+DOCUMENT_CONTENT_PATH = "/api/v1/documents/{documentId}/content"
+DOCUMENT_CONTENT_METADATA_PATH = "/api/v1/documents/{documentId}/content/metadata"
+DOCUMENT_CONTENT_FIELDS = (
+    "documentId",
+    "fileName",
+    "contentType",
+    "sizeBytes",
+    "sha256",
+    "uploadedAt",
+)
+DOCUMENT_CONTENT_MAX_BYTES = 10 * 1024 * 1024
+DOCUMENT_CONTENT_FILE_NAME_MAX_LENGTH = 255
+DOCUMENT_CONTENT_TYPE_MAX_LENGTH = 128
+DOCUMENT_CONTENT_ERRORS = ("EMPTY_CONTENT", "FILE_TOO_LARGE")
+DOCUMENT_CONTENT_EVENT = "document.content.uploaded"
 
 EVENT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$")
 VALID_JSON_TYPES = {"null", "boolean", "object", "array", "number", "string", "integer"}
@@ -2898,6 +2918,243 @@ def check_document_links_openapi(contracts: ContractSet, document, relative: str
         "linkedReference" in str((search_operation or {}).get("description") or ""),
         f"{relative}: GET /api/v1/documents/search must document that q matches linkedReference",
     )
+
+
+# ---------------------------------------------------------------------------
+# Document content checks
+# ---------------------------------------------------------------------------
+
+
+def check_document_content_openapi(contracts: ContractSet, document, relative: str):
+    """Require the document content operations, headers, schema, and errors."""
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    for method, content_path, operation_id in (
+        ("put", DOCUMENT_CONTENT_PATH, "uploadDocumentContent"),
+        ("get", DOCUMENT_CONTENT_PATH, "downloadDocumentContent"),
+        ("get", DOCUMENT_CONTENT_METADATA_PATH, "getDocumentContentMetadata"),
+    ):
+        path_item = paths.get(content_path) if isinstance(paths, dict) else None
+        operation = path_item.get(method) if isinstance(path_item, dict) else None
+        where = f"{relative}: {method.upper()} {content_path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required content operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+        contracts.check(
+            operation.get("operationId") == operation_id,
+            f"{where}: operationId must be {operation_id}",
+        )
+        parameter_refs, inline_names = _parameter_names(operation)
+        contracts.check(
+            "TenantHeader" in parameter_refs,
+            f"{where}: must require the shared TenantHeader",
+        )
+        contracts.check(
+            "documentId" in inline_names,
+            f"{where}: must declare the documentId path parameter",
+        )
+        responses = operation.get("responses") or {}
+        contracts.check("400" in responses, f"{where}: must document the 400 response")
+        contracts.check("404" in responses, f"{where}: must document the 404 response")
+
+        if method == "put":
+            contracts.check(
+                operation.get("x-raw-body") is True,
+                f"{where}: must be marked x-raw-body: true",
+            )
+            request_body = operation.get("requestBody") or {}
+            contracts.check(
+                request_body.get("required") is True,
+                f"{where}: request body must be required",
+            )
+            request_content = request_body.get("content") or {}
+            binary_schema = None
+            for media_type, media_object in request_content.items():
+                if media_type in ("*/*", "application/octet-stream") and isinstance(
+                    media_object, dict
+                ):
+                    binary_schema = media_object.get("schema")
+            contracts.check(
+                isinstance(binary_schema, dict)
+                and binary_schema.get("type") == "string"
+                and binary_schema.get("format") == "binary",
+                f"{where}: requestBody must declare a binary string body",
+            )
+            content_type_parameter = _inline_parameter(operation, "Content-Type")
+            contracts.check(
+                isinstance(content_type_parameter, dict)
+                and content_type_parameter.get("in") == "header",
+                f"{where}: must document the Content-Type header parameter",
+            )
+            if isinstance(content_type_parameter, dict):
+                contracts.check(
+                    content_type_parameter.get("required") is False,
+                    f"{where}: Content-Type must stay optional and default to "
+                    "application/octet-stream",
+                )
+                contracts.check(
+                    (content_type_parameter.get("schema") or {}).get("default")
+                    == "application/octet-stream",
+                    f"{where}: Content-Type must default to application/octet-stream",
+                )
+            file_name_parameter = _inline_parameter(operation, "X-File-Name")
+            contracts.check(
+                isinstance(file_name_parameter, dict)
+                and file_name_parameter.get("in") == "header",
+                f"{where}: must document the X-File-Name header parameter",
+            )
+            if isinstance(file_name_parameter, dict):
+                contracts.check(
+                    file_name_parameter.get("required") is True,
+                    f"{where}: X-File-Name must be required",
+                )
+                contracts.check(
+                    (file_name_parameter.get("schema") or {}).get("type") == "string",
+                    f"{where}: X-File-Name schema must be a string",
+                )
+            ok_schema = _response_schema(operation, "200")
+            contracts.check(
+                isinstance(ok_schema, dict)
+                and str(ok_schema.get("$ref", "")).endswith(
+                    "/schemas/DocumentContent"
+                ),
+                f"{where}: 200 must return the DocumentContent schema",
+            )
+            bad_request = responses.get("400")
+            bad_request_text = (
+                str(bad_request.get("description") or "")
+                if isinstance(bad_request, dict)
+                else ""
+            )
+            contracts.check(
+                "EMPTY_CONTENT" in bad_request_text,
+                f"{where}: 400 must document EMPTY_CONTENT",
+            )
+            too_large = responses.get("413")
+            too_large_text = (
+                str(too_large.get("description") or "")
+                if isinstance(too_large, dict)
+                else ""
+            )
+            contracts.check(
+                "FILE_TOO_LARGE" in too_large_text,
+                f"{where}: 413 must document FILE_TOO_LARGE",
+            )
+            too_large_schema = _response_schema(
+                operation, "413", "application/problem+json"
+            )
+            contracts.check(
+                isinstance(too_large_schema, dict)
+                and str(too_large_schema.get("$ref", "")).endswith("/schemas/Problem"),
+                f"{where}: 413 must use the shared Problem schema",
+            )
+        elif content_path == DOCUMENT_CONTENT_PATH:
+            ok_response = responses.get("200")
+            ok_content = (
+                ok_response.get("content") if isinstance(ok_response, dict) else {}
+            ) or {}
+            binary_schema = None
+            for media_type, media_object in ok_content.items():
+                if media_type in ("*/*", "application/octet-stream") and isinstance(
+                    media_object, dict
+                ):
+                    binary_schema = media_object.get("schema")
+            contracts.check(
+                isinstance(binary_schema, dict)
+                and binary_schema.get("type") == "string"
+                and binary_schema.get("format") == "binary",
+                f"{where}: 200 must return a binary string body",
+            )
+            headers = (
+                ok_response.get("headers") if isinstance(ok_response, dict) else {}
+            ) or {}
+            for header_name in ("Content-Type", "Content-Disposition", "X-Content-SHA256"):
+                contracts.check(
+                    header_name in headers,
+                    f"{where}: 200 must document the {header_name} header",
+                )
+            sha256_schema = (headers.get("X-Content-SHA256") or {}).get("schema") or {}
+            contracts.check(
+                sha256_schema.get("pattern") == "^[a-f0-9]{64}$",
+                f"{where}: X-Content-SHA256 must be a lowercase 64-character digest",
+            )
+        else:
+            ok_schema = _response_schema(operation, "200")
+            contracts.check(
+                isinstance(ok_schema, dict)
+                and str(ok_schema.get("$ref", "")).endswith(
+                    "/schemas/DocumentContent"
+                ),
+                f"{where}: 200 must return the DocumentContent schema",
+            )
+
+    content_schema = schemas.get("DocumentContent") or {}
+    content_properties = content_schema.get("properties") or {}
+    content_required = set(content_schema.get("required") or [])
+    contracts.check(
+        content_schema.get("type") == "object",
+        f"{relative}: DocumentContent must be an object schema",
+    )
+    for field in DOCUMENT_CONTENT_FIELDS:
+        contracts.check(
+            field in content_properties,
+            f"{relative}: DocumentContent.properties.{field} is required",
+        )
+        contracts.check(
+            field in content_required,
+            f"{relative}: DocumentContent.required must list {field}",
+        )
+    contracts.check(
+        (content_properties.get("documentId") or {}).get("format") == "uuid",
+        f"{relative}: DocumentContent.documentId must be a uuid",
+    )
+    contracts.check(
+        (content_properties.get("fileName") or {}).get("maxLength")
+        == DOCUMENT_CONTENT_FILE_NAME_MAX_LENGTH,
+        f"{relative}: DocumentContent.fileName maxLength must be "
+        f"{DOCUMENT_CONTENT_FILE_NAME_MAX_LENGTH}",
+    )
+    contracts.check(
+        (content_properties.get("contentType") or {}).get("maxLength")
+        == DOCUMENT_CONTENT_TYPE_MAX_LENGTH,
+        f"{relative}: DocumentContent.contentType maxLength must be "
+        f"{DOCUMENT_CONTENT_TYPE_MAX_LENGTH}",
+    )
+    size_schema = content_properties.get("sizeBytes") or {}
+    contracts.check(
+        (
+            size_schema.get("type"),
+            size_schema.get("format"),
+            size_schema.get("minimum"),
+            size_schema.get("maximum"),
+        )
+        == ("integer", "int64", 0, DOCUMENT_CONTENT_MAX_BYTES),
+        f"{relative}: DocumentContent.sizeBytes must be an int64 from 0 to "
+        f"{DOCUMENT_CONTENT_MAX_BYTES}",
+    )
+    contracts.check(
+        (content_properties.get("sha256") or {}).get("pattern")
+        == "^[a-f0-9]{64}$",
+        f"{relative}: DocumentContent.sha256 must be a lowercase 64-character digest",
+    )
+    contracts.check(
+        (content_properties.get("uploadedAt") or {}).get("format") == "date-time",
+        f"{relative}: DocumentContent.uploadedAt must be a date-time",
+    )
+
+    planned = document.get("x-planned-operations") or []
+    for implemented_path in (DOCUMENT_CONTENT_PATH, DOCUMENT_CONTENT_METADATA_PATH):
+        contracts.check(
+            not any(
+                isinstance(entry, dict) and entry.get("path") == implemented_path
+                for entry in planned
+            ),
+            f"{relative}: {implemented_path} must not remain in x-planned-operations",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -6256,10 +6513,32 @@ def check_openapi(contracts: ContractSet, verbose: bool):
                 if request_body is not None:
                     contracts.check(isinstance(request_body, dict), f"{where}: requestBody must be a mapping")
                     content = (request_body or {}).get("content") or {}
-                    contracts.check("application/json" in content, f"{where}: requestBody must declare application/json")
-                    if "application/json" in content:
-                        schema = (content["application/json"] or {}).get("schema")
-                        contracts.check(isinstance(schema, dict), f"{where}: requestBody schema is required")
+                    if operation.get("x-raw-body") is True:
+                        contracts.check(
+                            isinstance(content, dict) and bool(content),
+                            f"{where}: raw requestBody must declare a content media range",
+                        )
+                        for media_type, media_object in (content or {}).items():
+                            schema = (
+                                media_object.get("schema")
+                                if isinstance(media_object, dict)
+                                else None
+                            )
+                            contracts.check(
+                                isinstance(schema, dict),
+                                f"{where}: raw requestBody {media_type} schema is required",
+                            )
+                            contracts.check(
+                                isinstance(schema, dict)
+                                and schema.get("type") == "string"
+                                and schema.get("format") == "binary",
+                                f"{where}: raw requestBody {media_type} schema must be a binary string",
+                            )
+                    else:
+                        contracts.check("application/json" in content, f"{where}: requestBody must declare application/json")
+                        if "application/json" in content:
+                            schema = (content["application/json"] or {}).get("schema")
+                            contracts.check(isinstance(schema, dict), f"{where}: requestBody schema is required")
 
         for required_path, required_method in REQUIRED_OPENAPI_PATHS[vertical]:
             path_item = paths.get(required_path) if isinstance(paths, dict) else None
@@ -6584,6 +6863,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_payment_allocations(contracts, document, relative)
         if vertical == "document":
             check_document_links_openapi(contracts, document, relative)
+            check_document_content_openapi(contracts, document, relative)
         if vertical == "policy":
             check_policy_billing_openapi(contracts, document, relative)
             check_policy_receivables_openapi(contracts, document, relative)
@@ -6989,6 +7269,100 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
                 == set(CONTRACT_SECURITY_TYPES),
                 f"{relative}: ContractSecurityData.securityType must enumerate "
                 f"{list(CONTRACT_SECURITY_TYPES)}",
+            )
+
+        if vertical == "document":
+            document_send_events = {
+                operation.get("x-event-type")
+                for operation in operations.values()
+                if isinstance(operation, dict)
+                and operation.get("action") == "send"
+            }
+            contracts.check(
+                DOCUMENT_CONTENT_EVENT in addresses,
+                f"{relative}: required content event channel "
+                f"'{DOCUMENT_CONTENT_EVENT}' is missing",
+            )
+            contracts.check(
+                DOCUMENT_CONTENT_EVENT in implemented_addresses,
+                f"{relative}: content event channel '{DOCUMENT_CONTENT_EVENT}' "
+                "must be implemented",
+            )
+            contracts.check(
+                DOCUMENT_CONTENT_EVENT in document_send_events,
+                f"{relative}: content event '{DOCUMENT_CONTENT_EVENT}' must "
+                "have a send operation",
+            )
+            content_channel = next(
+                (
+                    channel
+                    for channel in channels.values()
+                    if isinstance(channel, dict)
+                    and channel.get("address") == DOCUMENT_CONTENT_EVENT
+                ),
+                None,
+            )
+            contracts.check(
+                isinstance(content_channel, dict)
+                and str(content_channel.get("x-implemented-by", "")).endswith(
+                    "DocumentContentEvents.java"
+                ),
+                f"{relative}: {DOCUMENT_CONTENT_EVENT} must name "
+                "DocumentContentEvents.java in x-implemented-by",
+            )
+            content_messages = (
+                content_channel.get("messages")
+                if isinstance(content_channel, dict)
+                else None
+            ) or {}
+            contracts.check(
+                "DocumentContentUploadedData" in content_messages,
+                f"{relative}: {DOCUMENT_CONTENT_EVENT} must reference "
+                "DocumentContentUploadedData",
+            )
+            content_message = (
+                ((document.get("components") or {}).get("messages") or {}).get(
+                    "DocumentContentUploadedData"
+                )
+                or {}
+            )
+            content_payload = content_message.get("payload") or {}
+            content_properties = content_payload.get("properties") or {}
+            content_required = set(content_payload.get("required") or [])
+            for field in (
+                "documentId",
+                "documentNumber",
+                "fileName",
+                "contentType",
+                "sizeBytes",
+                "sha256",
+            ):
+                contracts.check(
+                    field in content_properties,
+                    f"{relative}: DocumentContentUploadedData.properties.{field} "
+                    "is required",
+                )
+                contracts.check(
+                    field in content_required,
+                    f"{relative}: DocumentContentUploadedData.required must "
+                    f"list {field}",
+                )
+            contracts.check(
+                (content_properties.get("documentId") or {}).get("format") == "uuid",
+                f"{relative}: DocumentContentUploadedData.documentId must be a uuid",
+            )
+            content_size = content_properties.get("sizeBytes") or {}
+            contracts.check(
+                (content_size.get("type"), content_size.get("maximum"))
+                == ("integer", DOCUMENT_CONTENT_MAX_BYTES),
+                f"{relative}: DocumentContentUploadedData.sizeBytes must be an "
+                f"integer capped at {DOCUMENT_CONTENT_MAX_BYTES}",
+            )
+            contracts.check(
+                (content_properties.get("sha256") or {}).get("pattern")
+                == "^[a-f0-9]{64}$",
+                f"{relative}: DocumentContentUploadedData.sha256 must be a "
+                "lowercase 64-character digest",
             )
 
         entry = catalog_entries.get(vertical) or {}

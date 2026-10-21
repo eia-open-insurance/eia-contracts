@@ -451,6 +451,64 @@ Link semantics:
   and have no SPEC 11.6.9 equivalent (the SPEC association fact is
   `document.document.associated`); M-22 records the naming gap.
 
+### Document content contract (2026-10-20)
+
+Document 1.3.0 adds the raw content upload, download, and metadata surface. The
+change is additive: three new routes, one new schema, and one new event name; no
+existing path, request field, response field, or event changed.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/document.yaml` | 1.3.0 | Additive | `PUT|GET /api/v1/documents/{documentId}/content`, `GET /api/v1/documents/{documentId}/content/metadata`, the `DocumentContent` schema, and the `X-File-Name` and `Content-Type` upload headers. |
+| `asyncapi/document.yaml` | 1.3.0 | Additive | The implemented `document.content.uploaded` channel and operation with a `DocumentContentUploadedData` payload. |
+| `asyncapi/event-catalog.yaml` | 1.18.0 | Additive | The content name is published and implemented (197 published in total; Document 21 published and 6 implemented; the platform implemented total is 76). |
+
+Content semantics:
+
+- `PUT .../content` is a raw-byte upsert of the document's single current
+  content row. The body is not JSON and is stored unchanged. `Content-Type` is
+  the file MIME type and defaults to `application/octet-stream` when omitted;
+  the stored type is the bare `type/subtype`. `X-File-Name` is required and is
+  URL-decoded as UTF-8; a directory component is removed, a blank name is 400
+  `FILE_NAME_REQUIRED`, a name longer than 255 characters is 400
+  `FILE_NAME_TOO_LONG`, and a control character is 400 `INVALID_FILE_NAME`. An
+  empty body is 400 `EMPTY_CONTENT`.
+- A body above 10 MiB (10,485,760 bytes) is 413 `FILE_TOO_LARGE`; the public
+  domain rejects it before the expert call, so no content row or event is
+  written. Exactly 10 MiB is accepted. The 413 body is
+  `application/problem+json`.
+- The 200 response is the `DocumentContent` projection:
+  `{documentId, fileName, contentType, sizeBytes, sha256, uploadedAt}`. The
+  bytes are deliberately absent from the projection.
+- `GET .../content` streams the stored bytes with the stored `Content-Type`,
+  an attachment `Content-Disposition` built from the stored filename (with the
+  RFC 5987 `filename*` parameter for a non-ASCII name), and
+  `X-Content-SHA256` with the lowercase digest of the exact bytes. It is a
+  binary response and must not be parsed as JSON. There is no presigned URL and
+  no `Range` support.
+- `GET .../content/metadata` returns the projection without touching the bytes.
+- `X-EIA-Tenant` is required on all three public routes. A document outside the
+  caller's tenant and a document with no stored content are both 404, so the
+  response cannot confirm another tenant's document; the latter is 404
+  `CONTENT_NOT_FOUND`. The domain forwards the tenant to the expert's public
+  content path; the expert also accepts `tenantId` as a fallback.
+- An accepted upload writes `document.content.uploaded` to the transactional
+  outbox in the same transaction as the content row. The aggregate is
+  `DocumentContent`, keyed by the document id, with the content version as the
+  aggregate version, so replacing the content produces a new event. The name is
+  new and has no SPEC 11.6.9 equivalent; M-22 and M-40 record the naming and
+  lifecycle gaps.
+- The SPEC 11.6.10 presigned download, renditions, versions, OCR text, holds,
+  packages, requests, signatures, and retention disposition remain planned and
+  listed under `x-planned-operations`.
+- The validator requires the three operations, the tenant header and
+  `documentId` parameter, the `X-File-Name` and `Content-Type` upload headers,
+  the binary request and response bodies, the `Content-Disposition` and
+  `X-Content-SHA256` download headers, the `DocumentContent` fields and bounds,
+  the 400 `EMPTY_CONTENT` and 413 `FILE_TOO_LARGE` documentation, the
+  `DocumentContentUploadedData` payload, and the implemented channel, operation,
+  and catalog entry. The full run passes 12,255 checks.
+
 ### Policy billing contract (2026-10-20)
 
 Policy 2.3.0 adds the premium installment plan and its settlement surface. The
@@ -1723,7 +1781,14 @@ missing directory.
    the six document association-link operations on
    the public and expert surfaces, the `DocumentLink`, `CreateDocumentLinkRequest`,
    and `DocumentLinkedType` schemas, the `linkedType` + `linkedId` list filter,
-   the expert list `q`, and the search `linkedReference` match, the ten search
+   the expert list `q`, and the search `linkedReference` match, the three
+   document content operations with their shared `TenantHeader` and
+   `documentId` parameter, the required `X-File-Name` and optional
+   `Content-Type` upload headers, the binary request and 200 response bodies,
+   the `Content-Disposition` and `X-Content-SHA256` download headers, the
+   `DocumentContent` schema and its field bounds, the 400 `EMPTY_CONTENT` and
+   413 `FILE_TOO_LARGE` documentation, and the removal of the content path from
+   `x-planned-operations`, the ten search
    operations' shared parameters and `SearchResponse`/400/404 responses, the
    `SearchResponse` and `SearchItem` keys, the required 422/409/428 response
    codes on the Round 5 mutations, the payment source fields and their create
@@ -1787,7 +1852,9 @@ missing directory.
    `PolicyDunningSentData` payload with its required policy, installment,
    level, channel, sent-at, and status members, the
    `PolicyMassTortProfileUpdatedData` payload with its required
-   identity, status, tort, trigger, allocation, and coverage-block members, and
+   identity, status, tort, trigger, allocation, and coverage-block members,
+   the `DocumentContentUploadedData` payload with its required document
+   identity, filename, MIME type, size, and digest members, and
    the `ContractSecurityData` payload with its contract/security identity,
    type, money, currency, and status members.
 5. **Event catalog cross-check.** The published set in `event-catalog.yaml`
@@ -1799,7 +1866,8 @@ missing directory.
    verticals are required explicitly, including `direct.claim.assigned`,
    `direct.claim.allocation-created`, `assumed.claim.assigned`,
    `document.link.added`,
-   `document.link.removed`, `policy.policy.renewed`,
+   `document.link.removed`, `document.content.uploaded`,
+   `policy.policy.renewed`,
    `policy.billing-plan.created`, `policy.installment.paid`,
    `policy.installment.waived`, `policy.dunning.sent`,
    `policy.mass-tort-profile.updated`,
@@ -1879,6 +1947,15 @@ missing directory.
   `linkedType`/`linkedId` target and no role, book, or DOC-09 target-existence
   check, and publish `document.link.added`/`.removed` rather than the SPEC
   `document.document.associated` (M-22, M-26);
+- document content is one current raw-byte row per document
+  (`PUT|GET /api/v1/documents/{documentId}/content` plus `GET .../content/metadata`)
+  with a 10 MiB cap, SHA-256 verification, and the new
+  `document.content.uploaded` event. It has no presigned download, `Range`
+  support, versions, renditions, OCR text, legal hold, package, request,
+  signature, or retention-disposition surface, and the SPEC 11.6.9 content fact
+  does not exist. A missing tenant on the content routes is still the compact
+  `TENANT_REQUIRED` 400 rather than the canonical Problem, and the download
+  exposes the stored bytes rather than a short-lived URL (M-02, M-22, M-40);
 - claim assignment is implemented on both claim verticals but has no SPEC 11.4.10
   or 11.5.10 route or SPEC 11.4.9/11.5.9 event name. The Assumed Claims domain
   still requires a team the contract and expert make optional, the Direct Claims

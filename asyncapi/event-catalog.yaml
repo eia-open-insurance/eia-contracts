@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.17.0
+  version: 1.18.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -23,7 +23,8 @@ info:
     it appears in both lists. The Direct Claims and Assumed Claims task, note,
     and assignment events and the Direct Claims allocation-created event are
     new names with no SPEC 11.4.9 or 11.5.9 equivalent, and the Document link
-    events are new names with no SPEC 11.6.9 equivalent (MISMATCHES.md M-22).
+    and content events are new names with no SPEC 11.6.9 equivalent
+    (MISMATCHES.md M-22).
     The three Policy billing facts are new names: SPEC 11.2.13 calls the plan
     fact `policy.billing.plan-created` and
     defines no installment paid or waived fact, so the implemented names are
@@ -60,7 +61,12 @@ info:
     equivalent: a program is a catalog aggregate and the assignment is a policy
     command. They add two published and two implemented names, bringing the
     platform totals to 196 published and 75 implemented; Policy becomes 26
-    published and 14 implemented (M-22, M-39). The platform
+    published and 14 implemented (M-22, M-39). The Document content fact
+    `document.content.uploaded` is a new name with no SPEC 11.6.9 equivalent: a
+    content upload is an upsert of the current content row, and SPEC defines no
+    content-upload fact. It adds one published and one implemented name,
+    bringing the platform totals to 197 published and 76 implemented; Document
+    becomes 21 published and 6 implemented (M-22, M-40). The platform
     event-ingest service
     is the inbox:
     it validates the canonical envelope, verifies the HMAC signature when
@@ -408,12 +414,14 @@ x-event-catalog:
       - document.document.status-changed
       - document.link.added
       - document.link.removed
+      - document.content.uploaded
     implemented:
       - document.document.created
       - document.document.updated
       - document.document.status-changed
       - document.link.added
       - document.link.removed
+      - document.content.uploaded
     consumed:
       - policy.policy.issued
       - policy.policy.endorsed

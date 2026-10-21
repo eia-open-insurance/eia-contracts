@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-20 (Policy program catalog and membership).
+Status: open, reviewed 2026-10-20 (Document content).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -56,6 +56,10 @@ where the running code does not meet it yet.
   projection, command, book scope, policy-program controller and service, and
   client plus the expert program controller, service, rules, repository, view,
   entity, request, event factory, `schema.sql`, and the domain and expert tests.
+  The Document content pass reads the domain content controller, service,
+  client, projection, policy, size-limit filter, and exception handler plus the
+  expert content controller, service, rules, repository, event factory,
+  tenant resolver, `schema.sql`, and the domain and expert tests.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -674,7 +678,7 @@ ten publishing verticals now emit a subset:
 | Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.assigned`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted`, `assumed.claim.task-created`, `assumed.claim.task-completed`, `assumed.claim.task-updated`, `assumed.claim.note-added` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
 | Cession | `cession.cession.created`, `cession.cession.updated`, `cession.cession.handed-off` | `repos/eia-cession-expert/.../CessionEvents.java` |
 | Retrocession | `retrocession.retrocession.created`, `retrocession.retrocession.updated`, `retrocession.retrocession.handed-off` | `repos/eia-retrocession-expert/.../RetrocessionEvents.java` |
-| Document | `document.document.created`, `document.document.updated`, `document.document.status-changed`, `document.link.added`, `document.link.removed` | `repos/eia-document-expert/.../DocumentEvents.java`, `DocumentLinkEvents.java` |
+| Document | `document.document.created`, `document.document.updated`, `document.document.status-changed`, `document.link.added`, `document.link.removed`, `document.content.uploaded` | `repos/eia-document-expert/.../DocumentEvents.java`, `DocumentLinkEvents.java`, `DocumentContentEvents.java` |
 | Payment | `payment.payment.created`, `payment.payment.updated`, `payment.payment.status-changed` | `repos/eia-payment-expert/.../PaymentEvents.java` |
 | Notifications | `notifications.notification.created`, `notifications.notification.sent` | `repos/eia-notifications-expert/.../NotificationEvents.java` |
 
@@ -687,7 +691,10 @@ existing identity-only payloads.
 The Document expert's link writes append `document.link.added` or
 `document.link.removed` from `DocumentLinkEvents.java` in the same transaction
 as the link row. Both use the `DocumentLink` aggregate with the link id and
-version 1; the three document metadata events are unchanged.
+version 1; the three document metadata events are unchanged. A content upload
+appends `document.content.uploaded` from `DocumentContentEvents.java` in the
+same transaction as the content upsert, keyed by the `DocumentContent`
+aggregate on the document id with the content version.
 
 Each controller or service calls `outbox.insert(OutboxEvent.fromEnvelope(...))`
 in the same transaction as the aggregate write; for example
@@ -847,7 +854,7 @@ planned name |
 | Assumed Claims | `assumed.claim.updated`; `assumed.claim.assigned`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no assignment, task, or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
 | Cession | `cession.cession.created` / `.updated` / `.handed-off` | `cession.case.created`, `cession.handoff.sent`/`.acknowledged` |
 | Retrocession | `retrocession.retrocession.created` / `.updated` / `.handed-off` | `retrocession.case.created`, `retrocession.handoff.sent`/`.acknowledged` |
-| Document | `document.document.created` / `.updated` / `.status-changed`; `document.link.added` / `.removed` | `document.document.registered`, `document.document.associated`, plus the SPEC lifecycle verbs |
+| Document | `document.document.created` / `.updated` / `.status-changed`; `document.link.added` / `.removed`; `document.content.uploaded` | `document.document.registered`, `document.document.associated`, plus the SPEC lifecycle verbs; no SPEC content-upload fact |
 | Payment | `payment.payment.updated` / `.status-changed` | the SPEC per-verb names such as `payment.payment.authorized` |
 | Notifications | `notifications.notification.created` / `.sent` | `notifications.notification.issued` / `.delivered` |
 
@@ -868,6 +875,7 @@ Evidence:
 - `repos/eia-retrocession-expert/.../RetrocessionEvents.java:28-30`
 - `repos/eia-document-expert/.../DocumentEvents.java:29-31`
 - `repos/eia-document-expert/.../DocumentLinkEvents.java:26-28`
+- `repos/eia-document-expert/.../DocumentContentEvents.java:26-27`
 - `repos/eia-payment-expert/.../PaymentEvents.java:31-33`
 - `repos/eia-notifications-expert/.../NotificationEvents.java:36-37`
 
@@ -2039,10 +2047,82 @@ vocabulary. Separately, either resolve and tenant-check `leadPolicyId` or
 remove it, add an explicit close command before exposing CLOSED as a reachable
 state, and decide whether the DIRECT book header is required or optional.
 
+## M-40 Document content is one current byte row, not the SPEC versioned store
+
+SPEC 11.6.10 defines an authorized content download (presigned) and the SPEC
+11.6 model carries content, versions, hashes, page counts, OCR status, holds,
+and retention. The implemented slice stores exactly one current byte row per
+document, serves it through a raw-byte proxy, and emits a content-upload fact
+that has no SPEC 11.6.9 name.
+
+| Aspect | Implemented | SPEC 11.6.10 / 11.6 |
+|---|---|---|
+| Routes | `PUT|GET /api/v1/documents/{documentId}/content` and `GET .../content/metadata` | authorized content download (presigned), versions, preview, text, access log |
+| Upload | raw bytes; an upsert of the document's single current row | versioned content with a history |
+| Size limit | 10 MiB (10,485,760 bytes); a zero-byte body is 400 `EMPTY_CONTENT`; an over-limit body is 413 `FILE_TOO_LARGE` | no implemented limit stated |
+| Metadata | `DocumentContent` with `documentId`, `fileName`, `contentType`, `sizeBytes`, `sha256`, `uploadedAt` | content, hash, page count, OCR status, tags, versions |
+| Download | proxied bytes with `Content-Type`, `Content-Disposition`, and `X-Content-SHA256`; no `Range`, no presigned URL | short-lived presigned URL |
+| Filename | URL-encoded `X-File-Name`, reduced to its last path component; at most 255 characters | not specified |
+| Versioning | none; replacing the content overwrites the row and bumps the content version | superseded/version rows |
+| Book | none; tenant-scoped only | SPEC 3.6 book wall |
+| Event | `document.content.uploaded` (new; no SPEC 11.6.9 name) | no content-upload fact |
+| Missing tenant | 404 `NOT_FOUND` on the expert; 400 `TENANT_REQUIRED` on the public domain route | canonical 400 Problem |
+
+Consequences:
+
+- A consumer cannot retrieve a prior version, a preview rendition, OCR text, a
+  page count, tags, or an access log from the implemented surface; only the
+  current bytes and their metadata exist.
+- The public download proxies the bytes instead of issuing a short-lived
+  presigned URL, so the Document domain becomes a data-path hop and the
+  response has no `Range` support. A caller that expected a redirect or a
+  presigned target must instead consume a binary body.
+- The content write is an upsert with no optimistic concurrency token: two
+  concurrent uploads both succeed and the last writer wins, and no `If-Match`
+  or `Idempotency-Key` is accepted.
+- The public 413 is `application/problem+json` `FILE_TOO_LARGE`, but the
+  missing-tenant 400 is still the compact `TENANT_REQUIRED` `ApiError` rather
+  than the canonical Problem (M-02).
+- The event name is new and has no SPEC 11.6.9 equivalent, so a subscriber
+  cannot rely on a SPEC-defined content fact; it is additive under EV-05
+  (M-22).
+- The SPEC 11.6.9 names (`document.document.registered`, `.classified`,
+  `.superseded`, `.generated`, `.signed`, `.held`, `.hold-released`,
+  `.archived`, `.disposed`, `.requested`, `.request-fulfilled`,
+  `document.package.built`, and the two processing facts) remain planned.
+
+Evidence:
+
+- `repos/eia-document-domain/.../DocumentController.java:61-106` (public
+  upload, download, and metadata routes; `X-EIA-Tenant` required), the
+  `DocumentContentMetadata`, `DocumentContentDownload`, `DocumentContentPolicy`,
+  `DocumentContentSizeLimitFilter`, and `DocumentContentTooLargeException`
+  helpers, and `DocumentExpertClient.java:163-205` (expert calls and header
+  pass-through).
+- `repos/eia-document-expert/.../DocumentContentController.java:43-78` (raw
+  upload, download, and metadata), `DocumentContentService.java:35-69` (tenant
+  document lookup, size/file-name/type rules, upsert plus outbox),
+  `DocumentContentRules.java:27-157` (10 MiB, filename, MIME, SHA-256 rules),
+  `DocumentContentEvents.java:26-67` (`document.content.uploaded`),
+  `DocumentContentRepository.java` (single-row upsert and reads), and
+  `TenantResolver.java:28-41` (content routes hide a missing tenant as 404).
+- `repos/eia-document-expert/src/main/resources/schema.sql`
+  (`document_content` table and its size/content-type constraints).
+- Tests: `DocumentContentApiTest`, `DocumentContentClientTest`,
+  `DocumentContentIntegrationTest`, and `DocumentContentRulesTest`.
+- `openapi/document.yaml` 1.3.0, `asyncapi/document.yaml` 1.3.0, and
+  `asyncapi/event-catalog.yaml` 1.18.0 record the implemented shape.
+
+Resolution: either add versioning, renditions, OCR text, presigned download,
+book scope, and the SPEC lifecycle/content facts, or amend SPEC 11.6.9 and
+11.6.10 to the single-current-content proxy and the new
+`document.content.uploaded` name. The contract documents the implemented
+single-row shape until that decision.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-Policy program catalog and membership contract:
+Document content contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -2058,7 +2138,7 @@ OpenAPI 3.1 documents
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
   OK openapi/cession.yaml  9 paths, 11 operations
   OK openapi/retrocession.yaml  9 paths, 11 operations
-  OK openapi/document.yaml  11 paths, 15 operations
+  OK openapi/document.yaml  13 paths, 18 operations
   OK openapi/payment.yaml  11 paths, 14 operations
   OK openapi/notifications.yaml  7 paths, 9 operations
 
@@ -2070,10 +2150,10 @@ AsyncAPI 3 documents
   OK asyncapi/assumed-claims.yaml  21 event channels
   OK asyncapi/cession.yaml  17 event channels
   OK asyncapi/retrocession.yaml  17 event channels
-  OK asyncapi/document.yaml  20 event channels
+  OK asyncapi/document.yaml  21 event channels
   OK asyncapi/payment.yaml  19 event channels
   OK asyncapi/notifications.yaml  12 event channels
-  OK catalog: 196 unique published events across 10 verticals
+  OK catalog: 197 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -2081,7 +2161,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 12109 checks, 0 failures
+  PASS 12255 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -2229,7 +2309,16 @@ Additional checks and limits:
   planned, and re-adding `/api/v1/programs` to `x-planned-operations` each fail
   with the specific missing-operation, schema/required-field, implemented-event,
   or planned-route message. All five were run on a throwaway copy and exited
-  non-zero (exit 1); the working copy was left unchanged.
+  non-zero (exit 1); the working copy was left unchanged. The Document content
+  pass added five more: renaming the
+  `/api/v1/documents/{documentId}/content/metadata` path, renaming the
+  `DocumentContent` schema, removing the required `X-File-Name` header,
+  dropping `document.content.uploaded` from the Document catalog `implemented`
+  list, and re-adding `/api/v1/documents/{documentId}/content` to
+  `x-planned-operations` each fail with the specific missing-operation,
+  schema, header, implemented-event, or planned-route message. All five were
+  run on a throwaway copy and exited non-zero (exit 1); the working copy was
+  left unchanged.
 
 ## Resolution policy
 
