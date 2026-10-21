@@ -815,6 +815,49 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   M-32 with the profile consumer, and updates the validation evidence.
 - `python scripts/validate_contracts.py` passes 11,809 checks with 0 failures.
 
+### Added in the Policy program catalog contract (2026-10-20)
+
+- `openapi/policy.yaml` is 2.8.0: adds `GET/POST /api/v1/programs`,
+  `GET /api/v1/programs/{programId}`, and
+  `PATCH /api/v1/policies/{policyId}/program`, the flat `Program` projection
+  (`programId`, `programNumber`, `name`, `programType`, inclusive
+  `effectiveFrom`/`effectiveTo`, `status`, nullable `leadPolicyId`, and
+  `createdAt`), the closed `ProgramType` (`CAPTIVE`, `POOL`, `FRONTING`,
+  `COINSURANCE`, `MASS_TORT`) and `ProgramStatus` (`ACTIVE`, `CLOSED`) enums,
+  the `CreateProgramRequest` body (`name`, `programType`, both dates required,
+  optional `leadPolicyId`), and the `UpdatePolicyProgramRequest` body with a
+  required nullable `programId`. Adds the nullable, optional
+  `Policy.programId`. All four operations require `X-EIA-Tenant` and
+  `X-EIA-Book: DIRECT` and document the 400 `MISSING_TENANT_HEADER`/
+  `INVALID_TENANT_HEADER`/`VALIDATION_ERROR`/`INVALID_PROGRAM_*` codes, 404
+  `PROGRAM_NOT_FOUND`/`POLICY_NOT_FOUND`/`BOOK_SCOPE_VIOLATION`, and the
+  assignment 409 `CONCURRENT_MODIFICATION`; POST returns 201 with `Location`,
+  the reads and PATCH return 200, and PATCH returns the shared `ETag`. The
+  implemented `/api/v1/programs` entry leaves `x-planned-operations`.
+- `asyncapi/policy.yaml` is 1.6.0: adds the implemented
+  `policy.program.created` and `policy.policy.program-assigned` channels and
+  `send` operations with the `PolicyProgramCreatedData` and
+  `PolicyPolicyProgramAssignedData` payloads. The program event is keyed by the
+  program aggregate at version 1; the assignment event is keyed by the policy
+  aggregate and carries both sides of the nullable link plus
+  `changedFields: ["programId"]`.
+- `asyncapi/event-catalog.yaml` is 1.17.0: both program names are published and
+  implemented (196 published in total; Policy becomes 26 published and 14
+  implemented, and the platform implemented total becomes 75).
+- `scripts/validate_contracts.py` requires the four public paths, the five
+  schemas, the nullable and optional `Policy.programId`, the shared tenant and
+  DIRECT book parameters, the 201/200/400/404/409 responses, the 201 `Location`
+  and 200 `ETag` headers, the documented validation, not-found, and concurrency
+  codes and event names, both implemented channels with their payload fields
+  and enums, the two catalog entries, and the absence of an implemented program
+  path from `x-planned-operations`.
+- `README.md` records the routes, projection, validation and membership rules,
+  the book and tenant scope, both events, the additive versions, and the
+  validator coverage; `MISMATCHES.md` adds M-39 for the SPEC 10.11.3/11.2.10
+  route, vocabulary, field, and command gaps, the unresolved `leadPolicyId`,
+  and the absent-book acceptance, and updates M-01, M-14, and M-22.
+- `python scripts/validate_contracts.py` passes 12,109 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

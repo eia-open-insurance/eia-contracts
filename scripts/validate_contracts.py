@@ -1061,6 +1061,94 @@ MASS_TORT_EVENT_FIELDS = (
 )
 
 
+# Policy commercial programs (SPEC 10.11.3 `program`, SPEC 11.2.16). The public
+# domain exposes the short /api/v1/programs catalog and the policy membership
+# command; the expert serves the same public paths plus an /internal/v1 alias
+# that the domain calls and that stays an implementation detail. Every operation
+# requires the tenant and the DIRECT book. Each tuple is
+# (method, path, success status, success schema, request schema or None,
+# required error response codes).
+POLICY_PROGRAM_OPENAPI_PATHS = [
+    ("get", "/api/v1/programs", "200", "Program", None, ("400", "404")),
+    (
+        "post",
+        "/api/v1/programs",
+        "201",
+        "Program",
+        "CreateProgramRequest",
+        ("400", "404"),
+    ),
+    (
+        "get",
+        "/api/v1/programs/{programId}",
+        "200",
+        "Program",
+        None,
+        ("400", "404"),
+    ),
+    (
+        "patch",
+        "/api/v1/policies/{policyId}/program",
+        "200",
+        "Policy",
+        "UpdatePolicyProgramRequest",
+        ("400", "404", "409"),
+    ),
+]
+
+POLICY_PROGRAM_FIELDS = (
+    "programId",
+    "programNumber",
+    "name",
+    "programType",
+    "effectiveFrom",
+    "effectiveTo",
+    "status",
+    "leadPolicyId",
+    "createdAt",
+)
+
+POLICY_PROGRAM_CREATE_REQUIRED_FIELDS = (
+    "name",
+    "programType",
+    "effectiveFrom",
+    "effectiveTo",
+)
+
+POLICY_PROGRAM_CREATE_OPTIONAL_FIELDS = ("leadPolicyId",)
+
+POLICY_PROGRAM_TYPES = ("CAPTIVE", "POOL", "FRONTING", "COINSURANCE", "MASS_TORT")
+POLICY_PROGRAM_STATUSES = ("ACTIVE", "CLOSED")
+POLICY_PROGRAM_NAME_MAX_LENGTH = 200
+POLICY_PROGRAM_NUMBER_MAX_LENGTH = 32
+POLICY_PROGRAM_CREATED_FIELDS = (
+    "programId",
+    "programNumber",
+    "name",
+    "programType",
+    "effectiveFrom",
+    "effectiveTo",
+    "status",
+    "leadPolicyId",
+    "createdAt",
+)
+POLICY_PROGRAM_ASSIGNED_FIELDS = (
+    "policyId",
+    "policyNumber",
+    "status",
+    "version",
+    "effectiveDate",
+    "expirationDate",
+    "premiumAmount",
+    "premiumCurrency",
+    "limitAmount",
+    "limitCurrency",
+    "programId",
+    "previousProgramId",
+    "changedFields",
+)
+
+
 # Event names the transactional-outbox rollout actually emits. The catalog must
 # list each one as published and implemented, and the vertical document must
 # expose a channel for it. Round 5 covered the first six verticals; the rollout
@@ -1084,6 +1172,8 @@ IMPLEMENTED_EVENTS = {
         "policy.installment.waived",
         "policy.dunning.sent",
         "policy.mass-tort-profile.updated",
+        "policy.program.created",
+        "policy.policy.program-assigned",
     ],
     "contract": [
         "contract.contract.created",
@@ -4031,6 +4121,468 @@ def check_policy_mass_tort_profile_openapi(contracts: ContractSet, document, rel
 
 
 # ---------------------------------------------------------------------------
+# Policy program checks
+# ---------------------------------------------------------------------------
+
+
+def check_policy_programs(contracts: ContractSet, document, relative: str):
+    """Require the program catalog routes, schemas, and membership command.
+
+    The four public operations are mandatory and tenant/DIRECT scoped. The
+    projection carries the nine fields, the create body is
+    ``CreateProgramRequest``, and the PATCH body is
+    ``UpdatePolicyProgramRequest`` with a nullable ``programId``.
+    ``Policy.programId`` must stay nullable and optional so a policy outside a
+    program remains valid, and the implemented catalog paths must not remain in
+    ``x-planned-operations``.
+    """
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    program = schemas.get("Program") or {}
+    properties = program.get("properties") or {}
+    required = set(program.get("required") or [])
+    contracts.check(
+        isinstance(program, dict) and program.get("type") == "object",
+        f"{relative}: Program must be an object schema",
+    )
+    for field in POLICY_PROGRAM_FIELDS:
+        contracts.check(
+            isinstance(properties.get(field), dict),
+            f"{relative}: Program.{field} is required",
+        )
+        contracts.check(
+            field in required,
+            f"{relative}: Program.required must list {field}",
+        )
+    contracts.check(
+        _schema_types(properties.get("programId")) == {"string"}
+        and (properties.get("programId") or {}).get("format") == "uuid",
+        f"{relative}: Program.programId must be a uuid",
+    )
+    contracts.check(
+        _schema_types(properties.get("leadPolicyId")) == {"string", "null"}
+        and (properties.get("leadPolicyId") or {}).get("format") == "uuid",
+        f"{relative}: Program.leadPolicyId must be a nullable uuid",
+    )
+    contracts.check(
+        (
+            (properties.get("programNumber") or {}).get("type"),
+            (properties.get("programNumber") or {}).get("maxLength"),
+        )
+        == ("string", POLICY_PROGRAM_NUMBER_MAX_LENGTH),
+        f"{relative}: Program.programNumber must be a string of at most "
+        f"{POLICY_PROGRAM_NUMBER_MAX_LENGTH} characters",
+    )
+    contracts.check(
+        (
+            (properties.get("name") or {}).get("type"),
+            (properties.get("name") or {}).get("maxLength"),
+        )
+        == ("string", POLICY_PROGRAM_NAME_MAX_LENGTH),
+        f"{relative}: Program.name must be a string of at most "
+        f"{POLICY_PROGRAM_NAME_MAX_LENGTH} characters",
+    )
+    for field in ("effectiveFrom", "effectiveTo"):
+        contracts.check(
+            (properties.get(field) or {}).get("format") == "date",
+            f"{relative}: Program.{field} must be a date",
+        )
+    contracts.check(
+        (properties.get("createdAt") or {}).get("format") == "date-time",
+        f"{relative}: Program.createdAt must be a date-time",
+    )
+    contracts.check(
+        str((properties.get("programType") or {}).get("$ref", "")).endswith(
+            "/schemas/ProgramType"
+        ),
+        f"{relative}: Program.programType must reference ProgramType",
+    )
+    contracts.check(
+        str((properties.get("status") or {}).get("$ref", "")).endswith(
+            "/schemas/ProgramStatus"
+        ),
+        f"{relative}: Program.status must reference ProgramStatus",
+    )
+
+    for schema_name, expected in (
+        ("ProgramType", POLICY_PROGRAM_TYPES),
+        ("ProgramStatus", POLICY_PROGRAM_STATUSES),
+    ):
+        enum_schema = schemas.get(schema_name) or {}
+        contracts.check(
+            enum_schema.get("type") == "string",
+            f"{relative}: {schema_name} must be a string enum",
+        )
+        contracts.check(
+            set(enum_schema.get("enum") or []) == set(expected),
+            f"{relative}: {schema_name} must enumerate {list(expected)}",
+        )
+
+    create = schemas.get("CreateProgramRequest") or {}
+    create_properties = create.get("properties") or {}
+    create_required = set(create.get("required") or [])
+    contracts.check(
+        isinstance(create, dict) and create.get("type") == "object",
+        f"{relative}: CreateProgramRequest must be an object schema",
+    )
+    for field in POLICY_PROGRAM_CREATE_REQUIRED_FIELDS:
+        contracts.check(
+            isinstance(create_properties.get(field), dict),
+            f"{relative}: CreateProgramRequest.{field} is required",
+        )
+        contracts.check(
+            field in create_required,
+            f"{relative}: CreateProgramRequest.required must list {field}",
+        )
+    for field in POLICY_PROGRAM_CREATE_OPTIONAL_FIELDS:
+        contracts.check(
+            isinstance(create_properties.get(field), dict),
+            f"{relative}: CreateProgramRequest.{field} is required",
+        )
+        contracts.check(
+            field not in create_required,
+            f"{relative}: CreateProgramRequest.{field} must stay optional",
+        )
+        contracts.check(
+            _schema_types(create_properties.get(field)) == {"string", "null"},
+            f"{relative}: CreateProgramRequest.{field} must be a nullable string",
+        )
+        contracts.check(
+            (create_properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: CreateProgramRequest.{field} must be a uuid",
+        )
+    contracts.check(
+        str((create_properties.get("programType") or {}).get("$ref", "")).endswith(
+            "/schemas/ProgramType"
+        ),
+        f"{relative}: CreateProgramRequest.programType must reference ProgramType",
+    )
+    for field in ("effectiveFrom", "effectiveTo"):
+        contracts.check(
+            (create_properties.get(field) or {}).get("format") == "date",
+            f"{relative}: CreateProgramRequest.{field} must be a date",
+        )
+
+    update = schemas.get("UpdatePolicyProgramRequest") or {}
+    update_properties = update.get("properties") or {}
+    contracts.check(
+        isinstance(update, dict) and update.get("type") == "object",
+        f"{relative}: UpdatePolicyProgramRequest must be an object schema",
+    )
+    contracts.check(
+        "programId" in update_properties,
+        f"{relative}: UpdatePolicyProgramRequest.programId is required",
+    )
+    contracts.check(
+        "programId" in set(update.get("required") or []),
+        f"{relative}: UpdatePolicyProgramRequest.required must list programId",
+    )
+    contracts.check(
+        _schema_types(update_properties.get("programId")) == {"string", "null"},
+        f"{relative}: UpdatePolicyProgramRequest.programId must be a nullable string",
+    )
+    contracts.check(
+        (update_properties.get("programId") or {}).get("format") == "uuid",
+        f"{relative}: UpdatePolicyProgramRequest.programId must be a uuid",
+    )
+
+    policy = schemas.get("Policy") or {}
+    policy_properties = policy.get("properties") or {}
+    policy_required = set(policy.get("required") or [])
+    contracts.check(
+        "programId" in policy_properties,
+        f"{relative}: Policy.programId is required",
+    )
+    contracts.check(
+        _schema_types(policy_properties.get("programId")) == {"string", "null"}
+        and (policy_properties.get("programId") or {}).get("format") == "uuid",
+        f"{relative}: Policy.programId must be a nullable uuid",
+    )
+    contracts.check(
+        "programId" not in policy_required,
+        f"{relative}: Policy.programId must stay optional",
+    )
+
+    for (
+        method,
+        program_path,
+        success_status,
+        success_schema,
+        request_schema,
+        error_codes,
+    ) in POLICY_PROGRAM_OPENAPI_PATHS:
+        path_item = paths.get(program_path) if isinstance(paths, dict) else None
+        operation = path_item.get(method) if isinstance(path_item, dict) else None
+        where = f"{relative}: {method.upper()} {program_path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required program operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+
+        parameter_refs, inline_names = _parameter_names(operation)
+        contracts.check(
+            "TenantHeader" in parameter_refs,
+            f"{where}: must require the shared TenantHeader",
+        )
+        contracts.check(
+            "BookHeaderDirect" in parameter_refs,
+            f"{where}: must require the shared BookHeaderDirect",
+        )
+        if program_path.endswith("/{programId}"):
+            contracts.check(
+                "programId" in inline_names,
+                f"{where}: must declare the programId path parameter",
+            )
+        if program_path.endswith("/program"):
+            contracts.check(
+                "policyId" in inline_names,
+                f"{where}: must declare the policyId path parameter",
+            )
+
+        description = str(operation.get("description") or "")
+        contracts.check(
+            "MISSING_TENANT_HEADER" in description,
+            f"{where}: description must document 400 MISSING_TENANT_HEADER",
+        )
+        contracts.check(
+            "BOOK_SCOPE_VIOLATION" in description,
+            f"{where}: description must document 404 BOOK_SCOPE_VIOLATION",
+        )
+
+        responses = operation.get("responses") or {}
+        for code in error_codes:
+            contracts.check(
+                code in responses,
+                f"{where}: must document response {code}",
+            )
+        success_body = _response_schema(operation, success_status)
+        success_reference = str((success_body or {}).get("$ref", ""))
+        success_items_reference = str(
+            ((success_body or {}).get("items") or {}).get("$ref", "")
+        )
+        contracts.check(
+            isinstance(success_body, dict)
+            and (
+                success_reference.endswith(f"/schemas/{success_schema}")
+                or (
+                    success_body.get("type") == "array"
+                    and success_items_reference.endswith(f"/schemas/{success_schema}")
+                )
+            ),
+            f"{where}: {success_status} must return the {success_schema} schema",
+        )
+        for code, suffix in (("400", "BadRequest"), ("404", "NotFound")):
+            response = responses.get(code) if isinstance(responses, dict) else None
+            contracts.check(
+                isinstance(response, dict)
+                and str(response.get("$ref", "")).endswith(f"/responses/{suffix}"),
+                f"{where}: {code} must reference the shared {suffix} response",
+            )
+        if "409" in error_codes:
+            conflict = responses.get("409") if isinstance(responses, dict) else None
+            contracts.check(
+                isinstance(conflict, dict)
+                and str(conflict.get("$ref", "")).endswith("/responses/Conflict"),
+                f"{where}: 409 must reference the shared Conflict response",
+            )
+
+        if request_schema:
+            request_body = operation.get("requestBody") or {}
+            body_schema = (
+                ((request_body.get("content") or {}).get("application/json") or {})
+                .get("schema")
+                if isinstance(request_body, dict)
+                else None
+            )
+            contracts.check(
+                isinstance(request_body, dict) and request_body.get("required") is True,
+                f"{where}: requestBody must be required",
+            )
+            contracts.check(
+                isinstance(body_schema, dict)
+                and str(body_schema.get("$ref", "")).endswith(f"/schemas/{request_schema}"),
+                f"{where}: request body must use the {request_schema} schema",
+            )
+        else:
+            contracts.check(
+                operation.get("requestBody") is None,
+                f"{where}: read operations must not declare a requestBody",
+            )
+
+        if method == "post":
+            for code in (
+                "INVALID_PROGRAM_NAME",
+                "INVALID_PROGRAM_TYPE",
+                "INVALID_PROGRAM_DATES",
+            ):
+                contracts.check(
+                    code in description,
+                    f"{where}: description must document 400 {code}",
+                )
+            contracts.check(
+                "policy.program.created" in description,
+                f"{where}: description must document the policy.program.created event",
+            )
+            created = responses.get("201") if isinstance(responses, dict) else None
+            headers = created.get("headers") if isinstance(created, dict) else None
+            contracts.check(
+                isinstance(headers, dict) and "Location" in headers,
+                f"{where}: 201 must declare the Location header",
+            )
+        if program_path.endswith("/{programId}"):
+            contracts.check(
+                "PROGRAM_NOT_FOUND" in description,
+                f"{where}: description must document 404 PROGRAM_NOT_FOUND",
+            )
+        if method == "patch":
+            for code in (
+                "POLICY_NOT_FOUND",
+                "PROGRAM_NOT_FOUND",
+                "CONCURRENT_MODIFICATION",
+            ):
+                contracts.check(
+                    code in description,
+                    f"{where}: description must document {code}",
+                )
+            contracts.check(
+                "policy.policy.program-assigned" in description,
+                f"{where}: description must document the "
+                "policy.policy.program-assigned event",
+            )
+            ok = responses.get("200") if isinstance(responses, dict) else None
+            headers = ok.get("headers") if isinstance(ok, dict) else None
+            etag = headers.get("ETag") if isinstance(headers, dict) else None
+            contracts.check(
+                isinstance(etag, dict)
+                and str(etag.get("$ref", "")).endswith("/headers/ETag"),
+                f"{where}: 200 must declare the shared ETag header",
+            )
+
+    planned = document.get("x-planned-operations") or []
+    for implemented_path in sorted({entry[1] for entry in POLICY_PROGRAM_OPENAPI_PATHS}):
+        contracts.check(
+            not any(
+                isinstance(entry, dict) and entry.get("path") == implemented_path
+                for entry in planned
+            ),
+            f"{relative}: {implemented_path} must not remain in x-planned-operations",
+        )
+
+
+def check_policy_programs_asyncapi(contracts: ContractSet, document, relative: str):
+    """Require the two implemented program event channels and payloads."""
+    channels = document.get("channels") or {}
+    operations = document.get("operations") or {}
+    messages = (document.get("components") or {}).get("messages") or {}
+    send_events = {
+        operation.get("x-event-type")
+        for operation in operations.values()
+        if isinstance(operation, dict) and operation.get("action") == "send"
+    }
+    for channel_key, event, message_name, fields in (
+        (
+            "PolicyProgramCreated",
+            "policy.program.created",
+            "PolicyProgramCreatedData",
+            POLICY_PROGRAM_CREATED_FIELDS,
+        ),
+        (
+            "PolicyPolicyProgramAssigned",
+            "policy.policy.program-assigned",
+            "PolicyPolicyProgramAssignedData",
+            POLICY_PROGRAM_ASSIGNED_FIELDS,
+        ),
+    ):
+        channel = channels.get(channel_key) or {}
+        contracts.check(
+            channel.get("address") == event,
+            f"{relative}: {channel_key} channel must address {event}",
+        )
+        contracts.check(
+            channel.get("x-status") == "implemented",
+            f"{relative}: {event} channel must be implemented",
+        )
+        contracts.check(
+            bool(channel.get("x-implemented-by")),
+            f"{relative}: {event} must name the emitting source",
+        )
+        channel_messages = channel.get("messages") or {}
+        contracts.check(
+            (channel_messages.get(message_name) or {}).get("$ref")
+            == f"#/components/messages/{message_name}",
+            f"{relative}: {event} must reference {message_name}",
+        )
+        contracts.check(
+            event in send_events,
+            f"{relative}: {event} must have a send operation",
+        )
+        message = messages.get(message_name) or {}
+        payload = message.get("payload") or {}
+        payload_properties = payload.get("properties") or {}
+        payload_required = set(payload.get("required") or [])
+        for field in fields:
+            contracts.check(
+                field in payload_properties,
+                f"{relative}: {message_name}.properties.{field} is required",
+            )
+            contracts.check(
+                field in payload_required,
+                f"{relative}: {message_name}.required must list {field}",
+            )
+
+    created = (
+        (messages.get("PolicyProgramCreatedData") or {}).get("payload") or {}
+    )
+    created_properties = created.get("properties") or {}
+    contracts.check(
+        set((created_properties.get("programType") or {}).get("enum") or [])
+        == set(POLICY_PROGRAM_TYPES),
+        f"{relative}: PolicyProgramCreatedData.programType must enumerate "
+        f"{list(POLICY_PROGRAM_TYPES)}",
+    )
+    contracts.check(
+        set((created_properties.get("status") or {}).get("enum") or [])
+        == set(POLICY_PROGRAM_STATUSES),
+        f"{relative}: PolicyProgramCreatedData.status must enumerate "
+        f"{list(POLICY_PROGRAM_STATUSES)}",
+    )
+    contracts.check(
+        _schema_types(created_properties.get("leadPolicyId")) == {"string", "null"},
+        f"{relative}: PolicyProgramCreatedData.leadPolicyId must be a nullable string",
+    )
+    contracts.check(
+        (created_properties.get("createdAt") or {}).get("format") == "date-time",
+        f"{relative}: PolicyProgramCreatedData.createdAt must be a date-time",
+    )
+
+    assigned = (
+        (messages.get("PolicyPolicyProgramAssignedData") or {}).get("payload") or {}
+    )
+    assigned_properties = assigned.get("properties") or {}
+    for field in ("programId", "previousProgramId"):
+        contracts.check(
+            _schema_types(assigned_properties.get(field)) == {"string", "null"}
+            and (assigned_properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: PolicyPolicyProgramAssignedData.{field} must be a "
+            "nullable uuid",
+        )
+    changed_fields = assigned_properties.get("changedFields") or {}
+    contracts.check(
+        changed_fields.get("type") == "array"
+        and (changed_fields.get("items") or {}).get("type") == "string",
+        f"{relative}: PolicyPolicyProgramAssignedData.changedFields must be a "
+        "string array",
+    )
+    contracts.check(
+        (assigned_properties.get("version") or {}).get("type") == "integer",
+        f"{relative}: PolicyPolicyProgramAssignedData.version must be an integer",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Contract technical-account checks
 # ---------------------------------------------------------------------------
 
@@ -6038,6 +6590,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_policy_dunning_openapi(contracts, document, relative)
             check_policy_renewal_openapi(contracts, document, relative)
             check_policy_mass_tort_profile_openapi(contracts, document, relative)
+            check_policy_programs(contracts, document, relative)
         if vertical == "contract":
             check_contract_security(contracts, document, relative)
             check_contract_technical_accounts(contracts, document, relative)
@@ -6309,6 +6862,7 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
                     (dunning_properties.get(field) or {}).get("format") == "uuid",
                     f"{relative}: PolicyDunningSentData.{field} must be a uuid",
                 )
+            check_policy_programs_asyncapi(contracts, document, relative)
 
         if vertical == "contract":
             contract_send_events = {

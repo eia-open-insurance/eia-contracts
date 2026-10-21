@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Policy API
-  version: 2.7.0
+  version: 2.8.0
   summary: Direct-book policy administration and the Policy expert API.
   description: >
     This document describes the implemented public Policy domain API and the
@@ -141,6 +141,31 @@ info:
       trigger and status vocabularies, the wider Appendix E tort catalog, and
       the SPEC route form differ; MISMATCHES.md M-01 and M-32 record the
       deviation.
+
+    The 2026-10-20 program slice adds the commercial program catalog and the
+    policy-to-program membership command:
+
+    - `GET/POST /api/v1/programs` and `GET /api/v1/programs/{programId}`
+      expose the DIRECT-book program catalog as the flat `Program` projection:
+      `programId`, the server-generated `programNumber` (`PRG-{YEAR}-{7
+      digits}`), `name`, `programType`, the inclusive `effectiveFrom`/
+      `effectiveTo` range, `status`, the optional `leadPolicyId`, and
+      `createdAt`. The list is a bare newest-first array, not the page
+      envelope (M-04).
+    - `PATCH /api/v1/policies/{policyId}/program` assigns the policy to a
+      program or clears the link with a null `programId`. The updated `Policy`
+      carries the nullable `programId` and its new strong `ETag`.
+    - `X-EIA-Tenant` is required and `X-EIA-Book` is required and fixed to
+      DIRECT. Programs are created ACTIVE with a server-owned number; the
+      accepted create writes `policy.program.created`, and the accepted
+      assignment writes `policy.policy.program-assigned`, both in the same
+      transaction as the row change.
+    - The SPEC 10.11.3 program catalogue defines different type and status
+      vocabularies, a `code` instead of `programNumber`, and no POST or policy
+      assignment command; SPEC 11.2.10 mounts the catalog under
+      `/api/v1/policy/programs`. MISMATCHES.md M-01 and M-39 record the
+      deviation. Neither mutation accepts `Idempotency-Key` or `If-Match`
+      (M-06, M-07).
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -1753,6 +1778,201 @@ paths:
           $ref: './components.yaml#/components/responses/Conflict'
         default:
           $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/programs:
+    get:
+      operationId: listPrograms
+      tags:
+        - Policy
+      summary: List the tenant's program catalog.
+      description: >
+        Returns the tenant's programs newest first (`createdAt DESC`, then
+        `programId ASC`) as a bare `Program` array. A program groups policies
+        into one commercial portfolio; the program number is server-generated
+        per tenant and the effective range is inclusive. The list is not
+        paginated in this slice (M-04).
+
+        `X-EIA-Tenant` is required and `X-EIA-Book` is required and must be
+        DIRECT; a missing tenant or book is a 400 (`MISSING_TENANT_HEADER`/
+        `INVALID_TENANT_HEADER` or `MISSING_HEADER`), and another book is hidden
+        as 404 `BOOK_SCOPE_VIOLATION` (SPEC 3.6, WALL-06). The SPEC 11.2.10
+        catalog route is `/api/v1/policy/programs`; the implemented short path
+        is recorded in M-01.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+      responses:
+        '200':
+          description: The tenant's programs, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Program'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createProgram
+      tags:
+        - Policy
+      summary: Create a program in the DIRECT-book catalog.
+      description: >
+        Creates a program in the caller's tenant. The expert owns the identity:
+        `programId`, the server-generated `programNumber` (`PRG-{YEAR}-{7
+        digits}` from a per-tenant sequence), the initial `status` ACTIVE, and
+        `createdAt`. The caller supplies `name`, `programType`, and the
+        inclusive `effectiveFrom`/`effectiveTo` range; the same start and end
+        date is valid.
+
+        `name` is trimmed and capped at 200 characters. `programType` is
+        trimmed, upper-cased, and must be one of CAPTIVE, POOL, FRONTING,
+        COINSURANCE, or MASS_TORT; `effectiveTo` before `effectiveFrom` is
+        rejected. A blank required field is 400 `VALIDATION_ERROR`; an invalid
+        name, type, or date range is 400 `INVALID_PROGRAM_NAME`,
+        `INVALID_PROGRAM_TYPE`, or `INVALID_PROGRAM_DATES`. The optional
+        `leadPolicyId` is stored as supplied and is not resolved or checked
+        against the caller's tenant in this slice (M-39).
+
+        The accepted create writes `policy.program.created` in the same
+        transaction as the row. `X-EIA-Tenant` is required and `X-EIA-Book` is
+        required and must be DIRECT; a missing tenant or book is a 400
+        (`MISSING_TENANT_HEADER`/`INVALID_TENANT_HEADER` or `MISSING_HEADER`),
+        and another book is hidden as 404 `BOOK_SCOPE_VIOLATION`. The command
+        accepts neither `Idempotency-Key` nor `If-Match`, so a retry creates a
+        second program (M-06, M-07).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProgramRequest'
+      responses:
+        '201':
+          description: Program created ACTIVE with a server-generated number.
+          headers:
+            Location:
+              description: Canonical path of the created program.
+              schema:
+                type: string
+                format: uri
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Program'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/programs/{programId}:
+    get:
+      operationId: getProgram
+      tags:
+        - Policy
+      summary: Get one program from the tenant catalog.
+      description: >
+        Returns the program detail. The read is tenant-scoped, so a program id
+        from another tenant is indistinguishable from a missing one and is 404
+        `PROGRAM_NOT_FOUND`. `X-EIA-Tenant` is required and `X-EIA-Book` is
+        required and must be DIRECT; a missing tenant or book is a 400
+        (`MISSING_TENANT_HEADER`/`INVALID_TENANT_HEADER` or `MISSING_HEADER`),
+        and another book is hidden as 404 `BOOK_SCOPE_VIOLATION`.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: programId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Program detail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Program'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/program:
+    patch:
+      operationId: updatePolicyProgram
+      tags:
+        - Policy
+      summary: Assign a policy to a program or clear the assignment.
+      description: >
+        Sets the policy's `programId` to the supplied program, or clears the
+        link when `programId` is null; the request body is required and the
+        property is explicitly nullable. The assignment is a policy command:
+        the accepted write bumps the policy row version, returns the updated
+        `Policy` with its new strong `ETag`, and writes
+        `policy.policy.program-assigned` in the same transaction. The event
+        carries both the new `programId` and `previousProgramId`, either of
+        which is null on a first assignment or a clear. Repeating the same
+        assignment still bumps the version and emits another event.
+
+        An unknown policy or a policy in another tenant is 404
+        `POLICY_NOT_FOUND`; an unknown program is 404 `PROGRAM_NOT_FOUND`; a
+        missing tenant or book is a 400 (`MISSING_TENANT_HEADER`/
+        `INVALID_TENANT_HEADER` or `MISSING_HEADER`) and a malformed body is
+        400 `MALFORMED_REQUEST`. The program and the policy must share the
+        caller's tenant. A concurrent policy change is 409
+        `CONCURRENT_MODIFICATION` with `meta.currentVersion`,
+        `meta.expectedVersion`, and an `errors` entry whose code is
+        `STALE_VERSION`.
+
+        `X-EIA-Tenant` is required and `X-EIA-Book` is required and must be
+        DIRECT; another book is hidden as 404 `BOOK_SCOPE_VIOLATION`. The
+        command accepts neither `If-Match` nor `Idempotency-Key` in this
+        slice: the expert version-checks the row it read, and the version in
+        the response body is the only conflict token (M-06, M-07). The
+        `/internal/v1` alias the domain calls is an implementation detail.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePolicyProgramRequest'
+      responses:
+        '200':
+          description: Policy after the assignment or clear.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Policy'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
   /internal/v1/policies:
     get:
       operationId: expertListPolicies
@@ -2783,6 +3003,15 @@ components:
             renewal lineage). The renewal successor points at the term it
             replaced; every policy created directly carries null. The source
             policy itself is not mutated and does not point forward.
+        programId:
+          type: [string, 'null']
+          format: uuid
+          description: >
+            Nullable link to the commercial program catalog (SPEC 11.2.4
+            `policy.program_id`, SPEC 11.2.16). Assign or clear it with
+            `PATCH /api/v1/policies/{policyId}/program`; a policy may belong to
+            at most one program. The value is null (and may be omitted from the
+            JSON body) when the policy is not in a program.
     PolicyStatus:
       type: string
       description: Policy lifecycle status from SPEC 11.2.6.
@@ -4570,6 +4799,137 @@ components:
           description: Must not be before coverageBlockStart when both are present.
         status:
           $ref: '#/components/schemas/MassTortProfileStatus'
+    Program:
+      type: object
+      description: >
+        Public projection of a commercial program (SPEC 10.11.3 `program`,
+        SPEC 11.2.16). A program groups policies into one portfolio such as a
+        captive, pool, fronting arrangement, coinsurance facility, or mass tort
+        program. `programId` and the per-tenant `programNumber` are
+        server-owned; `status` starts at ACTIVE and CLOSED is reserved for a
+        later lifecycle command. The effective range is inclusive. The
+        projection does not expose `tenantId`, and it is narrower than the SPEC
+        catalogue: no `code`, `description`, owner legal entity, manager
+        organization unit, `program_version`, or capacity structure (M-39).
+      required:
+        - programId
+        - programNumber
+        - name
+        - programType
+        - effectiveFrom
+        - effectiveTo
+        - status
+        - leadPolicyId
+        - createdAt
+      properties:
+        programId:
+          type: string
+          format: uuid
+        programNumber:
+          type: string
+          maxLength: 32
+          description: >
+            Server-generated per tenant as `PRG-{YEAR}-{7 digits}` from
+            `policy_program_number_seq`.
+          examples:
+            - PRG-2026-0000001
+        name:
+          type: string
+          maxLength: 200
+        programType:
+          $ref: '#/components/schemas/ProgramType'
+        effectiveFrom:
+          type: string
+          format: date
+          description: Inclusive start of the program effective range.
+        effectiveTo:
+          type: string
+          format: date
+          description: Inclusive end; never before effectiveFrom.
+        status:
+          $ref: '#/components/schemas/ProgramStatus'
+        leadPolicyId:
+          type: [string, 'null']
+          format: uuid
+          description: >
+            Optional lead policy for the program. Null when none was supplied;
+            the value is stored as given and is not resolved in this slice
+            (M-39).
+        createdAt:
+          type: string
+          format: date-time
+    ProgramType:
+      type: string
+      description: >
+        Closed program-type vocabulary enforced by the Policy expert and the
+        database CHECK constraint. The SPEC 10.11.3 catalogue instead defines
+        `CASUALTY`, `PROPERTY`, `COMMERCIAL`, `AUTO`, `SPECIALTY`, and `OTHER`,
+        so the implemented set is a contract deviation (M-39).
+      enum:
+        - CAPTIVE
+        - POOL
+        - FRONTING
+        - COINSURANCE
+        - MASS_TORT
+    ProgramStatus:
+      type: string
+      description: >
+        Program lifecycle state. A program is created ACTIVE; the CLOSED state
+        is reserved for a later lifecycle command and no close operation is
+        implemented. The SPEC 10.11.3 catalogue instead uses ACTIVE and
+        INACTIVE (M-39).
+      enum:
+        - ACTIVE
+        - CLOSED
+    CreateProgramRequest:
+      type: object
+      description: >
+        Public create command for the program catalogue. The tenant comes from
+        `X-EIA-Tenant`; `programId`, `programNumber`, `status`, and `createdAt`
+        are server-owned and rejected or ignored if supplied. `name` and
+        `programType` are trimmed, `programType` is upper-cased, and the
+        effective range is inclusive.
+      required:
+        - name
+        - programType
+        - effectiveFrom
+        - effectiveTo
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        programType:
+          $ref: '#/components/schemas/ProgramType'
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+          description: Must be on or after effectiveFrom; the same date is valid.
+        leadPolicyId:
+          type: [string, 'null']
+          format: uuid
+          description: >
+            Optional lead policy. Stored as supplied; not resolved or checked
+            against the tenant in this slice (M-39).
+    UpdatePolicyProgramRequest:
+      type: object
+      description: >
+        Policy program membership command. `programId` is required but nullable:
+        a UUID assigns the policy to that program and null clears the link. The
+        expert applies the tenant wall, so an unknown or foreign program is 404
+        `PROGRAM_NOT_FOUND`. The public domain also tolerates an absent body as
+        a clear for compatibility; the canonical command requires the explicit
+        null.
+      required:
+        - programId
+      properties:
+        programId:
+          type: [string, 'null']
+          format: uuid
+          description: Program to assign; null clears the policy's program link.
 x-vertical: policy
 x-implementation:
   status: implemented
@@ -4641,6 +5001,32 @@ x-implementation:
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PutMassTortProfileRequest.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyMassTortProfile.java
     - repos/eia-policy-expert/src/main/resources/schema.sql
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/ProgramController.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/ProgramService.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/ProgramDto.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/CreateProgramCommand.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyProgramController.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyProgramService.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/UpdatePolicyProgramCommand.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyDto.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/Policy.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyRepository.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyProgramController.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyProgramService.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyProgramRepository.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/ProgramRules.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/ProgramView.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyProgram.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/CreateProgramRequest.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/AssignPolicyProgramRequest.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/RequestScope.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/ProgramControllerTest.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/PolicyProgramControllerTest.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/ProgramClientTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/PolicyProgramControllerTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/PolicyProgramServiceTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/PolicyProgramIntegrationTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/ProgramRulesTest.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyVersionController.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/CoverageController.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/EndorsementController.java
@@ -4727,24 +5113,43 @@ x-implementation:
     on every update. The event payload deliberately omits the profile id and the
     allocation notes; the policy is the event aggregate. The narrow profile
     against SPEC 11.2.11 is recorded in M-32.
+
+    The program catalog is a tenant-scoped DIRECT-book resource with a
+    server-generated per-tenant number. The domain proxies the expert's
+    `/internal/v1` alias with the tenant and DIRECT book; the expert owns the
+    number, the ACTIVE default, and the CAPTIVE/POOL/FRONTING/COINSURANCE/
+    MASS_TORT vocabulary. The public create returns 201 with a `Location`, and
+    the accepted create writes `policy.program.created` against the Program
+    aggregate at version 1 in the same transaction. The assignment command
+    bumps the policy row version and writes `policy.policy.program-assigned`
+    with `programId`, `previousProgramId`, and `changedFields`; the public
+    `Policy` carries the nullable `programId` and may omit it when null. The
+    expert's `/internal/v1` program alias is an implementation detail. The
+    narrower catalogue, the different type/status vocabularies, and the
+    SPEC-less create and assignment commands are recorded in M-01, M-22, and
+    M-39.
 x-compatibility:
-  contractVersion: 2.7.0
-  previousContractVersion: 2.6.0
+  contractVersion: 2.8.0
+  previousContractVersion: 2.7.0
   breaking: []
   compatible:
-    - Adds GET /api/v1/billing/installments/{installmentId}/dunning.
-    - Adds POST /api/v1/billing/installments/{installmentId}/dunning.
-    - Adds the DunningAction and CreateDunningRequest schemas.
-    - Adds the nullable Receivable.lastDunningLevel and Receivable.lastDunningAt members.
+    - Adds GET /api/v1/programs.
+    - Adds POST /api/v1/programs.
+    - Adds GET /api/v1/programs/{programId}.
+    - Adds PATCH /api/v1/policies/{policyId}/program.
+    - Adds the Program, ProgramType, ProgramStatus, CreateProgramRequest, and UpdatePolicyProgramRequest schemas.
+    - Adds the nullable Policy.programId member.
     - Adds no required request field to an existing operation, changes no existing path, and removes no response field.
   note: >
-    The installment dunning surface is additive over 2.6.0: the two operations
-    and both schemas are new, and the two receivable members are nullable and
-    default to null until an action is recorded. The route is a new sibling of
-    the cross-policy receivable read, so the HTTP API version stays /api/v1.
-    The implemented event joins the asyncapi/policy.yaml channels as the new
-    name `policy.dunning.sent`; the platform published and implemented counts
-    each grow by one.
+    The program catalog and membership surface is additive over 2.7.0: four new
+    operations and five new schemas, plus the nullable `Policy.programId`
+    member, which defaults to null for every policy created before this release.
+    No existing path, request field, response field, or event changed. The
+    routes are siblings under `/api/v1`, so the HTTP API version stays
+    `/api/v1`. The implemented events join the asyncapi/policy.yaml channels as
+    the new names `policy.program.created` and
+    `policy.policy.program-assigned`; the catalog published and implemented
+    counts each grow by two.
 x-planned-operations:
   - method: POST
     path: /api/v1/policies/{policyId}/bind
@@ -4774,10 +5179,6 @@ x-planned-operations:
     path: /api/v1/policies/{policyId}/reinsurance
     spec: SPEC 11.2.10
     note: Cession projection.
-  - method: GET
-    path: /api/v1/programs
-    spec: SPEC 11.2.10
-    note: Mass tort programs.
   - method: GET
     path: /api/v1/policies/{policyId}/lineage
     spec: SPEC 11.2.10

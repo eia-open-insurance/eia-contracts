@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-20 (Direct Claims mass-tort allocation guard).
+Status: open, reviewed 2026-10-20 (Policy program catalog and membership).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -52,7 +52,10 @@ where the running code does not meet it yet.
   `schema.sql`, and tests. The Direct Claims mass-tort allocation guard pass
   reads the domain claim detail controller and service, the Policy mass-tort
   client, the guard exception, the domain exception handler, and the domain
-  tests.
+  tests. The Policy program pass reads the domain program controller, service,
+  projection, command, book scope, policy-program controller and service, and
+  client plus the expert program controller, service, rules, repository, view,
+  entity, request, event factory, `schema.sql`, and the domain and expert tests.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -116,6 +119,7 @@ removed per the resolution policy.
 | M-36 | Direct Claims allocation erosion retry swallows the expert conflict and record failure | M |
 | M-37 | Contract security/collateral uses a narrow derived-status projection and a wider legacy status vocabulary | L |
 | M-38 | Policy installment dunning adds a SPEC-less route and event name and a different level vocabulary and book rule | L |
+| M-39 | Policy program catalog uses a short read/create path, a different type/status vocabulary, and SPEC-less membership and event names | L |
 
 ## M-01 Public base paths
 
@@ -136,6 +140,10 @@ remotes agree with the implementation, so the SPEC tables are the outlier.
 | Payment | `/api/v1/payments` | `/api/v1/payment/payments` |
 | Notifications | `/api/v1/notifications` | `/api/v1/notifications/...` (matches) |
 
+Policy programs add a second short-form row: the implemented catalog is
+`/api/v1/programs` and `/api/v1/programs/{programId}`, while SPEC 11.2.10 lists
+`/api/v1/policy/programs` and `/api/v1/policy/programs/{programId}` (M-39).
+
 The ten global-search routes follow the same shorter form
 (`/api/v1/{resource}/search`); their SPEC naming gap and validation differences
 are recorded in M-23.
@@ -151,6 +159,9 @@ Evidence:
 - `repos/eia-document-domain/.../DocumentController.java:15` - `/api/v1/documents`
 - `repos/eia-payment-domain/.../PaymentController.java:18` - `/api/v1/payments`
 - `repos/eia-notifications-domain/.../NotificationController.java:22` - `/api/v1/notifications`
+- `repos/eia-policy-domain/.../ProgramController.java:26` and
+  `PolicyProgramController.java:22` - `/api/v1/programs` and
+  `/api/v1/policies/{policyId}/program`
 - `repos/eia-platform/gateway/src/main/resources/application.yml:18-48` - the
   same public prefixes are routed.
 - Web remotes call the implemented prefixes, for example
@@ -239,8 +250,10 @@ Every other vertical still returns a bare `List<Dto>`: for example
 `NotificationController.list`, `CessionController.list` (public and expert), and
 `RetrocessionController.list` (public and expert). The Contract second-slice
 collections, the Direct Claims child collections, and the Assumed Claims child
-collections in Round 5 are also bare arrays. There is no `page` object, no
-cursor, and no `total` in those responses.
+collections in Round 5 are also bare arrays. The Policy program catalog list
+(`GET /api/v1/programs`) is also a bare `Program[]` rather than the Policy page
+envelope (M-39). There is no `page` object, no cursor, and no `total` in those
+responses.
 
 The implemented Policy envelope is **offset-based** and therefore differs from
 SPEC 7.6 and 12.2, which specify a cursor envelope
@@ -655,7 +668,7 @@ ten publishing verticals now emit a subset:
 | Vertical | Implemented event names | Source |
 |---|---|---|
 | Party | `party.party.created`, `party.party.updated` | `repos/eia-party-expert/.../PartyEvents.java` |
-| Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.billing-plan.created`, `policy.installment.paid`, `policy.installment.waived`, `policy.dunning.sent`, `policy.mass-tort-profile.updated` | `repos/eia-policy-expert/.../PolicyEvents.java` |
+| Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.billing-plan.created`, `policy.installment.paid`, `policy.installment.waived`, `policy.dunning.sent`, `policy.mass-tort-profile.updated`, `policy.program.created`, `policy.policy.program-assigned` | `repos/eia-policy-expert/.../PolicyEvents.java` |
 | Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded`, `contract.technical-account.created`, `contract.technical-account.issued`, `contract.technical-account.settled`, `contract.bordereau.received`, `contract.bordereau.processed`, `contract.bordereau.failed`, `contract.cash-call.requested`, `contract.cash-call.issued`, `contract.cash-call.settled`, `contract.cash-call.cancelled`, `contract.security.recorded` | `repos/eia-contract-expert/.../ContractEvents.java` |
 | Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.assigned`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.closed`, `direct.claim.task-created`, `direct.claim.task-completed`, `direct.claim.task-updated`, `direct.claim.note-added`, `direct.claim.allocation-created` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
 | Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.assigned`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted`, `assumed.claim.task-created`, `assumed.claim.task-completed`, `assumed.claim.task-updated`, `assumed.claim.note-added` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
@@ -828,7 +841,7 @@ tables. The differences are:
 | Vertical | Implemented | SPEC /
 planned name |
 |---|---|---|
-| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created`; `policy.installment.paid` / `.waived`; `policy.dunning.sent` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name; the dunning fact differs from SPEC 11.2.13 `policy.billing.dunning-changed`. `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
+| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created`; `policy.installment.paid` / `.waived`; `policy.dunning.sent`; `policy.program.created` / `policy.policy.program-assigned` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name; the dunning fact differs from SPEC 11.2.13 `policy.billing.dunning-changed`; the two program facts have no SPEC name because SPEC defines no program create or policy-assignment event. `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
 | Contract | `contract.contract.updated`; `contract.technical-account.created` / `.issued` / `.settled`; `contract.bordereau.processed` / `.failed` | No SPEC name for updated, the technical-account facts, or the two terminal bordereau facts: SPEC 11.3.9 lists lifecycle verbs, the contract-level `contract.account.issued` / `.agreed` facts, and `contract.bordereau.posted` / `.rejected` instead. `created`, `bound`, `commuted`, `cession.recorded`, and `contract.bordereau.received` match SPEC. |
 | Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned`; `direct.claim.allocation-created` | No SPEC names: SPEC 11.4.9 defines no assignment, task, note, or allocation-created event; it names the allocation fact `direct.claim.allocated`, which remains planned. `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and `closed` match SPEC. |
 | Assumed Claims | `assumed.claim.updated`; `assumed.claim.assigned`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no assignment, task, or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
@@ -846,7 +859,8 @@ implemented name is breaking and needs the EV-05 dual-publish window.
 
 Evidence:
 
-- `repos/eia-policy-expert/.../PolicyEvents.java:37-45` (policy and billing names)
+- `repos/eia-policy-expert/.../PolicyEvents.java:37-56` (policy, billing, dunning,
+  mass tort, and program names)
 - `repos/eia-contract-expert/.../ContractEvents.java:41-56`
 - `repos/eia-direct-claims-expert/.../ClaimEvents.java:57-68`
 - `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java:52-65`
@@ -1936,10 +1950,99 @@ and vocabulary. Renaming `policy.dunning.sent` to
 `policy.billing.dunning-changed` requires the EV-05 dual-publish window;
 publishing the SPEC name alongside the implemented one is additive.
 
+## M-39 Policy program catalog is a short-path, SPEC-less create and membership surface
+
+The Policy expert and domain implement a commercial program catalog plus a
+policy-to-program membership command. SPEC 10.11.3 defines the `program`
+master-data table and SPEC 11.2.10 lists two read APIs; the implemented surface
+is wider and uses a different path, vocabulary, and projection.
+
+| Aspect | Canonical contract / implemented | SPEC 10.11.3 and 11.2.10 |
+|---|---|---|
+| Paths | `GET/POST /api/v1/programs`, `GET /api/v1/programs/{programId}`, `PATCH /api/v1/policies/{policyId}/program` | `GET /api/v1/policy/programs`, `GET /api/v1/policy/programs/{programId}`; no create and no membership command |
+| Identity | `programId` UUID; per-tenant `programNumber` `PRG-{YEAR}-{7 digits}` from `policy_program_number_seq` | `id` and an immutable `code` varchar(16) |
+| Name | `name` varchar(200) | `name` varchar(200) plus optional `description` |
+| Types | `CAPTIVE`, `POOL`, `FRONTING`, `COINSURANCE`, `MASS_TORT` | `CASUALTY`, `PROPERTY`, `COMMERCIAL`, `AUTO`, `SPECIALTY`, `OTHER` |
+| Status | `ACTIVE`, `CLOSED` (CLOSED is reserved; no close command exists) | `ACTIVE`, `INACTIVE` |
+| Dates | inclusive `effectiveFrom`/`effectiveTo`, both required and NOT NULL; the same day is valid | both nullable |
+| Owner and manager | not modelled | `owner_legal_entity_id`, `manager_org_unit_id`, `program_org_unit`, `program_legal_entity`, `program_lob` |
+| Capacity | not modelled | `program_version`, `program_capacity`, and the LE-02 capacity-share rules |
+| Membership | one nullable `policy.program_id`; PATCH assignment command; returns the policy ETag | `policy.program_id` and the `POLICY_IN_PROGRAM` link; LE-01 requires one program per policy |
+| Lead policy | optional `leadPolicyId` stored as supplied, with no FK or tenant check | no lead-policy concept on `program` |
+| Events | `policy.program.created` (Program aggregate, version 1) and `policy.policy.program-assigned` (Policy aggregate, version + 1) | no program event in SPEC 11.2.9 |
+| Book | The canonical contract requires `X-EIA-Book: DIRECT`; the domain and expert accept an absent header | SPEC 3.6 book wall |
+
+Consequences:
+
+- A consumer cannot map the implemented program types to the SPEC 10.11.3
+  catalog without a translation table; the types describe legal structures
+  (captive, pool, fronting, coinsurance, mass tort) while the SPEC catalog
+  describes business classes. The same applies to CLOSED versus INACTIVE.
+- The projection has no `code`, `description`, owner legal entity, manager
+  organization unit, LOB/legal-entity assignments, `program_version`, or
+  capacity structure, so the LE-02 share-sum check, LE-06 versioning, and the
+  program detail/capacity/fronting views cannot be served from it.
+- `CLOSED` is accepted by the database CHECK constraint and the status enum but
+  no command can reach it; every created program stays ACTIVE.
+- `leadPolicyId` is written without a foreign key, existence check, or tenant
+  check, so a caller can store a dangling policy id or another tenant's policy
+  id. The program projection returns it unchanged.
+- The `PATCH` body is required by the canonical contract, but the public domain
+  also treats an absent body as a clear; a caller that omits the body silently
+  clears the membership instead of receiving a 400.
+- The create and assignment commands accept neither `Idempotency-Key` nor
+  `If-Match`; a retried create produces a second program, and a retried
+  assignment emits a second event and bumps the policy version again.
+- A missing `X-EIA-Book` is accepted by both the domain and the expert even
+  though the canonical contract requires DIRECT; another book is still hidden
+  as 404 `BOOK_SCOPE_VIOLATION` by the domain.
+
+Evidence:
+
+- `repos/eia-policy-domain/.../ProgramController.java:25-65` (public
+  `/api/v1/programs`, tenant header, `requireDirectWhenPresent`, 201 and
+  `Location`), `ProgramService.java:31-43` (date-range pre-check),
+  `ProgramDto.java`, and `CreateProgramCommand.java` (name and type
+  constraints).
+- `repos/eia-policy-domain/.../PolicyProgramController.java:21-47` (public
+  PATCH, optional body, ETag echo) and `PolicyProgramService.java`,
+  `UpdatePolicyProgramCommand.java`.
+- `repos/eia-policy-domain/.../PolicyClient.java:418-494` (`/internal/v1`
+  program calls and projection remap).
+- `repos/eia-policy-expert/.../PolicyProgramController.java:29-85` (public and
+  internal aliases, tenant query or header, 201 create, 200 assignment with
+  ETag), `PolicyProgramService.java:54-112` (number generation, ACTIVE default,
+  null clear, version check and 409), and `ProgramRules.java:17-95`
+  (vocabulary, name cap, date order).
+- `repos/eia-policy-expert/.../PolicyProgramRepository.java:45-84`
+  (tenant-scoped reads, newest-first list, number sequence) and
+  `PolicyProgram.java`, `ProgramView.java`, `CreateProgramRequest.java`,
+  `AssignPolicyProgramRequest.java`.
+- `repos/eia-policy-expert/.../PolicyEvents.java:50-51,94-153`
+  (`policy.program.created` against Program at version 1 and
+  `policy.policy.program-assigned` against Policy with both link sides) and
+  `src/main/resources/schema.sql:52-85` (`policy_program`, its CHECK
+  constraints, the nullable `policy.program_id` FK, and the indexes; no FK on
+  `lead_policy_id`).
+- Tests: `ProgramControllerTest`, `PolicyProgramControllerTest`,
+  `ProgramClientTest`, `PolicyProgramControllerTest`,
+  `PolicyProgramServiceTest`, `PolicyProgramIntegrationTest`, and
+  `ProgramRulesTest`.
+- `openapi/policy.yaml` 2.8.0, `asyncapi/policy.yaml` 1.6.0, and
+  `asyncapi/event-catalog.yaml` 1.17.0 record the implemented shape.
+
+Resolution: either extend SPEC 10.11.3/11.2.10 with the implemented catalog,
+membership command, and event names, or align the implemented paths,
+vocabulary, and projection with the SPEC master data. Until then the contract
+documents the short paths and the CAPTIVE/POOL/FRONTING/COINSURANCE/MASS_TORT
+vocabulary. Separately, either resolve and tenant-check `leadPolicyId` or
+remove it, add an explicit close command before exposing CLOSED as a reachable
+state, and decide whether the DIRECT book header is required or optional.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-Direct Claims mass-tort allocation guard contract:
+Policy program catalog and membership contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -1949,7 +2052,7 @@ python: 3.12.8 (standard library only)
 
 OpenAPI 3.1 documents
   OK openapi/party.yaml  5 paths, 7 operations
-  OK openapi/policy.yaml  43 paths, 56 operations
+  OK openapi/policy.yaml  46 paths, 60 operations
   OK openapi/contract.yaml  40 paths, 58 operations
   OK openapi/direct-claims.yaml  49 paths, 72 operations
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
@@ -1961,7 +2064,7 @@ OpenAPI 3.1 documents
 
 AsyncAPI 3 documents
   OK asyncapi/party.yaml  9 event channels
-  OK asyncapi/policy.yaml  24 event channels
+  OK asyncapi/policy.yaml  26 event channels
   OK asyncapi/contract.yaml  29 event channels
   OK asyncapi/direct-claims.yaml  26 event channels
   OK asyncapi/assumed-claims.yaml  21 event channels
@@ -1970,7 +2073,7 @@ AsyncAPI 3 documents
   OK asyncapi/document.yaml  20 event channels
   OK asyncapi/payment.yaml  19 event channels
   OK asyncapi/notifications.yaml  12 event channels
-  OK catalog: 194 unique published events across 10 verticals
+  OK catalog: 196 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -1978,7 +2081,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 11809 checks, 0 failures
+  PASS 12109 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -2119,7 +2222,14 @@ Additional checks and limits:
   mass-tort allocation guard pass added one more: removing
   `MASS_TORT_YEAR_OUTSIDE_BLOCK` from the allocation create 400 description
   fails with the specific missing-code message. It was run on a throwaway copy
-  and exited non-zero (exit 1); the working copy was left unchanged.
+  and exited non-zero (exit 1); the working copy was left unchanged. The Policy
+  program pass added five more: renaming the `GET/POST /api/v1/programs` path,
+  renaming the `Program` schema, removing `programId` from
+  `UpdatePolicyProgramRequest.required`, marking `policy.program.created`
+  planned, and re-adding `/api/v1/programs` to `x-planned-operations` each fail
+  with the specific missing-operation, schema/required-field, implemented-event,
+  or planned-route message. All five were run on a throwaway copy and exited
+  non-zero (exit 1); the working copy was left unchanged.
 
 ## Resolution policy
 

@@ -1022,6 +1022,69 @@ it forwards the create:
   not re-read the profile. `MISMATCHES.md` M-31 records the stable code and
   M-32 the narrow profile that supplies the block.
 
+### Policy program catalog and membership (2026-10-20)
+
+Policy 2.8.0 adds the commercial program catalog and the policy-to-program
+membership command. The change is additive: four new operations, five new
+schemas, and the nullable `Policy.programId` member; no existing path, request
+field, response field, or event changed.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/policy.yaml` | 2.8.0 | Additive | `GET/POST /api/v1/programs`, `GET /api/v1/programs/{programId}`, `PATCH /api/v1/policies/{policyId}/program`, the `Program`, `ProgramType`, `ProgramStatus`, `CreateProgramRequest`, and `UpdatePolicyProgramRequest` schemas, and the nullable `Policy.programId` member. |
+| `asyncapi/policy.yaml` | 1.6.0 | Additive | The implemented `policy.program.created` and `policy.policy.program-assigned` channels and `send` operations, with `PolicyProgramCreatedData` and `PolicyPolicyProgramAssignedData` payload schemas. |
+| `asyncapi/event-catalog.yaml` | 1.17.0 | Additive | Both program names are published and implemented (196 published in total; Policy 26 published and 14 implemented; the platform implemented total is 75). |
+
+Program semantics:
+
+- A program groups policies into one commercial portfolio: a captive, pool,
+  fronting arrangement, coinsurance facility, or mass tort program. The flat
+  `Program` projection is `programId`, the server-generated
+  `programNumber` (`PRG-{YEAR}-{7 digits}`), `name`, `programType`, the
+  inclusive `effectiveFrom`/`effectiveTo` range, `status`, the nullable
+  `leadPolicyId`, and `createdAt`. The list is a bare newest-first array and
+  is not part of the offset page envelope (M-04).
+- `POST /api/v1/programs` always creates ACTIVE with a server-owned identity
+  and returns 201 with `Location`. `name` is trimmed and capped at 200
+  characters; `programType` is trimmed, upper-cased, and limited to `CAPTIVE`,
+  `POOL`, `FRONTING`, `COINSURANCE`, or `MASS_TORT`; the effective range is
+  inclusive, so a one-day program is valid and an end before the start is a
+  400. The optional `leadPolicyId` is stored as supplied and is not resolved
+  or checked against the tenant (M-39).
+- `GET /api/v1/programs/{programId}` is tenant-scoped: an unknown program and
+  a program in another tenant are both 404 `PROGRAM_NOT_FOUND`.
+- `PATCH /api/v1/policies/{policyId}/program` sets the policy's program or
+  clears it with a null `programId`; the body is required and the property is
+  explicitly nullable. The accepted command bumps the policy row version and
+  returns the updated `Policy` with its new strong `ETag`. An unknown or
+  foreign policy is 404 `POLICY_NOT_FOUND`, an unknown or foreign program is
+  404 `PROGRAM_NOT_FOUND`, and a concurrent policy change is 409
+  `CONCURRENT_MODIFICATION`. The command accepts neither `If-Match` nor
+  `Idempotency-Key`, so the response body's version is the only conflict
+  token (M-06, M-07).
+- `X-EIA-Tenant` is required on all four operations. The canonical contract
+  requires `X-EIA-Book: DIRECT`; a missing tenant or book is a 400
+  (`MISSING_TENANT_HEADER`/`INVALID_TENANT_HEADER` or `MISSING_HEADER`), and
+  another book is hidden as 404 `BOOK_SCOPE_VIOLATION`. The domain and expert
+  currently accept an absent book header, which M-39 records.
+- The accepted create writes `policy.program.created` against the Program
+  aggregate at version 1 in the same transaction as the row. The accepted
+  assignment writes `policy.policy.program-assigned` against the Policy
+  aggregate with `programId`, `previousProgramId`, and
+  `changedFields: ["programId"]`; either id is null on a first assignment or a
+  clear.
+- The SPEC 10.11.3 catalogue uses `code`, `CASUALTY`/`PROPERTY`/`COMMERCIAL`/
+  `AUTO`/`SPECIALTY`/`OTHER` types, and ACTIVE/INACTIVE status, and SPEC
+  11.2.10 mounts the catalog under `/api/v1/policy/programs`. SPEC defines no
+  program create, policy-assignment command, or program event names. The
+  contract records the implemented shape and M-01, M-22, and M-39 record the
+  deviations.
+- The validator requires the four public paths, the five schemas, the
+  nullable `Policy.programId`, both required headers, the 201/200/400/404/409
+  responses, the 201 `Location`, the 200 `ETag`, both implemented channels and
+  their payload fields and enums, and rejects any implemented program path that
+  reappears under `x-planned-operations`. The full run passes 12,109 checks.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -1058,6 +1121,7 @@ Every request carries a resolved tenant; no request body may override it.
 | `X-EIA-Book` | Policy billing and receivables | Optional for compatibility with the other Policy proxy routes, but a supplied value must be DIRECT; another book is hidden as 404 `BOOK_SCOPE_VIOLATION`. An absent header is accepted. The guard runs before the expert call. |
 | `X-EIA-Book` | Policy installment dunning | Required and fixed to `DIRECT`. A missing header is a 400 and another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header, which M-38 records. |
 | `X-EIA-Book` | Policy renewal | Required and fixed to `DIRECT`. The contract makes a missing header a 400 and hides another book as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header, which M-28 records. |
+| `X-EIA-Book` | Policy programs | Required and fixed to `DIRECT`. The contract makes a missing header a 400 and hides another book as 404 `BOOK_SCOPE_VIOLATION`; the domain and expert currently accept an absent header, which M-39 records. |
 | `X-EIA-Book` | Contract technical accounts | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-29 records. |
 | `X-EIA-Book` | Contract period bordereaux | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-30 records. |
 | `X-EIA-Book` | Contract cash calls | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-34 records. |
@@ -1852,6 +1916,21 @@ missing directory.
   `X-EIA-Book: DIRECT` while the domain accepts an absent header, and the
   command has no `Idempotency-Key`/`If-Match`; M-22 and M-38 record the
   differences;
+- the program catalog is implemented at the short `GET/POST /api/v1/programs`
+  and `GET /api/v1/programs/{programId}` paths, with
+  `PATCH /api/v1/policies/{policyId}/program` as the membership command, while
+  SPEC 11.2.10 mounts only a read-only catalog at `/api/v1/policy/programs`.
+  The implemented vocabulary is `CAPTIVE`/`POOL`/`FRONTING`/`COINSURANCE`/
+  `MASS_TORT` and ACTIVE/CLOSED instead of the SPEC 10.11.3
+  `CASUALTY`/`PROPERTY`/`COMMERCIAL`/`AUTO`/`SPECIALTY`/`OTHER` and
+  ACTIVE/INACTIVE sets, uses a generated `programNumber` instead of `code`, and
+  omits the owner legal entity, manager organization unit, description,
+  `program_version`, and capacity structure. The create and assignment are
+  SPEC-less commands that publish the new `policy.program.created` and
+  `policy.policy.program-assigned` names. `leadPolicyId` is stored without a
+  reference or tenant check, and the domain and expert accept an absent
+  `X-EIA-Book` although the canonical contract requires DIRECT (M-01, M-22,
+  M-39);
 - the premium-receivables queue is a tenant-wide read at
   `GET /api/v1/billing/installments`, outside `/api/v1/policies`, and returns the
   flat `Receivable`/`ReceivableSummary` projection. SPEC 11.2.13 describes the
