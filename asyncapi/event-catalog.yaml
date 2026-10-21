@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.20.0
+  version: 1.21.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -78,6 +78,11 @@ info:
     `policy.billing.credit-note-issued`; they add three published and three
     implemented names, bringing the platform totals to 201 published and 80
     implemented; Policy becomes 29 published and 17 implemented (M-22, M-41).
+    The 2026-10-21 Document content-version slice adds no event name and no
+    channel: it only adds the required `version` member to the
+    `document.content.uploaded` payload, keeping `eventVersion` 1. The totals
+    therefore stay 201 published and 80 implemented, with Document at 21
+    published and 6 implemented (M-40).
     The platform
     event-ingest service
     is the inbox:

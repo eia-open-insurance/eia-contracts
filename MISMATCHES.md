@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-20 (Document content).
+Status: open, reviewed 2026-10-21 (Document content versions).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -61,6 +61,12 @@ where the running code does not meet it yet.
   client, projection, policy, size-limit filter, and exception handler plus the
   expert content controller, service, rules, repository, event factory,
   tenant resolver, `schema.sql`, and the domain and expert tests.
+  The Document content-version pass reads the domain content controller,
+  service, client, and metadata/version projections plus the expert content
+  controller, service, repository, both version records, the
+  `ContentVersionNotFoundException` mapping, `DocumentContentEvents`, the
+  pointer/revision `schema.sql` tables and backfill, and the domain and expert
+  version tests.
   The Policy credit-note pass reads the domain credit-note controller, service,
   projection, commands, book scope, and client plus the expert credit-note
   controller, service, rules, repository, entity, requests, event factory,
@@ -129,7 +135,7 @@ removed per the resolution policy.
 | M-37 | Contract security/collateral uses a narrow derived-status projection and a wider legacy status vocabulary | L |
 | M-38 | Policy installment dunning adds a SPEC-less route and event name and a different level vocabulary and book rule | L |
 | M-39 | Policy program catalog uses a short read/create path, a different type/status vocabulary, and SPEC-less membership and event names | L |
-| M-40 | Document content is one current byte row, not the SPEC versioned store | L |
+| M-40 | Document content keeps a current pointer plus revisions under `/content/versions`, not the SPEC `/versions` store | L |
 | M-41 | Policy credit notes use a short path, a four-state lifecycle, free-text reason, and new event names, with no approval or SAP step | L |
 
 ## M-01 Public base paths
@@ -710,8 +716,9 @@ The Document expert's link writes append `document.link.added` or
 as the link row. Both use the `DocumentLink` aggregate with the link id and
 version 1; the three document metadata events are unchanged. A content upload
 appends `document.content.uploaded` from `DocumentContentEvents.java` in the
-same transaction as the content upsert, keyed by the `DocumentContent`
-aggregate on the document id with the content version.
+same transaction as the revision row, keyed by the `DocumentContent` aggregate
+on the document id with the content revision as the aggregate version; the
+payload repeats that revision as `version` while `eventVersion` stays 1.
 
 Each controller or service calls `outbox.insert(OutboxEvent.fromEnvelope(...))`
 in the same transaction as the aggregate write; for example
@@ -2094,44 +2101,55 @@ vocabulary. Separately, either resolve and tenant-check `leadPolicyId` or
 remove it, add an explicit close command before exposing CLOSED as a reachable
 state, and decide whether the DIRECT book header is required or optional.
 
-## M-40 Document content is one current byte row, not the SPEC versioned store
+## M-40 Document content keeps a current pointer plus revisions, not the SPEC versioned store
 
-SPEC 11.6.10 defines an authorized content download (presigned) and the SPEC
-11.6 model carries content, versions, hashes, page counts, OCR status, holds,
-and retention. The implemented slice stores exactly one current byte row per
-document, serves it through a raw-byte proxy, and emits a content-upload fact
-that has no SPEC 11.6.9 name.
+SPEC 11.6.10 defines an authorized content download (presigned) and mounts the
+content history at `GET /versions` and the version-creating command at `POST
+/versions`; the SPEC 11.6 model carries content, versions, hashes, page counts,
+OCR status, holds, and retention. The implemented slice stores one current
+content pointer per document plus immutable revision rows, serves the bytes
+through a raw-byte proxy under `/content`, exposes the history under
+`/content/versions`, and emits a content-upload fact that has no SPEC 11.6.9
+name.
 
 | Aspect | Implemented | SPEC 11.6.10 / 11.6 |
 |---|---|---|
-| Routes | `PUT|GET /api/v1/documents/{documentId}/content` and `GET .../content/metadata` | authorized content download (presigned), versions, preview, text, access log |
-| Upload | raw bytes; an upsert of the document's single current row | versioned content with a history |
+| Routes | `PUT|GET /api/v1/documents/{documentId}/content`, `GET .../content/metadata`, `GET .../content/versions`, and `GET .../content/versions/{version}` | authorized content download (presigned), `GET`/`POST .../versions`, preview, text, access log |
+| Upload | raw bytes; each accepted body appends an immutable revision and advances the current pointer | versioned content with a history |
 | Size limit | 10 MiB (10,485,760 bytes); a zero-byte body is 400 `EMPTY_CONTENT`; an over-limit body is 413 `FILE_TOO_LARGE` | no implemented limit stated |
-| Metadata | `DocumentContent` with `documentId`, `fileName`, `contentType`, `sizeBytes`, `sha256`, `uploadedAt` | content, hash, page count, OCR status, tags, versions |
-| Download | proxied bytes with `Content-Type`, `Content-Disposition`, and `X-Content-SHA256`; no `Range`, no presigned URL | short-lived presigned URL |
+| Metadata | `DocumentContent` with `documentId`, `fileName`, `contentType`, `sizeBytes`, `sha256`, `uploadedAt`, `currentVersion` | content, hash, page count, OCR status, tags, versions |
+| Download | proxied bytes with `Content-Type`, `Content-Disposition`, `X-Content-SHA256`, and `X-Content-Version`; one revision is downloadable through `/content/versions/{version}`; no `Range`, no presigned URL | short-lived presigned URL |
 | Filename | URL-encoded `X-File-Name`, reduced to its last path component; at most 255 characters | not specified |
-| Versioning | none; replacing the content overwrites the row and bumps the content version | superseded/version rows |
+| Versioning | append-only `document_content_version` rows; revisions start at 1 and the history is newest first; every upload appends one revision and advances `current_version`; no deletion, retention, or lineage | superseded/version rows at `/versions` |
+| Concurrency | a per-document pointer lock allocates the next revision, so concurrent uploads both retain their bytes; the last committed upload wins the current pointer without `If-Match` or `Idempotency-Key` | not specified |
 | Book | none; tenant-scoped only | SPEC 3.6 book wall |
-| Event | `document.content.uploaded` (new; no SPEC 11.6.9 name) | no content-upload fact |
+| Event | `document.content.uploaded` (new; no SPEC 11.6.9 name); payload `version` is the revision and the aggregate version, `eventVersion` 1 | no content-upload fact |
 | Missing tenant | 404 `NOT_FOUND` on the expert; 400 `TENANT_REQUIRED` on the public domain route | canonical 400 Problem |
 
 Consequences:
 
-- A consumer cannot retrieve a prior version, a preview rendition, OCR text, a
-  page count, tags, or an access log from the implemented surface; only the
-  current bytes and their metadata exist.
+- A consumer can now list and download prior revisions and read the current
+  revision number, but still cannot retrieve a preview rendition, OCR text, a
+  page count, tags, an access log, a legal hold, or a retention disposition.
+- The history is implemented at `/content/versions`, not the SPEC `/versions`
+  route, and the version-creating command is the content upload rather than
+  `POST /versions`. A client generated from SPEC 11.6.10 must be adapted to the
+  nested path.
 - The public download proxies the bytes instead of issuing a short-lived
-  presigned URL, so the Document domain becomes a data-path hop and the
+  presigned URL, so the Document domain remains a data-path hop and the
   response has no `Range` support. A caller that expected a redirect or a
   presigned target must instead consume a binary body.
-- The content write is an upsert with no optimistic concurrency token: two
-  concurrent uploads both succeed and the last writer wins, and no `If-Match`
-  or `Idempotency-Key` is accepted.
-- The public 413 is `application/problem+json` `FILE_TOO_LARGE`, but the
-  missing-tenant 400 is still the compact `TENANT_REQUIRED` `ApiError` rather
-  than the canonical Problem (M-02).
+- Revision allocation is serialized per document, but the current pointer has
+  no optimistic concurrency token: two concurrent uploads both retain a
+  revision and the last writer wins the current read. No `If-Match` or
+  `Idempotency-Key` is accepted.
+- The public 413 is `application/problem+json` `FILE_TOO_LARGE` and an unknown
+  revision is 404 `CONTENT_VERSION_NOT_FOUND`, but the missing-tenant 400 is
+  still the compact `TENANT_REQUIRED` `ApiError` rather than the canonical
+  Problem (M-02).
 - The event name is new and has no SPEC 11.6.9 equivalent, so a subscriber
-  cannot rely on a SPEC-defined content fact; it is additive under EV-05
+  cannot rely on a SPEC-defined content fact. The added payload `version` is
+  additive under EV-05 and keeps `eventVersion` 1; no event name is added
   (M-22).
 - The SPEC 11.6.9 names (`document.document.registered`, `.classified`,
   `.superseded`, `.generated`, `.signed`, `.held`, `.hold-released`,
@@ -2140,31 +2158,42 @@ Consequences:
 
 Evidence:
 
-- `repos/eia-document-domain/.../DocumentController.java:61-106` (public
-  upload, download, and metadata routes; `X-EIA-Tenant` required), the
-  `DocumentContentMetadata`, `DocumentContentDownload`, `DocumentContentPolicy`,
+- `repos/eia-document-domain/.../DocumentController.java:61-132` (public
+  upload, current download, metadata, version list, and version download;
+  `X-EIA-Tenant` required), the `DocumentContentMetadata`,
+  `DocumentContentVersion`, `DocumentContentDownload`, `DocumentContentPolicy`,
   `DocumentContentSizeLimitFilter`, and `DocumentContentTooLargeException`
-  helpers, and `DocumentExpertClient.java:163-205` (expert calls and header
+  helpers, and `DocumentExpertClient.java:163-230` (expert calls and header
   pass-through).
-- `repos/eia-document-expert/.../DocumentContentController.java:43-78` (raw
-  upload, download, and metadata), `DocumentContentService.java:35-69` (tenant
-  document lookup, size/file-name/type rules, upsert plus outbox),
-  `DocumentContentRules.java:27-157` (10 MiB, filename, MIME, SHA-256 rules),
-  `DocumentContentEvents.java:26-67` (`document.content.uploaded`),
-  `DocumentContentRepository.java` (single-row upsert and reads), and
-  `TenantResolver.java:28-41` (content routes hide a missing tenant as 404).
-- `repos/eia-document-expert/src/main/resources/schema.sql`
-  (`document_content` table and its size/content-type constraints).
-- Tests: `DocumentContentApiTest`, `DocumentContentClientTest`,
+- `repos/eia-document-expert/.../DocumentContentController.java:43-106` (raw
+  upload, current download, metadata, newest-first version list, and revision
+  download), `DocumentContentService.java:39-101` (tenant document lookup,
+  revision append, pointer refresh, outbox, version reads),
+  `DocumentContentRepository.java:97-193` (revision allocation, pointer update,
+  newest-first list, revision read), `DocumentContentRules.java:27-157`
+  (10 MiB, filename, MIME, SHA-256 rules), `DocumentContentEvents.java:35-68`
+  (`document.content.uploaded` with `version`), `DocumentContentVersion.java`,
+  `DocumentContentVersionMetadata.java`, `ContentVersionNotFoundException.java`,
+  `ApiExceptionHandler.java:35-39` (`CONTENT_VERSION_NOT_FOUND`),
+  `TenantResolver.java:28-41` (content routes hide a missing tenant as 404),
+  and `DocumentContentRules`/`DocumentContentMetadata`/`DocumentContent.java`.
+- `repos/eia-document-expert/src/main/resources/schema.sql:48-110`
+  (`document_content` current pointer, `document_content_version` revision
+  table with `UNIQUE (document_id, version)` and the newest-first index, and the
+  version-1 backfill).
+- Tests: `DocumentContentApiTest`, `DocumentContentVersionApiTest`,
+  `DocumentContentClientTest`, `DocumentContentVersionClientTest`,
   `DocumentContentIntegrationTest`, and `DocumentContentRulesTest`.
-- `openapi/document.yaml` 1.3.0, `asyncapi/document.yaml` 1.3.0, and
-  `asyncapi/event-catalog.yaml` 1.18.0 record the implemented shape.
+- `openapi/document.yaml` 1.4.0, `asyncapi/document.yaml` 1.4.0, and
+  `asyncapi/event-catalog.yaml` 1.21.0 record the implemented shape.
 
-Resolution: either add versioning, renditions, OCR text, presigned download,
-book scope, and the SPEC lifecycle/content facts, or amend SPEC 11.6.9 and
-11.6.10 to the single-current-content proxy and the new
-`document.content.uploaded` name. The contract documents the implemented
-single-row shape until that decision.
+Resolution: either align the implementation with SPEC 11.6.10 (move the
+history to `/versions`, add the `POST /versions` command, presigned download,
+renditions, OCR text, book scope, and the SPEC lifecycle/content facts) or
+amend SPEC 11.6.9 and 11.6.10 to the current-pointer plus revision proxy, the
+`/content/versions` path, the upload-as-version-command, and the new
+`document.content.uploaded` payload. The contract documents the implemented
+shape until that decision.
 
 ## M-41 Policy credit notes use a short path, a four-state lifecycle, and new event names
 
@@ -2250,8 +2279,8 @@ implemented narrow surface and the DIRECT book requirement.
 
 ## Validation evidence
 
-The repository validator was run on the working tree after the 2026-10-20
-Policy credit-note contract:
+The repository validator was run on the working tree after the 2026-10-21
+Document content version contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -2267,7 +2296,7 @@ OpenAPI 3.1 documents
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
   OK openapi/cession.yaml  9 paths, 11 operations
   OK openapi/retrocession.yaml  9 paths, 11 operations
-  OK openapi/document.yaml  13 paths, 18 operations
+  OK openapi/document.yaml  15 paths, 20 operations
   OK openapi/payment.yaml  11 paths, 14 operations
   OK openapi/notifications.yaml  7 paths, 9 operations
 
@@ -2290,7 +2319,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 12561 checks, 0 failures
+  PASS 12657 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -2461,7 +2490,14 @@ Additional checks and limits:
   dropping `policy.credit-note.issued` from the Policy catalog `implemented`
   list each fail with the specific missing-operation, schema, enum, or
   implemented-event message. All four were run on a throwaway copy and exited
-  non-zero (exit 1); the working copy was left unchanged.
+  non-zero (exit 1); the working copy was left unchanged. The Document
+  content-version pass added three more: renaming the
+  `/api/v1/documents/{documentId}/content/versions` path, removing
+  `currentVersion` from the required `DocumentContent` keys, and removing
+  `version` from the required `DocumentContentUploadedData` keys each fail with
+  the specific missing-operation, required-metadata-field, or required-payload
+  message. All three were run on a throwaway copy and exited non-zero
+  (exit 1); the working copy was left unchanged.
 
 ## Resolution policy
 

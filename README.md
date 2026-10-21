@@ -455,7 +455,9 @@ Link semantics:
 
 Document 1.3.0 adds the raw content upload, download, and metadata surface. The
 change is additive: three new routes, one new schema, and one new event name; no
-existing path, request field, response field, or event changed.
+existing path, request field, response field, or event changed. Document 1.4.0
+extends the same surface with the retained revision history; see
+[Document content versions](#document-content-versions-2026-10-21).
 
 | Document | Version | Classification | Change |
 |---|---|---|---|
@@ -465,49 +467,114 @@ existing path, request field, response field, or event changed.
 
 Content semantics:
 
-- `PUT .../content` is a raw-byte upsert of the document's single current
-  content row. The body is not JSON and is stored unchanged. `Content-Type` is
-  the file MIME type and defaults to `application/octet-stream` when omitted;
-  the stored type is the bare `type/subtype`. `X-File-Name` is required and is
-  URL-decoded as UTF-8; a directory component is removed, a blank name is 400
+- `PUT .../content` is a raw-byte upload. In 1.3.0 it replaced the document's
+  single current content row; from 1.4.0 every accepted body is appended as an
+  immutable revision while the current row still serves the newest bytes. The
+  body is not JSON and is stored unchanged. `Content-Type` is the file MIME type
+  and defaults to `application/octet-stream` when omitted; the stored type is
+  the bare `type/subtype`. `X-File-Name` is required and is URL-decoded as
+  UTF-8; a directory component is removed, a blank name is 400
   `FILE_NAME_REQUIRED`, a name longer than 255 characters is 400
   `FILE_NAME_TOO_LONG`, and a control character is 400 `INVALID_FILE_NAME`. An
   empty body is 400 `EMPTY_CONTENT`.
 - A body above 10 MiB (10,485,760 bytes) is 413 `FILE_TOO_LARGE`; the public
-  domain rejects it before the expert call, so no content row or event is
+  domain rejects it before the expert call, so no content revision or event is
   written. Exactly 10 MiB is accepted. The 413 body is
   `application/problem+json`.
 - The 200 response is the `DocumentContent` projection:
   `{documentId, fileName, contentType, sizeBytes, sha256, uploadedAt}`. The
-  bytes are deliberately absent from the projection.
+  bytes are deliberately absent from the projection. 1.4.0 adds the required
+  `currentVersion`.
 - `GET .../content` streams the stored bytes with the stored `Content-Type`,
   an attachment `Content-Disposition` built from the stored filename (with the
   RFC 5987 `filename*` parameter for a non-ASCII name), and
-  `X-Content-SHA256` with the lowercase digest of the exact bytes. It is a
-  binary response and must not be parsed as JSON. There is no presigned URL and
-  no `Range` support.
+  `X-Content-SHA256` with the lowercase digest of the exact bytes. 1.4.0 adds
+  `X-Content-Version` with the revision of the returned bytes. It is a binary
+  response and must not be parsed as JSON. There is no presigned URL and no
+  `Range` support.
 - `GET .../content/metadata` returns the projection without touching the bytes.
-- `X-EIA-Tenant` is required on all three public routes. A document outside the
+- `X-EIA-Tenant` is required on all content routes. A document outside the
   caller's tenant and a document with no stored content are both 404, so the
   response cannot confirm another tenant's document; the latter is 404
   `CONTENT_NOT_FOUND`. The domain forwards the tenant to the expert's public
   content path; the expert also accepts `tenantId` as a fallback.
 - An accepted upload writes `document.content.uploaded` to the transactional
-  outbox in the same transaction as the content row. The aggregate is
-  `DocumentContent`, keyed by the document id, with the content version as the
+  outbox in the same transaction as the revision append. The aggregate is
+  `DocumentContent`, keyed by the document id, with the content revision as the
   aggregate version, so replacing the content produces a new event. The name is
   new and has no SPEC 11.6.9 equivalent; M-22 and M-40 record the naming and
   lifecycle gaps.
-- The SPEC 11.6.10 presigned download, renditions, versions, OCR text, holds,
-  packages, requests, signatures, and retention disposition remain planned and
-  listed under `x-planned-operations`.
-- The validator requires the three operations, the tenant header and
-  `documentId` parameter, the `X-File-Name` and `Content-Type` upload headers,
-  the binary request and response bodies, the `Content-Disposition` and
-  `X-Content-SHA256` download headers, the `DocumentContent` fields and bounds,
-  the 400 `EMPTY_CONTENT` and 413 `FILE_TOO_LARGE` documentation, the
-  `DocumentContentUploadedData` payload, and the implemented channel, operation,
-  and catalog entry. The full run passes 12,255 checks.
+- The SPEC 11.6.10 presigned download, renditions, OCR text, holds, packages,
+  requests, signatures, and retention disposition remain planned and listed
+  under `x-planned-operations`. Version history is implemented from 1.4.0, but
+  under `/content/versions` rather than the SPEC `/versions` route.
+- The validator requires the content operations (five from 1.4.0), the tenant
+  header and `documentId` parameter, the `X-File-Name` and `Content-Type` upload
+  headers, the binary request and response bodies, the `Content-Disposition`,
+  `X-Content-SHA256`, and `X-Content-Version` download headers, the
+  `DocumentContent` fields and bounds, the 400 `EMPTY_CONTENT` and 413
+  `FILE_TOO_LARGE` documentation, the `DocumentContentUploadedData` payload,
+  and the implemented channel, operation, and catalog entry. The 1.3.0 run
+  passed 12,255 checks.
+
+### Document content versions (2026-10-21)
+
+Document 1.4.0 adds the retained content-revision history. The change is
+additive: two new routes, one new schema, one required metadata member, one
+required event-payload member, and no new event name; no existing path, request
+field, response field, or event is removed or changes meaning.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/document.yaml` | 1.4.0 | Additive | `GET /api/v1/documents/{documentId}/content/versions`, `GET /api/v1/documents/{documentId}/content/versions/{version}`, the `DocumentContentVersion` schema, the required `DocumentContent.currentVersion`, and the `X-Content-Version` download header. |
+| `asyncapi/document.yaml` | 1.4.0 | Additive | The `DocumentContentUploadedData` payload gains the required `version` member; `eventVersion` stays 1. |
+| `asyncapi/event-catalog.yaml` | 1.21.0 | Additive | No name is added or removed; the totals stay 201 published and 80 implemented (Document 21 published and 6 implemented). |
+
+Version semantics:
+
+- Every accepted `PUT .../content` appends one immutable revision and advances
+  the current pointer. Revisions start at 1 and increase by one per accepted
+  upload. The first upload and a replacement both create a revision; a failed
+  upload writes no revision and no event.
+- `GET .../content/versions` returns the revisions as a bare JSON array ordered
+  newest first (`version` descending). Each `DocumentContentVersion` is
+  `{documentId, version, fileName, contentType, sizeBytes, sha256, uploadedAt}`.
+  A document with no stored content has no revisions and returns `[]`; a
+  document outside the caller's tenant is 404.
+- `GET .../content/versions/{version}` streams the exact bytes of one revision
+  with the same representation headers as the current download: the stored
+  `Content-Type`, an attachment `Content-Disposition` built from that
+  revision's filename, `X-Content-SHA256` with the digest of the returned bytes,
+  and `X-Content-Version` repeating the revision. It is a binary response and
+  must not be parsed as JSON. There is no presigned URL and no `Range` support.
+- `X-EIA-Tenant` is required on both routes. A document outside the tenant is
+  404, indistinguishable from a missing document. An unknown revision,
+  including a number below 1, is 404 `CONTENT_VERSION_NOT_FOUND`; a non-numeric
+  `version` is 400 `INVALID_PARAMETER`. The expert returns the compact
+  `CONTENT_VERSION_NOT_FOUND` `ApiError`; the domain preserves the expert's
+  400/404 status and exposes it as an `application/problem+json` body.
+- `DocumentContent.currentVersion` names the newest revision and is the value in
+  the current download's `X-Content-Version` header. `GET .../content/metadata`
+  and the upload response both return it.
+- The accepted upload's `document.content.uploaded` payload now carries the
+  revision as `version` (in addition to `documentId`, `documentNumber`,
+  `fileName`, `contentType`, `sizeBytes`, and `sha256`). The revision is also
+  the `DocumentContent` aggregate version. The event name, channel, and
+  `eventVersion` 1 are unchanged, so no catalog name is added and no subscriber
+  needs a new subscription.
+- The history is nested under `/content/versions`; SPEC 11.6.10 mounts the
+  history at `GET /versions` and the version-creating command at `POST
+  /versions`. The upload is the version-creating command in this slice. The
+  SPEC path shape and the remaining presigned-download, rendition, OCR, hold,
+  package, request, signature, and retention gaps are recorded in M-40.
+- The validator requires both version routes, the tenant header and
+  `documentId` parameter, the required positive `version` path parameter, the
+  `DocumentContentVersion` array and fields, the four binary download headers,
+  the `CONTENT_VERSION_NOT_FOUND` and `INVALID_PARAMETER` documentation, the
+  `currentVersion` member, the required event-payload `version`, and the absence
+  of the implemented version paths from `x-planned-operations`; it also asserts
+  that `document.content.uploaded` remains the only `document.content.*` event.
+  The full run passes 12,657 checks.
 
 ### Policy billing contract (2026-10-20)
 
@@ -1944,9 +2011,14 @@ missing directory.
    document content operations with their shared `TenantHeader` and
    `documentId` parameter, the required `X-File-Name` and optional
    `Content-Type` upload headers, the binary request and 200 response bodies,
-   the `Content-Disposition` and `X-Content-SHA256` download headers, the
-   `DocumentContent` schema and its field bounds, the 400 `EMPTY_CONTENT` and
-   413 `FILE_TOO_LARGE` documentation, and the removal of the content path from
+   the `Content-Disposition`, `X-Content-SHA256`, and `X-Content-Version`
+   download headers, the `DocumentContent` schema and its field bounds
+   (including `currentVersion`), the 400 `EMPTY_CONTENT` and 413
+   `FILE_TOO_LARGE` documentation, the two content-version operations with
+   their `DocumentContentVersion` array and schema, the required positive
+   `version` path parameter, the four version-download headers, the
+   `CONTENT_VERSION_NOT_FOUND`/`INVALID_PARAMETER` documentation, and the
+   removal of the content and version paths from
    `x-planned-operations`, the ten search
    operations' shared parameters and `SearchResponse`/400/404 responses, the
    `SearchResponse` and `SearchItem` keys, the required 422/409/428 response
@@ -2023,7 +2095,7 @@ missing directory.
    `PolicyMassTortProfileUpdatedData` payload with its required
    identity, status, tort, trigger, allocation, and coverage-block members,
    the `DocumentContentUploadedData` payload with its required document
-   identity, filename, MIME type, size, and digest members, and
+   identity, revision, filename, MIME type, size, and digest members, and
    the `ContractSecurityData` payload with its contract/security identity,
    type, money, currency, and status members, and the
    `ContractSecurityStatusChangedData` payload with its contract/security
@@ -2050,7 +2122,9 @@ missing directory.
    (`requested`, `issued`, `settled`, and `cancelled`),
    `contract.security.recorded`, `contract.security.status-changed`,
    `policy.credit-note.issued`, `policy.credit-note.applied`, and
-   `policy.credit-note.cancelled`.
+   `policy.credit-note.cancelled`. The Document document must also keep
+   `document.content.uploaded` as its only `document.content.*` event, so the
+   content-version slice cannot add an event name silently.
 6. **JSON Schema checks.** All three files parse as JSON, declare the 2020-12
    dialect and an `$id`, carry the required members, keep required properties
    defined, and validate their own examples against a small schema subset.
@@ -2122,15 +2196,20 @@ missing directory.
   `linkedType`/`linkedId` target and no role, book, or DOC-09 target-existence
   check, and publish `document.link.added`/`.removed` rather than the SPEC
   `document.document.associated` (M-22, M-26);
-- document content is one current raw-byte row per document
-  (`PUT|GET /api/v1/documents/{documentId}/content` plus `GET .../content/metadata`)
-  with a 10 MiB cap, SHA-256 verification, and the new
-  `document.content.uploaded` event. It has no presigned download, `Range`
-  support, versions, renditions, OCR text, legal hold, package, request,
-  signature, or retention-disposition surface, and the SPEC 11.6.9 content fact
-  does not exist. A missing tenant on the content routes is still the compact
-  `TENANT_REQUIRED` 400 rather than the canonical Problem, and the download
-  exposes the stored bytes rather than a short-lived URL (M-02, M-22, M-40);
+- document content keeps one current raw-byte pointer per document plus an
+  append-only revision history
+  (`PUT|GET /api/v1/documents/{documentId}/content`, `GET .../content/metadata`,
+  and `GET .../content/versions` plus `GET .../content/versions/{version}`) with
+  a 10 MiB cap, SHA-256 verification, and the new
+  `document.content.uploaded` event. SPEC 11.6.10 mounts the history at
+  `/versions` and the version-creating command at `POST /versions`, while the
+  implemented history is under `/content/versions` and the upload creates the
+  revision; the slice has no presigned download, `Range` support, rendition,
+  OCR text, legal hold, package, request, signature, or retention-disposition
+  surface, and the SPEC 11.6.9 content fact does not exist. A missing tenant on
+  the content routes is still the compact `TENANT_REQUIRED` 400 rather than the
+  canonical Problem, and the download exposes the stored bytes rather than a
+  short-lived URL (M-02, M-22, M-40);
 - claim assignment is implemented on both claim verticals but has no SPEC 11.4.10
   or 11.5.10 route or SPEC 11.4.9/11.5.9 event name. The Assumed Claims domain
   still requires a team the contract and expert make optional, the Direct Claims

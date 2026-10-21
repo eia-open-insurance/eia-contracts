@@ -1526,13 +1526,28 @@ DOCUMENT_LINKED_TYPES = (
 
 DOCUMENT_LINK_REFERENCE_MAX_LENGTH = 64
 
-# Document content. One document owns one current content row (the upload is an
-# upsert), and the public surface is three routes. The metadata projection is
-# named DocumentContent because the bytes are not part of it.
+# Document content. One document owns one current content pointer and an
+# append-only revision history; every upload appends a revision and advances
+# the pointer. The public surface is five routes. The metadata projection is
+# named DocumentContent because the bytes are not part of it, and the history
+# projection is DocumentContentVersion.
 DOCUMENT_CONTENT_PATH = "/api/v1/documents/{documentId}/content"
 DOCUMENT_CONTENT_METADATA_PATH = "/api/v1/documents/{documentId}/content/metadata"
+DOCUMENT_CONTENT_VERSIONS_PATH = "/api/v1/documents/{documentId}/content/versions"
+DOCUMENT_CONTENT_VERSION_PATH = (
+    "/api/v1/documents/{documentId}/content/versions/{version}"
+)
 DOCUMENT_CONTENT_FIELDS = (
     "documentId",
+    "fileName",
+    "contentType",
+    "sizeBytes",
+    "sha256",
+    "uploadedAt",
+)
+DOCUMENT_CONTENT_VERSION_FIELDS = (
+    "documentId",
+    "version",
     "fileName",
     "contentType",
     "sizeBytes",
@@ -3034,6 +3049,8 @@ def check_document_content_openapi(contracts: ContractSet, document, relative: s
         ("put", DOCUMENT_CONTENT_PATH, "uploadDocumentContent"),
         ("get", DOCUMENT_CONTENT_PATH, "downloadDocumentContent"),
         ("get", DOCUMENT_CONTENT_METADATA_PATH, "getDocumentContentMetadata"),
+        ("get", DOCUMENT_CONTENT_VERSIONS_PATH, "listDocumentContentVersions"),
+        ("get", DOCUMENT_CONTENT_VERSION_PATH, "downloadDocumentContentVersion"),
     ):
         path_item = paths.get(content_path) if isinstance(paths, dict) else None
         operation = path_item.get(method) if isinstance(path_item, dict) else None
@@ -3172,7 +3189,12 @@ def check_document_content_openapi(contracts: ContractSet, document, relative: s
             headers = (
                 ok_response.get("headers") if isinstance(ok_response, dict) else {}
             ) or {}
-            for header_name in ("Content-Type", "Content-Disposition", "X-Content-SHA256"):
+            for header_name in (
+                "Content-Type",
+                "Content-Disposition",
+                "X-Content-SHA256",
+                "X-Content-Version",
+            ):
                 contracts.check(
                     header_name in headers,
                     f"{where}: 200 must document the {header_name} header",
@@ -3181,6 +3203,89 @@ def check_document_content_openapi(contracts: ContractSet, document, relative: s
             contracts.check(
                 sha256_schema.get("pattern") == "^[a-f0-9]{64}$",
                 f"{where}: X-Content-SHA256 must be a lowercase 64-character digest",
+            )
+            version_header_schema = (
+                (headers.get("X-Content-Version") or {}).get("schema") or {}
+            )
+            contracts.check(
+                version_header_schema.get("type") == "integer"
+                and version_header_schema.get("minimum") == 1,
+                f"{where}: X-Content-Version must be a positive integer",
+            )
+        elif content_path == DOCUMENT_CONTENT_VERSIONS_PATH:
+            ok_schema = _response_schema(operation, "200")
+            contracts.check(
+                isinstance(ok_schema, dict)
+                and ok_schema.get("type") == "array"
+                and str((ok_schema.get("items") or {}).get("$ref", "")).endswith(
+                    "/schemas/DocumentContentVersion"
+                ),
+                f"{where}: 200 must return an array of DocumentContentVersion",
+            )
+        elif content_path == DOCUMENT_CONTENT_VERSION_PATH:
+            version_parameter = _inline_parameter(operation, "version")
+            contracts.check(
+                isinstance(version_parameter, dict)
+                and version_parameter.get("in") == "path"
+                and version_parameter.get("required") is True,
+                f"{where}: must declare the required version path parameter",
+            )
+            version_schema = (
+                (version_parameter or {}).get("schema")
+                if isinstance(version_parameter, dict)
+                else None
+            ) or {}
+            contracts.check(
+                version_schema.get("type") == "integer"
+                and version_schema.get("minimum") == 1,
+                f"{where}: version path parameter must be a positive integer",
+            )
+            ok_response = responses.get("200")
+            ok_content = (
+                ok_response.get("content") if isinstance(ok_response, dict) else {}
+            ) or {}
+            binary_schema = None
+            for media_type, media_object in ok_content.items():
+                if media_type in ("*/*", "application/octet-stream") and isinstance(
+                    media_object, dict
+                ):
+                    binary_schema = media_object.get("schema")
+            contracts.check(
+                isinstance(binary_schema, dict)
+                and binary_schema.get("type") == "string"
+                and binary_schema.get("format") == "binary",
+                f"{where}: 200 must return a binary string body",
+            )
+            headers = (
+                ok_response.get("headers") if isinstance(ok_response, dict) else {}
+            ) or {}
+            for header_name in (
+                "Content-Type",
+                "Content-Disposition",
+                "X-Content-SHA256",
+                "X-Content-Version",
+            ):
+                contracts.check(
+                    header_name in headers,
+                    f"{where}: 200 must document the {header_name} header",
+                )
+            version_header_schema = (
+                (headers.get("X-Content-Version") or {}).get("schema") or {}
+            )
+            contracts.check(
+                version_header_schema.get("type") == "integer"
+                and version_header_schema.get("minimum") == 1,
+                f"{where}: X-Content-Version must be a positive integer",
+            )
+            description = str(operation.get("description") or "")
+            contracts.check(
+                "CONTENT_VERSION_NOT_FOUND" in description,
+                f"{where}: description must document 404 CONTENT_VERSION_NOT_FOUND",
+            )
+            contracts.check(
+                "INVALID_PARAMETER" in description,
+                f"{where}: description must document 400 INVALID_PARAMETER for a "
+                "non-numeric version",
             )
         else:
             ok_schema = _response_schema(operation, "200")
@@ -3245,9 +3350,84 @@ def check_document_content_openapi(contracts: ContractSet, document, relative: s
         (content_properties.get("uploadedAt") or {}).get("format") == "date-time",
         f"{relative}: DocumentContent.uploadedAt must be a date-time",
     )
+    current_version = content_properties.get("currentVersion") or {}
+    contracts.check(
+        current_version.get("type") == "integer"
+        and current_version.get("minimum") == 1,
+        f"{relative}: DocumentContent.currentVersion must be a positive integer",
+    )
+    contracts.check(
+        "currentVersion" in content_required,
+        f"{relative}: DocumentContent.required must list currentVersion",
+    )
+
+    version_schema = schemas.get("DocumentContentVersion") or {}
+    version_properties = version_schema.get("properties") or {}
+    version_required = set(version_schema.get("required") or [])
+    contracts.check(
+        version_schema.get("type") == "object",
+        f"{relative}: DocumentContentVersion must be an object schema",
+    )
+    for field in DOCUMENT_CONTENT_VERSION_FIELDS:
+        contracts.check(
+            field in version_properties,
+            f"{relative}: DocumentContentVersion.properties.{field} is required",
+        )
+        contracts.check(
+            field in version_required,
+            f"{relative}: DocumentContentVersion.required must list {field}",
+        )
+    contracts.check(
+        (version_properties.get("documentId") or {}).get("format") == "uuid",
+        f"{relative}: DocumentContentVersion.documentId must be a uuid",
+    )
+    revision = version_properties.get("version") or {}
+    contracts.check(
+        revision.get("type") == "integer" and revision.get("minimum") == 1,
+        f"{relative}: DocumentContentVersion.version must be a positive integer",
+    )
+    contracts.check(
+        (version_properties.get("fileName") or {}).get("maxLength")
+        == DOCUMENT_CONTENT_FILE_NAME_MAX_LENGTH,
+        f"{relative}: DocumentContentVersion.fileName maxLength must be "
+        f"{DOCUMENT_CONTENT_FILE_NAME_MAX_LENGTH}",
+    )
+    contracts.check(
+        (version_properties.get("contentType") or {}).get("maxLength")
+        == DOCUMENT_CONTENT_TYPE_MAX_LENGTH,
+        f"{relative}: DocumentContentVersion.contentType maxLength must be "
+        f"{DOCUMENT_CONTENT_TYPE_MAX_LENGTH}",
+    )
+    version_size = version_properties.get("sizeBytes") or {}
+    contracts.check(
+        (
+            version_size.get("type"),
+            version_size.get("format"),
+            version_size.get("minimum"),
+            version_size.get("maximum"),
+        )
+        == ("integer", "int64", 0, DOCUMENT_CONTENT_MAX_BYTES),
+        f"{relative}: DocumentContentVersion.sizeBytes must be an int64 from 0 to "
+        f"{DOCUMENT_CONTENT_MAX_BYTES}",
+    )
+    contracts.check(
+        (version_properties.get("sha256") or {}).get("pattern")
+        == "^[a-f0-9]{64}$",
+        f"{relative}: DocumentContentVersion.sha256 must be a lowercase "
+        "64-character digest",
+    )
+    contracts.check(
+        (version_properties.get("uploadedAt") or {}).get("format") == "date-time",
+        f"{relative}: DocumentContentVersion.uploadedAt must be a date-time",
+    )
 
     planned = document.get("x-planned-operations") or []
-    for implemented_path in (DOCUMENT_CONTENT_PATH, DOCUMENT_CONTENT_METADATA_PATH):
+    for implemented_path in (
+        DOCUMENT_CONTENT_PATH,
+        DOCUMENT_CONTENT_METADATA_PATH,
+        DOCUMENT_CONTENT_VERSIONS_PATH,
+        DOCUMENT_CONTENT_VERSION_PATH,
+    ):
         contracts.check(
             not any(
                 isinstance(entry, dict) and entry.get("path") == implemented_path
@@ -7962,6 +8142,16 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
                 if isinstance(operation, dict)
                 and operation.get("action") == "send"
             }
+            content_event_names = {
+                address
+                for address in addresses
+                if isinstance(address, str) and address.startswith("document.content.")
+            }
+            contracts.check(
+                content_event_names == {DOCUMENT_CONTENT_EVENT},
+                f"{relative}: {DOCUMENT_CONTENT_EVENT} must remain the only "
+                "document.content.* event name; the version slice adds no event",
+            )
             contracts.check(
                 DOCUMENT_CONTENT_EVENT in addresses,
                 f"{relative}: required content event channel "
@@ -8016,6 +8206,7 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
             for field in (
                 "documentId",
                 "documentNumber",
+                "version",
                 "fileName",
                 "contentType",
                 "sizeBytes",
@@ -8034,6 +8225,13 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
             contracts.check(
                 (content_properties.get("documentId") or {}).get("format") == "uuid",
                 f"{relative}: DocumentContentUploadedData.documentId must be a uuid",
+            )
+            content_revision = content_properties.get("version") or {}
+            contracts.check(
+                content_revision.get("type") == "integer"
+                and content_revision.get("minimum") == 1,
+                f"{relative}: DocumentContentUploadedData.version must be a "
+                "positive integer",
             )
             content_size = content_properties.get("sizeBytes") or {}
             contracts.check(

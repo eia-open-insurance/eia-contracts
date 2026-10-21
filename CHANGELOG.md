@@ -971,6 +971,42 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   and the validation evidence.
 - `python scripts/validate_contracts.py` passes 12,561 checks with 0 failures.
 
+### Added in the Document content version contract (2026-10-21)
+
+- `openapi/document.yaml` is 1.4.0: adds
+  `GET /api/v1/documents/{documentId}/content/versions` (bare
+  `DocumentContentVersion[]`, newest first) and
+  `GET /api/v1/documents/{documentId}/content/versions/{version}` (binary
+  revision download), the seven-field `DocumentContentVersion` schema, the
+  required `DocumentContent.currentVersion` member, and the `X-Content-Version`
+  header on both content downloads. Every upload now appends an immutable
+  revision and advances the current pointer. The two SPEC 11.6.10 `/versions`
+  entries are removed from `x-planned-operations` because the history is
+  implemented (nested under `/content/versions`) and the upload is the
+  version-creating command. The change is additive.
+- `asyncapi/document.yaml` is 1.4.0: the implemented
+  `document.content.uploaded` payload gains the required `version` member (the
+  content revision and aggregate version). No channel or event name is added,
+  and `eventVersion` stays 1.
+- `asyncapi/event-catalog.yaml` is 1.21.0: no published or implemented name is
+  added or removed, so the totals stay 201 published and 80 implemented
+  (Document 21 published and 6 implemented); the description records the
+  payload-only change.
+- `scripts/validate_contracts.py` requires the two version operations, the
+  tenant header and `documentId` parameter, the required positive `version`
+  path parameter, the `DocumentContentVersion` array and schema fields, the
+  four binary download headers, the `CONTENT_VERSION_NOT_FOUND` and
+  `INVALID_PARAMETER` documentation, the required `DocumentContent.currentVersion`,
+  the required payload `version`, and the absence of the implemented version
+  paths from `x-planned-operations`; it also asserts that
+  `document.content.uploaded` remains the only `document.content.*` event.
+- `README.md` records the two routes, the revision rules, the response shapes,
+  the headers, the error codes, the event-payload change, the additive versions,
+  and the validation count; `MISMATCHES.md` updates M-40 for the implemented
+  revision history, the `/content/versions` path, the payload `version`, and the
+  remaining SPEC gaps, and refreshes the validation evidence.
+- `python scripts/validate_contracts.py` passes 12,657 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

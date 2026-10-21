@@ -1,28 +1,41 @@
 openapi: 3.1.0
 info:
   title: EIA Document API
-  version: 1.3.0
+  version: 1.4.0
   summary: Document metadata, lifecycle, association-link, and content administration and the Document expert API.
   description: >
     This document describes the implemented public Document domain API and the
     internal Document expert API. The authoritative requirement is SPEC 11.6
     and SPEC 12; the implemented surface is the first vertical slice.
 
-    The slice carries metadata, lifecycle, association links, and the current
-    content bytes. Renditions, versions, OCR text, holds, packages, requests,
-    signatures, and retention disposition from SPEC 11.6 are planned and listed
-    under x-planned-operations.
+    The slice carries metadata, lifecycle, association links, the current
+    content bytes, and the retained content-revision history. Renditions, OCR
+    text, holds, packages, requests, signatures, and retention disposition from
+    SPEC 11.6 are planned and listed under x-planned-operations.
 
     The 2026-10-20 content slice adds the raw `PUT|GET
     /api/v1/documents/{documentId}/content` routes, `GET
     /api/v1/documents/{documentId}/content/metadata`, the `DocumentContent`
     projection, the `X-File-Name` upload header, and the
-    `document.content.uploaded` event. The upload replaces the stored bytes
-    (an upsert), is capped at 10 MiB, rejects an empty body, and returns the
-    metadata projection; the download streams the bytes with `Content-Type`,
-    `Content-Disposition`, and `X-Content-SHA256`. Both public routes require
-    `X-EIA-Tenant`; the expert also accepts `tenantId` as a fallback. The SPEC
-    11.6.10 presigned download and the renditions remain planned.
+    `document.content.uploaded` event. The upload replaced the stored bytes (an
+    upsert) in that slice, is capped at 10 MiB, rejects an empty body, and
+    returns the metadata projection; the download streams the bytes with
+    `Content-Type`, `Content-Disposition`, `X-Content-SHA256`, and
+    `X-Content-Version`. Both public routes require `X-EIA-Tenant`; the expert also accepts `tenantId` as
+    a fallback. The SPEC 11.6.10 presigned download and the renditions remain
+    planned.
+
+    The 2026-10-21 version slice appends every accepted upload as an immutable
+    content revision. `GET /api/v1/documents/{documentId}/content/versions`
+    lists the revisions newest first and `GET
+    /api/v1/documents/{documentId}/content/versions/{version}` streams one
+    revision with the same representation headers as the current download. The
+    `DocumentContent` projection and the upload response carry `currentVersion`;
+    the `document.content.uploaded` payload carries the revision as `version`
+    while the event keeps `eventVersion` 1. No event name is added. The SPEC
+    11.6.10 version routes are `/versions` (GET and POST); the implemented
+    history is nested under `/content/versions` and the version-creating
+    command is the content upload (MISMATCHES.md M-40).
 
     The 2026-10-20 link slice adds `GET|POST
     /api/v1/documents/{documentId}/links` and `DELETE
@@ -201,18 +214,19 @@ paths:
       description: >
         Raw-byte upload. `Content-Type` is the file MIME type and defaults to
         `application/octet-stream` when omitted; `X-File-Name` is required and
-        carries the URL-encoded filename. The body replaces the document's
-        current content (an upsert) and the 200 response is the
-        `DocumentContent` metadata, including the lowercase SHA-256 digest of
-        the exact stored bytes. An empty body is 400 `EMPTY_CONTENT`; a body
-        above 10 MiB (10,485,760 bytes) is 413 `FILE_TOO_LARGE`. A blank or
-        malformed `X-File-Name` (400 `FILE_NAME_REQUIRED`/`INVALID_FILE_NAME`),
-        a decoded name longer than 255 characters (400 `FILE_NAME_TOO_LONG`),
-        and a non-concrete or invalid `Content-Type` (400
-        `INVALID_CONTENT_TYPE`) are rejected before the bytes are stored. A
-        document outside the caller's tenant is 404. Each accepted write
-        appends `document.content.uploaded` to the outbox in the same
-        transaction.
+        carries the URL-encoded filename. Every accepted body is appended as an
+        immutable content revision and becomes the document's current content;
+        the 200 response is the `DocumentContent` metadata, including the
+        revision as `currentVersion` and the lowercase SHA-256 digest of the
+        exact stored bytes. An empty body is 400 `EMPTY_CONTENT`; a body above
+        10 MiB (10,485,760 bytes) is 413 `FILE_TOO_LARGE`. A blank or malformed
+        `X-File-Name` (400 `FILE_NAME_REQUIRED`/`INVALID_FILE_NAME`), a decoded
+        name longer than 255 characters (400 `FILE_NAME_TOO_LONG`), and a
+        non-concrete or invalid `Content-Type` (400 `INVALID_CONTENT_TYPE`) are
+        rejected before the bytes are stored. A document outside the caller's
+        tenant is 404. Each accepted write appends `document.content.uploaded`
+        to the outbox in the same transaction, with the new revision as the
+        payload `version` and the aggregate version.
       x-raw-body: true
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
@@ -257,7 +271,9 @@ paths:
               format: binary
       responses:
         '200':
-          description: Content stored; the metadata projection of the stored bytes.
+          description: >
+            Content revision stored; the metadata projection of the current
+            bytes and their revision number.
           content:
             application/json:
               schema:
@@ -298,11 +314,12 @@ paths:
         Returns the stored bytes unchanged. The response is binary: the stored
         file MIME type is the `Content-Type`, `Content-Disposition` is an
         attachment built from the stored filename (with the RFC 5987
-        `filename*` parameter for a non-ASCII name), and `X-Content-SHA256`
-        carries the lowercase digest of the bytes. A document outside the
-        caller's tenant is 404; a document with no stored content is 404
-        `CONTENT_NOT_FOUND`. There is no presigned URL, no `Range` support, and
-        the response must not be parsed as JSON.
+        `filename*` parameter for a non-ASCII name), `X-Content-SHA256`
+        carries the lowercase digest of the bytes, and `X-Content-Version`
+        carries the revision number naming the newest retained revision. A
+        document outside the caller's tenant is 404; a document with no stored
+        content is 404 `CONTENT_NOT_FOUND`. There is no presigned URL, no
+        `Range` support, and the response must not be parsed as JSON.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - name: documentId
@@ -337,6 +354,13 @@ paths:
               schema:
                 type: string
                 pattern: '^[a-f0-9]{64}$'
+            X-Content-Version:
+              description: >
+                Revision number of the returned bytes, the same value as
+                `currentVersion` in the metadata projection.
+              schema:
+                type: integer
+                minimum: 1
           content:
             '*/*':
               schema:
@@ -358,9 +382,10 @@ paths:
         Returns the `DocumentContent` projection without the bytes. The
         projection carries the owning document, the stored display filename,
         the stored MIME type, the exact size in bytes, the lowercase SHA-256
-        digest, and the upload instant. A document outside the caller's tenant
-        is 404, indistinguishable from a missing document; a document with no
-        stored content is 404 `CONTENT_NOT_FOUND`.
+        digest, the upload instant, and the current revision number. A document
+        outside the caller's tenant is 404, indistinguishable from a missing
+        document; a document with no stored content is 404
+        `CONTENT_NOT_FOUND`.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - name: documentId
@@ -376,6 +401,121 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DocumentContent'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/documents/{documentId}/content/versions:
+    get:
+      operationId: listDocumentContentVersions
+      tags:
+        - Document
+      summary: List the retained content revisions of a document.
+      description: >
+        Returns the document's immutable content revisions as a bare JSON array
+        ordered newest first (`version` descending). Each entry carries the
+        owning document, the revision number, the stored display filename, the
+        stored MIME type, the exact size in bytes, the lowercase SHA-256 digest,
+        and the upload instant. A document with no stored content has no
+        revisions and returns an empty array. A document outside the caller's
+        tenant is 404, indistinguishable from a missing document. The SPEC
+        11.6.10 history route is `/versions`; the implemented history is nested
+        under `/content/versions` (MISMATCHES.md M-40).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: documentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Retained content revisions, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DocumentContentVersion'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/documents/{documentId}/content/versions/{version}:
+    get:
+      operationId: downloadDocumentContentVersion
+      tags:
+        - Document
+      summary: Stream one retained content revision of a document.
+      description: >
+        Returns the stored bytes of one retained revision unchanged. The
+        response is binary: the stored file MIME type is the `Content-Type`,
+        `Content-Disposition` is an attachment built from the revision's
+        filename, `X-Content-SHA256` carries the lowercase digest of the bytes,
+        and `X-Content-Version` repeats the requested revision. Revisions start
+        at 1 and increase by one per accepted upload. A document outside the
+        caller's tenant is 404, indistinguishable from a missing document; a
+        revision that does not exist, including a number below 1, is 404
+        `CONTENT_VERSION_NOT_FOUND`. A non-numeric `version` is 400
+        `INVALID_PARAMETER`. There is no presigned URL and no `Range` support.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: documentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: version
+          in: path
+          required: true
+          description: >
+            Revision number from `GET .../content/versions`, starting at 1.
+            A non-numeric value is 400 `INVALID_PARAMETER`; an unknown or
+            non-positive revision is 404 `CONTENT_VERSION_NOT_FOUND`.
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        '200':
+          description: The bytes of the requested content revision.
+          headers:
+            Content-Type:
+              description: >
+                The stored file MIME type of the revision, for example
+                `application/pdf`. Falls back to `application/octet-stream`
+                when the stored type cannot be parsed.
+              schema:
+                type: string
+            Content-Disposition:
+              description: >
+                Attachment disposition with the revision's stored filename, for
+                example `attachment; filename="policy schedule v1.pdf"`. A
+                non-ASCII name also carries `filename*=UTF-8''...`.
+              schema:
+                type: string
+            X-Content-SHA256:
+              description: >
+                Lowercase hexadecimal SHA-256 of the returned revision bytes.
+              schema:
+                type: string
+                pattern: '^[a-f0-9]{64}$'
+            X-Content-Version:
+              description: Revision number of the returned bytes.
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            '*/*':
+              schema:
+                type: string
+                format: binary
         '400':
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
@@ -859,6 +999,8 @@ components:
         /api/v1/documents/{documentId}/content` to stream them. The digest is
         computed over the exact stored bytes and is repeated in the download's
         `X-Content-SHA256` header, so a caller can verify the transfer.
+        `currentVersion` names the newest retained revision, which is the
+        revision returned by the current download.
       required:
         - documentId
         - fileName
@@ -866,6 +1008,7 @@ components:
         - sizeBytes
         - sha256
         - uploadedAt
+        - currentVersion
       properties:
         documentId:
           type: string
@@ -905,7 +1048,84 @@ components:
         uploadedAt:
           type: string
           format: date-time
-          description: Instant of the most recent accepted upload (an upsert).
+          description: Instant of the most recent accepted upload.
+          examples:
+            - '2026-10-20T09:30:00Z'
+        currentVersion:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >
+            Revision number of the stored bytes, starting at 1 for the first
+            upload and increasing by one per accepted upload. It is the newest
+            entry in the retained history and the value carried by the current
+            download's `X-Content-Version` header.
+          examples:
+            - 2
+    DocumentContentVersion:
+      type: object
+      description: >
+        Metadata of one immutable content revision retained for a document. The
+        bytes are not part of the projection; use `GET
+        /api/v1/documents/{documentId}/content/versions/{version}` to stream
+        them. `version` is also the aggregate version of the
+        `document.content.uploaded` fact written with the revision.
+      required:
+        - documentId
+        - version
+        - fileName
+        - contentType
+        - sizeBytes
+        - sha256
+        - uploadedAt
+      properties:
+        documentId:
+          type: string
+          format: uuid
+          description: Owning document, within the caller's tenant.
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >
+            Revision number, starting at 1 for the first upload and increasing
+            by one per accepted upload.
+          examples:
+            - 1
+        fileName:
+          type: string
+          maxLength: 255
+          description: >
+            Display filename stored with this revision. Any directory component
+            supplied on upload was removed before the name was stored.
+          examples:
+            - policy schedule.pdf
+        contentType:
+          type: string
+          maxLength: 128
+          description: >
+            Stored file MIME type without parameters, for example
+            `application/pdf`.
+          examples:
+            - application/pdf
+        sizeBytes:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 10485760
+          description: Exact size of the revision in bytes. The maximum is 10 MiB.
+          examples:
+            - 27
+        sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          description: Lowercase hexadecimal SHA-256 digest of the revision bytes.
+          examples:
+            - 9f2c5d0f8f0d1c9a5f0f0f3a6b8c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f607182
+        uploadedAt:
+          type: string
+          format: date-time
+          description: Instant at which this revision was accepted.
           examples:
             - '2026-10-20T09:30:00Z'
     DocumentType:
@@ -1139,7 +1359,7 @@ components:
 x-vertical: document
 x-implementation:
   status: implemented
-  verifiedAt: '2026-10-20'
+  verifiedAt: '2026-10-21'
   verifiedAgainst:
     - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentController.java
     - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentSearchResponse.java
@@ -1147,6 +1367,7 @@ x-implementation:
     - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentService.java
     - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentExpertClient.java
     - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentContentMetadata.java
+    - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentContentVersion.java
     - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentContentDownload.java
     - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentContentPolicy.java
     - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentContentSizeLimitFilter.java
@@ -1157,9 +1378,14 @@ x-implementation:
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentQueryController.java
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentContentController.java
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentContentService.java
+    - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentContentRepository.java
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentContentMetadata.java
+    - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentContentVersion.java
+    - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentContentVersionMetadata.java
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentContentRules.java
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentContentEvents.java
+    - repos/eia-document-expert/src/main/java/com/eia/document/expert/ContentVersionNotFoundException.java
+    - repos/eia-document-expert/src/main/java/com/eia/document/expert/ApiExceptionHandler.java
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentLinkController.java
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentLinkDto.java
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/CreateDocumentLinkRequest.java
@@ -1170,37 +1396,35 @@ x-implementation:
     Vertical-specific ApiError {code, message, details[{field, message}]}. Not
     the canonical Problem envelope yet. Content uploads add a
     `application/problem+json` 413 `FILE_TOO_LARGE` before the expert call and
-    preserve the expert's 400/404 problem bodies, but a missing tenant on a
-    content route is still the compact `TENANT_REQUIRED` ApiError.
+    preserve the expert's 400/404 problem bodies, including the version routes'
+    `CONTENT_VERSION_NOT_FOUND`, but a missing tenant on a content route is
+    still the compact `TENANT_REQUIRED` ApiError.
 x-compatibility:
-  contractVersion: 1.3.0
-  previousContractVersion: 1.2.0
+  contractVersion: 1.4.0
+  previousContractVersion: 1.3.0
   breaking: []
   compatible:
-    - Adds PUT and GET /api/v1/documents/{documentId}/content and GET /api/v1/documents/{documentId}/content/metadata.
-    - Adds the DocumentContent schema for the content metadata projection.
-    - Documents the X-File-Name and Content-Type upload headers, the Content-Disposition and X-Content-SHA256 download headers, and the 400 EMPTY_CONTENT and 413 FILE_TOO_LARGE errors.
-    - Removes the implemented content download path from x-planned-operations.
-    - Adds the document.content.uploaded event to asyncapi/document.yaml and the catalog.
+    - Adds GET /api/v1/documents/{documentId}/content/versions and GET /api/v1/documents/{documentId}/content/versions/{version}.
+    - Adds the DocumentContentVersion schema for the retained revision metadata projection.
+    - Adds currentVersion to the DocumentContent metadata projection and the X-Content-Version header to both content downloads.
+    - Adds the required version member to the document.content.uploaded payload while keeping eventVersion 1.
+    - Removes the implemented content history from x-planned-operations; the upload is the version-creating command.
   note: >
-    The content surface is additive over 1.2.0: no existing path, request
-    field, response field, or event changes. The public routes require
-    X-EIA-Tenant; the expert accepts tenantId as a fallback. The upload is an
-    upsert of one current content row per document, so versions, renditions,
-    and presigned downloads remain planned.
+    The version surface is additive over 1.3.0: no existing path, request field,
+    response field, or event name is removed or changes meaning. The current
+    content upload now appends an immutable revision and advances the current
+    pointer; a replacement still becomes the bytes served by the current
+    download. The metadata projection and the upload response gain a required
+    currentVersion member, and the event payload gains a required version
+    member, so a strict consumer must tolerate the two new fields (EV-05). The
+    SPEC 11.6.10 `/versions` route, renditions, and presigned downloads remain
+    unavailable; the implemented history is nested under `/content/versions`
+    (MISMATCHES.md M-40).
 x-planned-operations:
   - method: GET
     path: /api/v1/documents/{documentId}/preview
     spec: SPEC 11.6.10
     note: Preview rendition.
-  - method: GET
-    path: /api/v1/documents/{documentId}/versions
-    spec: SPEC 11.6.10
-    note: Versions.
-  - method: POST
-    path: /api/v1/documents/{documentId}/versions
-    spec: SPEC 11.6.10
-    note: New version.
   - method: POST
     path: /api/v1/documents/{documentId}/associations
     spec: SPEC 11.6.10
