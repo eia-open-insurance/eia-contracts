@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Policy API
-  version: 2.8.0
+  version: 2.9.0
   summary: Direct-book policy administration and the Policy expert API.
   description: >
     This document describes the implemented public Policy domain API and the
@@ -166,6 +166,27 @@ info:
       `/api/v1/policy/programs`. MISMATCHES.md M-01 and M-39 record the
       deviation. Neither mutation accepts `Idempotency-Key` or `If-Match`
       (M-06, M-07).
+
+    The 2026-10-20 credit-note slice adds the policy billing adjustment
+    resource:
+
+    - `GET/POST /api/v1/policies/{policyId}/credit-notes` lists the policy's
+      notes newest first and requests a new DRAFT note. `PATCH
+      .../credit-notes/{creditNoteId}/status` advances a note once through
+      DRAFT -> ISSUED -> APPLIED, with CANCELLED reachable from DRAFT or ISSUED;
+      APPLIED and CANCELLED are terminal.
+    - The projection is the ten-field `CreditNote`; the server owns
+      `creditNoteId`, `noteNumber` (`CN-{7 digits}`), the DRAFT creation state,
+      the timestamps, and the policy-version bump. `amount` must be greater than
+      zero, `currency` must equal the policy premium currency, and `reason` is
+      optional and capped at 500 characters.
+    - `X-EIA-Tenant` is required and `X-EIA-Book` is required and fixed to
+      DIRECT. Each accepted transition writes `policy.credit-note.issued`,
+      `policy.credit-note.applied`, or `policy.credit-note.cancelled` in the
+      same transaction as the note row and the policy-version bump; creation
+      itself writes no event. The SPEC 11.2.13 route, approval/SAP lifecycle,
+      reason vocabulary, and event names differ; MISMATCHES.md M-22 and M-41
+      record the deviation.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -1651,6 +1672,176 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DunningAction'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/credit-notes:
+    get:
+      operationId: listPolicyCreditNotes
+      tags:
+        - Policy
+      summary: List the credit notes of a direct policy.
+      description: >
+        Returns the policy's credit notes as a bare newest-first array, ordered
+        by `createdAt` descending with `noteNumber` as the tie-breaker. Credit
+        notes are a DIRECT-book billing resource (SPEC 11.2.13 billing
+        adjustments): the domain forwards the tenant and DIRECT book to the
+        Policy expert and preserves expert 400/404/409 problems unchanged.
+
+        `status` is the note lifecycle state: `DRAFT` before issue, `ISSUED`
+        after the issue transition, `APPLIED` once applied to the receivable,
+        or `CANCELLED`. `issuedAt` is stamped by ISSUED and preserved by the
+        later transitions; `appliedAt` is stamped only by APPLIED. `reason` is
+        optional and is null when it was omitted or blank.
+
+        A policy with no note returns an empty array. An unknown policy or a
+        policy in another tenant is 404 `POLICY_NOT_FOUND`; another book is
+        hidden as 404 `BOOK_SCOPE_VIOLATION`. A malformed `policyId` is 400
+        `INVALID_PARAMETER`; a missing tenant is 400 `MISSING_TENANT_HEADER`.
+        The canonical contract requires `X-EIA-Book: DIRECT`; the domain
+        currently accepts an absent header for compatibility with the other
+        Policy proxy routes (MISMATCHES.md M-41). The read writes no event.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The policy's credit notes, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CreditNote'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createPolicyCreditNote
+      tags:
+        - Policy
+      summary: Request a draft credit note for a direct policy.
+      description: >
+        Creates a DRAFT credit note for the policy and returns 201 with the
+        stored projection. `amount` must be a positive money decimal string;
+        zero, a negative value, and a missing value are 400
+        `VALIDATION_ERROR`, while a positive value that rounds to zero at scale
+        4 is 400 `INVALID_CREDIT_NOTE_AMOUNT` from the expert. `currency` is
+        trimmed and upper-cased and must equal the policy premium currency; a
+        blank or malformed value is 400 `VALIDATION_ERROR` and a well-formed
+        foreign currency is 400 `CURRENCY_MISMATCH`. `reason` is optional,
+        trimmed, stored as null when blank, and capped at 500 characters; a
+        longer value is 400 `VALIDATION_ERROR` (the expert's
+        `INVALID_CREDIT_NOTE_REASON` is the internal backstop). A malformed
+        body is 400 `VALIDATION_ERROR`.
+
+        `creditNoteId`, `noteNumber` (`CN-{7 digits}`), status DRAFT,
+        `issuedAt`/`appliedAt` null, and `createdAt` are server-owned. The
+        accepted create bumps the policy row version but emits no lifecycle
+        event; only ISSUED, APPLIED, and CANCELLED do. An unknown policy or a
+        policy in another tenant is 404 `POLICY_NOT_FOUND`; another book is
+        hidden as 404 `BOOK_SCOPE_VIOLATION`. A concurrent policy change is 409
+        `CONCURRENT_MODIFICATION`. The command accepts no `Idempotency-Key` or
+        `If-Match` in this slice (M-06, M-07).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCreditNoteRequest'
+      responses:
+        '201':
+          description: The stored DRAFT credit note.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreditNote'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/credit-notes/{creditNoteId}/status:
+    patch:
+      operationId: updatePolicyCreditNoteStatus
+      tags:
+        - Policy
+      summary: Advance a credit note through its status lifecycle.
+      description: >
+        Advances one credit note through the expert-owned lifecycle and returns
+        the updated projection. The only allowed edges are DRAFT -> ISSUED,
+        DRAFT -> CANCELLED, ISSUED -> APPLIED, and ISSUED -> CANCELLED.
+        APPLIED and CANCELLED are terminal, so any later transition, including
+        a replay of the same terminal status, is 409
+        `INVALID_CREDIT_NOTE_TRANSITION` with `meta.currentStatus` and
+        `meta.targetStatus`. `status` is trimmed and upper-cased; DRAFT and
+        unknown values are 400 `INVALID_CREDIT_NOTE_STATUS`, and a blank or
+        missing value is 400 `VALIDATION_ERROR`.
+
+        ISSUED stamps `issuedAt`; APPLIED stamps `appliedAt`; CANCELLED stamps
+        neither and preserves an `issuedAt` the note already carries. The
+        accepted transition bumps the policy row version and writes
+        `policy.credit-note.issued`, `policy.credit-note.applied`, or
+        `policy.credit-note.cancelled` in the same transaction as the row, so a
+        rejection writes neither. An unknown policy or credit note, including a
+        note under another policy or tenant, is 404 `POLICY_NOT_FOUND` or
+        `CREDIT_NOTE_NOT_FOUND`; another book is 404 `BOOK_SCOPE_VIOLATION`;
+        a concurrent change is 409 `CONCURRENT_MODIFICATION`. The command
+        accepts no `Idempotency-Key` or `If-Match` (M-06, M-07).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: creditNoteId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCreditNoteStatusRequest'
+      responses:
+        '200':
+          description: The updated credit note.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreditNote'
         '400':
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
@@ -4930,6 +5121,134 @@ components:
           type: [string, 'null']
           format: uuid
           description: Program to assign; null clears the policy's program link.
+    CreditNote:
+      type: object
+      description: >
+        Public projection of one policy billing credit note (SPEC 11.2.13
+        billing adjustments). A note is created DRAFT for the policy premium
+        currency and advances once through DRAFT -> ISSUED -> APPLIED, with
+        CANCELLED reachable from DRAFT or ISSUED. APPLIED and CANCELLED are
+        terminal. `creditNoteId` is the domain's public name for the expert row
+        id; `noteNumber` is server-generated as `CN-{7 digits}` and is unique
+        per policy.
+        `issuedAt` is stamped by ISSUED and preserved afterwards; `appliedAt`
+        is stamped only by APPLIED; `createdAt` is the request instant.
+        `reason` is optional and null when it was omitted or blank. The
+        projection does not expose `tenantId`. The lifecycle, reason freedom,
+        and event names are narrower than the SPEC `credit_note_request`
+        (MISMATCHES.md M-41).
+      required:
+        - creditNoteId
+        - noteNumber
+        - policyId
+        - amount
+        - currency
+        - reason
+        - status
+        - issuedAt
+        - appliedAt
+        - createdAt
+      properties:
+        creditNoteId:
+          type: string
+          format: uuid
+        noteNumber:
+          type: string
+          maxLength: 32
+          description: Server-generated as `CN-{7 digits}` and unique per policy.
+          examples:
+            - CN-0000001
+        policyId:
+          type: string
+          format: uuid
+        amount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        reason:
+          type: [string, 'null']
+          maxLength: 500
+          description: >
+            Optional free-text adjustment reason. Blank input is stored as
+            null. The SPEC 11.2.13 credit-note reason enum is not enforced
+            (M-41).
+        status:
+          $ref: '#/components/schemas/CreditNoteStatus'
+        issuedAt:
+          type: [string, 'null']
+          format: date-time
+          description: Stamped by the ISSUED transition; null before it.
+        appliedAt:
+          type: [string, 'null']
+          format: date-time
+          description: Stamped by the APPLIED transition; null otherwise.
+        createdAt:
+          type: string
+          format: date-time
+    CreditNoteStatus:
+      type: string
+      description: >
+        Closed credit-note lifecycle vocabulary. A note is created DRAFT; the
+        public status command accepts only ISSUED, APPLIED, or CANCELLED.
+        APPLIED and CANCELLED are terminal. The SPEC `credit_note_request`
+        status set is REQUESTED/APPROVED/SENT_TO_SAP/ISSUED/REJECTED instead
+        (M-41).
+      enum:
+        - DRAFT
+        - ISSUED
+        - APPLIED
+        - CANCELLED
+    CreateCreditNoteRequest:
+      type: object
+      description: >
+        Request a DRAFT credit note for a direct policy. `amount` is a positive
+        money decimal string; zero, a negative value, and a missing value are
+        400 `VALIDATION_ERROR`, while a positive value that rounds to zero at
+        scale 4 is 400 `INVALID_CREDIT_NOTE_AMOUNT` from the expert. `currency`
+        is trimmed, upper-cased, and must equal the policy premium currency; a
+        blank or malformed value is 400 `VALIDATION_ERROR` and a well-formed
+        foreign currency is 400 `CURRENCY_MISMATCH`. `reason` is optional,
+        trimmed, stored as null when blank, and capped at 500 characters; a
+        longer value is 400 `VALIDATION_ERROR` (the expert's
+        `INVALID_CREDIT_NOTE_REASON` is the internal backstop). The identity,
+        note number, DRAFT status, and timestamps are server-owned.
+      required:
+        - amount
+        - currency
+      properties:
+        amount:
+          type: string
+          description: >
+            Positive decimal money as a string with at most four fraction
+            digits (SPEC 10.3). Never a JSON number; zero and negative values
+            are rejected.
+          pattern: '^(?!0(?:\.0{1,4})?$)(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,4})?$'
+          examples:
+            - '1250.50'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+          description: Must equal the policy premium currency.
+        reason:
+          type: [string, 'null']
+          maxLength: 500
+          description: Optional free-text reason; blank input is stored as null.
+    UpdateCreditNoteStatusRequest:
+      type: object
+      description: >
+        Target status for a credit-note transition. DRAFT is the creation state
+        only and is rejected here; an unknown value is 400
+        `INVALID_CREDIT_NOTE_STATUS`. The expert applies the transition graph
+        and returns 409 `INVALID_CREDIT_NOTE_TRANSITION` for an illegal or
+        repeated terminal edge.
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - ISSUED
+            - APPLIED
+            - CANCELLED
 x-vertical: policy
 x-implementation:
   status: implemented
@@ -5027,6 +5346,24 @@ x-implementation:
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/PolicyProgramServiceTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/PolicyProgramIntegrationTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/ProgramRulesTest.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyCreditNoteController.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyCreditNoteService.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/CreditNote.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/CreateCreditNoteCommand.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/UpdateCreditNoteStatusCommand.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/CreditNoteController.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/CreditNoteService.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/CreditNoteRules.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/CreditNoteRepository.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyCreditNote.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/CreateCreditNoteRequest.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/UpdateCreditNoteStatusRequest.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/PolicyCreditNoteControllerTest.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/PolicyCreditNoteServiceTest.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/PolicyCreditNoteClientTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/CreditNoteControllerTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/CreditNoteServiceTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/CreditNoteRulesTest.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyVersionController.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/CoverageController.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/EndorsementController.java
@@ -5128,28 +5465,36 @@ x-implementation:
     narrower catalogue, the different type/status vocabularies, and the
     SPEC-less create and assignment commands are recorded in M-01, M-22, and
     M-39.
+
+    The credit-note surface is a DIRECT-book child resource. The domain proxies
+    the expert's `/internal/v1` alias with the tenant and DIRECT book and
+    remaps the expert `id` to the public `creditNoteId`, dropping `tenantId`.
+    The expert owns the `CN-{7 digits}` number, the DRAFT creation state, the
+    positive-amount and policy-currency rules, the 500-character reason cap,
+    and the transition graph; the domain preserves expert 400/404/409 problems.
+    Creation bumps the policy row version without an event; each accepted
+    transition writes its `policy.credit-note.*` event in the same transaction.
+    The short path, the four-state lifecycle, the free-text reason, the missing
+    approval and SAP credit-memo steps, and the event names differ from SPEC
+    11.2.13 and are recorded in M-22 and M-41.
 x-compatibility:
-  contractVersion: 2.8.0
-  previousContractVersion: 2.7.0
+  contractVersion: 2.9.0
+  previousContractVersion: 2.8.0
   breaking: []
   compatible:
-    - Adds GET /api/v1/programs.
-    - Adds POST /api/v1/programs.
-    - Adds GET /api/v1/programs/{programId}.
-    - Adds PATCH /api/v1/policies/{policyId}/program.
-    - Adds the Program, ProgramType, ProgramStatus, CreateProgramRequest, and UpdatePolicyProgramRequest schemas.
-    - Adds the nullable Policy.programId member.
+    - Adds GET /api/v1/policies/{policyId}/credit-notes.
+    - Adds POST /api/v1/policies/{policyId}/credit-notes.
+    - Adds PATCH /api/v1/policies/{policyId}/credit-notes/{creditNoteId}/status.
+    - Adds the CreditNote, CreditNoteStatus, CreateCreditNoteRequest, and UpdateCreditNoteStatusRequest schemas.
     - Adds no required request field to an existing operation, changes no existing path, and removes no response field.
   note: >
-    The program catalog and membership surface is additive over 2.7.0: four new
-    operations and five new schemas, plus the nullable `Policy.programId`
-    member, which defaults to null for every policy created before this release.
-    No existing path, request field, response field, or event changed. The
-    routes are siblings under `/api/v1`, so the HTTP API version stays
-    `/api/v1`. The implemented events join the asyncapi/policy.yaml channels as
-    the new names `policy.program.created` and
-    `policy.policy.program-assigned`; the catalog published and implemented
-    counts each grow by two.
+    The policy credit-note surface is additive over 2.8.0: three new operations
+    and four new schemas. The routes are siblings under `/api/v1`, so the HTTP
+    API version stays `/api/v1`. The three implemented events join
+    asyncapi/policy.yaml as the new names `policy.credit-note.issued`,
+    `policy.credit-note.applied`, and `policy.credit-note.cancelled`; the
+    catalog published and implemented counts each grow by three. No existing
+    path, request field, response field, or event changed.
 x-planned-operations:
   - method: POST
     path: /api/v1/policies/{policyId}/bind

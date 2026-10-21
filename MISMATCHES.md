@@ -61,6 +61,10 @@ where the running code does not meet it yet.
   client, projection, policy, size-limit filter, and exception handler plus the
   expert content controller, service, rules, repository, event factory,
   tenant resolver, `schema.sql`, and the domain and expert tests.
+  The Policy credit-note pass reads the domain credit-note controller, service,
+  projection, commands, book scope, and client plus the expert credit-note
+  controller, service, rules, repository, entity, requests, event factory,
+  `schema.sql`, and the domain and expert tests.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -125,6 +129,8 @@ removed per the resolution policy.
 | M-37 | Contract security/collateral uses a narrow derived-status projection and a wider legacy status vocabulary | L |
 | M-38 | Policy installment dunning adds a SPEC-less route and event name and a different level vocabulary and book rule | L |
 | M-39 | Policy program catalog uses a short read/create path, a different type/status vocabulary, and SPEC-less membership and event names | L |
+| M-40 | Document content is one current byte row, not the SPEC versioned store | L |
+| M-41 | Policy credit notes use a short path, a four-state lifecycle, free-text reason, and new event names, with no approval or SAP step | L |
 
 ## M-01 Public base paths
 
@@ -148,6 +154,9 @@ remotes agree with the implementation, so the SPEC tables are the outlier.
 Policy programs add a second short-form row: the implemented catalog is
 `/api/v1/programs` and `/api/v1/programs/{programId}`, while SPEC 11.2.10 lists
 `/api/v1/policy/programs` and `/api/v1/policy/programs/{programId}` (M-39).
+Policy credit notes add another short-form row: the implemented
+`/api/v1/policies/{policyId}/credit-notes` versus SPEC 11.2.13's
+`/api/v1/policy/policies/{policyId}/credit-notes` (M-41).
 
 The ten global-search routes follow the same shorter form
 (`/api/v1/{resource}/search`); their SPEC naming gap and validation differences
@@ -167,6 +176,10 @@ Evidence:
 - `repos/eia-policy-domain/.../ProgramController.java:26` and
   `PolicyProgramController.java:22` - `/api/v1/programs` and
   `/api/v1/policies/{policyId}/program`
+- `repos/eia-policy-domain/.../PolicyCreditNoteController.java:27` -
+  `/api/v1/policies/{policyId}/credit-notes`, and
+  `repos/eia-policy-expert/.../CreditNoteController.java:27-31` - the same
+  public path plus the internal alias.
 - `repos/eia-platform/gateway/src/main/resources/application.yml:18-48` - the
   same public prefixes are routed.
 - Web remotes call the implemented prefixes, for example
@@ -582,8 +595,11 @@ unimplemented fields and list the missing operations under
   schedules, aggregate erosion, endorsements, insureds, locations,
   cancellations, and reinstatements, so those are no longer gaps. The
   2026-10-20 billing slice adds the installment plan and settlement; billing
-  accounts, billing instructions, credit notes, disputes, and commission
-  statements from SPEC 11.2.13 remain gaps (M-27). The premium-receivables
+  accounts, billing instructions, disputes, and commission statements from
+  SPEC 11.2.13 remain gaps (M-27). The credit-note slice adds the narrow
+  DRAFT/ISSUED/APPLIED/CANCELLED adjustment (M-41), so the request surface
+  exists, but the SPEC approval, SAP credit-memo, tax, and original-invoice
+  members remain gaps. The premium-receivables
   slice adds the tenant-wide receivable queue and the dunning slice adds the
   per-installment dunning history and command (M-38), so receivables and
   dunning are no longer resource gaps. The renewal
@@ -673,7 +689,7 @@ ten publishing verticals now emit a subset:
 | Vertical | Implemented event names | Source |
 |---|---|---|
 | Party | `party.party.created`, `party.party.updated` | `repos/eia-party-expert/.../PartyEvents.java` |
-| Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.billing-plan.created`, `policy.installment.paid`, `policy.installment.waived`, `policy.dunning.sent`, `policy.mass-tort-profile.updated`, `policy.program.created`, `policy.policy.program-assigned` | `repos/eia-policy-expert/.../PolicyEvents.java` |
+| Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.billing-plan.created`, `policy.installment.paid`, `policy.installment.waived`, `policy.dunning.sent`, `policy.mass-tort-profile.updated`, `policy.program.created`, `policy.policy.program-assigned`, `policy.credit-note.issued`, `policy.credit-note.applied`, `policy.credit-note.cancelled` | `repos/eia-policy-expert/.../PolicyEvents.java` |
 | Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded`, `contract.technical-account.created`, `contract.technical-account.issued`, `contract.technical-account.settled`, `contract.bordereau.received`, `contract.bordereau.processed`, `contract.bordereau.failed`, `contract.cash-call.requested`, `contract.cash-call.issued`, `contract.cash-call.settled`, `contract.cash-call.cancelled`, `contract.security.recorded`, `contract.security.status-changed` | `repos/eia-contract-expert/.../ContractEvents.java` |
 | Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.assigned`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.closed`, `direct.claim.task-created`, `direct.claim.task-completed`, `direct.claim.task-updated`, `direct.claim.note-added`, `direct.claim.allocation-created` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
 | Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.assigned`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted`, `assumed.claim.task-created`, `assumed.claim.task-completed`, `assumed.claim.task-updated`, `assumed.claim.note-added` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
@@ -724,6 +740,15 @@ delivery channel, the send instant, and the action status. The policy row
 version advances with the action, so every dunning event is distinct. The name
 is `policy.dunning.sent`; SPEC 11.2.13 publishes
 `policy.billing.dunning-changed` instead, which remains planned (M-22, M-38).
+
+The three credit-note facts are policy-level transitions:
+`PolicyEvents.creditNoteStatusChanged` picks `policy.credit-note.issued`,
+`.applied`, or `.cancelled` from the new status and builds the payload from the
+policy identity and number, the credit-note identity and number, the amount as
+a decimal string, the currency, and the status. Each accepted transition bumps
+the policy row version, so every event is distinct. Creating the DRAFT note
+bumps the policy version but writes no event; SPEC 11.2.13 publishes only
+`policy.billing.credit-note-issued` (M-22, M-41).
 
 The Contract expert's generic status command can additionally emit the
 already-cataloged `contract.contract.signed`, `.endorsed`, `.expired`, and
@@ -852,7 +877,7 @@ tables. The differences are:
 | Vertical | Implemented | SPEC /
 planned name |
 |---|---|---|
-| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created`; `policy.installment.paid` / `.waived`; `policy.dunning.sent`; `policy.program.created` / `policy.policy.program-assigned` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name; the dunning fact differs from SPEC 11.2.13 `policy.billing.dunning-changed`; the two program facts have no SPEC name because SPEC defines no program create or policy-assignment event. `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
+| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created`; `policy.installment.paid` / `.waived`; `policy.dunning.sent`; `policy.program.created` / `policy.policy.program-assigned`; `policy.credit-note.issued` / `.applied` / `.cancelled` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name; the dunning fact differs from SPEC 11.2.13 `policy.billing.dunning-changed`; the two program facts have no SPEC name because SPEC defines no program create or policy-assignment event. SPEC 11.2.13 publishes only `policy.billing.credit-note-issued` and defines no applied or cancelled fact, so all three credit-note names are new (M-41). `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
 | Contract | `contract.contract.updated`; `contract.technical-account.created` / `.issued` / `.settled`; `contract.bordereau.processed` / `.failed`; `contract.security.status-changed` | No SPEC name for updated, the technical-account facts, the two terminal bordereau facts, or the security status fact: SPEC 11.3.9 lists lifecycle verbs, the contract-level `contract.account.issued` / `.agreed` facts, `contract.bordereau.posted` / `.rejected`, and only the `contract.security.recorded` / `.breached` security facts. `created`, `bound`, `commuted`, `cession.recorded`, `contract.bordereau.received`, and `contract.security.recorded` match SPEC. |
 | Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned`; `direct.claim.allocation-created` | No SPEC names: SPEC 11.4.9 defines no assignment, task, note, or allocation-created event; it names the allocation fact `direct.claim.allocated`, which remains planned. `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and `closed` match SPEC. |
 | Assumed Claims | `assumed.claim.updated`; `assumed.claim.assigned`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no assignment, task, or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
@@ -871,7 +896,7 @@ implemented name is breaking and needs the EV-05 dual-publish window.
 Evidence:
 
 - `repos/eia-policy-expert/.../PolicyEvents.java:37-56` (policy, billing, dunning,
-  mass tort, and program names)
+  mass tort, program, and credit-note names)
 - `repos/eia-contract-expert/.../ContractEvents.java:41-56`
 - `repos/eia-direct-claims-expert/.../ClaimEvents.java:57-68`
 - `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java:52-65`
@@ -1266,9 +1291,10 @@ Resolution: either amend SPEC 11.2.13 to the implemented `/billing`,
 `/billing/installments/{installmentId}/dunning`, and cross-policy
 `/api/v1/billing/installments` routes, flat projections, event names, and
 status/level vocabularies, or add the SPEC route and names as aliases with an
-EV-05 dual-publish window. The billing account, instruction, credit-note,
-dispute, and commission-statement routes remain unimplemented (M-12); the
-receivable queue and the dunning history are implemented as above.
+EV-05 dual-publish window. The billing account, instruction, dispute, and
+commission-statement routes remain unimplemented (M-12); the receivable queue
+and the dunning history are implemented as above, and policy credit notes are
+implemented as a separate child resource recorded in M-41.
 
 ## M-28 Policy renewal creates a successor instead of transitioning the source
 
@@ -2140,10 +2166,92 @@ book scope, and the SPEC lifecycle/content facts, or amend SPEC 11.6.9 and
 `document.content.uploaded` name. The contract documents the implemented
 single-row shape until that decision.
 
+## M-41 Policy credit notes use a short path, a four-state lifecycle, and new event names
+
+SPEC 11.2.13 defines the `credit_note_request` row, mounts the request at
+`POST /api/v1/policy/policies/{policyId}/credit-notes`, routes the request
+through a human approval step and the Payment SAP subtransaction, and publishes
+`policy.billing.credit-note-issued`. The implemented slice is a narrower
+tenant-scoped child resource with its own lifecycle, free-text reason, and three
+new event names.
+
+| Aspect | Implemented | SPEC 11.2.13 |
+|---|---|---|
+| Paths | `GET/POST /api/v1/policies/{policyId}/credit-notes` and `PATCH .../{creditNoteId}/status` | `POST /api/v1/policy/policies/{policyId}/credit-notes`; no public list or status action row |
+| Identity | `creditNoteId` UUID; server-generated `noteNumber` `CN-{7 digits}` | `id`; optional `original_invoice_number` and `sap_credit_memo_number` |
+| Status | `DRAFT`, `ISSUED`, `APPLIED`, `CANCELLED` | `REQUESTED`, `APPROVED`, `SENT_TO_SAP`, `ISSUED`, `REJECTED` |
+| Transitions | DRAFT -> ISSUED -> APPLIED; CANCELLED from DRAFT or ISSUED; APPLIED and CANCELLED terminal | Request, approve, send to SAP, persist the SAP reference, issue, reject |
+| Reason | free text, trimmed, optional, at most 500 characters | closed enum `CANCELLATION`, `ENDORSEMENT`, `AUDIT_RETURN`, `OVERPAYMENT`, `REFUND`, `CORRECTION` |
+| Money | positive `amount` plus `currency`, which must equal the policy premium currency | `amount`, optional `tax_amount`, and `currency` |
+| Approval | none | `policy.credit-note.approve` human approval with `approved_by` |
+| SAP | no credit-memo number, no `payment.finance.credit-note` call, and no Payment link | SAP credit-memo request and persisted reference |
+| Original invoice | not modelled | optional `original_invoice_number` |
+| Projection | flat ten fields; `tenantId` is not exposed | the full request row including tax, approval, and SAP columns |
+| Events | `policy.credit-note.issued`, `.applied`, `.cancelled` | only `policy.billing.credit-note-issued` |
+| Book | the canonical contract requires `X-EIA-Book: DIRECT`; the domain and expert accept an absent header | SPEC 3.6 book wall |
+
+Consequences:
+
+- A consumer cannot see the approval, SAP credit-memo number, tax amount, or
+  original invoice reference because none of them is modelled or returned.
+- The free-text reason cannot be mapped to the SPEC six-value enum without a
+  translation table; the domain test's `CANCELLATION`/`ENDORSEMENT`/... example
+  is illustrative, not enforced by the expert's `CreditNoteRules`.
+- The four-state lifecycle collapses the SPEC request/approval/SAP flow into
+  DRAFT/ISSUED/APPLIED/CANCELLED, so a client cannot observe REQUESTED,
+  APPROVED, SENT_TO_SAP, or REJECTED.
+- Creating a note bumps the policy row version but writes no event, so a
+  consumer that only subscribes to the credit-note facts never sees the DRAFT
+  creation. Only the three transition facts are published.
+- The create has no `Idempotency-Key` and no caller-supplied business key, so a
+  retried request produces a second note and consumes a second server-assigned
+  number; the status command accepts no `If-Match`, and a replay of a terminal
+  target is a 409 rather than a no-op.
+- A missing `X-EIA-Book` is accepted by both the domain and the expert even
+  though the canonical contract requires DIRECT; another book is hidden as 404
+  `BOOK_SCOPE_VIOLATION`.
+- The three event names are new and have no SPEC equivalent other than the
+  issued fact, so aligning them requires the EV-05 dual-publish window (M-22).
+
+Evidence:
+
+- `repos/eia-policy-domain/.../PolicyCreditNoteController.java:27-76` (public
+  GET/POST/PATCH, required tenant header, `requireDirectWhenPresent`, 201),
+  `PolicyCreditNoteService.java` (expert delegation), `CreditNote.java`,
+  `CreateCreditNoteCommand.java`, and `UpdateCreditNoteStatusCommand.java`.
+- `repos/eia-policy-domain/.../PolicyClient.java:652-720` (expert
+  `/internal/v1` calls) and `:1103-1121` (`ExpertCreditNote` aliases; `id` ->
+  `creditNoteId`, `tenantId` dropped).
+- `repos/eia-policy-expert/.../CreditNoteController.java:27-77` (public and
+  internal aliases, tenant query/header, 201/200),
+  `CreditNoteService.java:47-124` (policy wall, currency match, number
+  consumption, conditional transition, policy version bump, outbox),
+  `CreditNoteRules.java:16-127` (four states, transition graph, positive
+  amount, currency, 500-character reason), `CreditNoteRepository.java:20-118`
+  (tenant/policy-scoped reads, `CN-{7 digits}` sequence, conditional update),
+  `PolicyCreditNote.java`, `CreateCreditNoteRequest.java`, and
+  `UpdateCreditNoteStatusRequest.java`.
+- `repos/eia-policy-expert/.../PolicyEvents.java:22-24,92-116`
+  (`policy.credit-note.issued` / `.applied` / `.cancelled` with policy and note
+  identity, amount, currency, and status) and
+  `src/main/resources/schema.sql:525-554` (`policy_credit_note`, its CHECK
+  constraints, and the number sequence).
+- Tests: `PolicyCreditNoteControllerTest`, `PolicyCreditNoteServiceTest`,
+  `PolicyCreditNoteClientTest`, `CreditNoteControllerTest`,
+  `CreditNoteServiceTest`, and `CreditNoteRulesTest`.
+- `openapi/policy.yaml` 2.9.0, `asyncapi/policy.yaml` 1.7.0, and
+  `asyncapi/event-catalog.yaml` 1.20.0 record the implemented shape.
+
+Resolution: either extend SPEC 11.2.13 with the implemented short route,
+four-state lifecycle, free-text reason, and three event names, or add the SPEC
+request/approval/SAP lifecycle, reason enum, and `policy.billing.credit-note-issued`
+name behind an EV-05 dual-publish window. Until then the contract documents the
+implemented narrow surface and the DIRECT book requirement.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-20
-Contract security status action:
+Policy credit-note contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -2153,7 +2261,7 @@ python: 3.12.8 (standard library only)
 
 OpenAPI 3.1 documents
   OK openapi/party.yaml  5 paths, 7 operations
-  OK openapi/policy.yaml  46 paths, 60 operations
+  OK openapi/policy.yaml  48 paths, 63 operations
   OK openapi/contract.yaml  41 paths, 59 operations
   OK openapi/direct-claims.yaml  49 paths, 72 operations
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
@@ -2165,7 +2273,7 @@ OpenAPI 3.1 documents
 
 AsyncAPI 3 documents
   OK asyncapi/party.yaml  9 event channels
-  OK asyncapi/policy.yaml  26 event channels
+  OK asyncapi/policy.yaml  29 event channels
   OK asyncapi/contract.yaml  30 event channels
   OK asyncapi/direct-claims.yaml  26 event channels
   OK asyncapi/assumed-claims.yaml  21 event channels
@@ -2174,7 +2282,7 @@ AsyncAPI 3 documents
   OK asyncapi/document.yaml  21 event channels
   OK asyncapi/payment.yaml  19 event channels
   OK asyncapi/notifications.yaml  12 event channels
-  OK catalog: 198 unique published events across 10 verticals
+  OK catalog: 201 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -2182,7 +2290,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 12333 checks, 0 failures
+  PASS 12561 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -2345,6 +2453,13 @@ Additional checks and limits:
   replacing the `RELEASED` terminal wording, and dropping
   `contract.security.status-changed` from the Contract catalog `implemented`
   list each fail with the specific missing-operation, enum, terminal-state, or
+  implemented-event message. All four were run on a throwaway copy and exited
+  non-zero (exit 1); the working copy was left unchanged. The Policy credit-note
+  pass added four more: renaming the
+  `/api/v1/policies/{policyId}/credit-notes` path, renaming the `CreditNote`
+  schema, adding `DRAFT` to the `UpdateCreditNoteStatusRequest.status` enum, and
+  dropping `policy.credit-note.issued` from the Policy catalog `implemented`
+  list each fail with the specific missing-operation, schema, enum, or
   implemented-event message. All four were run on a throwaway copy and exited
   non-zero (exit 1); the working copy was left unchanged.
 

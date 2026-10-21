@@ -553,10 +553,10 @@ Billing semantics:
   `policy.installment.waived`, each in the same transaction as the row change.
   The commands do not accept `Idempotency-Key` or `If-Match` in this slice;
   repeating a terminal settlement is the retry-safe path (M-06, M-07).
-- Billing account, billing instructions, credit notes, disputes, and
-  commission statements from SPEC 11.2.13 remain unimplemented (M-12, M-27);
-  the installment dunning history is the separate surface documented below.
-  The cross-policy premium-receivables queue is the next section.
+- Billing account, billing instructions, disputes, and commission statements
+  from SPEC 11.2.13 remain unimplemented (M-12, M-27); policy credit notes and
+  the installment dunning history are separate surfaces documented below. The
+  cross-policy premium-receivables queue is the next section.
 
 ### Policy premium receivables contract (2026-10-20)
 
@@ -1195,6 +1195,59 @@ Program semantics:
   their payload fields and enums, and rejects any implemented program path that
   reappears under `x-planned-operations`. The full run passes 12,109 checks.
 
+### Policy credit notes (2026-10-20)
+
+Policy 2.9.0 adds the policy credit-note lifecycle. The change is additive:
+three new operations and four new schemas; no existing path, request field,
+response field, or event changed.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/policy.yaml` | 2.9.0 | Additive | `GET/POST /api/v1/policies/{policyId}/credit-notes`, `PATCH /api/v1/policies/{policyId}/credit-notes/{creditNoteId}/status`, the `CreditNote`, `CreditNoteStatus`, `CreateCreditNoteRequest`, and `UpdateCreditNoteStatusRequest` schemas, and the required tenant and DIRECT book headers. |
+| `asyncapi/policy.yaml` | 1.7.0 | Additive | The implemented `policy.credit-note.issued`, `policy.credit-note.applied`, and `policy.credit-note.cancelled` channels and `send` operations with a shared `PolicyCreditNoteData` payload. |
+| `asyncapi/event-catalog.yaml` | 1.20.0 | Additive | All three names are published and implemented (201 published and 80 implemented in total; Policy 29 published and 17 implemented). |
+
+Credit-note semantics:
+
+- `GET .../credit-notes` returns the policy's notes as a bare newest-first
+  array. A policy with no note returns `[]`. The projection is the ten-field
+  `CreditNote`: `creditNoteId`, `noteNumber`, `policyId`, `amount`, `currency`,
+  `reason`, `status`, `issuedAt`, `appliedAt`, and `createdAt`.
+- `POST .../credit-notes` creates a DRAFT note and returns 201 with the stored
+  projection. `amount` is a positive decimal money string, `currency` must equal
+  the policy premium currency, and `reason` is optional and capped at 500
+  characters. The server owns `creditNoteId`, `noteNumber` (`CN-{7 digits}`),
+  the DRAFT state, the timestamps, and the policy-version bump.
+- `PATCH .../credit-notes/{creditNoteId}/status` accepts only `ISSUED`,
+  `APPLIED`, and `CANCELLED`. The only allowed edges are DRAFT -> ISSUED,
+  DRAFT -> CANCELLED, ISSUED -> APPLIED, and ISSUED -> CANCELLED; APPLIED and
+  CANCELLED are terminal. ISSUED stamps `issuedAt`, APPLIED stamps
+  `appliedAt`, and CANCELLED stamps neither while preserving an earlier
+  `issuedAt`.
+- `X-EIA-Tenant` is required and `X-EIA-Book` is required and fixed to
+  `DIRECT`; another book is hidden as 404 `BOOK_SCOPE_VIOLATION`. The domain
+  currently accepts an absent book header for compatibility with the other
+  Policy proxy routes (M-41).
+- Creation bumps the policy version but emits no event. Each accepted
+  transition writes `policy.credit-note.issued`, `.applied`, or `.cancelled`
+  in the same transaction as the note row and the version bump. Errors are 400
+  for the body, amount, currency, reason, and target status; 404 for an unknown
+  policy or note; and 409 for an illegal transition or a concurrent change.
+- SPEC 11.2.13 mounts the request at
+  `/api/v1/policy/policies/{policyId}/credit-notes`, expects the
+  REQUESTED/APPROVED/SENT_TO_SAP/ISSUED/REJECTED lifecycle with an approval
+  gate and a SAP credit-memo reference, uses a closed reason enum, and publishes
+  `policy.billing.credit-note-issued`. The implemented short path, four-state
+  lifecycle, free-text reason, missing approval/SAP steps, and three new event
+  names are recorded in M-22 and M-41.
+- The validator requires the two paths, the three operations, the tenant and
+  DIRECT book parameters, the `CreditNote` fields and status enum, the positive
+  amount pattern, the optional 500-character reason, the three-value status
+  request enum, the 201/200/400/404/409 responses, the three implemented
+  channels and their payload fields, the catalog entries, and the absence of
+  the implemented routes from `x-planned-operations`. The full run passes
+  12,561 checks.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -1232,6 +1285,7 @@ Every request carries a resolved tenant; no request body may override it.
 | `X-EIA-Book` | Policy installment dunning | Required and fixed to `DIRECT`. A missing header is a 400 and another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header, which M-38 records. |
 | `X-EIA-Book` | Policy renewal | Required and fixed to `DIRECT`. The contract makes a missing header a 400 and hides another book as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header, which M-28 records. |
 | `X-EIA-Book` | Policy programs | Required and fixed to `DIRECT`. The contract makes a missing header a 400 and hides another book as 404 `BOOK_SCOPE_VIOLATION`; the domain and expert currently accept an absent header, which M-39 records. |
+| `X-EIA-Book` | Policy credit notes | Required and fixed to `DIRECT`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`. The domain currently accepts an absent header for compatibility with the other Policy proxy routes, which M-41 records. |
 | `X-EIA-Book` | Contract technical accounts | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-29 records. |
 | `X-EIA-Book` | Contract period bordereaux | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-30 records. |
 | `X-EIA-Book` | Contract cash calls | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-34 records. |
@@ -1610,8 +1664,10 @@ Rules:
   event name differ from the implemented `/billing` route and
   `policy.billing-plan.created` name; the two installment facts have no SPEC
   name. The naming difference and the still-unimplemented billing-account,
-  instruction, credit-note, dispute, and commission surfaces are recorded in
-  M-22 and M-27. The dunning history is implemented separately at
+  instruction, dispute, and commission surfaces are recorded in M-22 and M-27.
+  Credit notes are implemented separately at
+  `/api/v1/policies/{policyId}/credit-notes` (M-41). The dunning history is
+  implemented separately at
   `/api/v1/billing/installments/{installmentId}/dunning` (M-38).
 
 ### Policy premium receivables
@@ -1707,6 +1763,57 @@ Rules:
   `LEGAL`/`BLOCKED` vocabulary, and its published fact is
   `policy.billing.dunning-changed`. The implemented route, level vocabulary, and
   event name are recorded in M-22 and M-38.
+
+### Policy credit notes
+
+Credit notes are policy billing adjustments (SPEC 11.2.13). The public surface
+is a domain proxy over the Policy expert; the expert also exposes the same
+resource under `/internal/v1/policies/{policyId}/credit-notes` for the domain
+adapter, but that internal route is not part of the public contract.
+
+| Operation | Path | Success | Errors |
+|---|---|---|---|
+| List notes | `GET /api/v1/policies/{policyId}/credit-notes` | 200 `CreditNote[]` | 400, 404 |
+| Request note | `POST /api/v1/policies/{policyId}/credit-notes` | 201 `CreditNote` | 400, 404, 409 |
+| Advance status | `PATCH /api/v1/policies/{policyId}/credit-notes/{creditNoteId}/status` | 200 `CreditNote` | 400, 404, 409 |
+
+`CreditNote` is `{creditNoteId, noteNumber, policyId, amount, currency, reason,
+status, issuedAt, appliedAt, createdAt}`. `reason` is nullable, `issuedAt` and
+`appliedAt` are null until their transition, and `status` is `DRAFT`, `ISSUED`,
+`APPLIED`, or `CANCELLED`. The create body is `CreateCreditNoteRequest`:
+`amount` is a positive decimal string and `currency` is required to equal the
+policy premium currency; `reason` is optional and capped at 500 characters.
+
+Rules:
+
+- The notes are ordered newest first by `createdAt`, then `noteNumber`, and an
+  empty list is `[]`, not 404.
+- `amount` must be positive. A zero, negative, or missing value is 400
+  `VALIDATION_ERROR` from the domain; a positive value that rounds to zero at
+  scale 4 is the expert's 400 `INVALID_CREDIT_NOTE_AMOUNT`. A blank or
+  malformed currency is 400 `VALIDATION_ERROR` and a well-formed foreign
+  currency is 400 `CURRENCY_MISMATCH`. A reason over 500 characters is 400
+  `VALIDATION_ERROR`; the expert's `INVALID_CREDIT_NOTE_REASON` is the internal
+  backstop.
+- The status command accepts only `ISSUED`, `APPLIED`, and `CANCELLED`. DRAFT
+  and unknown values are 400 `INVALID_CREDIT_NOTE_STATUS`; only DRAFT -> ISSUED,
+  DRAFT -> CANCELLED, ISSUED -> APPLIED, and ISSUED -> CANCELLED are allowed.
+  APPLIED and CANCELLED are terminal, so any later edge is 409
+  `INVALID_CREDIT_NOTE_TRANSITION` with `meta.currentStatus` and
+  `meta.targetStatus`. A concurrent policy change is 409
+  `CONCURRENT_MODIFICATION`.
+- The create bumps the policy version but writes no event. Each accepted
+  transition writes `policy.credit-note.issued`, `.applied`, or `.cancelled` in
+  the same transaction as the row and the version bump. Neither command accepts
+  `Idempotency-Key` or `If-Match` (M-06, M-07).
+- `X-EIA-Tenant` is required. The canonical contract requires
+  `X-EIA-Book: DIRECT` and hides another book as 404 `BOOK_SCOPE_VIOLATION`;
+  the domain currently accepts an absent header (M-41).
+- SPEC 11.2.13 uses `/api/v1/policy/policies/{policyId}/credit-notes`, the
+  REQUESTED/APPROVED/SENT_TO_SAP/ISSUED/REJECTED statuses, a closed reason
+  enum, an approval gate, a SAP credit-memo reference, and the
+  `policy.billing.credit-note-issued` fact. The implemented narrow shape and the
+  three new event names are recorded in M-22 and M-41.
 
 ### Global search
 
@@ -1897,7 +2004,13 @@ missing directory.
    `INVALID_STATUS`/`INVALID_STATUS_TRANSITION` and terminal/`BREACH` rules,
    the `SecurityStatus` enum with `ACTIVE` and `OUTSTANDING`,
    the 201/200 successes and 400/404/409 responses, the four documented
-   security conflict codes, and agreement between
+   security conflict codes, the two credit-note paths and their required
+   `TenantHeader` and `BookHeaderDirect` parameters, the ten-field
+   `CreditNote` projection and `CreditNoteStatus` enum, the positive
+   `CreateCreditNoteRequest.amount` pattern and optional 500-character reason,
+   the three-value `UpdateCreditNoteStatusRequest` enum, the
+   201/200/400/404/409 responses, the documented transition and event rules,
+   and agreement between
    `info.version` and `x-compatibility.contractVersion`.
 4. **AsyncAPI structure.** `asyncapi: 3.0.0`, channel addresses, `x-event-type`,
    `x-status: planned|implemented`, `x-implemented-by` on every implemented
@@ -1914,7 +2027,9 @@ missing directory.
    the `ContractSecurityData` payload with its contract/security identity,
    type, money, currency, and status members, and the
    `ContractSecurityStatusChangedData` payload with its contract/security
-   identity, type, previous-status, and status members.
+   identity, type, previous-status, and status members, and the
+   `PolicyCreditNoteData` payload with its policy and note identity, note
+   number, amount, currency, and status members.
 5. **Event catalog cross-check.** The published set in `event-catalog.yaml`
    must equal the channel addresses in the matching vertical document, event
    names must be unique across the platform and must match
@@ -1933,7 +2048,9 @@ missing directory.
    `contract.bordereau.received`, `contract.bordereau.processed`,
    `contract.bordereau.failed`, the four `contract.cash-call.*` facts
    (`requested`, `issued`, `settled`, and `cancelled`),
-   `contract.security.recorded`, and `contract.security.status-changed`.
+   `contract.security.recorded`, `contract.security.status-changed`,
+   `policy.credit-note.issued`, `policy.credit-note.applied`, and
+   `policy.credit-note.cancelled`.
 6. **JSON Schema checks.** All three files parse as JSON, declare the 2020-12
    dialect and an `$id`, carry the required members, keep required properties
    defined, and validate their own examples against a small schema subset.
@@ -2039,8 +2156,20 @@ missing directory.
   with the flat `BillingPlan`/`Installment` projection, while SPEC 11.2.13 names
   the route `/installments` and defines the plan event as
   `policy.billing.plan-created`; the installment paid and waived facts have no
-  SPEC name. Billing accounts, instructions, credit notes, disputes, and
-  commission statements remain unimplemented (M-12, M-22, M-27);
+  SPEC name. Billing accounts, instructions, disputes, and commission
+  statements remain unimplemented (M-12, M-22, M-27);
+- policy credit notes are implemented at
+  `GET/POST /api/v1/policies/{policyId}/credit-notes` and
+  `PATCH .../{creditNoteId}/status` with the DRAFT/ISSUED/APPLIED/CANCELLED
+  lifecycle and the new `policy.credit-note.issued`, `.applied`, and
+  `.cancelled` events. SPEC 11.2.13 names the short-form request route
+  `/api/v1/policy/policies/{policyId}/credit-notes`, uses the
+  REQUESTED/APPROVED/SENT_TO_SAP/ISSUED/REJECTED statuses with a closed reason
+  enum, an approval gate, and a SAP credit-memo reference, and publishes only
+  `policy.billing.credit-note-issued`. The implemented lifecycle is narrower,
+  the reason is free text capped at 500 characters, creation emits no event, and
+  the domain accepts an absent `X-EIA-Book` although the canonical contract
+  requires DIRECT (M-22, M-41);
 - installment dunning is implemented as a per-installment history and command at
   `GET/POST /api/v1/billing/installments/{installmentId}/dunning` with the
   `REMINDER`/`FIRST_NOTICE`/`SECOND_NOTICE`/`COLLECTIONS` level vocabulary and

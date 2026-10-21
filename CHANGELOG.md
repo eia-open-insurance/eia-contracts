@@ -933,6 +933,44 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   name, and remaining gaps.
 - `python scripts/validate_contracts.py` passes 12,333 checks with 0 failures.
 
+### Added in the Policy credit-note contract (2026-10-20)
+
+- `openapi/policy.yaml` is 2.9.0: adds `GET/POST
+  /api/v1/policies/{policyId}/credit-notes` and `PATCH
+  /api/v1/policies/{policyId}/credit-notes/{creditNoteId}/status`, the
+  ten-field `CreditNote` projection (`creditNoteId`, `noteNumber`, `policyId`,
+  `amount`, `currency`, `reason`, `status`, `issuedAt`, `appliedAt`,
+  `createdAt`), the `CreditNoteStatus` enum
+  (`DRAFT`/`ISSUED`/`APPLIED`/`CANCELLED`), `CreateCreditNoteRequest` (positive
+  amount, policy currency, optional 500-character reason), and
+  `UpdateCreditNoteStatusRequest` (`ISSUED`/`APPLIED`/`CANCELLED`). Both
+  operations require the shared `TenantHeader` and `BookHeaderDirect`; the list
+  returns 200, the create returns 201, and the status action returns 200, with
+  400/404 on every operation and 409 on both mutations. The descriptions record
+  the DRAFT -> ISSUED -> APPLIED graph, CANCELLED from DRAFT or ISSUED, the
+  terminal APPLIED/CANCELLED states, and the `policy.credit-note.*` events. The
+  change is additive.
+- `asyncapi/policy.yaml` is 1.7.0: adds the implemented
+  `policy.credit-note.issued`, `policy.credit-note.applied`, and
+  `policy.credit-note.cancelled` channels and `send` operations with a shared
+  `PolicyCreditNoteData` payload (policy and note identity, note number, amount,
+  currency, and status).
+- `asyncapi/event-catalog.yaml` is 1.20.0: all three names are published and
+  implemented (201 published and 80 implemented in total; Policy becomes 29
+  published and 17 implemented).
+- `scripts/validate_contracts.py` requires the two paths, the three operations,
+  the shared tenant and DIRECT book parameters, the ten-field `CreditNote`
+  schema and its status enum, the positive amount pattern and 500-character
+  reason cap, the three-value status request enum, the 201/200/400/404/409
+  responses, the documented transition and event rules, the three implemented
+  channels, the shared payload fields, and the catalog entries; the implemented
+  routes must not reappear under `x-planned-operations`.
+- `README.md` records the routes, lifecycle, book rule, events, and additive
+  versions; `MISMATCHES.md` adds M-41 for the SPEC route, lifecycle, reason
+  vocabulary, approval/SAP, and event-name gaps, and updates M-12, M-22, M-27,
+  and the validation evidence.
+- `python scripts/validate_contracts.py` passes 12,561 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

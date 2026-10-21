@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:policy
 info:
   title: EIA Policy events
-  version: 1.6.0
+  version: 1.7.0
   summary: Published domain event names for the Policy vertical.
   description: >
     Event contract for the Policy vertical. The authoritative event names are
@@ -20,8 +20,10 @@ info:
     `policy.policy.reinstated`, `policy.policy.renewed`, the billing facts
     `policy.billing-plan.created`, `policy.installment.paid`,
     `policy.installment.waived`, and `policy.dunning.sent`,
-    `policy.mass-tort-profile.updated`, and the program facts
-    `policy.program.created` and `policy.policy.program-assigned` through
+    `policy.mass-tort-profile.updated`, the program facts
+    `policy.program.created` and `policy.policy.program-assigned`, and the
+    credit-note facts `policy.credit-note.issued`,
+    `policy.credit-note.applied`, and `policy.credit-note.cancelled` through
     the transactional outbox; those channels and operations are marked
     `x-status: implemented`. The `created` and `updated` names are additive: the
     catalog had no generic create or update fact. The billing plan name is
@@ -36,8 +38,11 @@ info:
     The two program facts are new names with no SPEC 11.2.9 equivalent: a
     program is a catalog aggregate and the assignment is a policy command, so
     the names, the aggregate type, and the nullable membership fields are
-    recorded in M-22 and M-39. The remaining SPEC 11.2.9 and 11.2.13 names are
-    planned.
+    recorded in M-22 and M-39. The three credit-note facts are new names as
+    well: SPEC 11.2.13 publishes only `policy.billing.credit-note-issued`, and
+    the implemented lifecycle has no approval or SAP step, so the names and the
+    narrower status model are recorded in M-22 and M-41. The remaining SPEC
+    11.2.9 and 11.2.13 names are planned.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -267,6 +272,64 @@ channels:
         $ref: '#/components/messages/DomainEvent'
       PolicyDunningSentData:
         $ref: '#/components/messages/PolicyDunningSentData'
+  PolicyCreditNoteIssued:
+    address: policy.credit-note.issued
+    title: policy.credit-note.issued
+    description: >
+      Emitted when a DRAFT credit note is issued, in the same transaction as the
+      note row, the policy-version bump, and the outbox row. The payload carries
+      the policy identity and number, the credit-note identity and number, the
+      note amount as a decimal string, the currency, and status ISSUED. A
+      created DRAFT note emits no event.
+    x-event-type: policy.credit-note.issued
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.2.13
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      PolicyCreditNoteData:
+        $ref: '#/components/messages/PolicyCreditNoteData'
+  PolicyCreditNoteApplied:
+    address: policy.credit-note.applied
+    title: policy.credit-note.applied
+    description: >
+      Emitted when an ISSUED credit note is applied to the policy receivable, in
+      the same transaction as the note row, the policy-version bump, and the
+      outbox row. The payload carries the policy identity and number, the
+      credit-note identity and number, the note amount as a decimal string, the
+      currency, and status APPLIED. APPLIED is terminal.
+    x-event-type: policy.credit-note.applied
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.2.13
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      PolicyCreditNoteData:
+        $ref: '#/components/messages/PolicyCreditNoteData'
+  PolicyCreditNoteCancelled:
+    address: policy.credit-note.cancelled
+    title: policy.credit-note.cancelled
+    description: >
+      Emitted when a DRAFT or ISSUED credit note is cancelled, in the same
+      transaction as the note row, the policy-version bump, and the outbox row.
+      The payload carries the policy identity and number, the credit-note
+      identity and number, the note amount as a decimal string, the currency,
+      and status CANCELLED. A cancelled note preserves an `issuedAt` stamped
+      earlier and never stamps `appliedAt`. CANCELLED is terminal.
+    x-event-type: policy.credit-note.cancelled
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.2.13
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      PolicyCreditNoteData:
+        $ref: '#/components/messages/PolicyCreditNoteData'
   PolicyPolicyRenewed:
     address: policy.policy.renewed
     title: policy.policy.renewed
@@ -606,6 +669,39 @@ operations:
       an installment, in the same transaction as the action row and the
       policy-version bump.
     x-event-type: policy.dunning.sent
+    x-status: implemented
+  publishPolicyCreditNoteIssued:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyCreditNoteIssued'
+    summary: Publish policy.credit-note.issued
+    description: >
+      Publishes policy.credit-note.issued when a DRAFT credit note reaches
+      ISSUED, in the same transaction as the note row and the policy-version
+      bump.
+    x-event-type: policy.credit-note.issued
+    x-status: implemented
+  publishPolicyCreditNoteApplied:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyCreditNoteApplied'
+    summary: Publish policy.credit-note.applied
+    description: >
+      Publishes policy.credit-note.applied when an ISSUED credit note is applied
+      to the receivable, in the same transaction as the note row and the
+      policy-version bump.
+    x-event-type: policy.credit-note.applied
+    x-status: implemented
+  publishPolicyCreditNoteCancelled:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyCreditNoteCancelled'
+    summary: Publish policy.credit-note.cancelled
+    description: >
+      Publishes policy.credit-note.cancelled when a DRAFT or ISSUED credit note
+      is cancelled, in the same transaction as the note row and the
+      policy-version bump.
+    x-event-type: policy.credit-note.cancelled
     x-status: implemented
   publishPolicyPolicyRenewed:
     action: send
@@ -976,6 +1072,47 @@ components:
             enum:
               - SENT
               - CANCELLED
+    PolicyCreditNoteData:
+      name: PolicyCreditNoteData
+      title: policy.credit-note.* data
+      summary: One accepted policy credit-note lifecycle transition.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - policyId
+          - policyNumber
+          - creditNoteId
+          - noteNumber
+          - amount
+          - currency
+          - status
+        properties:
+          policyId:
+            type: string
+            format: uuid
+          policyNumber:
+            type: string
+          creditNoteId:
+            type: string
+            format: uuid
+          noteNumber:
+            type: string
+            maxLength: 32
+            description: Server-generated as `CN-{7 digits}` and unique per policy.
+          amount:
+            type: string
+            description: Positive decimal money string with up to four fraction digits (SPEC 10.3).
+          currency:
+            type: string
+            pattern: '^[A-Z]{3}$'
+          status:
+            type: string
+            enum:
+              - ISSUED
+              - APPLIED
+              - CANCELLED
     PolicyMassTortProfileUpdatedData:
       name: PolicyMassTortProfileUpdatedData
       title: policy.mass-tort-profile.updated data
@@ -1168,20 +1305,26 @@ x-implementation:
   publisher: eia-policy-expert
   subscriber: none
   notes: >
-    Fourteen Policy events are written to the transactional outbox in the same
+    Seventeen Policy events are written to the transactional outbox in the same
     transaction as the aggregate write and dispatched by the platform outbox
     dispatcher when `eia.outbox.enabled=true`: `created`, `updated`,
     `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`,
     `billing-plan.created`, `installment.paid`, `installment.waived`,
-    `dunning.sent`, `mass-tort-profile.updated`, and the program facts
-    `policy.program.created` and `policy.policy.program-assigned`. The renewal
+    `dunning.sent`, `mass-tort-profile.updated`, the program facts
+    `policy.program.created` and `policy.policy.program-assigned`, and the
+    credit-note facts `policy.credit-note.issued`,
+    `policy.credit-note.applied`, and `policy.credit-note.cancelled`. The renewal
     event carries both policy identities and the lineage link; the billing plan
     event carries the complete schedule; the installment events carry the
     settled row and its payment evidence; the dunning event carries the dunned
     installment, the escalation level and channel, the send instant, and the
     action status; the mass tort profile event carries the allocation context
     and the coverage block; and the program events carry the created catalog
-    row and the policy membership delta with both sides of the link. The other
+    row and the policy membership delta with both sides of the link. The
+    credit-note events carry the policy and note identity, the note number, the
+    amount as a decimal string, the currency, and the new status; they are
+    keyed by the policy aggregate because every transition bumps the policy
+    version. The other
     SPEC 11.2.9 and 11.2.13 names remain planned. There is no
     business subscriber or subscription registry yet.
 

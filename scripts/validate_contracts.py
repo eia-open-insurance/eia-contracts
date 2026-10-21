@@ -1176,6 +1176,75 @@ POLICY_PROGRAM_ASSIGNED_FIELDS = (
 )
 
 
+# Policy credit notes (SPEC 11.2.13 billing adjustments). The public domain
+# exposes the short /api/v1/policies/{policyId}/credit-notes resource; the
+# expert's /internal/v1 alias is an implementation detail. Every operation
+# requires the tenant header and the canonical DIRECT book. A note is created
+# DRAFT and advances once through DRAFT -> ISSUED -> APPLIED, with CANCELLED
+# reachable from DRAFT or ISSUED. APPLIED and CANCELLED are terminal. Creation
+# bumps the policy version but emits no event; each accepted transition writes
+# one credit-note event in the same transaction.
+POLICY_CREDIT_NOTE_PATHS = [
+    (
+        "get",
+        "/api/v1/policies/{policyId}/credit-notes",
+        "200",
+        "CreditNote",
+        None,
+    ),
+    (
+        "post",
+        "/api/v1/policies/{policyId}/credit-notes",
+        "201",
+        "CreditNote",
+        "CreateCreditNoteRequest",
+    ),
+    (
+        "patch",
+        "/api/v1/policies/{policyId}/credit-notes/{creditNoteId}/status",
+        "200",
+        "CreditNote",
+        "UpdateCreditNoteStatusRequest",
+    ),
+]
+
+POLICY_CREDIT_NOTE_FIELDS = (
+    "creditNoteId",
+    "noteNumber",
+    "policyId",
+    "amount",
+    "currency",
+    "reason",
+    "status",
+    "issuedAt",
+    "appliedAt",
+    "createdAt",
+)
+
+POLICY_CREDIT_NOTE_STATUSES = ("DRAFT", "ISSUED", "APPLIED", "CANCELLED")
+POLICY_CREDIT_NOTE_REQUEST_STATUSES = ("ISSUED", "APPLIED", "CANCELLED")
+POLICY_CREDIT_NOTE_REASON_MAX_LENGTH = 500
+POLICY_CREDIT_NOTE_AMOUNT_PATTERN = (
+    r"^(?!0(?:\.0{1,4})?$)(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,4})?$"
+)
+POLICY_CREDIT_NOTE_EVENTS = (
+    "policy.credit-note.issued",
+    "policy.credit-note.applied",
+    "policy.credit-note.cancelled",
+)
+POLICY_CREDIT_NOTE_EVENT_FIELDS = (
+    "policyId",
+    "policyNumber",
+    "creditNoteId",
+    "noteNumber",
+    "amount",
+    "currency",
+    "status",
+)
+POLICY_CREDIT_NOTE_EVENT_MESSAGE = "PolicyCreditNoteData"
+POLICY_CREDIT_NOTE_EVENT_IMPLEMENTED_BY = "PolicyEvents.java"
+
+
 # Event names the transactional-outbox rollout actually emits. The catalog must
 # list each one as published and implemented, and the vertical document must
 # expose a channel for it. Round 5 covered the first six verticals; the rollout
@@ -1201,6 +1270,9 @@ IMPLEMENTED_EVENTS = {
         "policy.mass-tort-profile.updated",
         "policy.program.created",
         "policy.policy.program-assigned",
+        "policy.credit-note.issued",
+        "policy.credit-note.applied",
+        "policy.credit-note.cancelled",
     ],
     "contract": [
         "contract.contract.created",
@@ -4868,6 +4940,407 @@ def check_policy_programs_asyncapi(contracts: ContractSet, document, relative: s
 
 
 # ---------------------------------------------------------------------------
+# Policy credit-note checks
+# ---------------------------------------------------------------------------
+
+
+def check_policy_credit_notes_openapi(contracts: ContractSet, document, relative: str):
+    """Require the public credit-note operations, schemas, and lifecycle rules."""
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    for (
+        method,
+        note_path,
+        success_status,
+        response_schema_name,
+        request_schema_name,
+    ) in POLICY_CREDIT_NOTE_PATHS:
+        path_item = paths.get(note_path) if isinstance(paths, dict) else None
+        operation = path_item.get(method) if isinstance(path_item, dict) else None
+        where = f"{relative}: {method.upper()} {note_path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required credit-note operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+
+        parameter_refs, inline_names = _parameter_names(operation)
+        for parameter in ("TenantHeader", "BookHeaderDirect"):
+            contracts.check(
+                parameter in parameter_refs,
+                f"{where}: must document the shared {parameter} parameter",
+            )
+        contracts.check(
+            "policyId" in inline_names,
+            f"{where}: must declare the policyId path parameter",
+        )
+        if method == "patch":
+            contracts.check(
+                "creditNoteId" in inline_names,
+                f"{where}: must declare the creditNoteId path parameter",
+            )
+
+        responses = operation.get("responses") or {}
+        for code in ("400", "404"):
+            contracts.check(
+                code in responses,
+                f"{where}: must document the {code} response",
+            )
+        if method == "get":
+            ok_schema = _response_schema(operation, "200")
+            contracts.check(
+                isinstance(ok_schema, dict)
+                and ok_schema.get("type") == "array"
+                and str((ok_schema.get("items") or {}).get("$ref", "")).endswith(
+                    f"/schemas/{response_schema_name}"
+                ),
+                f"{where}: 200 must return an array of {response_schema_name}",
+            )
+        else:
+            contracts.check(
+                "409" in responses,
+                f"{where}: must document the 409 response",
+            )
+            request_body = operation.get("requestBody") or {}
+            contracts.check(
+                isinstance(request_body, dict)
+                and request_body.get("required") is True,
+                f"{where}: request body must be required",
+            )
+            request_schema = (
+                ((request_body.get("content") or {}).get("application/json") or {})
+                .get("schema")
+                if isinstance(request_body, dict)
+                else None
+            )
+            contracts.check(
+                isinstance(request_schema, dict)
+                and str(request_schema.get("$ref", "")).endswith(
+                    f"/schemas/{request_schema_name}"
+                ),
+                f"{where}: request body must use the {request_schema_name} schema",
+            )
+            success_schema = _response_schema(operation, success_status)
+            contracts.check(
+                isinstance(success_schema, dict)
+                and str(success_schema.get("$ref", "")).endswith(
+                    f"/schemas/{response_schema_name}"
+                ),
+                f"{where}: {success_status} must return the "
+                f"{response_schema_name} schema",
+            )
+
+    list_item = paths.get("/api/v1/policies/{policyId}/credit-notes")
+    list_operation = (
+        list_item.get("get") if isinstance(list_item, dict) else None
+    )
+    list_text = str(
+        (list_operation or {}).get("description") or ""
+    )
+    contracts.check(
+        "newest-first" in list_text.lower(),
+        f"{relative}: GET credit notes must document the newest-first order",
+    )
+
+    create_item = paths.get("/api/v1/policies/{policyId}/credit-notes")
+    create_operation = (
+        create_item.get("post") if isinstance(create_item, dict) else None
+    )
+    create_text = str((create_operation or {}).get("description") or "")
+    for code in (
+        "INVALID_CREDIT_NOTE_AMOUNT",
+        "CURRENCY_MISMATCH",
+        "INVALID_CREDIT_NOTE_REASON",
+        "VALIDATION_ERROR",
+        "CONCURRENT_MODIFICATION",
+    ):
+        contracts.check(
+            code in create_text,
+            f"{relative}: POST credit notes must document {code}",
+        )
+    contracts.check(
+        "no lifecycle" in create_text.lower()
+        or "emits no" in create_text.lower(),
+        f"{relative}: POST credit notes must document that creation emits no event",
+    )
+
+    status_path = (
+        "/api/v1/policies/{policyId}/credit-notes/{creditNoteId}/status"
+    )
+    status_item = paths.get(status_path) if isinstance(paths, dict) else None
+    status_operation = (
+        status_item.get("patch") if isinstance(status_item, dict) else None
+    )
+    status_text = str((status_operation or {}).get("description") or "")
+    for status in POLICY_CREDIT_NOTE_STATUSES:
+        contracts.check(
+            status in status_text,
+            f"{relative}: PATCH credit-note status must document {status}",
+        )
+    for code in (
+        "INVALID_CREDIT_NOTE_STATUS",
+        "INVALID_CREDIT_NOTE_TRANSITION",
+        "CONCURRENT_MODIFICATION",
+    ):
+        contracts.check(
+            code in status_text,
+            f"{relative}: PATCH credit-note status must document {code}",
+        )
+    for event in POLICY_CREDIT_NOTE_EVENTS:
+        contracts.check(
+            event in status_text,
+            f"{relative}: PATCH credit-note status must document {event}",
+        )
+
+    planned_operations = document.get("x-planned-operations") or []
+    planned_pairs = {
+        (str(entry.get("method", "")).lower(), entry.get("path"))
+        for entry in planned_operations
+        if isinstance(entry, dict)
+    }
+    for method, note_path, _, _, _ in POLICY_CREDIT_NOTE_PATHS:
+        contracts.check(
+            (method, note_path) not in planned_pairs,
+            f"{relative}: implemented credit-note operation {method.upper()} "
+            f"{note_path} must not reappear under x-planned-operations",
+        )
+
+    credit_note = schemas.get("CreditNote") or {}
+    properties = credit_note.get("properties") or {}
+    required = set(credit_note.get("required") or [])
+    contracts.check(
+        isinstance(credit_note, dict) and credit_note.get("type") == "object",
+        f"{relative}: CreditNote must be an object schema",
+    )
+    contracts.check(
+        required == set(POLICY_CREDIT_NOTE_FIELDS),
+        f"{relative}: CreditNote must require exactly "
+        f"{list(POLICY_CREDIT_NOTE_FIELDS)}",
+    )
+    for field in POLICY_CREDIT_NOTE_FIELDS:
+        contracts.check(
+            field in properties,
+            f"{relative}: CreditNote.properties.{field} is required",
+        )
+    for field in ("creditNoteId", "policyId"):
+        contracts.check(
+            (properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: CreditNote.{field} must be a uuid",
+        )
+    contracts.check(
+        (properties.get("noteNumber") or {}).get("type") == "string"
+        and (properties.get("noteNumber") or {}).get("maxLength") == 32,
+        f"{relative}: CreditNote.noteNumber must be a string of at most 32 characters",
+    )
+    contracts.check(
+        str((properties.get("amount") or {}).get("$ref", "")).endswith(
+            "/schemas/MoneyAmount"
+        ),
+        f"{relative}: CreditNote.amount must reference MoneyAmount",
+    )
+    contracts.check(
+        str((properties.get("currency") or {}).get("$ref", "")).endswith(
+            "/schemas/CurrencyCode"
+        ),
+        f"{relative}: CreditNote.currency must reference CurrencyCode",
+    )
+    reason = properties.get("reason") or {}
+    contracts.check(
+        _schema_types(reason) == {"string", "null"}
+        and reason.get("maxLength") == POLICY_CREDIT_NOTE_REASON_MAX_LENGTH,
+        f"{relative}: CreditNote.reason must be a nullable string of at most "
+        f"{POLICY_CREDIT_NOTE_REASON_MAX_LENGTH} characters",
+    )
+    contracts.check(
+        str((properties.get("status") or {}).get("$ref", "")).endswith(
+            "/schemas/CreditNoteStatus"
+        ),
+        f"{relative}: CreditNote.status must reference CreditNoteStatus",
+    )
+    for field in ("issuedAt", "appliedAt"):
+        contracts.check(
+            _schema_types(properties.get(field)) == {"string", "null"}
+            and (properties.get(field) or {}).get("format") == "date-time",
+            f"{relative}: CreditNote.{field} must be a nullable date-time",
+        )
+    contracts.check(
+        (properties.get("createdAt") or {}).get("format") == "date-time",
+        f"{relative}: CreditNote.createdAt must be a date-time",
+    )
+
+    status_schema = schemas.get("CreditNoteStatus") or {}
+    contracts.check(
+        status_schema.get("type") == "string",
+        f"{relative}: CreditNoteStatus must be a string enum",
+    )
+    contracts.check(
+        tuple(status_schema.get("enum") or []) == POLICY_CREDIT_NOTE_STATUSES,
+        f"{relative}: CreditNoteStatus must enumerate "
+        f"{list(POLICY_CREDIT_NOTE_STATUSES)}",
+    )
+
+    create = schemas.get("CreateCreditNoteRequest") or {}
+    create_properties = create.get("properties") or {}
+    create_required = set(create.get("required") or [])
+    contracts.check(
+        isinstance(create, dict) and create.get("type") == "object",
+        f"{relative}: CreateCreditNoteRequest must be an object schema",
+    )
+    contracts.check(
+        create_required == {"amount", "currency"},
+        f"{relative}: CreateCreditNoteRequest must require amount and currency",
+    )
+    contracts.check(
+        "reason" in create_properties and "reason" not in create_required,
+        f"{relative}: CreateCreditNoteRequest.reason must stay optional",
+    )
+    contracts.check(
+        "status" not in create_properties,
+        f"{relative}: CreateCreditNoteRequest must not accept a caller status",
+    )
+    amount = create_properties.get("amount") or {}
+    contracts.check(
+        amount.get("type") == "string"
+        and amount.get("pattern") == POLICY_CREDIT_NOTE_AMOUNT_PATTERN,
+        f"{relative}: CreateCreditNoteRequest.amount must be a positive money "
+        "decimal string",
+    )
+    contracts.check(
+        str((create_properties.get("currency") or {}).get("$ref", "")).endswith(
+            "/schemas/CurrencyCode"
+        ),
+        f"{relative}: CreateCreditNoteRequest.currency must reference CurrencyCode",
+    )
+    create_reason = create_properties.get("reason") or {}
+    contracts.check(
+        _schema_types(create_reason) == {"string", "null"}
+        and create_reason.get("maxLength")
+        == POLICY_CREDIT_NOTE_REASON_MAX_LENGTH,
+        f"{relative}: CreateCreditNoteRequest.reason must be a nullable string "
+        f"of at most {POLICY_CREDIT_NOTE_REASON_MAX_LENGTH} characters",
+    )
+
+    request = schemas.get("UpdateCreditNoteStatusRequest") or {}
+    request_properties = request.get("properties") or {}
+    contracts.check(
+        isinstance(request, dict) and request.get("type") == "object",
+        f"{relative}: UpdateCreditNoteStatusRequest must be an object schema",
+    )
+    contracts.check(
+        set(request.get("required") or []) == {"status"},
+        f"{relative}: UpdateCreditNoteStatusRequest must require only status",
+    )
+    request_status = request_properties.get("status") or {}
+    contracts.check(
+        (request_status.get("type"), tuple(request_status.get("enum") or []))
+        == ("string", POLICY_CREDIT_NOTE_REQUEST_STATUSES),
+        f"{relative}: UpdateCreditNoteStatusRequest.status must enumerate "
+        f"{list(POLICY_CREDIT_NOTE_REQUEST_STATUSES)}",
+    )
+
+
+def check_policy_credit_notes_asyncapi(contracts: ContractSet, document, relative: str):
+    """Require the three implemented credit-note channels and their payload."""
+    channels = document.get("channels") or {}
+    operations = document.get("operations") or {}
+    messages = (
+        (document.get("components") or {}).get("messages") or {}
+    )
+    send_events = {
+        operation.get("x-event-type")
+        for operation in operations.values()
+        if isinstance(operation, dict)
+        and operation.get("action") == "send"
+    }
+
+    for event in POLICY_CREDIT_NOTE_EVENTS:
+        channel = next(
+            (
+                candidate
+                for candidate in channels.values()
+                if isinstance(candidate, dict)
+                and candidate.get("address") == event
+            ),
+            None,
+        )
+        contracts.check(
+            isinstance(channel, dict),
+            f"{relative}: required credit-note event channel '{event}' is missing",
+        )
+        if not isinstance(channel, dict):
+            continue
+        contracts.check(
+            channel.get("x-status") == "implemented",
+            f"{relative}: credit-note event channel '{event}' must be implemented",
+        )
+        contracts.check(
+            str(channel.get("x-implemented-by", "")).endswith(
+                POLICY_CREDIT_NOTE_EVENT_IMPLEMENTED_BY
+            ),
+            f"{relative}: credit-note event channel '{event}' must name "
+            f"{POLICY_CREDIT_NOTE_EVENT_IMPLEMENTED_BY} in x-implemented-by",
+        )
+        contracts.check(
+            event in send_events,
+            f"{relative}: credit-note event '{event}' must have a send operation",
+        )
+        channel_messages = channel.get("messages") or {}
+        contracts.check(
+            (
+                channel_messages.get(POLICY_CREDIT_NOTE_EVENT_MESSAGE) or {}
+            ).get("$ref")
+            == f"#/components/messages/{POLICY_CREDIT_NOTE_EVENT_MESSAGE}",
+            f"{relative}: {event} must reference "
+            f"{POLICY_CREDIT_NOTE_EVENT_MESSAGE}",
+        )
+
+    message = messages.get(POLICY_CREDIT_NOTE_EVENT_MESSAGE) or {}
+    payload = message.get("payload") or {}
+    payload_properties = payload.get("properties") or {}
+    payload_required = set(payload.get("required") or [])
+    contracts.check(
+        payload_required == set(POLICY_CREDIT_NOTE_EVENT_FIELDS),
+        f"{relative}: {POLICY_CREDIT_NOTE_EVENT_MESSAGE} must require exactly "
+        f"{list(POLICY_CREDIT_NOTE_EVENT_FIELDS)}",
+    )
+    for field in POLICY_CREDIT_NOTE_EVENT_FIELDS:
+        contracts.check(
+            field in payload_properties,
+            f"{relative}: {POLICY_CREDIT_NOTE_EVENT_MESSAGE}.properties.{field} "
+            "is required",
+        )
+    for field in ("policyId", "creditNoteId"):
+        contracts.check(
+            (payload_properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: {POLICY_CREDIT_NOTE_EVENT_MESSAGE}.{field} must be a uuid",
+        )
+    contracts.check(
+        (payload_properties.get("noteNumber") or {}).get("maxLength") == 32,
+        f"{relative}: {POLICY_CREDIT_NOTE_EVENT_MESSAGE}.noteNumber must be at "
+        "most 32 characters",
+    )
+    contracts.check(
+        (payload_properties.get("amount") or {}).get("type") == "string",
+        f"{relative}: {POLICY_CREDIT_NOTE_EVENT_MESSAGE}.amount must be a "
+        "decimal string",
+    )
+    contracts.check(
+        (payload_properties.get("currency") or {}).get("pattern")
+        == "^[A-Z]{3}$",
+        f"{relative}: {POLICY_CREDIT_NOTE_EVENT_MESSAGE}.currency must be an "
+        "uppercase ISO code",
+    )
+    contracts.check(
+        set((payload_properties.get("status") or {}).get("enum") or [])
+        == set(POLICY_CREDIT_NOTE_REQUEST_STATUSES),
+        f"{relative}: {POLICY_CREDIT_NOTE_EVENT_MESSAGE}.status must enumerate "
+        f"{list(POLICY_CREDIT_NOTE_REQUEST_STATUSES)}",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Contract technical-account checks
 # ---------------------------------------------------------------------------
 
@@ -7006,6 +7479,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_policy_renewal_openapi(contracts, document, relative)
             check_policy_mass_tort_profile_openapi(contracts, document, relative)
             check_policy_programs(contracts, document, relative)
+            check_policy_credit_notes_openapi(contracts, document, relative)
         if vertical == "contract":
             check_contract_security(contracts, document, relative)
             check_contract_security_status(contracts, document, relative)
@@ -7279,6 +7753,7 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
                     f"{relative}: PolicyDunningSentData.{field} must be a uuid",
                 )
             check_policy_programs_asyncapi(contracts, document, relative)
+            check_policy_credit_notes_asyncapi(contracts, document, relative)
 
         if vertical == "contract":
             contract_send_events = {
