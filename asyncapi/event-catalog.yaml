@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.21.0
+  version: 1.22.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -29,10 +29,10 @@ info:
     fact `policy.billing.plan-created` and
     defines no installment paid or waived fact, so the implemented names are
     `policy.billing-plan.created`, `policy.installment.paid`, and
-    `policy.installment.waived` (M-22, M-27). The three Contract
+    `policy.installment.waived` (M-22, M-27). The five Contract
     technical-account facts `contract.technical-account.created`, `.issued`,
-    and `.settled` are new child-aggregate names with no SPEC 11.3.9
-    equivalent (M-22, M-29). The Contract period-bordereau facts use
+    `.settled`, `.line-added`, and `.line-removed` are new names with no SPEC
+    11.3.9 equivalent (M-22, M-29, M-42). The Contract period-bordereau facts use
     `contract.bordereau.received` (already cataloged), plus the new terminal
     names `contract.bordereau.processed` and `contract.bordereau.failed`;
     SPEC 11.3.9 instead publishes `contract.bordereau.posted` and
@@ -83,6 +83,14 @@ info:
     `document.content.uploaded` payload, keeping `eventVersion` 1. The totals
     therefore stay 201 published and 80 implemented, with Document at 21
     published and 6 implemented (M-40).
+    The two Contract technical-account line facts
+    `contract.technical-account.line-added` and `.line-removed` are new
+    grandchild-aggregate names with no SPEC 11.3.9 equivalent: each uses the
+    line id and aggregate version 1 while the outbox partition key stays the
+    contract id, and the events are emitted only while the account is DRAFT.
+    They add two published and two implemented names, bringing the platform
+    totals to 203 published and 82 implemented; Contract becomes 32 published
+    and 19 implemented (M-22, M-42).
     The platform
     event-ingest service
     is the inbox:
@@ -264,6 +272,8 @@ x-event-catalog:
       - contract.technical-account.created
       - contract.technical-account.issued
       - contract.technical-account.settled
+      - contract.technical-account.line-added
+      - contract.technical-account.line-removed
       - contract.bordereau.received
       - contract.bordereau.processed
       - contract.bordereau.failed
@@ -290,6 +300,8 @@ x-event-catalog:
       - contract.technical-account.created
       - contract.technical-account.issued
       - contract.technical-account.settled
+      - contract.technical-account.line-added
+      - contract.technical-account.line-removed
       - contract.bordereau.received
       - contract.bordereau.processed
       - contract.bordereau.failed

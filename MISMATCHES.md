@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-21 (Document content versions).
+Status: open, reviewed 2026-10-21 (Contract technical-account lines).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -20,7 +20,12 @@ where the running code does not meet it yet.
   services, their query repositories, and the shell's `GlobalSearch.jsx`. The
   Contract technical-account pass reads the domain controller, service, client,
   and projection plus the expert controller, rules, repository, status enum,
-  event factory, and `schema.sql`. The Contract period-bordereau pass reads the
+  event factory, and `schema.sql`. The Contract technical-account-line pass
+  reads the domain line controller, service, client, projection, summary, and
+  command plus the expert line controller, rules, repository, line-type enum,
+  list read model, request, reconciliation exception, event factory,
+  `schema.sql`, and the domain and expert line tests. The Contract
+  period-bordereau pass reads the
   domain controller, service, client, projection, and command rules plus the
   expert period controller, legacy header controller, rules, repositories,
   status enum, event factory, and `schema.sql`. The Direct Claims allocation
@@ -137,6 +142,7 @@ removed per the resolution policy.
 | M-39 | Policy program catalog uses a short read/create path, a different type/status vocabulary, and SPEC-less membership and event names | L |
 | M-40 | Document content keeps a current pointer plus revisions under `/content/versions`, not the SPEC `/versions` store | L |
 | M-41 | Policy credit notes use a short path, a four-state lifecycle, free-text reason, and new event names, with no approval or SAP step | L |
+| M-42 | Contract technical-account lines use four header-component types, a DRAFT-only write guard, and an issue-time reconciliation instead of the full SPEC line vocabulary | L |
 
 ## M-01 Public base paths
 
@@ -696,7 +702,7 @@ ten publishing verticals now emit a subset:
 |---|---|---|
 | Party | `party.party.created`, `party.party.updated` | `repos/eia-party-expert/.../PartyEvents.java` |
 | Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.billing-plan.created`, `policy.installment.paid`, `policy.installment.waived`, `policy.dunning.sent`, `policy.mass-tort-profile.updated`, `policy.program.created`, `policy.policy.program-assigned`, `policy.credit-note.issued`, `policy.credit-note.applied`, `policy.credit-note.cancelled` | `repos/eia-policy-expert/.../PolicyEvents.java` |
-| Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded`, `contract.technical-account.created`, `contract.technical-account.issued`, `contract.technical-account.settled`, `contract.bordereau.received`, `contract.bordereau.processed`, `contract.bordereau.failed`, `contract.cash-call.requested`, `contract.cash-call.issued`, `contract.cash-call.settled`, `contract.cash-call.cancelled`, `contract.security.recorded`, `contract.security.status-changed` | `repos/eia-contract-expert/.../ContractEvents.java` |
+| Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded`, `contract.technical-account.created`, `contract.technical-account.issued`, `contract.technical-account.settled`, `contract.technical-account.line-added`, `contract.technical-account.line-removed`, `contract.bordereau.received`, `contract.bordereau.processed`, `contract.bordereau.failed`, `contract.cash-call.requested`, `contract.cash-call.issued`, `contract.cash-call.settled`, `contract.cash-call.cancelled`, `contract.security.recorded`, `contract.security.status-changed` | `repos/eia-contract-expert/.../ContractEvents.java` |
 | Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.assigned`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.closed`, `direct.claim.task-created`, `direct.claim.task-completed`, `direct.claim.task-updated`, `direct.claim.note-added`, `direct.claim.allocation-created` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
 | Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.assigned`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted`, `assumed.claim.task-created`, `assumed.claim.task-completed`, `assumed.claim.task-updated`, `assumed.claim.note-added` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
 | Cession | `cession.cession.created`, `cession.cession.updated`, `cession.cession.handed-off` | `repos/eia-cession-expert/.../CessionEvents.java` |
@@ -761,11 +767,14 @@ The Contract expert's generic status command can additionally emit the
 already-cataloged `contract.contract.signed`, `.endorsed`, `.expired`, and
 `.cancelled` names when the target status matches. Those names remain published
 and are not part of the implemented subset recorded in this change; the catalog
-declares only the seventeen Contract events listed above. The three
-technical-account facts are child-aggregate events: the envelope uses the
-account id and its lifecycle version (1 for created, 2 for issued, 3 for
-settled) while the outbox partition key stays the contract id. They have no
-SPEC 11.3.9 equivalent (M-22, M-29). The three bordereau facts are also
+declares only the nineteen Contract events listed above. The three
+technical-account lifecycle facts are child-aggregate events: the envelope uses
+the account id and its lifecycle version (1 for created, 2 for issued, 3 for
+settled) while the outbox partition key stays the contract id. The two line
+facts are grandchild events: the envelope uses the line id and aggregate
+version 1, while the partition key stays the contract id; they carry only the
+contract, account, and line identity, the line type, and the amount. All five
+have no SPEC 11.3.9 equivalent (M-22, M-29, M-42). The three bordereau facts are also
 child-aggregate events: the envelope uses the bordereau id and version 1 for
 received and 2 for processed or failed, with the contract id as the partition
 key. `received` matches SPEC; `processed` and `failed` replace the SPEC
@@ -1372,10 +1381,10 @@ ASSUMED treaty, but narrower than SPEC 11.3.4, 11.3.9, and 11.3.10.
 |---|---|---|
 | Path and mount | `GET/POST /api/v1/contracts/{contractId}/technical-accounts`, `PATCH /api/v1/contracts/{contractId}/technical-accounts/{accountId}/status` | SPEC 11.3.10 names `GET /api/v1/contracts/{contractId}/accounts`; the implemented controller uses `/technical-accounts`. The public path is documented; the expert also mounts the same controller under `/internal/v1`. |
 | Statuses | `DRAFT`, `ISSUED`, `SETTLED`; only DRAFT -> ISSUED -> SETTLED | SPEC 11.3.4 also names `AGREED`, `DISPUTED`, and `SUPERSEDED`. A request with `DRAFT` is 400 `INVALID_STATUS`; a skipped or repeated edge is 409 `INVALID_STATUS_TRANSITION`. |
-| Lines | One row with `cededPremium`, `cededLosses`, `commission`, `otherCharges`, and a derived `balance` | SPEC's separate `technical_account_line` breakdown and the cash-call/settlement linkage are absent. |
+| Lines | `GET/POST .../{accountId}/lines` and `DELETE .../lines/{lineId}` expose the SPEC `technical_account_line` detail with the four header-component types `PREMIUM`, `LOSS`, `COMMISSION`, and `OTHER`; lines are editable only in DRAFT and must reconcile by component before issue (M-42) | The richer SPEC 11.3.4 line-type vocabulary, a line update, a per-line currency, and a source-document link remain gaps (M-42). The account header is still one row with `cededPremium`, `cededLosses`, `commission`, `otherCharges`, and a derived `balance`, and the cash-call/settlement linkage is absent. |
 | Period | `periodStart < periodEnd`; unique exact `(tenant, contract, periodStart, periodEnd)` | There is no overlap rejection (CTR-07) and no contract-window or contract-currency equality check (CTR-08). The unique key catches only an identical period, so two overlapping but non-identical periods are accepted. |
 | Book | `X-EIA-Book: ASSUMED` when present; another book is 404 `BOOK_SCOPE_VIOLATION` | The canonical contract requires the header, but the domain accepts an absent header for compatibility with the other Contract proxy routes (`requireAssumedBookWhenPresent`). The expert internal alias does not check the book at all. |
-| Events | `contract.technical-account.created`, `.issued`, `.settled` | SPEC 11.3.9 defines `contract.account.issued` and `contract.account.agreed`; the implemented names have no SPEC equivalent (M-22). The envelope uses the account id and lifecycle version 1/2/3 while the outbox partition key stays the contract id. |
+| Events | `contract.technical-account.created`, `.issued`, `.settled`, `.line-added`, `.line-removed` | SPEC 11.3.9 defines `contract.account.issued` and `contract.account.agreed`; the implemented names have no SPEC equivalent (M-22). The account envelope uses the account id and lifecycle version 1/2/3, and each line event uses the line id at version 1, while the outbox partition key stays the contract id (M-42). |
 | Balance | Derived at create as `cededPremium - commission - cededLosses + otherCharges`; positive means due from the cedent to the reinsurer | The balance is not reconciled against paid losses, cash calls, or settlement evidence, and there is no accounting line or payment link. |
 
 Evidence:
@@ -1395,18 +1404,42 @@ Evidence:
   (newest-first list, unique-period conflict, compare-and-set status update).
 - `repos/eia-contract-expert/src/main/resources/schema.sql:354-381`
   (unique exact period, non-negative amounts, currency pattern, status check).
-- `repos/eia-contract-expert/.../ContractEvents.java:54-56,195-246`
-  (event names, child-aggregate id/version, contract partition key).
-- `openapi/contract.yaml` (introduced in 2.2.0, now 3.1.0) and the README
-  technical-account section record the implemented shape.
+- `repos/eia-contract-expert/.../ContractEvents.java:69-71,225-238,474-510`
+  (account fact names, child-aggregate id/version, contract partition key) and
+  `:72-73,247-259,512-544` (the line fact names, the add/remove factories, the
+  aggregate type, version 1, and the shared line payload).
+- `repos/eia-contract-expert/.../technicalaccount/TechnicalAccountLineController.java:44-129`
+  (list/add/remove, tenant and book context, DRAFT guard, per-mutation outbox),
+  `TechnicalAccountLineRules.java:43-141` (line-type and positive-amount
+  validation, text bounds, four-way totals, and the issue reconciliation),
+  `TechnicalAccountLineRepository.java:49-103` (insertion-order reads,
+  tenant/account scoping, delete, and grouped totals),
+  `TechnicalAccountLineType.java:10-24` (the four component types and their
+  header fields), and
+  `TechnicalAccountLinesDoNotReconcileException.java:16-31` (one conflict with
+  a per-type mismatch detail list).
+- `repos/eia-contract-domain/.../TechnicalAccountLineController.java:28-79`
+  (public paths, required tenant, optional ASSUMED book guard),
+  `TechnicalAccountLineClient.java:58-196` (expert call, `lines` -> `items`
+  normalization, totals mapping), `TechnicalAccountLine.java:23-31` (`id` ->
+  `lineId` alias), and `LineSummary.java:23-49`.
+- `repos/eia-contract-expert/src/main/resources/schema.sql:440-467`
+  (unique exact period, non-negative amounts, currency pattern, status check)
+  and `:469-495` (`contract_technical_account_line`, the four-type check, the
+  positive amount, and the account cascade).
+- `openapi/contract.yaml` (introduced in 2.2.0, now 4.2.0) and the README
+  technical-account and technical-account-line sections record the implemented
+  shape.
 
 Resolution: the implemented slice is documented as canonical for now. Closing
 the gap means adding the SPEC `/accounts` alias (or amending SPEC 11.3.10),
-implementing the AGREED/DISPUTED/SUPERSEDED transitions and the line breakdown,
-and enforcing period overlap plus the contract window and currency equality. The
-event names follow EV-05: keep publishing the implemented names and add a SPEC
-name only through a dual-publish window. Renaming the path or statuses is
-breaking and needs an ADR and a `/v2` or dual-mount period.
+implementing the AGREED/DISPUTED/SUPERSEDED transitions, and enforcing period
+overlap plus the contract window and currency equality. The line slice is
+documented as canonical but remains narrower than SPEC 11.3.4; M-42 records the
+reduced type vocabulary and the other line gaps. The event names follow EV-05:
+keep publishing the implemented names and add a SPEC name only through a
+dual-publish window. Renaming the path or statuses is breaking and needs an ADR
+and a `/v2` or dual-mount period.
 
 ## M-30 Contract period bordereaux use a narrower lifecycle and omit line staging
 
@@ -2277,10 +2310,92 @@ request/approval/SAP lifecycle, reason enum, and `policy.billing.credit-note-iss
 name behind an EV-05 dual-publish window. Until then the contract documents the
 implemented narrow surface and the DIRECT book requirement.
 
+## M-42 Contract technical-account lines are reduced to four header components
+
+SPEC 11.3.4 defines `technical_account_line` as the line detail of a technical
+account, with a richer line-type vocabulary than the four statement components
+and fields that link a line to its source. The 2026-10-21 slice implements the
+detail behind the account header, reduced to the four header components and a
+DRAFT-only add/remove surface.
+
+| Area | Implemented | SPEC 11.3.4 / gap |
+|---|---|---|
+| Paths | `GET/POST /api/v1/contracts/{contractId}/technical-accounts/{accountId}/lines` and `DELETE .../lines/{lineId}`, plus the same controller under `/internal/v1` | SPEC 11.3.10 does not list a line route; the detail is nested under the implemented `/technical-accounts` path (M-29). |
+| Line types | `PREMIUM`, `LOSS`, `COMMISSION`, `OTHER`, each mapping to one header field | The SPEC line vocabulary is richer (for example paid loss, outstanding loss, IBNR, ALAE, brokerage, reinstatement premium, tax, and adjustment). The four values are the reduced component domain. |
+| Projection | `lineId`, `accountId`, `lineType`, `reference`, `description`, `amount`, `createdAt`; `tenantId` is not exposed | No source-document reference, no currency per line (the account currency is implied), and no audit actor. |
+| Writes | `POST` creates and `DELETE` removes; both only while the account is DRAFT (409 `ACCOUNT_NOT_EDITABLE`); `amount` must be strictly positive | No line update or amount correction. A zero or negative line cannot be recorded, so a credit line is modelled through the header amount instead. |
+| Reconciliation | On DRAFT -> ISSUED, when at least one line exists, each line-type total must equal the matching header field (`ACCOUNT_LINES_DO_NOT_RECONCILE` with one `details[]` entry per type) | A header-only account (no lines) remains issuable, so the rule is opt-in by the presence of detail. There is no duplicate-line detection, line count, or per-line approval. |
+| Text bounds | `reference` at most 64 characters, `description` at most 255; both optional and trimmed | The domain validates `description` at 300 characters and the expert caps it at 255, so the effective public bound is 255. |
+| Events | `contract.technical-account.line-added` and `.line-removed`, each a grandchild fact keyed by the line id at aggregate version 1 with the contract id as the outbox partition key | The names have no SPEC 11.3.9 equivalent and the payload omits `reference` and `description` (M-22). |
+| Book | The canonical contract requires `X-EIA-Book: ASSUMED`; another book is 404 `BOOK_SCOPE_VIOLATION` | The domain accepts an absent header for compatibility with the other Contract proxy routes; the expert internal alias checks no book (M-29). |
+
+Consequences:
+
+- A consumer that only reads the `TechnicalAccount` header does not see the
+  line detail; it must call the `/lines` read model. The header and the totals
+  are reconciled only at issue.
+- The reduced vocabulary rolls every line into one of four buckets, so a
+  consumer cannot distinguish paid versus outstanding loss, IBNR, ALAE,
+  brokerage, tax, or adjustment from the line record itself.
+- The line events are not full audit records: they carry the type and amount
+  but not the optional reference or description, so an event-only consumer
+  cannot reproduce the line text.
+- A line cannot be corrected in place; a mistake is removed and re-added while
+  the account is DRAFT. Once ISSUED, the detail is immutable and the only path
+  is a new account period.
+- The domain's 300-character description check is wider than the expert's
+  255-character column, so a 256-300 character description passes the domain
+  and is rejected by the expert with a 400. The canonical contract documents
+  the effective 255 bound.
+
+Evidence:
+
+- `repos/eia-contract-domain/.../TechnicalAccountLineController.java:28-79`
+  (public paths, required tenant header, optional ASSUMED book guard, 200/201/
+  204), `TechnicalAccountLineService.java:21-32`, and
+  `TechnicalAccountLineClient.java:58-196` (expert call, `lines` -> `items`
+  normalization, totals mapping, error translation).
+- `repos/eia-contract-domain/.../TechnicalAccountLine.java:23-31` (`id` ->
+  `lineId` and `technicalAccountId` -> `accountId` aliases),
+  `LineSummary.java:23-49` (items plus the four totals), and
+  `CreateTechnicalAccountLineCommand.java:14-19`.
+- `repos/eia-contract-domain/.../ContractCommandRules.java:258-267`
+  (domain line-type, positive-amount, 64-character reference, and
+  300-character description validation).
+- `repos/eia-contract-expert/.../technicalaccount/TechnicalAccountLineController.java:44-129`
+  (list/add/remove, tenant resolution, account lock, DRAFT guard, per-mutation
+  outbox), `TechnicalAccountLineRules.java:43-141` (validation, four-way
+  totals, and the per-type reconciliation), and
+  `TechnicalAccountLineRepository.java:49-103` (insertion-order reads,
+  tenant/account scoping, delete, grouped totals).
+- `repos/eia-contract-expert/.../technicalaccount/TechnicalAccountLineType.java:10-24`
+  (four types and their header fields),
+  `TechnicalAccountLinesDoNotReconcileException.java:16-31` (one conflict with
+  the per-type mismatch list), and `TechnicalAccountLineList.java:15-18`
+  (expert `lines`/`totals` wire read model).
+- `repos/eia-contract-expert/.../ContractEvents.java:72-73,247-259,512-544`
+  (line event names, factories, aggregate type, version 1, and payload).
+- `repos/eia-contract-expert/src/main/resources/schema.sql:469-495`
+  (`contract_technical_account_line`, four-type check, positive amount, and
+  account cascade).
+- Tests: `TechnicalAccountLineControllerTest`,
+  `TechnicalAccountLineOutboxIntegrationTest`, `TechnicalAccountLineClientTest`,
+  and `TechnicalAccountControllerTest` (issue reconciliation).
+- `openapi/contract.yaml` 4.2.0, `asyncapi/contract.yaml` 1.7.0, and
+  `asyncapi/event-catalog.yaml` 1.22.0 record the implemented shape.
+
+Resolution: the implemented four-component detail is documented as canonical
+for now. Closing the gap means adding the SPEC detail line vocabulary, a line
+update or correction command, per-line currency/source metadata, and a stricter
+reconciliation (including duplicate detection) or amending SPEC 11.3.4 to the
+reduced component model. The two event names follow EV-05 and can be aligned to
+a SPEC name only through a dual-publish window. The description bound should be
+aligned between the domain and expert before it is treated as a stable 300.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-21
-Document content version contract:
+Contract technical-account lines contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -2291,7 +2406,7 @@ python: 3.12.8 (standard library only)
 OpenAPI 3.1 documents
   OK openapi/party.yaml  5 paths, 7 operations
   OK openapi/policy.yaml  48 paths, 63 operations
-  OK openapi/contract.yaml  41 paths, 59 operations
+  OK openapi/contract.yaml  43 paths, 62 operations
   OK openapi/direct-claims.yaml  49 paths, 72 operations
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
   OK openapi/cession.yaml  9 paths, 11 operations
@@ -2303,7 +2418,7 @@ OpenAPI 3.1 documents
 AsyncAPI 3 documents
   OK asyncapi/party.yaml  9 event channels
   OK asyncapi/policy.yaml  29 event channels
-  OK asyncapi/contract.yaml  30 event channels
+  OK asyncapi/contract.yaml  32 event channels
   OK asyncapi/direct-claims.yaml  26 event channels
   OK asyncapi/assumed-claims.yaml  21 event channels
   OK asyncapi/cession.yaml  17 event channels
@@ -2311,7 +2426,7 @@ AsyncAPI 3 documents
   OK asyncapi/document.yaml  21 event channels
   OK asyncapi/payment.yaml  19 event channels
   OK asyncapi/notifications.yaml  12 event channels
-  OK catalog: 201 unique published events across 10 verticals
+  OK catalog: 203 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -2319,7 +2434,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 12657 checks, 0 failures
+  PASS 12857 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -2497,7 +2612,15 @@ Additional checks and limits:
   `version` from the required `DocumentContentUploadedData` keys each fail with
   the specific missing-operation, required-metadata-field, or required-payload
   message. All three were run on a throwaway copy and exited non-zero
-  (exit 1); the working copy was left unchanged.
+  (exit 1); the working copy was left unchanged. The Contract
+  technical-account-line pass added four more: renaming the
+  `/api/v1/contracts/{contractId}/technical-accounts/{accountId}/lines` path,
+  renaming the `LineSummary` schema, adding `DRAFT` to the
+  `TechnicalAccountLineType` enum, and dropping
+  `contract.technical-account.line-added` from the Contract catalog
+  `implemented` list each fail with the specific missing-operation, schema,
+  enum, or implemented-event message. All four were run on a throwaway copy and
+  exited non-zero (exit 1); the working copy was left unchanged.
 
 ## Resolution policy
 

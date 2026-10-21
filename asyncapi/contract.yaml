@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:contract
 info:
   title: EIA Contract events
-  version: 1.6.0
+  version: 1.7.0
   summary: Published domain event names for the Contract vertical.
   description: >
     Event contract for the Contract vertical. The authoritative event names are
@@ -16,12 +16,12 @@ info:
 
     The Contract expert now publishes `contract.contract.created`,
     `contract.contract.updated`, `contract.contract.bound`,
-    `contract.contract.commuted`, `contract.cession.recorded`, the three
+    `contract.contract.commuted`, `contract.cession.recorded`, the five
     technical-account facts `contract.technical-account.created`, `.issued`,
-    and `.settled`, the three period-bordereau facts
-    `contract.bordereau.received`, `.processed`, and `.failed`, and the four
-    cash-call facts `contract.cash-call.requested`, `.issued`, `.settled`, and
-    `.cancelled` through the transactional outbox; those channels and
+    `.settled`, `.line-added`, and `.line-removed`, the three period-bordereau
+    facts `contract.bordereau.received`, `.processed`, and `.failed`, and the
+    four cash-call facts `contract.cash-call.requested`, `.issued`, `.settled`,
+    and `.cancelled` through the transactional outbox; those channels and
     operations are marked `x-status: implemented`. The security/collateral
     fact `contract.security.recorded` is also implemented: it is a child
     aggregate keyed by the security id at version 1, while the outbox
@@ -34,9 +34,10 @@ info:
     targets a catalog lifecycle state can also emit the already-cataloged
     `signed`, `endorsed`, `expired`, or `cancelled` name; those names remain
     published and are not part of the implemented subset recorded here. The
-    remaining SPEC 11.3.9 names are planned. The technical-account names are new
-    child-aggregate facts with no SPEC 11.3.9 equivalent (M-22, M-29). The
-    bordereau `processed` and `failed` names are new terminal facts; SPEC 11.3.9
+    remaining SPEC 11.3.9 names are planned. The technical-account names,
+    including the two line facts, are new child- and grandchild-aggregate facts
+    with no SPEC 11.3.9 equivalent (M-22, M-29, M-42). The bordereau `processed`
+    and `failed` names are new terminal facts; SPEC 11.3.9
     publishes `contract.bordereau.posted` and `contract.bordereau.rejected`
     instead, so both spellings are published and only the implemented ones are
     recorded (M-22, M-30). SPEC 11.3.9 publishes only
@@ -268,6 +269,49 @@ channels:
         $ref: '#/components/messages/DomainEvent'
       ContractTechnicalAccountData:
         $ref: '#/components/messages/ContractTechnicalAccountData'
+  ContractTechnicalAccountLineAdded:
+    address: contract.technical-account.line-added
+    title: contract.technical-account.line-added
+    description: >
+      Emitted when a financial line is added to a DRAFT technical account, in
+      the same transaction as the line insert. The line is a grandchild fact of
+      the contract: the envelope uses the line id and aggregate version 1 while
+      the outbox partition key remains the contract id. The payload carries the
+      contract, account, and line identity, the line type, and the amount as a
+      decimal string. The account header amounts are not changed by the line;
+      they are reconciled when the account is issued. The name is new and has
+      no SPEC 11.3.9 equivalent (M-22, M-42).
+    x-event-type: contract.technical-account.line-added
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.3.9
+    x-implemented-by: repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ContractEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      ContractTechnicalAccountLineData:
+        $ref: '#/components/messages/ContractTechnicalAccountLineData'
+  ContractTechnicalAccountLineRemoved:
+    address: contract.technical-account.line-removed
+    title: contract.technical-account.line-removed
+    description: >
+      Emitted when a financial line is removed from a DRAFT technical account,
+      in the same transaction as the line delete. The envelope uses the removed
+      line id and aggregate version 1 while the outbox partition key remains the
+      contract id. The payload carries the same contract, account, and line
+      identity, line type, and amount as the add fact. Removing a line is
+      possible only while the account is DRAFT; once ISSUED the line detail is
+      immutable. The name is new and has no SPEC 11.3.9 equivalent (M-22, M-42).
+    x-event-type: contract.technical-account.line-removed
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.3.9
+    x-implemented-by: repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ContractEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      ContractTechnicalAccountLineData:
+        $ref: '#/components/messages/ContractTechnicalAccountLineData'
   ContractBordereauReceived:
     address: contract.bordereau.received
     title: contract.bordereau.received
@@ -690,6 +734,30 @@ operations:
       settled, in the same transaction as the status row update.
     x-event-type: contract.technical-account.settled
     x-status: implemented
+  publishContractTechnicalAccountLineAdded:
+    action: send
+    channel:
+      $ref: '#/channels/ContractTechnicalAccountLineAdded'
+    summary: Publish contract.technical-account.line-added
+    description: >
+      Publishes contract.technical-account.line-added through the transactional
+      outbox in the same transaction as the line insert on a DRAFT account. The
+      event uses the line id at aggregate version 1; the outbox partition key
+      stays the contract id.
+    x-event-type: contract.technical-account.line-added
+    x-status: implemented
+  publishContractTechnicalAccountLineRemoved:
+    action: send
+    channel:
+      $ref: '#/channels/ContractTechnicalAccountLineRemoved'
+    summary: Publish contract.technical-account.line-removed
+    description: >
+      Publishes contract.technical-account.line-removed through the
+      transactional outbox in the same transaction as the line delete on a DRAFT
+      account. The event uses the removed line id at aggregate version 1; the
+      outbox partition key stays the contract id.
+    x-event-type: contract.technical-account.line-removed
+    x-status: implemented
   publishContractBordereauReceived:
     action: send
     channel:
@@ -992,6 +1060,42 @@ components:
               - DRAFT
               - ISSUED
               - SETTLED
+    ContractTechnicalAccountLineData:
+      name: ContractTechnicalAccountLineData
+      title: contract.technical-account.line-* data
+      summary: >
+        Minimal schema for the envelope data object of a technical-account line
+        fact.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - contractId
+          - accountId
+          - lineId
+          - lineType
+          - amount
+        properties:
+          contractId:
+            type: string
+            format: uuid
+          accountId:
+            type: string
+            format: uuid
+          lineId:
+            type: string
+            format: uuid
+          lineType:
+            type: string
+            enum:
+              - PREMIUM
+              - LOSS
+              - COMMISSION
+              - OTHER
+          amount:
+            type: string
+            pattern: '^-?(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,4})?$'
     ContractBordereauData:
       name: ContractBordereauData
       title: contract.bordereau.* data
@@ -1242,16 +1346,21 @@ x-implementation:
   publisher: eia-contract-expert
   subscriber: none
   notes: >
-    Seventeen Contract events are written to the transactional outbox in the
+    Nineteen Contract events are written to the transactional outbox in the
     same transaction as the aggregate write: `created`, `updated`, `bound`,
     `commuted`, `cession.recorded`, `technical-account.created`,
     `technical-account.issued`, `technical-account.settled`,
+    `technical-account.line-added`, `technical-account.line-removed`,
     `bordereau.received`, `bordereau.processed`, `bordereau.failed`,
     `cash-call.requested`, `cash-call.issued`, `cash-call.settled`,
     `cash-call.cancelled`, `security.recorded`, and
-    `security.status-changed`. The three technical-account
+    `security.status-changed`. The three technical-account lifecycle
     facts are child-aggregate events that use the account id and its lifecycle
-    version while the outbox partition key stays the contract id. The three
+    version while the outbox partition key stays the contract id. The two line
+    facts are grandchild events that use the line id and aggregate version 1
+    while the partition key stays the contract id; their payload carries the
+    contract, account, and line identity, the line type, and the amount, and
+    they are emitted only while the account is DRAFT. The three
     bordereau facts are child-aggregate events that use the bordereau id and
     version 1 (received) or 2 (processed or failed) while the partition key
     stays the contract id. The four cash-call facts use the cash-call id and

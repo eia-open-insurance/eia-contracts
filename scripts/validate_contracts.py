@@ -423,6 +423,73 @@ CONTRACT_TECHNICAL_ACCOUNT_CREATE_FIELDS = (
 CONTRACT_TECHNICAL_ACCOUNT_STATUSES = ("DRAFT", "ISSUED", "SETTLED")
 CONTRACT_TECHNICAL_ACCOUNT_REQUEST_STATUSES = ("ISSUED", "SETTLED")
 
+# Contract technical-account lines (SPEC 11.3.4 technical_account_line). Each
+# tuple is (method, path, success status, success schema, request schema or
+# None). The collection GET/POST and the item DELETE are mandatory; all three
+# operations document the tenant and ASSUMED book headers, the contract and
+# account path parameters, and 400/404, with 409 on both mutations. The line is
+# editable only in DRAFT (ACCOUNT_NOT_EDITABLE) and issue-time reconciliation
+# is documented on the account status PATCH.
+CONTRACT_TECHNICAL_ACCOUNT_LINE_PATHS = [
+    (
+        "get",
+        "/api/v1/contracts/{contractId}/technical-accounts/{accountId}/lines",
+        "200",
+        "LineSummary",
+        None,
+    ),
+    (
+        "post",
+        "/api/v1/contracts/{contractId}/technical-accounts/{accountId}/lines",
+        "201",
+        "TechnicalAccountLine",
+        "CreateTechnicalAccountLineRequest",
+    ),
+    (
+        "delete",
+        "/api/v1/contracts/{contractId}/technical-accounts/{accountId}/lines/{lineId}",
+        "204",
+        None,
+        None,
+    ),
+]
+
+CONTRACT_TECHNICAL_ACCOUNT_LINE_FIELDS = (
+    "lineId",
+    "accountId",
+    "lineType",
+    "reference",
+    "description",
+    "amount",
+    "createdAt",
+)
+
+CONTRACT_TECHNICAL_ACCOUNT_LINE_TYPES = ("PREMIUM", "LOSS", "COMMISSION", "OTHER")
+CONTRACT_TECHNICAL_ACCOUNT_LINE_SUMMARY_FIELDS = ("items", "totals")
+CONTRACT_TECHNICAL_ACCOUNT_LINE_TOTAL_FIELDS = (
+    "premium",
+    "loss",
+    "commission",
+    "other",
+)
+CONTRACT_TECHNICAL_ACCOUNT_LINE_REFERENCE_MAX_LENGTH = 64
+CONTRACT_TECHNICAL_ACCOUNT_LINE_DESCRIPTION_MAX_LENGTH = 255
+CONTRACT_TECHNICAL_ACCOUNT_LINE_NOT_EDITABLE = "ACCOUNT_NOT_EDITABLE"
+CONTRACT_TECHNICAL_ACCOUNT_LINE_RECONCILE = "ACCOUNT_LINES_DO_NOT_RECONCILE"
+CONTRACT_TECHNICAL_ACCOUNT_LINE_EVENTS = (
+    "contract.technical-account.line-added",
+    "contract.technical-account.line-removed",
+)
+CONTRACT_TECHNICAL_ACCOUNT_LINE_EVENT_FIELDS = (
+    "contractId",
+    "accountId",
+    "lineId",
+    "lineType",
+    "amount",
+)
+CONTRACT_TECHNICAL_ACCOUNT_LINE_EVENT_MESSAGE = "ContractTechnicalAccountLineData"
+CONTRACT_TECHNICAL_ACCOUNT_LINE_EVENT_IMPLEMENTED_BY = "ContractEvents.java"
+
 
 # Contract period bordereaux. Each tuple is
 # (method, path, success status, success schema, request schema or None). All
@@ -1283,6 +1350,8 @@ IMPLEMENTED_EVENTS = {
         "contract.technical-account.created",
         "contract.technical-account.issued",
         "contract.technical-account.settled",
+        "contract.technical-account.line-added",
+        "contract.technical-account.line-removed",
         "contract.bordereau.received",
         "contract.bordereau.processed",
         "contract.bordereau.failed",
@@ -5724,6 +5793,428 @@ def check_contract_technical_accounts(contracts: ContractSet, document, relative
 
 
 # ---------------------------------------------------------------------------
+# Contract technical-account line checks
+# ---------------------------------------------------------------------------
+
+
+def check_contract_technical_account_lines(
+    contracts: ContractSet, document, relative: str
+):
+    """Require the technical-account line operations, schemas, and rules."""
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    for (
+        method,
+        line_path,
+        success_status,
+        response_schema_name,
+        request_schema_name,
+    ) in CONTRACT_TECHNICAL_ACCOUNT_LINE_PATHS:
+        path_item = paths.get(line_path) if isinstance(paths, dict) else None
+        operation = path_item.get(method) if isinstance(path_item, dict) else None
+        where = f"{relative}: {method.upper()} {line_path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required technical-account line operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+
+        parameter_refs, inline_names = _parameter_names(operation)
+        contracts.check(
+            "TenantHeader" in parameter_refs,
+            f"{where}: must document the shared TenantHeader parameter",
+        )
+        contracts.check(
+            "BookHeaderAssumed" in parameter_refs,
+            f"{where}: must document the shared BookHeaderAssumed parameter",
+        )
+        for path_parameter in ("contractId", "accountId"):
+            contracts.check(
+                path_parameter in inline_names,
+                f"{where}: must declare the {path_parameter} path parameter",
+            )
+        if method == "delete":
+            contracts.check(
+                "lineId" in inline_names,
+                f"{where}: must declare the lineId path parameter",
+            )
+
+        responses = operation.get("responses") or {}
+        for code in ("400", "404"):
+            contracts.check(
+                code in responses,
+                f"{where}: must document the {code} response",
+            )
+        if method in ("post", "delete"):
+            contracts.check(
+                "409" in responses,
+                f"{where}: must document the 409 response",
+            )
+            conflict = responses.get("409") if isinstance(responses, dict) else None
+            conflict_text = (
+                str(conflict.get("description") or "")
+                if isinstance(conflict, dict)
+                else ""
+            )
+            contracts.check(
+                CONTRACT_TECHNICAL_ACCOUNT_LINE_NOT_EDITABLE in conflict_text,
+                f"{where}: 409 must document "
+                f"{CONTRACT_TECHNICAL_ACCOUNT_LINE_NOT_EDITABLE}",
+            )
+
+        description = str(operation.get("description") or "")
+        if method in ("post", "delete"):
+            contracts.check(
+                CONTRACT_TECHNICAL_ACCOUNT_LINE_NOT_EDITABLE in description,
+                f"{where}: description must document "
+                f"{CONTRACT_TECHNICAL_ACCOUNT_LINE_NOT_EDITABLE}",
+            )
+
+        if method == "get":
+            contracts.check(
+                "requestBody" not in operation,
+                f"{where}: the read operation must not declare a request body",
+            )
+            ok_schema = _response_schema(operation, success_status)
+            contracts.check(
+                isinstance(ok_schema, dict)
+                and str(ok_schema.get("$ref", "")).endswith(
+                    f"/schemas/{response_schema_name}"
+                ),
+                f"{where}: {success_status} must return the "
+                f"{response_schema_name} schema",
+            )
+        elif method == "post":
+            request_body = operation.get("requestBody") or {}
+            contracts.check(
+                request_body.get("required") is True,
+                f"{where}: request body must be required",
+            )
+            request_schema = (
+                ((request_body.get("content") or {}).get("application/json") or {})
+                .get("schema")
+                if isinstance(request_body, dict)
+                else None
+            )
+            contracts.check(
+                isinstance(request_schema, dict)
+                and str(request_schema.get("$ref", "")).endswith(
+                    f"/schemas/{request_schema_name}"
+                ),
+                f"{where}: request body must use the {request_schema_name} schema",
+            )
+            success_schema = _response_schema(operation, success_status)
+            contracts.check(
+                isinstance(success_schema, dict)
+                and str(success_schema.get("$ref", "")).endswith(
+                    f"/schemas/{response_schema_name}"
+                ),
+                f"{where}: {success_status} must return the "
+                f"{response_schema_name} schema",
+            )
+        else:
+            contracts.check(
+                success_status in responses,
+                f"{where}: must document the {success_status} response",
+            )
+            contracts.check(
+                _response_schema(operation, success_status) is None,
+                f"{where}: {success_status} must not return a body",
+            )
+
+    line = schemas.get("TechnicalAccountLine") or {}
+    line_properties = line.get("properties") or {}
+    line_required = set(line.get("required") or [])
+    contracts.check(
+        isinstance(line, dict) and line.get("type") == "object",
+        f"{relative}: TechnicalAccountLine must be an object schema",
+    )
+    contracts.check(
+        line_required == set(CONTRACT_TECHNICAL_ACCOUNT_LINE_FIELDS),
+        f"{relative}: TechnicalAccountLine must require exactly "
+        f"{list(CONTRACT_TECHNICAL_ACCOUNT_LINE_FIELDS)}",
+    )
+    for field in CONTRACT_TECHNICAL_ACCOUNT_LINE_FIELDS:
+        contracts.check(
+            field in line_properties,
+            f"{relative}: TechnicalAccountLine.properties.{field} is required",
+        )
+    for field in ("lineId", "accountId"):
+        contracts.check(
+            (line_properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: TechnicalAccountLine.{field} must be a uuid",
+        )
+    contracts.check(
+        str((line_properties.get("lineType") or {}).get("$ref", "")).endswith(
+            "/schemas/TechnicalAccountLineType"
+        ),
+        f"{relative}: TechnicalAccountLine.lineType must reference "
+        "TechnicalAccountLineType",
+    )
+    for field, max_length in (
+        ("reference", CONTRACT_TECHNICAL_ACCOUNT_LINE_REFERENCE_MAX_LENGTH),
+        ("description", CONTRACT_TECHNICAL_ACCOUNT_LINE_DESCRIPTION_MAX_LENGTH),
+    ):
+        property_schema = line_properties.get(field) or {}
+        contracts.check(
+            _schema_types(property_schema) == {"string", "null"}
+            and property_schema.get("maxLength") == max_length,
+            f"{relative}: TechnicalAccountLine.{field} must be a nullable string "
+            f"of at most {max_length} characters",
+        )
+    contracts.check(
+        str((line_properties.get("amount") or {}).get("$ref", "")).endswith(
+            "/schemas/MoneyAmount"
+        ),
+        f"{relative}: TechnicalAccountLine.amount must reference MoneyAmount",
+    )
+    contracts.check(
+        (line_properties.get("createdAt") or {}).get("format") == "date-time",
+        f"{relative}: TechnicalAccountLine.createdAt must be a date-time",
+    )
+
+    line_type = schemas.get("TechnicalAccountLineType") or {}
+    contracts.check(
+        line_type.get("type") == "string",
+        f"{relative}: TechnicalAccountLineType must be a string enum",
+    )
+    contracts.check(
+        set(line_type.get("enum") or [])
+        == set(CONTRACT_TECHNICAL_ACCOUNT_LINE_TYPES),
+        f"{relative}: TechnicalAccountLineType must enumerate "
+        f"{list(CONTRACT_TECHNICAL_ACCOUNT_LINE_TYPES)}",
+    )
+
+    totals = schemas.get("TechnicalAccountLineTotals") or {}
+    totals_properties = totals.get("properties") or {}
+    totals_required = set(totals.get("required") or [])
+    contracts.check(
+        isinstance(totals, dict) and totals.get("type") == "object",
+        f"{relative}: TechnicalAccountLineTotals must be an object schema",
+    )
+    contracts.check(
+        totals_required == set(CONTRACT_TECHNICAL_ACCOUNT_LINE_TOTAL_FIELDS),
+        f"{relative}: TechnicalAccountLineTotals must require exactly "
+        f"{list(CONTRACT_TECHNICAL_ACCOUNT_LINE_TOTAL_FIELDS)}",
+    )
+    for field in CONTRACT_TECHNICAL_ACCOUNT_LINE_TOTAL_FIELDS:
+        contracts.check(
+            str((totals_properties.get(field) or {}).get("$ref", "")).endswith(
+                "/schemas/MoneyAmount"
+            ),
+            f"{relative}: TechnicalAccountLineTotals.{field} must reference "
+            "MoneyAmount",
+        )
+
+    summary = schemas.get("LineSummary") or {}
+    summary_properties = summary.get("properties") or {}
+    summary_required = set(summary.get("required") or [])
+    contracts.check(
+        isinstance(summary, dict) and summary.get("type") == "object",
+        f"{relative}: LineSummary must be an object schema",
+    )
+    contracts.check(
+        summary_required == set(CONTRACT_TECHNICAL_ACCOUNT_LINE_SUMMARY_FIELDS),
+        f"{relative}: LineSummary must require exactly "
+        f"{list(CONTRACT_TECHNICAL_ACCOUNT_LINE_SUMMARY_FIELDS)}",
+    )
+    items = summary_properties.get("items") or {}
+    contracts.check(
+        items.get("type") == "array"
+        and str((items.get("items") or {}).get("$ref", "")).endswith(
+            "/schemas/TechnicalAccountLine"
+        ),
+        f"{relative}: LineSummary.items must be an array of "
+        "TechnicalAccountLine",
+    )
+    contracts.check(
+        str((summary_properties.get("totals") or {}).get("$ref", "")).endswith(
+            "/schemas/TechnicalAccountLineTotals"
+        ),
+        f"{relative}: LineSummary.totals must reference "
+        "TechnicalAccountLineTotals",
+    )
+
+    create = schemas.get("CreateTechnicalAccountLineRequest") or {}
+    create_properties = create.get("properties") or {}
+    create_required = set(create.get("required") or [])
+    contracts.check(
+        isinstance(create, dict) and create.get("type") == "object",
+        f"{relative}: CreateTechnicalAccountLineRequest must be an object schema",
+    )
+    contracts.check(
+        create_required == {"lineType", "amount"},
+        f"{relative}: CreateTechnicalAccountLineRequest must require exactly "
+        "lineType and amount",
+    )
+    contracts.check(
+        str((create_properties.get("lineType") or {}).get("$ref", "")).endswith(
+            "/schemas/TechnicalAccountLineType"
+        ),
+        f"{relative}: CreateTechnicalAccountLineRequest.lineType must reference "
+        "TechnicalAccountLineType",
+    )
+    contracts.check(
+        str((create_properties.get("amount") or {}).get("$ref", "")).endswith(
+            "/schemas/MoneyAmount"
+        ),
+        f"{relative}: CreateTechnicalAccountLineRequest.amount must reference "
+        "MoneyAmount",
+    )
+    for field, max_length in (
+        ("reference", CONTRACT_TECHNICAL_ACCOUNT_LINE_REFERENCE_MAX_LENGTH),
+        ("description", CONTRACT_TECHNICAL_ACCOUNT_LINE_DESCRIPTION_MAX_LENGTH),
+    ):
+        property_schema = create_properties.get(field) or {}
+        contracts.check(
+            _schema_types(property_schema) == {"string", "null"}
+            and property_schema.get("maxLength") == max_length,
+            f"{relative}: CreateTechnicalAccountLineRequest.{field} must be an "
+            f"optional nullable string of at most {max_length} characters",
+        )
+
+    status_path = (
+        "/api/v1/contracts/{contractId}/technical-accounts/{accountId}/status"
+    )
+    status_item = paths.get(status_path) if isinstance(paths, dict) else None
+    status_operation = status_item.get("patch") if isinstance(status_item, dict) else None
+    contracts.check(
+        isinstance(status_operation, dict),
+        f"{relative}: PATCH {status_path} is required to document line "
+        "reconciliation",
+    )
+    if isinstance(status_operation, dict):
+        status_description = str(status_operation.get("description") or "")
+        status_conflict = (
+            (status_operation.get("responses") or {}).get("409") or {}
+        )
+        status_conflict_text = str(status_conflict.get("description") or "")
+        contracts.check(
+            CONTRACT_TECHNICAL_ACCOUNT_LINE_RECONCILE in status_description,
+            f"{relative}: PATCH {status_path} description must document "
+            f"{CONTRACT_TECHNICAL_ACCOUNT_LINE_RECONCILE}",
+        )
+        contracts.check(
+            CONTRACT_TECHNICAL_ACCOUNT_LINE_RECONCILE in status_conflict_text,
+            f"{relative}: PATCH {status_path} 409 must document "
+            f"{CONTRACT_TECHNICAL_ACCOUNT_LINE_RECONCILE}",
+        )
+        contracts.check(
+            "DRAFT" in status_description and "ISSUED" in status_description,
+            f"{relative}: PATCH {status_path} description must document the "
+            "DRAFT -> ISSUED reconciliation point",
+        )
+
+    planned = {
+        (entry.get("method", "").lower(), entry.get("path"))
+        for entry in document.get("x-planned-operations") or []
+        if isinstance(entry, dict)
+    }
+    for method, line_path, *_ in CONTRACT_TECHNICAL_ACCOUNT_LINE_PATHS:
+        contracts.check(
+            (method, line_path) not in planned,
+            f"{relative}: implemented line operation {method.upper()} "
+            f"{line_path} must not reappear under x-planned-operations",
+        )
+
+
+def check_contract_technical_account_lines_asyncapi(
+    contracts: ContractSet, document, relative: str
+):
+    """Require the two implemented line channels and their shared payload."""
+    channels = document.get("channels") or {}
+    operations = document.get("operations") or {}
+    messages = (document.get("components") or {}).get("messages") or {}
+    send_events = {
+        operation.get("x-event-type")
+        for operation in operations.values()
+        if isinstance(operation, dict) and operation.get("action") == "send"
+    }
+
+    for event in CONTRACT_TECHNICAL_ACCOUNT_LINE_EVENTS:
+        channel = next(
+            (
+                candidate
+                for candidate in channels.values()
+                if isinstance(candidate, dict)
+                and candidate.get("address") == event
+            ),
+            None,
+        )
+        contracts.check(
+            isinstance(channel, dict),
+            f"{relative}: required technical-account line event channel "
+            f"'{event}' is missing",
+        )
+        if not isinstance(channel, dict):
+            continue
+        contracts.check(
+            channel.get("x-status") == "implemented",
+            f"{relative}: line event channel '{event}' must be implemented",
+        )
+        contracts.check(
+            str(channel.get("x-implemented-by", "")).endswith(
+                CONTRACT_TECHNICAL_ACCOUNT_LINE_EVENT_IMPLEMENTED_BY
+            ),
+            f"{relative}: line event channel '{event}' must name "
+            f"{CONTRACT_TECHNICAL_ACCOUNT_LINE_EVENT_IMPLEMENTED_BY} in "
+            "x-implemented-by",
+        )
+        contracts.check(
+            event in send_events,
+            f"{relative}: line event '{event}' must have a send operation",
+        )
+        channel_messages = channel.get("messages") or {}
+        contracts.check(
+            (
+                channel_messages.get(CONTRACT_TECHNICAL_ACCOUNT_LINE_EVENT_MESSAGE)
+                or {}
+            ).get("$ref")
+            == f"#/components/messages/{CONTRACT_TECHNICAL_ACCOUNT_LINE_EVENT_MESSAGE}",
+            f"{relative}: {event} must reference "
+            f"{CONTRACT_TECHNICAL_ACCOUNT_LINE_EVENT_MESSAGE}",
+        )
+
+    message = messages.get(CONTRACT_TECHNICAL_ACCOUNT_LINE_EVENT_MESSAGE) or {}
+    payload = message.get("payload") or {}
+    payload_properties = payload.get("properties") or {}
+    payload_required = set(payload.get("required") or [])
+    contracts.check(
+        payload_required == set(CONTRACT_TECHNICAL_ACCOUNT_LINE_EVENT_FIELDS),
+        f"{relative}: {CONTRACT_TECHNICAL_ACCOUNT_LINE_EVENT_MESSAGE} must "
+        f"require exactly {list(CONTRACT_TECHNICAL_ACCOUNT_LINE_EVENT_FIELDS)}",
+    )
+    for field in CONTRACT_TECHNICAL_ACCOUNT_LINE_EVENT_FIELDS:
+        contracts.check(
+            field in payload_properties,
+            f"{relative}: {CONTRACT_TECHNICAL_ACCOUNT_LINE_EVENT_MESSAGE}."
+            f"properties.{field} is required",
+        )
+    for field in ("contractId", "accountId", "lineId"):
+        contracts.check(
+            (payload_properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: {CONTRACT_TECHNICAL_ACCOUNT_LINE_EVENT_MESSAGE}."
+            f"{field} must be a uuid",
+        )
+    contracts.check(
+        set((payload_properties.get("lineType") or {}).get("enum") or [])
+        == set(CONTRACT_TECHNICAL_ACCOUNT_LINE_TYPES),
+        f"{relative}: {CONTRACT_TECHNICAL_ACCOUNT_LINE_EVENT_MESSAGE}.lineType "
+        f"must enumerate {list(CONTRACT_TECHNICAL_ACCOUNT_LINE_TYPES)}",
+    )
+    amount = payload_properties.get("amount") or {}
+    contracts.check(
+        amount.get("type") == "string"
+        and amount.get("pattern")
+        == "^-?(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,4})?$",
+        f"{relative}: {CONTRACT_TECHNICAL_ACCOUNT_LINE_EVENT_MESSAGE}.amount "
+        "must be a decimal string",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Contract period-bordereau checks
 # ---------------------------------------------------------------------------
 
@@ -7664,6 +8155,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_contract_security(contracts, document, relative)
             check_contract_security_status(contracts, document, relative)
             check_contract_technical_accounts(contracts, document, relative)
+            check_contract_technical_account_lines(contracts, document, relative)
             check_contract_bordereaux(contracts, document, relative)
             check_contract_cash_calls(contracts, document, relative)
         if vertical == "direct-claims":
@@ -7936,6 +8428,9 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
             check_policy_credit_notes_asyncapi(contracts, document, relative)
 
         if vertical == "contract":
+            check_contract_technical_account_lines_asyncapi(
+                contracts, document, relative
+            )
             contract_send_events = {
                 operation.get("x-event-type")
                 for operation in operations.values()

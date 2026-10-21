@@ -1007,6 +1007,52 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   remaining SPEC gaps, and refreshes the validation evidence.
 - `python scripts/validate_contracts.py` passes 12,657 checks with 0 failures.
 
+### Added in the contract technical-account lines contract (2026-10-21)
+
+- `openapi/contract.yaml` is 4.2.0: adds `GET/POST
+  /api/v1/contracts/{contractId}/technical-accounts/{accountId}/lines` and
+  `DELETE .../lines/{lineId}`, the `TechnicalAccountLine` projection
+  (`lineId`, `accountId`, `lineType`, `reference`, `description`, `amount`,
+  `createdAt`), the `TechnicalAccountLineType` enum (`PREMIUM`, `LOSS`,
+  `COMMISSION`, `OTHER`), the `LineSummary` read model (`items` plus
+  `totals` for premium, loss, commission, and other), the
+  `TechnicalAccountLineTotals` schema, and the
+  `CreateTechnicalAccountLineRequest` body. The list returns 200, the create
+  201, and the delete 204, with 400/404 on every operation and 409
+  `ACCOUNT_NOT_EDITABLE` on both mutations. The account status PATCH now
+  documents the issue-time reconciliation: when at least one line exists, each
+  line-type total must equal its matching header component, otherwise the
+  transition is 409 `ACCOUNT_LINES_DO_NOT_RECONCILE` with one `details[]`
+  entry per offending type. The change is additive; the reconciliation only
+  rejects an issue that has line detail.
+- `asyncapi/contract.yaml` is 1.7.0: adds the implemented
+  `contract.technical-account.line-added` and `.line-removed` grandchild
+  channels and `send` operations with a shared
+  `ContractTechnicalAccountLineData` payload (`contractId`, `accountId`,
+  `lineId`, `lineType`, `amount`). Each event uses the line id and aggregate
+  version 1 while the outbox partition key stays the contract id; both are
+  emitted only while the account is DRAFT and have no SPEC 11.3.9 equivalent.
+- `asyncapi/event-catalog.yaml` is 1.22.0: both line names are published and
+  implemented (203 published in total; Contract becomes 32 published and 19
+  implemented, and the platform implemented total becomes 82).
+- `scripts/validate_contracts.py` requires the two line paths and their
+  GET/POST/DELETE operations, the tenant and ASSUMED book parameters, the
+  contract/account/line path parameters, the `TechnicalAccountLine`,
+  `TechnicalAccountLineType`, `LineSummary`, `TechnicalAccountLineTotals`, and
+  `CreateTechnicalAccountLineRequest` schemas and their field bounds, the
+  200/201/204 successes, the 400/404/409 responses with
+  `ACCOUNT_NOT_EDITABLE`, the issue-time `ACCOUNT_LINES_DO_NOT_RECONCILE`
+  documentation on the status PATCH, the absence of the implemented paths from
+  `x-planned-operations`, the two implemented channels and `send` operations,
+  the shared payload fields and enums, and the two catalog entries.
+- `README.md` records the routes, the `LineSummary` and line projections, the
+  DRAFT-only edit guard, the issue-time reconciliation rule, the book rule, the
+  two events, the additive versions, and the remaining line-vocabulary gaps;
+  `MISMATCHES.md` updates M-29 and adds M-42 for the reduced line types and
+  the other SPEC `technical_account_line` gaps, and refreshes the validation
+  evidence.
+- `python scripts/validate_contracts.py` passes 12,857 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

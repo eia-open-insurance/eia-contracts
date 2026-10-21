@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Contract API
-  version: 4.1.0
+  version: 4.2.0
   summary: Assumed-book reinsurance contract administration and the Contract expert API.
   description: >
     This document describes the implemented public Contract domain API and the
@@ -42,9 +42,13 @@ info:
     `balance = cededPremium - commission - cededLosses + otherCharges`, and
     exposes every money field as a decimal string (SPEC 10.3). A positive
     balance is due from the cedent to the reinsurer. The account is created in
-    DRAFT and moves DRAFT -> ISSUED -> SETTLED; the SPEC 11.3.4
-    `technical_account_line` breakdown is not part of this slice, and the SPEC
-    11.3.10 `/accounts` route is exposed as `/technical-accounts` (M-29).
+    DRAFT and moves DRAFT -> ISSUED -> SETTLED. The SPEC 11.3.4
+    `technical_account_line` detail is implemented under
+    `.../{accountId}/lines`: a line names one of the four header components and
+    is editable only while the account is DRAFT, and issuing an account that has
+    lines requires each component's line total to equal the matching header
+    amount (`ACCOUNT_LINES_DO_NOT_RECONCILE`, M-42). The SPEC 11.3.10 `/accounts`
+    route is exposed as `/technical-accounts` (M-29).
 
     A cash call is an interim funding request on one contract period. The expert
     generates `callNumber` as `CC-{year}-{sequence}`, creates the row in
@@ -1164,10 +1168,24 @@ paths:
         Applies one transition: DRAFT -> ISSUED or ISSUED -> SETTLED. The
         request only accepts `ISSUED` or `SETTLED`; `DRAFT` is the creation
         state and is 400 `INVALID_STATUS`. Skipping a step, repeating a terminal
-        status, or a concurrent change is 409 `INVALID_STATUS_TRANSITION`. A
-        successful transition appends `contract.technical-account.issued` or
+        status, or a concurrent change is 409 `INVALID_STATUS_TRANSITION`.
+
+        Issuing also reconciles the line detail (SPEC 11.3.4
+        `technical_account_line`). When at least one line exists, the sum of the
+        lines of each `lineType` must equal the matching header amount:
+        `PREMIUM` = `cededPremium`, `LOSS` = `cededLosses`, `COMMISSION` =
+        `commission`, and `OTHER` = `otherCharges`. Any mismatch rejects the
+        transition with 409 `ACCOUNT_LINES_DO_NOT_RECONCILE`, carrying one
+        `details[]` entry per offending line type; the account stays DRAFT and
+        no event is written. An account with no lines (a header-only account,
+        including one linked by a processed period bordereau) remains issuable.
+
+        A successful transition appends `contract.technical-account.issued` or
         `contract.technical-account.settled` to the outbox in the same
-        transaction as the row update.
+        transaction as the row update. The account lock makes the reconciliation
+        and the status write atomic with respect to concurrent line changes;
+        after ISSUED the line detail is immutable and every add or delete is
+        409 `ACCOUNT_NOT_EDITABLE`.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
@@ -1204,6 +1222,182 @@ paths:
           description: >
             409. `INVALID_STATUS_TRANSITION` when the requested edge is not
             DRAFT -> ISSUED or ISSUED -> SETTLED, including a concurrent change.
+            `ACCOUNT_LINES_DO_NOT_RECONCILE` when issuing an account that has
+            lines and at least one line-type total differs from the matching
+            header component; `details[]` names each offending `lineType`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/{contractId}/technical-accounts/{accountId}/lines:
+    get:
+      operationId: listContractTechnicalAccountLines
+      tags:
+        - Contract
+      summary: List the line detail and component totals of a technical account.
+      description: >
+        Returns the account's lines plus the per-component totals used by the
+        issue reconciliation. `items` is in insertion order (`createdAt`, then
+        line id); `totals` always carries all four components, with a zero
+        amount for a component that has no line. Each line type maps to exactly
+        one header component: `PREMIUM` -> `cededPremium`, `LOSS` ->
+        `cededLosses`, `COMMISSION` -> `commission`, and `OTHER` ->
+        `otherCharges`. Money is a decimal string (SPEC 10.3). The account
+        header does not embed the lines; this operation is the detail read.
+
+        `X-EIA-Tenant` is required and `X-EIA-Book` must be ASSUMED; another
+        book is hidden as 404 `BOOK_SCOPE_VIOLATION` (SPEC 3.6.2, WALL-06). The
+        query is scoped by tenant, contract, and account, so an unknown
+        contract, an unknown account, an account under another contract, and
+        another tenant's account are all 404. The read is available in every
+        account status; editing is not.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Lines and per-component totals of the account.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LineSummary'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: addContractTechnicalAccountLine
+      tags:
+        - Contract
+      summary: Add a line to a DRAFT technical account.
+      description: >
+        Records one financial line on the account and returns it with 201.
+        `lineType` is required and is one of `PREMIUM`, `LOSS`, `COMMISSION`,
+        or `OTHER` (trimmed and case-insensitive). `amount` is required and must
+        be strictly positive. `reference` and `description` are optional,
+        trimmed, and treated as absent when blank; `reference` is at most 64
+        characters and `description` at most 255. The tenant comes from
+        `X-EIA-Tenant`, the contract and account from the path, and the line id
+        and `createdAt` are server-derived, so none of them is accepted in the
+        body.
+
+        Lines can be added only while the account is DRAFT; an ISSUED or
+        SETTLED account is 409 `ACCOUNT_NOT_EDITABLE`. An unknown contract,
+        account, or an account under another contract is 404. The write and its
+        `contract.technical-account.line-added` outbox fact share one
+        transaction, so a rejected request leaves neither behind. The account
+        header amounts are not changed by a line; they are reconciled at issue
+        (409 `ACCOUNT_LINES_DO_NOT_RECONCILE`).
+
+        `X-EIA-Tenant` is required and `X-EIA-Book` must be ASSUMED; another
+        book is hidden as 404 `BOOK_SCOPE_VIOLATION` (SPEC 3.6.2, WALL-06).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTechnicalAccountLineRequest'
+      responses:
+        '201':
+          description: Line added to the DRAFT account.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TechnicalAccountLine'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            409. `ACCOUNT_NOT_EDITABLE` when the account is ISSUED or SETTLED;
+            lines can only be added while it is DRAFT.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/contracts/{contractId}/technical-accounts/{accountId}/lines/{lineId}:
+    delete:
+      operationId: removeContractTechnicalAccountLine
+      tags:
+        - Contract
+      summary: Remove a line from a DRAFT technical account.
+      description: >
+        Deletes one line and returns 204 with no body. The line is scoped by
+        tenant, contract, and account, so an unknown contract, unknown account,
+        unknown line, a line under another account, and another tenant's record
+        are all 404. Lines can be removed only while the account is DRAFT; an
+        ISSUED or SETTLED account is 409 `ACCOUNT_NOT_EDITABLE`. The delete and
+        its `contract.technical-account.line-removed` outbox fact share one
+        transaction, so a rejected request leaves neither behind.
+
+        `X-EIA-Tenant` is required and `X-EIA-Book` must be ASSUMED; another
+        book is hidden as 404 `BOOK_SCOPE_VIOLATION` (SPEC 3.6.2, WALL-06).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: lineId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Line removed.
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            409. `ACCOUNT_NOT_EDITABLE` when the account is ISSUED or SETTLED;
+            lines can only be removed while it is DRAFT.
           content:
             application/problem+json:
               schema:
@@ -3354,8 +3548,11 @@ components:
         `cededPremium - commission - cededLosses + otherCharges`; a positive
         balance is due from the cedent to the reinsurer and a negative balance
         is due from the reinsurer to the cedent. Money fields are decimal
-        strings (SPEC 10.3). The SPEC `technical_account_line` breakdown is not
-        part of this slice (M-29).
+        strings (SPEC 10.3). The account header is the reconciled view: the
+        SPEC 11.3.4 `technical_account_line` detail is read from
+        `.../{accountId}/lines` and is not embedded here. An account with lines
+        can be issued only when every line-type total equals its matching
+        header component (M-42).
       required:
         - accountId
         - accountNumber
@@ -3462,6 +3659,120 @@ components:
           enum:
             - ISSUED
             - SETTLED
+    TechnicalAccountLine:
+      type: object
+      description: >
+        One financial line of a technical account (SPEC 11.3.4
+        `technical_account_line`, reduced to the statement's four header
+        components). A line belongs to exactly one account and contributes to
+        exactly one component: `PREMIUM` to `cededPremium`, `LOSS` to
+        `cededLosses`, `COMMISSION` to `commission`, and `OTHER` to
+        `otherCharges`. `reference` and `description` are optional audit text
+        and are null when absent. `amount` is strictly positive and is a
+        decimal string (SPEC 10.3). Lines are add-only and remove-only in the
+        DRAFT account; an ISSUED account is immutable.
+      required:
+        - lineId
+        - accountId
+        - lineType
+        - reference
+        - description
+        - amount
+        - createdAt
+      properties:
+        lineId:
+          type: string
+          format: uuid
+        accountId:
+          type: string
+          format: uuid
+        lineType:
+          $ref: '#/components/schemas/TechnicalAccountLineType'
+        reference:
+          type: [string, 'null']
+          maxLength: 64
+          description: Optional source reference, trimmed; null when absent.
+        description:
+          type: [string, 'null']
+          maxLength: 255
+          description: Optional free-text description, trimmed; null when absent.
+        amount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        createdAt:
+          type: string
+          format: date-time
+    TechnicalAccountLineType:
+      type: string
+      description: >
+        The header component a technical-account line contributes to. The
+        implemented slice is reduced to these four component types; the richer
+        SPEC 11.3.4 detail vocabulary is not modelled (M-42).
+      enum:
+        - PREMIUM
+        - LOSS
+        - COMMISSION
+        - OTHER
+    TechnicalAccountLineTotals:
+      type: object
+      description: >
+        Summed line amounts by header component, in insertion order. All four
+        members are always present; a component with no line is `0.0000`.
+        Money is a decimal string (SPEC 10.3). These are the totals reconciled
+        against the account header on DRAFT -> ISSUED.
+      required:
+        - premium
+        - loss
+        - commission
+        - other
+      properties:
+        premium:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        loss:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        commission:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        other:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+    LineSummary:
+      type: object
+      description: >
+        The line detail of one technical account plus its per-component totals
+        (SPEC 11.3.4 `technical_account_line`). `items` is in insertion order;
+        `totals` is the reconciliation view used on issue. The account header
+        is not repeated here.
+      required:
+        - items
+        - totals
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/TechnicalAccountLine'
+        totals:
+          $ref: '#/components/schemas/TechnicalAccountLineTotals'
+    CreateTechnicalAccountLineRequest:
+      type: object
+      description: >
+        Adds one line to a DRAFT technical account. The tenant comes from
+        `X-EIA-Tenant`, the contract and account from the path, and the line id
+        and `createdAt` are server-derived, so none of them is accepted in the
+        body. `lineType` is trimmed and case-insensitive; `amount` is required
+        and must be greater than zero; `reference` and `description` are
+        optional and trimmed, with the same bounds as the projection.
+      required:
+        - lineType
+        - amount
+      properties:
+        lineType:
+          $ref: '#/components/schemas/TechnicalAccountLineType'
+        reference:
+          type: [string, 'null']
+          maxLength: 64
+        description:
+          type: [string, 'null']
+          maxLength: 255
+        amount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
     CashCall:
       type: object
       description: >
@@ -4181,7 +4492,7 @@ components:
 x-vertical: contract
 x-implementation:
   status: implemented
-  verifiedAt: '2026-10-20'
+  verifiedAt: '2026-10-21'
   verifiedAgainst:
     - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/ContractController.java
     - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/ContractSearch.java
@@ -4232,11 +4543,25 @@ x-implementation:
     - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/TechnicalAccountClient.java
     - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/TechnicalAccount.java
     - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/CreateTechnicalAccountCommand.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/TechnicalAccountLineController.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/TechnicalAccountLineService.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/TechnicalAccountLineClient.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/TechnicalAccountLine.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/LineSummary.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/CreateTechnicalAccountLineCommand.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/technicalaccount/TechnicalAccountController.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/technicalaccount/TechnicalAccountRules.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/technicalaccount/TechnicalAccountRepository.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/technicalaccount/TechnicalAccountStatus.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/technicalaccount/ContractTechnicalAccount.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/technicalaccount/TechnicalAccountLineController.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/technicalaccount/TechnicalAccountLineRules.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/technicalaccount/TechnicalAccountLineRepository.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/technicalaccount/TechnicalAccountLineType.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/technicalaccount/TechnicalAccountLineList.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/technicalaccount/ContractTechnicalAccountLine.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/technicalaccount/CreateTechnicalAccountLineRequest.java
+    - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/technicalaccount/TechnicalAccountLinesDoNotReconcileException.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/cashcall/CashCallController.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/cashcall/CashCallRules.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/cashcall/CashCallRepository.java
@@ -4265,7 +4590,16 @@ x-implementation:
     Percentages are points of 100, not decimal fractions. Technical accounts
     are projected with accountId (the expert row id) and exclude tenantId; the
     expert generates accountNumber and the balance, and the only statuses are
-    DRAFT, ISSUED, and SETTLED. Period bordereaux are projected with
+    DRAFT, ISSUED, and SETTLED. Technical-account lines are projected with
+    lineId (the expert row id is remapped by the domain) and accountId and
+    exclude tenantId; lineType is the implemented four-value component enum,
+    amount is strictly positive, and the list normalizes the expert `lines` map
+    into the public `items` plus the four `totals` buckets. Lines are editable
+    only in DRAFT (409 ACCOUNT_NOT_EDITABLE), and issuing a DRAFT account with
+    lines reconciles each component total to the header (409
+    ACCOUNT_LINES_DO_NOT_RECONCILE); the domain validates description at 300
+    characters but the expert caps it at 255 (M-42). Period bordereaux are
+    projected with
     bordereauId (the expert row id is remapped by the domain) and exclude
     tenantId; the expert generates bordereauNumber, the lifecycle is RECEIVED ->
     PROCESSED|FAILED, and PROCESSED links or creates the technical account for
@@ -4287,8 +4621,8 @@ x-implementation:
     domain accepts an absent X-EIA-Book on the security routes even though the
     canonical contract requires ASSUMED (M-37).
 x-compatibility:
-  contractVersion: 4.1.0
-  previousContractVersion: 4.0.0
+  contractVersion: 4.2.0
+  previousContractVersion: 4.1.0
   breaking:
     - The public GET/POST /api/v1/contracts/{contractId}/security operations now use the ten-field SecurityRecord response and the CreateContractSecurityRequest body. The wide Security and CreateSecurityRequest schemas are internal-expert only; a generated client of the old public Security shape must move to SecurityRecord.
     - PATCH /api/v1/contracts/{contractId}/status no longer accepts BOUND (since 2.0.0); it returns 409 BIND_REQUIRES_COMMAND and bind must use POST /bind.
@@ -4302,6 +4636,7 @@ x-compatibility:
     - Adds GET/POST /api/v1/contracts/{contractId}/cash-calls and PATCH /api/v1/contracts/{contractId}/cash-calls/{cashCallId}/status with the CashCall, CashCallStatus, CreateCashCallRequest, and UpdateCashCallStatusRequest schemas.
     - Documents the implemented derived ACTIVE/EXPIRED security status, the OUTSTANDING bind-slice value, and the contract.security.recorded event; the HTTP security paths are unchanged.
     - Adds PATCH /api/v1/contracts/{contractId}/security/{securityId}/status with the UpdateContractSecurityStatusRequest schema and the RELEASED/EXPIRED security lifecycle.
+    - Adds GET/POST /api/v1/contracts/{contractId}/technical-accounts/{accountId}/lines and DELETE .../lines/{lineId} with the TechnicalAccountLine, TechnicalAccountLineType, LineSummary, TechnicalAccountLineTotals, and CreateTechnicalAccountLineRequest schemas. The technical-account status description now documents issue-time line reconciliation.
   note: >
     Search, technical accounts, and cash calls are additive. The
     period-bordereau slice replaces the previously documented public bordereau
@@ -4315,7 +4650,11 @@ x-compatibility:
     generated client of the old public shape must move to SecurityRecord and
     CreateContractSecurityRequest. The security status action in 4.1.0 is
     additive: it adds one path and one request schema and changes no response
-    field. The HTTP base path stays /api/v1/contracts.
+    field. Technical-account lines in 4.2.0 are additive: they add two paths
+    and five schemas and change no existing request or response field; the one
+    behavioural addition is the issue-time reconciliation, which rejects an
+    issue that the header alone would have accepted when the account has line
+    detail. The HTTP base path stays /api/v1/contracts.
 x-planned-operations:
   - method: PATCH
     path: /api/v1/contracts/{contractId}

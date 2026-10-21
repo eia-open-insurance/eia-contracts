@@ -812,12 +812,75 @@ Technical-account semantics:
 - The projection is `{accountId, accountNumber, contractId, periodStart,
   periodEnd, currency, cededPremium, cededLosses, commission, otherCharges,
   balance, status, createdAt}`. `tenantId` is not part of the public projection.
-  The SPEC 11.3.4 `technical_account_line` breakdown, the `AGREED`, `DISPUTED`,
-  and `SUPERSEDED` statuses, and the SPEC 11.3.10 `/accounts` path remain gaps
-  (M-29).
+  The SPEC 11.3.4 `technical_account_line` breakdown is implemented from 4.2.0
+  (see the next section); the `AGREED`, `DISPUTED`, and `SUPERSEDED` statuses
+  and the SPEC 11.3.10 `/accounts` path remain gaps (M-29).
 - The three event names are child-aggregate facts with no SPEC 11.3.9
   equivalent (M-22, M-29). The envelope uses the account id and its lifecycle
   version (1, 2, 3) while the outbox partition key stays the contract id.
+
+### Contract technical-account lines (2026-10-21)
+
+Contract 4.2.0 adds the financial line detail behind the technical-account
+header. The change is additive: two paths, five schemas, and two event names are
+new, and no existing path, request field, response field, or event changed. The
+issue command gains one aggregate guard: a DRAFT account that has lines can be
+issued only when every line-type total equals its matching header amount.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/contract.yaml` | 4.2.0 | Additive | `GET/POST /api/v1/contracts/{contractId}/technical-accounts/{accountId}/lines` and `DELETE .../lines/{lineId}`, the `TechnicalAccountLine`, `TechnicalAccountLineType`, `LineSummary`, `TechnicalAccountLineTotals`, and `CreateTechnicalAccountLineRequest` schemas, and the issue-time reconciliation rule on the account status PATCH. |
+| `asyncapi/contract.yaml` | 1.7.0 | Additive | Two implemented grandchild channels and `send` operations: `contract.technical-account.line-added` and `.line-removed`, with a shared `ContractTechnicalAccountLineData` payload. |
+| `asyncapi/event-catalog.yaml` | 1.22.0 | Additive | Both names are published and implemented (203 published in total; Contract 32 published and 19 implemented; the platform implemented total is 82). |
+
+Line semantics:
+
+- `GET .../lines` returns the `LineSummary` read model: `items` in insertion
+  order (`createdAt`, then line id) and `totals` keyed by the four header
+  components `premium`, `loss`, `commission`, and `other`. All four totals are
+  always present, as decimal strings, and a component with no line is
+  `0.0000`. The account projection does not embed the lines.
+- `POST .../lines` records one line and returns 201. `lineType` is required and
+  is one of `PREMIUM`, `LOSS`, `COMMISSION`, or `OTHER` (trimmed and
+  case-insensitive). `amount` is required and must be strictly positive.
+  `reference` (at most 64 characters) and `description` (at most 255) are
+  optional, trimmed, and null when absent. The line id and `createdAt` are
+  server-derived and are not accepted in the body.
+- `DELETE .../lines/{lineId}` removes one line and returns 204 with no body.
+  The line lookup is scoped by tenant, contract, and account, so an unknown
+  line, a line under another account, and another tenant's record are all 404.
+- Lines can be added and removed only while the account is DRAFT. An ISSUED or
+  SETTLED account is 409 `ACCOUNT_NOT_EDITABLE`. A line does not change the
+  header amounts; it is the audit detail that must reconcile to them.
+- **Reconciliation on issue.** `PATCH .../{accountId}/status` to `ISSUED`
+  reconciles the line detail when at least one line exists: the sum of
+  `PREMIUM` lines must equal `cededPremium`, `LOSS` lines `cededLosses`,
+  `COMMISSION` lines `commission`, and `OTHER` lines `otherCharges`. Any
+  mismatch rejects the transition with 409 `ACCOUNT_LINES_DO_NOT_RECONCILE`,
+  carrying one `details[]` entry per offending line type; the account stays
+  DRAFT and no event is written. The account row lock makes the reconciliation
+  and the status write atomic with respect to a concurrent line add or delete.
+  An account with no lines (a header-only account, including one created or
+  linked by a processed period bordereau) remains issuable. The rule applies
+  only at DRAFT -> ISSUED; SETTLED changes no line.
+- The line projection is `{lineId, accountId, lineType, reference, description,
+  amount, createdAt}`; `tenantId` is not exposed and the expert's `id` is
+  remapped to `lineId` by the domain. Money is a decimal string (SPEC 10.3).
+- `X-EIA-Tenant` is required. The canonical contract requires
+  `X-EIA-Book: ASSUMED`; another book is hidden as 404
+  `BOOK_SCOPE_VIOLATION`. The domain currently accepts an absent header for
+  compatibility with the other Contract proxy routes (M-29, M-42).
+- Both line facts are grandchild-aggregate events written through the
+  transactional outbox in the same transaction as the line row. The envelope
+  uses the line id and aggregate version 1 while the outbox partition key stays
+  the contract id. The payload is `{contractId, accountId, lineId, lineType,
+  amount}`; the optional reference and description are not carried. The names
+  are new and have no SPEC 11.3.9 equivalent (M-22, M-42).
+- The implemented line vocabulary is deliberately reduced to the four header
+  components; the richer SPEC 11.3.4 detail types, a line update, negative or
+  zero lines, a per-line currency, and a line-level source document are not
+  modelled. The domain accepts a 300-character description but the expert caps
+  it at 255, so the effective bound is 255. M-42 records these gaps.
 
 ### Contract period bordereaux (2026-10-20)
 
@@ -1354,6 +1417,7 @@ Every request carries a resolved tenant; no request body may override it.
 | `X-EIA-Book` | Policy programs | Required and fixed to `DIRECT`. The contract makes a missing header a 400 and hides another book as 404 `BOOK_SCOPE_VIOLATION`; the domain and expert currently accept an absent header, which M-39 records. |
 | `X-EIA-Book` | Policy credit notes | Required and fixed to `DIRECT`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`. The domain currently accepts an absent header for compatibility with the other Policy proxy routes, which M-41 records. |
 | `X-EIA-Book` | Contract technical accounts | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-29 records. |
+| `X-EIA-Book` | Contract technical-account lines | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-29 and M-42 record. |
 | `X-EIA-Book` | Contract period bordereaux | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-30 records. |
 | `X-EIA-Book` | Contract cash calls | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-34 records. |
 | `X-EIA-Book` | Contract security/collateral | Required and fixed to `ASSUMED`. Another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header for compatibility with the other Contract proxy routes, which M-37 records. |
@@ -2076,8 +2140,17 @@ missing directory.
    `INVALID_STATUS`/`INVALID_STATUS_TRANSITION` and terminal/`BREACH` rules,
    the `SecurityStatus` enum with `ACTIVE` and `OUTSTANDING`,
    the 201/200 successes and 400/404/409 responses, the four documented
-   security conflict codes, the two credit-note paths and their required
-   `TenantHeader` and `BookHeaderDirect` parameters, the ten-field
+   security conflict codes, the two technical-account line paths and their
+   GET/POST/DELETE operations with the required `TenantHeader` and
+   `BookHeaderAssumed` parameters, the `contractId`/`accountId`/`lineId` path
+   parameters, the `TechnicalAccountLine`, `TechnicalAccountLineType`,
+   `LineSummary`, `TechnicalAccountLineTotals`, and
+   `CreateTechnicalAccountLineRequest` schemas and their field types, enums,
+   and text bounds, the 200/201/204 successes, the 400/404/409 responses with
+   `ACCOUNT_NOT_EDITABLE`, the issue-time `ACCOUNT_LINES_DO_NOT_RECONCILE`
+   documentation on the status PATCH, and the absence of the implemented line
+   paths from `x-planned-operations`, the two credit-note paths and their
+   required `TenantHeader` and `BookHeaderDirect` parameters, the ten-field
    `CreditNote` projection and `CreditNoteStatus` enum, the positive
    `CreateCreditNoteRequest.amount` pattern and optional 500-character reason,
    the three-value `UpdateCreditNoteStatusRequest` enum, the
@@ -2099,7 +2172,9 @@ missing directory.
    the `ContractSecurityData` payload with its contract/security identity,
    type, money, currency, and status members, and the
    `ContractSecurityStatusChangedData` payload with its contract/security
-   identity, type, previous-status, and status members, and the
+   identity, type, previous-status, and status members, the
+   `ContractTechnicalAccountLineData` payload with its contract, account, line,
+   type, and amount members, and the
    `PolicyCreditNoteData` payload with its policy and note identity, note
    number, amount, currency, and status members.
 5. **Event catalog cross-check.** The published set in `event-catalog.yaml`
@@ -2121,6 +2196,8 @@ missing directory.
    `contract.bordereau.failed`, the four `contract.cash-call.*` facts
    (`requested`, `issued`, `settled`, and `cancelled`),
    `contract.security.recorded`, `contract.security.status-changed`,
+   `contract.technical-account.line-added`,
+   `contract.technical-account.line-removed`,
    `policy.credit-note.issued`, `policy.credit-note.applied`, and
    `policy.credit-note.cancelled`. The Document document must also keep
    `document.content.uploaded` as its only `document.content.*` event, so the
