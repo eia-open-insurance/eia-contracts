@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:contract
 info:
   title: EIA Contract events
-  version: 1.5.0
+  version: 1.6.0
   summary: Published domain event names for the Contract vertical.
   description: >
     Event contract for the Contract vertical. The authoritative event names are
@@ -25,7 +25,11 @@ info:
     operations are marked `x-status: implemented`. The security/collateral
     fact `contract.security.recorded` is also implemented: it is a child
     aggregate keyed by the security id at version 1, while the outbox
-    partition key stays the contract id. `contract.contract.updated`
+    partition key stays the contract id. The security status action adds
+    `contract.security.status-changed`, also implemented: it is a new child
+    fact with no SPEC 11.3.9 name, keyed by the security id at aggregate
+    version 2, or version 3 when an expired record is released, while the
+    partition key stays the contract id (M-22, M-37). `contract.contract.updated`
     is additive: the catalog had no generic update fact. A status write that
     targets a catalog lifecycle state can also emit the already-cataloged
     `signed`, `endorsed`, `expired`, or `cancelled` name; those names remain
@@ -477,6 +481,30 @@ channels:
         $ref: '#/components/messages/DomainEvent'
       ContractSecurityData:
         $ref: '#/components/messages/ContractSecurityData'
+  ContractSecurityStatusChanged:
+    address: contract.security.status-changed
+    title: contract.security.status-changed
+    description: >
+      Emitted by the security status action in the same transaction as the
+      `contract_security` status and `updated_at` row update. The event is a
+      child aggregate: it uses the security id, aggregate version 2 for the
+      first status change and version 3 when an `EXPIRED` record is released,
+      while the outbox partition key stays the contract id. The payload carries
+      the contract and security identity, the security type, and the previous
+      and new status. `RELEASED` is terminal, so it is never a previous status;
+      a `BREACH` record and every released record reject the action. The name
+      is new: SPEC 11.3.9 publishes only `contract.security.recorded` and
+      `contract.security.breached` (M-22, M-37).
+    x-event-type: contract.security.status-changed
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.3.9
+    x-implemented-by: repos/eia-contract-expert/src/main/java/com/eia/contract/expert/ContractEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      ContractSecurityStatusChangedData:
+        $ref: '#/components/messages/ContractSecurityStatusChangedData'
   ContractSecurityBreached:
     address: contract.security.breached
     title: contract.security.breached
@@ -787,6 +815,19 @@ operations:
       the contract id.
     x-event-type: contract.security.recorded
     x-status: implemented
+  publishContractSecurityStatusChanged:
+    action: send
+    channel:
+      $ref: '#/channels/ContractSecurityStatusChanged'
+    summary: Publish contract.security.status-changed
+    description: >
+      Publishes contract.security.status-changed when the public security
+      status action releases or expires a record, in the same transaction as
+      the status row update. The event uses the security id at aggregate
+      version 2, or 3 when an expired record is released; the outbox partition
+      key stays the contract id.
+    x-event-type: contract.security.status-changed
+    x-status: implemented
   publishContractSecurityBreached:
     action: send
     channel:
@@ -1077,6 +1118,52 @@ components:
               - RELEASED
               - EXPIRED
               - BREACH
+    ContractSecurityStatusChangedData:
+      name: ContractSecurityStatusChangedData
+      title: contract.security.status-changed data
+      summary: >
+        Minimal schema for the envelope data object of a contract security
+        status fact.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - contractId
+          - securityId
+          - securityType
+          - previousStatus
+          - status
+        properties:
+          contractId:
+            type: string
+            format: uuid
+          securityId:
+            type: string
+            format: uuid
+          securityType:
+            type: string
+            enum:
+              - LETTER_OF_CREDIT
+              - TRUST_FUND
+              - FUNDS_WITHHELD
+              - CASH_ADVANCE
+              - PARENT_GUARANTEE
+              - BANK_GUARANTEE
+              - SECURITIES
+          previousStatus:
+            type: string
+            enum:
+              - ACTIVE
+              - OUTSTANDING
+              - PARTIAL
+              - REQUIRED
+              - EXPIRED
+          status:
+            type: string
+            enum:
+              - RELEASED
+              - EXPIRED
     ContractCashCallData:
       name: ContractCashCallData
       title: contract.cash-call.* data
@@ -1155,13 +1242,14 @@ x-implementation:
   publisher: eia-contract-expert
   subscriber: none
   notes: >
-    Sixteen Contract events are written to the transactional outbox in the same
-    transaction as the aggregate write: `created`, `updated`, `bound`,
+    Seventeen Contract events are written to the transactional outbox in the
+    same transaction as the aggregate write: `created`, `updated`, `bound`,
     `commuted`, `cession.recorded`, `technical-account.created`,
     `technical-account.issued`, `technical-account.settled`,
     `bordereau.received`, `bordereau.processed`, `bordereau.failed`,
     `cash-call.requested`, `cash-call.issued`, `cash-call.settled`,
-    `cash-call.cancelled`, and `security.recorded`. The three technical-account
+    `cash-call.cancelled`, `security.recorded`, and
+    `security.status-changed`. The three technical-account
     facts are child-aggregate events that use the account id and its lifecycle
     version while the outbox partition key stays the contract id. The three
     bordereau facts are child-aggregate events that use the bordereau id and
@@ -1171,7 +1259,10 @@ x-implementation:
     while the partition key stays the contract id. The security fact uses the
     security id and aggregate version 1 while the partition key stays the
     contract id; its payload carries the derived status of the public create or
-    a bind-slice status recorded through the internal expert surface. A status
+    a bind-slice status recorded through the internal expert surface. The
+    security status fact uses the security id and aggregate version 2, or 3 for
+    the release of an expired record, while the partition key stays the
+    contract id; its payload carries the previous and new status. A status
     write that targets a catalog lifecycle state can additionally emit the
     cataloged `signed`, `endorsed`, `expired`, or `cancelled` name; those names
     remain published and are not part of the implemented subset recorded here.

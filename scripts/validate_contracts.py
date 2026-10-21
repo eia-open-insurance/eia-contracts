@@ -649,6 +649,33 @@ CONTRACT_SECURITY_EVENT_FIELDS = (
     "status",
 )
 
+# Contract security status action. One PATCH on the public security path moves
+# a live record to RELEASED or EXPIRED and an EXPIRED record to RELEASED;
+# RELEASED is terminal and BREACH cannot be moved. The request only accepts the
+# two terminal outcomes, and the implementation writes
+# contract.security.status-changed in the same transaction as the row update.
+CONTRACT_SECURITY_STATUS_PATH = (
+    "/api/v1/contracts/{contractId}/security/{securityId}/status"
+)
+CONTRACT_SECURITY_STATUS_REQUEST = "UpdateContractSecurityStatusRequest"
+CONTRACT_SECURITY_STATUS_REQUEST_STATUSES = ("RELEASED", "EXPIRED")
+CONTRACT_SECURITY_STATUS_PREVIOUS = (
+    "ACTIVE",
+    "OUTSTANDING",
+    "PARTIAL",
+    "REQUIRED",
+    "EXPIRED",
+)
+CONTRACT_SECURITY_STATUS_CODES = ("INVALID_STATUS", "INVALID_STATUS_TRANSITION")
+CONTRACT_SECURITY_STATUS_EVENT = "contract.security.status-changed"
+CONTRACT_SECURITY_STATUS_EVENT_FIELDS = (
+    "contractId",
+    "securityId",
+    "securityType",
+    "previousStatus",
+    "status",
+)
+
 
 # Direct Claims and Assumed Claims task and note schemas. The public projection
 # and command shapes are the ones the domains serialize, so the names are
@@ -1192,6 +1219,7 @@ IMPLEMENTED_EVENTS = {
         "contract.cash-call.settled",
         "contract.cash-call.cancelled",
         "contract.security.recorded",
+        "contract.security.status-changed",
     ],
     "direct-claims": [
         "direct.claim.registered",
@@ -5748,6 +5776,113 @@ def check_contract_security(contracts: ContractSet, document, relative: str):
     )
 
 
+def check_contract_security_status(contracts: ContractSet, document, relative: str):
+    """Require the security status action, its request schema, and its rules."""
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+    path_item = paths.get(CONTRACT_SECURITY_STATUS_PATH) if isinstance(paths, dict) else None
+    operation = path_item.get("patch") if isinstance(path_item, dict) else None
+    where = f"{relative}: PATCH {CONTRACT_SECURITY_STATUS_PATH}"
+    contracts.check(
+        isinstance(operation, dict),
+        f"{where}: required security status operation is missing",
+    )
+    if not isinstance(operation, dict):
+        return
+
+    parameter_refs, inline_names = _parameter_names(operation)
+    contracts.check(
+        "TenantHeader" in parameter_refs,
+        f"{where}: must document the shared TenantHeader parameter",
+    )
+    contracts.check(
+        "BookHeaderAssumed" in parameter_refs,
+        f"{where}: must document the shared BookHeaderAssumed parameter",
+    )
+    contracts.check(
+        "contractId" in inline_names,
+        f"{where}: must declare the contractId path parameter",
+    )
+    contracts.check(
+        "securityId" in inline_names,
+        f"{where}: must declare the securityId path parameter",
+    )
+
+    responses = operation.get("responses") or {}
+    for code in ("200", "400", "404", "409"):
+        contracts.check(code in responses, f"{where}: must document the {code} response")
+    ok_schema = _response_schema(operation, "200")
+    contracts.check(
+        isinstance(ok_schema, dict)
+        and str(ok_schema.get("$ref", "")).endswith("/schemas/SecurityRecord"),
+        f"{where}: 200 must return the SecurityRecord schema",
+    )
+
+    request_body = operation.get("requestBody") or {}
+    contracts.check(
+        isinstance(request_body, dict) and request_body.get("required") is True,
+        f"{where}: request body must be required",
+    )
+    request_schema = (
+        ((request_body.get("content") or {}).get("application/json") or {}).get("schema")
+        if isinstance(request_body, dict)
+        else None
+    )
+    contracts.check(
+        isinstance(request_schema, dict)
+        and str(request_schema.get("$ref", "")).endswith(
+            f"/schemas/{CONTRACT_SECURITY_STATUS_REQUEST}"
+        ),
+        f"{where}: request body must use the {CONTRACT_SECURITY_STATUS_REQUEST} schema",
+    )
+
+    description = operation.get("description") or ""
+    for status in (
+        "ACTIVE",
+        "OUTSTANDING",
+        "PARTIAL",
+        "REQUIRED",
+        "RELEASED",
+        "EXPIRED",
+        "BREACH",
+    ):
+        contracts.check(
+            status in description,
+            f"{where}: description must document the {status} transition rule",
+        )
+    for code in CONTRACT_SECURITY_STATUS_CODES:
+        contracts.check(
+            code in description,
+            f"{where}: description must document the {code} error code",
+        )
+    contracts.check(
+        "RELEASED` is terminal" in description,
+        f"{where}: description must state that RELEASED is terminal",
+    )
+    contracts.check(
+        "ASSUMED" in description,
+        f"{where}: description must document the ASSUMED book",
+    )
+
+    request = schemas.get(CONTRACT_SECURITY_STATUS_REQUEST) or {}
+    request_properties = request.get("properties") or {}
+    contracts.check(
+        isinstance(request, dict) and request.get("type") == "object",
+        f"{relative}: {CONTRACT_SECURITY_STATUS_REQUEST} must be an object schema",
+    )
+    contracts.check(
+        set(request.get("required") or []) == {"status"},
+        f"{relative}: {CONTRACT_SECURITY_STATUS_REQUEST} must require only status",
+    )
+    status = request_properties.get("status") or {}
+    contracts.check(
+        (status.get("type"), tuple(status.get("enum") or []))
+        == ("string", CONTRACT_SECURITY_STATUS_REQUEST_STATUSES),
+        f"{relative}: {CONTRACT_SECURITY_STATUS_REQUEST}.status must enumerate "
+        f"{list(CONTRACT_SECURITY_STATUS_REQUEST_STATUSES)}",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
@@ -6873,6 +7008,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_policy_programs(contracts, document, relative)
         if vertical == "contract":
             check_contract_security(contracts, document, relative)
+            check_contract_security_status(contracts, document, relative)
             check_contract_technical_accounts(contracts, document, relative)
             check_contract_bordereaux(contracts, document, relative)
             check_contract_cash_calls(contracts, document, relative)
@@ -7269,6 +7405,79 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
                 == set(CONTRACT_SECURITY_TYPES),
                 f"{relative}: ContractSecurityData.securityType must enumerate "
                 f"{list(CONTRACT_SECURITY_TYPES)}",
+            )
+
+            contracts.check(
+                CONTRACT_SECURITY_STATUS_EVENT in addresses,
+                f"{relative}: required security status event channel "
+                f"'{CONTRACT_SECURITY_STATUS_EVENT}' is missing",
+            )
+            contracts.check(
+                CONTRACT_SECURITY_STATUS_EVENT in implemented_addresses,
+                f"{relative}: security status event channel "
+                f"'{CONTRACT_SECURITY_STATUS_EVENT}' must be implemented",
+            )
+            contracts.check(
+                CONTRACT_SECURITY_STATUS_EVENT in contract_send_events,
+                f"{relative}: security status event "
+                f"'{CONTRACT_SECURITY_STATUS_EVENT}' must have a send operation",
+            )
+            status_channel = next(
+                (
+                    channel
+                    for channel in channels.values()
+                    if isinstance(channel, dict)
+                    and channel.get("address") == CONTRACT_SECURITY_STATUS_EVENT
+                ),
+                None,
+            )
+            status_messages = (
+                status_channel.get("messages")
+                if isinstance(status_channel, dict)
+                else None
+            ) or {}
+            contracts.check(
+                "ContractSecurityStatusChangedData" in status_messages,
+                f"{relative}: {CONTRACT_SECURITY_STATUS_EVENT} must reference "
+                "ContractSecurityStatusChangedData",
+            )
+            status_message = (
+                ((document.get("components") or {}).get("messages") or {}).get(
+                    "ContractSecurityStatusChangedData"
+                )
+                or {}
+            )
+            status_payload = status_message.get("payload") or {}
+            status_properties = status_payload.get("properties") or {}
+            status_required = set(status_payload.get("required") or [])
+            for field in CONTRACT_SECURITY_STATUS_EVENT_FIELDS:
+                contracts.check(
+                    field in status_properties,
+                    f"{relative}: ContractSecurityStatusChangedData.properties.{field} "
+                    "is required",
+                )
+                contracts.check(
+                    field in status_required,
+                    f"{relative}: ContractSecurityStatusChangedData.required must list "
+                    f"{field}",
+                )
+            contracts.check(
+                set((status_properties.get("previousStatus") or {}).get("enum") or [])
+                == set(CONTRACT_SECURITY_STATUS_PREVIOUS),
+                f"{relative}: ContractSecurityStatusChangedData.previousStatus must "
+                f"enumerate {list(CONTRACT_SECURITY_STATUS_PREVIOUS)}",
+            )
+            contracts.check(
+                set((status_properties.get("status") or {}).get("enum") or [])
+                == set(CONTRACT_SECURITY_STATUS_REQUEST_STATUSES),
+                f"{relative}: ContractSecurityStatusChangedData.status must enumerate "
+                f"{list(CONTRACT_SECURITY_STATUS_REQUEST_STATUSES)}",
+            )
+            contracts.check(
+                set((status_properties.get("securityType") or {}).get("enum") or [])
+                == set(CONTRACT_SECURITY_TYPES),
+                f"{relative}: ContractSecurityStatusChangedData.securityType must "
+                f"enumerate {list(CONTRACT_SECURITY_TYPES)}",
             )
 
         if vertical == "document":

@@ -898,6 +898,41 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   lifecycle gaps, and updates M-14, M-22, and the validation evidence.
 - `python scripts/validate_contracts.py` passes 12,255 checks with 0 failures.
 
+### Added in the contract security status action (2026-10-20)
+
+- `openapi/contract.yaml` is 4.1.0: adds
+  `PATCH /api/v1/contracts/{contractId}/security/{securityId}/status` and the
+  `UpdateContractSecurityStatusRequest` schema (`status` is `RELEASED` or
+  `EXPIRED`). The action moves a record in `ACTIVE`, `OUTSTANDING`, `PARTIAL`,
+  or `REQUIRED` to `RELEASED` or `EXPIRED` and an `EXPIRED` record to
+  `RELEASED`; `RELEASED` is terminal and `BREACH` is rejected. A target outside
+  the two outcomes is 400 `INVALID_STATUS`, an illegal, repeated, or terminal
+  edge is 409 `INVALID_STATUS_TRANSITION`, and an unknown or foreign record is
+  404. The 200 body is the ten-field `SecurityRecord`. The route requires the
+  shared tenant and ASSUMED book parameters, and its description records that
+  the action is available in every contract lifecycle state. The change is
+  additive.
+- `asyncapi/contract.yaml` is 1.6.0: adds the implemented
+  `contract.security.status-changed` channel and `send` operation with a
+  `ContractSecurityStatusChangedData` payload (`contractId`, `securityId`,
+  `securityType`, `previousStatus`, `status`). The event is a child aggregate
+  at aggregate version 2, or 3 for the release of an expired record, while the
+  outbox partition key stays the contract id; the name is new and has no SPEC
+  11.3.9 equivalent.
+- `asyncapi/event-catalog.yaml` is 1.19.0: `contract.security.status-changed`
+  is published and implemented (198 published in total; Contract becomes 30
+  published and 17 implemented, and the platform implemented total becomes 77).
+- `scripts/validate_contracts.py` requires the status path, the tenant and
+  ASSUMED book parameters, both path parameters, the required
+  `UpdateContractSecurityStatusRequest` with exactly the two-value enum, the
+  200 `SecurityRecord` and 400/404/409 responses, the transition, terminal, and
+  `BREACH` documentation, the implemented channel and `send` operation, the
+  payload fields and status enums, and the catalog entry.
+- `README.md` records the route, transitions, error codes, event, and additive
+  versions; `MISMATCHES.md` updates M-37 and M-22 for the added action, event
+  name, and remaining gaps.
+- `python scripts/validate_contracts.py` passes 12,333 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

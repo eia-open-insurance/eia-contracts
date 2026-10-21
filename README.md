@@ -917,9 +917,61 @@ Security semantics:
   approval reference, and expiry date.
 - The implemented route keeps the short M-01 form and the SPEC 11.3.10 table
   uses `/api/v1/contract/contracts/{contractId}/security`. The SPEC 11.3.4
-  status enum has no `ACTIVE`, the request is narrower than the SPEC
-  `contract_security` columns, and there is no release or status action. M-37
-  records those gaps.
+  status enum has no `ACTIVE` and the request is narrower than the SPEC
+  `contract_security` columns. The public status action added in 4.1.0 is
+  documented in the next section; M-37 records the remaining gaps.
+
+### Contract security status action (2026-10-20)
+
+Contract 4.1.0 adds the security/collateral status action. The change is
+additive: one new path and one request schema; no existing path, request field,
+response field, or event changed. The event name is new and adds one published
+and one implemented catalog name.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/contract.yaml` | 4.1.0 | Additive | `PATCH /api/v1/contracts/{contractId}/security/{securityId}/status` and the `UpdateContractSecurityStatusRequest` schema (`status`: `RELEASED` or `EXPIRED`); the 200 `SecurityRecord` and 400/404/409 responses. |
+| `asyncapi/contract.yaml` | 1.6.0 | Additive | The implemented `contract.security.status-changed` channel and `send` operation with a `ContractSecurityStatusChangedData` payload. |
+| `asyncapi/event-catalog.yaml` | 1.19.0 | Additive | `contract.security.status-changed` is published and implemented (198 published in total; Contract 30 published and 17 implemented; the platform implemented total is 77). |
+
+Status semantics:
+
+- The body is `{status}`. Only `RELEASED` and `EXPIRED` are accepted; the value
+  is trimmed and upper-cased, and any other target is 400 `INVALID_STATUS`
+  (including `BREACH`, which is not a lifecycle action).
+- A live record in `ACTIVE`, `OUTSTANDING`, `PARTIAL`, or `REQUIRED` can move to
+  `RELEASED` or `EXPIRED`; an `EXPIRED` record can still move to `RELEASED`.
+  `RELEASED` is terminal, so a repeated release or any action on a released
+  record is 409 `INVALID_STATUS_TRANSITION`. A `BREACH` record cannot be
+  released or expired; that is also 409 `INVALID_STATUS_TRANSITION`.
+- The record is tenant- and contract-scoped. An unknown contract, an unknown
+  security, another tenant's record, and a security id under another contract
+  are all 404 `NOT_FOUND`. A compare-and-set that loses a concurrent status
+  change is 409 `INVALID_STATUS_TRANSITION`.
+- The status and `updated_at` row update and the
+  `contract.security.status-changed` outbox event share one transaction; a
+  rejected action writes neither. The action is not blocked by the contract
+  lifecycle, so it works for a signed, in-force, or closed contract, unlike the
+  create.
+- `X-EIA-Tenant` is required. The canonical contract requires
+  `X-EIA-Book: ASSUMED`; another book is hidden as 404 `BOOK_SCOPE_VIOLATION`.
+  The domain currently accepts an absent header for compatibility with the
+  other Contract proxy routes, which M-37 records.
+- The 200 body is the same ten-field `SecurityRecord` the list and create
+  return. The action is served by the domain `SecurityController` and by the
+  expert's public `ContractSecurityController`; neither adds a public
+  single-record GET.
+- The event is a child aggregate: the envelope uses the security id at
+  aggregate version 2 for the first status change and 3 when an expired record
+  is released, while the outbox partition key stays the contract id. The
+  payload is `{contractId, securityId, securityType, previousStatus, status}`.
+  The name is new; SPEC 11.3.9 publishes only `contract.security.recorded` and
+  `contract.security.breached` (M-22, M-37).
+- The validator requires the path, the tenant and ASSUMED book parameters, both
+  path parameters, the required `UpdateContractSecurityStatusRequest` with
+  exactly the two-value status enum, the 200 `SecurityRecord` and 400/404/409
+  responses, the transition and terminal-state documentation, the implemented
+  channel, the `send` operation, the payload fields, and the catalog entry.
 
 ### Policy mass tort profile contract (2026-10-20)
 
@@ -1835,11 +1887,15 @@ missing directory.
    `CashCallStatus`, `CreateCashCallRequest`, and
    `UpdateCashCallStatusRequest` schemas and their field types, the nullable
    4000-character `notes`, the `ISSUED`/`SETTLED`/`CANCELLED` request enum, the
-   201/200 successes, and the 400/404/409 responses, the two public security
+   201/200 successes, and the 400/404/409 responses, the three public security
    operations with their required `TenantHeader` and `BookHeaderAssumed`
    parameters, the ten-field `SecurityRecord` projection, the
    `CreateContractSecurityRequest` required/optional split that rejects a
-   caller `status`, the `SecurityStatus` enum with `ACTIVE` and `OUTSTANDING`,
+   caller `status`, the `UpdateContractSecurityStatusRequest` two-value
+   `RELEASED`/`EXPIRED` enum, the status path and `securityId` parameter, the
+   200 `SecurityRecord` and 400/404/409 responses, the
+   `INVALID_STATUS`/`INVALID_STATUS_TRANSITION` and terminal/`BREACH` rules,
+   the `SecurityStatus` enum with `ACTIVE` and `OUTSTANDING`,
    the 201/200 successes and 400/404/409 responses, the four documented
    security conflict codes, and agreement between
    `info.version` and `x-compatibility.contractVersion`.
@@ -1856,7 +1912,9 @@ missing directory.
    the `DocumentContentUploadedData` payload with its required document
    identity, filename, MIME type, size, and digest members, and
    the `ContractSecurityData` payload with its contract/security identity,
-   type, money, currency, and status members.
+   type, money, currency, and status members, and the
+   `ContractSecurityStatusChangedData` payload with its contract/security
+   identity, type, previous-status, and status members.
 5. **Event catalog cross-check.** The published set in `event-catalog.yaml`
    must equal the channel addresses in the matching vertical document, event
    names must be unique across the platform and must match
@@ -1874,8 +1932,8 @@ missing directory.
    `payment.allocation.created`,
    `contract.bordereau.received`, `contract.bordereau.processed`,
    `contract.bordereau.failed`, the four `contract.cash-call.*` facts
-   (`requested`, `issued`, `settled`, and `cancelled`), and
-   `contract.security.recorded`.
+   (`requested`, `issued`, `settled`, and `cancelled`),
+   `contract.security.recorded`, and `contract.security.status-changed`.
 6. **JSON Schema checks.** All three files parse as JSON, declare the 2020-12
    dialect and an `$id`, carry the required members, keep required properties
    defined, and validate their own examples against a small schema subset.

@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.18.0
+  version: 1.19.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -66,7 +66,13 @@ info:
     content upload is an upsert of the current content row, and SPEC defines no
     content-upload fact. It adds one published and one implemented name,
     bringing the platform totals to 197 published and 76 implemented; Document
-    becomes 21 published and 6 implemented (M-22, M-40). The platform
+    becomes 21 published and 6 implemented (M-22, M-40). The Contract security
+    status fact `contract.security.status-changed` is a new name with no SPEC
+    11.3.9 equivalent: SPEC publishes `contract.security.recorded` and
+    `contract.security.breached` but no security status-change fact. It adds
+    one published and one implemented name, bringing the platform totals to
+    198 published and 77 implemented; Contract becomes 30 published and 17
+    implemented (M-22, M-37). The platform
     event-ingest service
     is the inbox:
     it validates the canonical envelope, verifies the HMAC signature when
@@ -253,6 +259,7 @@ x-event-catalog:
       - contract.cash-call.settled
       - contract.cash-call.cancelled
       - contract.security.recorded
+      - contract.security.status-changed
       - contract.security.breached
       - contract.reinstatement.applied
       - contract.premium.adjusted
@@ -274,6 +281,7 @@ x-event-catalog:
       - contract.cash-call.settled
       - contract.cash-call.cancelled
       - contract.security.recorded
+      - contract.security.status-changed
     consumed:
       - policy.policy.issued
       - policy.policy.endorsed
