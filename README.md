@@ -1285,7 +1285,10 @@ it forwards the create:
 Policy 2.8.0 adds the commercial program catalog and the policy-to-program
 membership command. The change is additive: four new operations, five new
 schemas, and the nullable `Policy.programId` member; no existing path, request
-field, response field, or event changed.
+field, response field, or event changed. Policy 2.12.0 later adds the optional
+capacity pair and the derived capacity usage to the same projection and create
+body; that additive slice is documented under
+[Policy program capacity](#policy-program-capacity-2026-10-21).
 
 | Document | Version | Classification | Change |
 |---|---|---|---|
@@ -1300,8 +1303,9 @@ Program semantics:
   `Program` projection is `programId`, the server-generated
   `programNumber` (`PRG-{YEAR}-{7 digits}`), `name`, `programType`, the
   inclusive `effectiveFrom`/`effectiveTo` range, `status`, the nullable
-  `leadPolicyId`, and `createdAt`. The list is a bare newest-first array and
-  is not part of the offset page envelope (M-04).
+  `leadPolicyId`, and `createdAt`; 2.12.0 adds the optional capacity pair and
+  the `usedAmount`/`utilizationPct`/`policyCount` aggregates. The list is a
+  bare newest-first array and is not part of the offset page envelope (M-04).
 - `POST /api/v1/programs` always creates ACTIVE with a server-owned identity
   and returns 201 with `Location`. `name` is trimmed and capped at 200
   characters; `programType` is trimmed, upper-cased, and limited to `CAPTIVE`,
@@ -1513,6 +1517,51 @@ Credit-application semantics:
   new codes and their descriptions, and the applied payload members; it also
   rejects the nullable members becoming required. The full run passes 13,282
   checks.
+
+### Policy program capacity (2026-10-21)
+
+Policy 2.12.0 adds the optional program capacity and the derived capacity
+usage. The change is additive: five `Program` response members and one optional
+`CreateProgramRequest` pair; no path, event, required request field, or
+existing field meaning changes.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/policy.yaml` | 2.12.0 | Additive | The nullable `Program.capacityAmount`, `.capacityCurrency`, and `.utilizationPct` members; the `Program.usedAmount` and `.policyCount` members; the optional `CreateProgramRequest.capacityAmount`/`capacityCurrency` pair with its both-or-neither rule; the capacity usage derivation; and the 400 `INVALID_PROGRAM_CAPACITY` documentation. |
+| `asyncapi/policy.yaml` | 1.9.0 | Unchanged | `PolicyProgramCreatedData` keeps its nine members; capacity is not published on the create event. |
+| `asyncapi/event-catalog.yaml` | 1.23.0 | Unchanged | No event name or channel changes; 205 published and 84 implemented names. |
+
+Capacity semantics:
+
+- `Program.capacityAmount` and `Program.capacityCurrency` are the optional
+  capacity limit. The pair is both null or both present; a program without a
+  limit reports null for both. The amount is a positive decimal money string in
+  the capacity currency.
+- `Program.usedAmount` is the sum of the `limitAmount` values of the tenant's
+  policies whose `programId` is the program. It is zero when no policy is
+  assigned or no limit is recorded, and it is a bare decimal sum: the program
+  neither converts nor validates the assigned policies' `limitCurrency`.
+- `Program.policyCount` is the number of those policies across all statuses.
+- `Program.utilizationPct` is `usedAmount / capacityAmount * 100`, rounded
+  HALF_UP to two decimals; it is null without capacity and is not capped at
+  100. A program with no capacity still reports `usedAmount` and `policyCount`.
+- `POST /api/v1/programs` accepts the optional pair: both members or neither,
+  the amount greater than zero with at most four fraction digits, and the
+  currency a three-letter upper-case ISO 4217 code. A partial pair, a
+  non-positive amount, or a malformed currency is 400
+  `INVALID_PROGRAM_CAPACITY`; the public domain currently returns 400
+  `VALIDATION_ERROR` with the field-specific `CAPACITY_AMOUNT_REQUIRED`/
+  `CAPACITY_CURRENCY_REQUIRED`/`MIN_VALUE`/`INVALID_FORMAT` codes, which M-39
+  records.
+- The flat pair is narrower than the SPEC 10.11.3 `program_capacity` /
+  `program_version` structure and the LE-02 capacity-share rules; M-39 records
+  the gap.
+- The validator requires the five new `Program` members and their
+  nullability/patterns, the optional create pair with its positive-amount and
+  currency constraints, the exact `dependentRequired` both-or-neither mapping,
+  the capacity derivation in the schema descriptions, and the
+  `INVALID_PROGRAM_CAPACITY` code on the create operation. The full run passes
+  13,320 checks.
 
 ### Compatibility matrix
 
@@ -2386,6 +2435,14 @@ missing directory.
    `CreateCreditNoteRequest.amount` pattern and optional 500-character reason,
    the three-value `UpdateCreditNoteStatusRequest` enum, the
    201/200/400/404/409 responses, the documented transition and event rules,
+   the four program operations with their required `TenantHeader` and
+   `BookHeaderDirect` parameters, the fourteen-field `Program` projection and
+   its nullable capacity pair and non-null usage aggregates, the optional
+   `CreateProgramRequest.capacityAmount`/`capacityCurrency` pair with its
+   positive-money and three-letter-currency schemas and exact
+   `dependentRequired` both-or-neither mapping, the capacity derivation and 400
+   `INVALID_PROGRAM_CAPACITY` documentation, and the absence of the implemented
+   program paths from `x-planned-operations`,
    the three legal-entity paths and four operations with their required
    `TenantHeader` and optional `BookHeaderDirectOptional` parameters, the
    `LegalEntity`, `LegalEntityType`, `LegalEntityStatus`,
@@ -2599,7 +2656,13 @@ missing directory.
   `CASUALTY`/`PROPERTY`/`COMMERCIAL`/`AUTO`/`SPECIALTY`/`OTHER` and
   ACTIVE/INACTIVE sets, uses a generated `programNumber` instead of `code`, and
   omits the owner legal entity, manager organization unit, description,
-  `program_version`, and capacity structure. The create and assignment are
+  `program_version`, and the SPEC capacity-share structure. The projection does
+  model an optional flat `capacityAmount`/`capacityCurrency` pair and derives
+  `usedAmount` (the bare sum of the assigned policies' limits),
+  `utilizationPct`, and `policyCount`, but it still has no capacity-share rows
+  or LE-02 share-sum check, and the public domain reports a capacity
+  request-shape failure as 400 `VALIDATION_ERROR` where the canonical contract
+  documents 400 `INVALID_PROGRAM_CAPACITY`. The create and assignment are
   SPEC-less commands that publish the new `policy.program.created` and
   `policy.policy.program-assigned` names. `leadPolicyId` is stored without a
   reference or tenant check, and the domain and expert accept an absent

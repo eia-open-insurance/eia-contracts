@@ -63,7 +63,10 @@ where the running code does not meet it yet.
   service, projection, command, book scope, policy-program controller and
   service, and client plus the expert program controller, service, rules,
   repository, view, entity, request, event factory, `schema.sql`, and the domain
-  and expert tests.
+  and expert tests. The program-capacity pass re-read the domain program
+  service, projection, command, and client plus the expert program rules, view,
+  entity, repository, request, `schema.sql`, and the domain and expert capacity
+  tests.
   The Document content pass reads the domain content controller, service,
   client, projection, policy, size-limit filter, and exception handler plus the
   expert content controller, service, rules, repository, event factory,
@@ -150,7 +153,7 @@ removed per the resolution policy.
 | M-36 | Direct Claims allocation erosion retry swallows the expert conflict and record failure | M |
 | M-37 | Contract security/collateral uses a narrow derived-status projection and a wider legacy status vocabulary | L |
 | M-38 | Policy installment dunning adds a SPEC-less route and event name and a different level vocabulary and book rule | L |
-| M-39 | Policy program catalog uses a short read/create path, a different type/status vocabulary, and SPEC-less membership and event names | L |
+| M-39 | Policy program catalog uses a short read/create path, a different type/status vocabulary, a flat optional capacity pair, and SPEC-less membership and event names | L |
 | M-40 | Document content keeps a current pointer plus revisions under `/content/versions`, not the SPEC `/versions` store | L |
 | M-41 | Policy credit notes use a short path, a four-state lifecycle, free-text reason, and new event names, with no approval or SAP step | L |
 | M-42 | Contract technical-account lines implement the 13-type SPEC vocabulary and bucket reconciliation but omit line correction, per-line currency/source metadata, and per-line approval | L |
@@ -2115,7 +2118,7 @@ and vocabulary. Renaming `policy.dunning.sent` to
 `policy.billing.dunning-changed` requires the EV-05 dual-publish window;
 publishing the SPEC name alongside the implemented one is additive.
 
-## M-39 Policy program catalog is a short-path, SPEC-less create and membership surface
+## M-39 Policy program catalog is a short-path, SPEC-less create, membership, and capacity surface
 
 The Policy expert and domain implement a commercial program catalog plus a
 policy-to-program membership command. SPEC 10.11.3 defines the `program`
@@ -2131,7 +2134,7 @@ is wider and uses a different path, vocabulary, and projection.
 | Status | `ACTIVE`, `CLOSED` (CLOSED is reserved; no close command exists) | `ACTIVE`, `INACTIVE` |
 | Dates | inclusive `effectiveFrom`/`effectiveTo`, both required and NOT NULL; the same day is valid | both nullable |
 | Owner and manager | not modelled | `owner_legal_entity_id`, `manager_org_unit_id`, `program_org_unit`, `program_legal_entity`, `program_lob` |
-| Capacity | not modelled | `program_version`, `program_capacity`, and the LE-02 capacity-share rules |
+| Capacity | optional flat `capacityAmount`/`capacityCurrency` pair (both or neither, amount greater than zero, ISO 4217 alpha-3); derived `usedAmount` (sum of the assigned policies' `limit_amount`), `utilizationPct`, and `policyCount`; no capacity-share rows | `program_version`, `program_capacity`, and the LE-02 capacity-share rules |
 | Membership | one nullable `policy.program_id`; PATCH assignment command; returns the policy ETag | `policy.program_id` and the `POLICY_IN_PROGRAM` link; LE-01 requires one program per policy |
 | Lead policy | optional `leadPolicyId` stored as supplied, with no FK or tenant check | no lead-policy concept on `program` |
 | Events | `policy.program.created` (Program aggregate, version 1) and `policy.policy.program-assigned` (Policy aggregate, version + 1) | no program event in SPEC 11.2.9 |
@@ -2145,8 +2148,24 @@ Consequences:
   describes business classes. The same applies to CLOSED versus INACTIVE.
 - The projection has no `code`, `description`, owner legal entity, manager
   organization unit, LOB/legal-entity assignments, `program_version`, or
-  capacity structure, so the LE-02 share-sum check, LE-06 versioning, and the
-  program detail/capacity/fronting views cannot be served from it.
+  capacity-share rows, so the LE-02 share-sum check, LE-06 versioning, and the
+  program detail/capacity-share/fronting views cannot be served from it. The
+  optional flat capacity pair and the derived
+  `usedAmount`/`utilizationPct`/`policyCount` serve a single-program capacity
+  view only.
+- `usedAmount` is a bare `SUM(policy.limit_amount)` over the assigned policies:
+  it does not convert or verify the policies' `limitCurrency`, filter by policy
+  status, or check the sum against `capacityCurrency`, so a mixed-currency or
+  cancelled-policy membership is summed as-is and `utilizationPct` can exceed
+  100 without a capacity breach. The projection has no remaining-capacity or
+  used-currency member.
+- The canonical contract documents 400 `INVALID_PROGRAM_CAPACITY` for a partial
+  capacity pair, a non-positive amount, or a malformed currency. The expert's
+  `ProgramRules` returns that code for the pair and for its non-positive and
+  malformed backstops, but the public domain validates the same shapes first
+  and returns 400 `VALIDATION_ERROR` with `CAPACITY_AMOUNT_REQUIRED`,
+  `CAPACITY_CURRENCY_REQUIRED`, `MIN_VALUE`, or `INVALID_FORMAT`, so a public
+  caller does not see `INVALID_PROGRAM_CAPACITY`.
 - `CLOSED` is accepted by the database CHECK constraint and the status enum but
   no command can reach it; every created program stays ACTIVE.
 - `leadPolicyId` is written without a foreign key, existence check, or tenant
@@ -2166,8 +2185,9 @@ Evidence:
 
 - `repos/eia-policy-domain/.../ProgramController.java:25-65` (public
   `/api/v1/programs`, tenant header, `requireDirectWhenPresent`, 201 and
-  `Location`), `ProgramService.java:31-43` (date-range pre-check),
-  `ProgramDto.java`, and `CreateProgramCommand.java` (name and type
+  `Location`), `ProgramService.java:34-64` (date-range and capacity-pair
+  pre-checks), `ProgramDto.java` (capacity and usage members), and
+  `CreateProgramCommand.java` (name, type, capacity amount/currency
   constraints).
 - `repos/eia-policy-domain/.../PolicyProgramController.java:21-47` (public
   PATCH, optional body, ETag echo) and `PolicyProgramService.java`,
@@ -2177,32 +2197,44 @@ Evidence:
 - `repos/eia-policy-expert/.../PolicyProgramController.java:29-85` (public and
   internal aliases, tenant query or header, 201 create, 200 assignment with
   ETag), `PolicyProgramService.java:54-112` (number generation, ACTIVE default,
-  null clear, version check and 409), and `ProgramRules.java:17-95`
-  (vocabulary, name cap, date order).
-- `repos/eia-policy-expert/.../PolicyProgramRepository.java:45-84`
-  (tenant-scoped reads, newest-first list, number sequence) and
-  `PolicyProgram.java`, `ProgramView.java`, `CreateProgramRequest.java`,
-  `AssignPolicyProgramRequest.java`.
+  capacity persistence, usage projection, null clear, version check and 409),
+  and `ProgramRules.java:17-129` (vocabulary, name cap, date order, capacity
+  validation, and utilization).
+- `repos/eia-policy-expert/.../PolicyProgramRepository.java:45-114`
+  (tenant-scoped reads, newest-first list, number sequence, and the grouped
+  usage query) and `PolicyProgram.java`, `ProgramView.java`,
+  `CreateProgramRequest.java`, `AssignPolicyProgramRequest.java`.
 - `repos/eia-policy-expert/.../PolicyEvents.java:50-51,94-153`
   (`policy.program.created` against Program at version 1 and
   `policy.policy.program-assigned` against Policy with both link sides) and
-  `src/main/resources/schema.sql:52-85` (`policy_program`, its CHECK
-  constraints, the nullable `policy.program_id` FK, and the indexes; no FK on
-  `lead_policy_id`).
+  `src/main/resources/schema.sql:52-99` (`policy_program`, the
+  `capacity_amount`/`capacity_currency` columns and their positive,
+  three-letter, and both-or-neither CHECK constraints, the nullable
+  `policy.program_id` FK, and the indexes; no FK on `lead_policy_id`).
 - Tests: `ProgramControllerTest`, `PolicyProgramControllerTest`,
   `ProgramClientTest`, `PolicyProgramControllerTest`,
   `PolicyProgramServiceTest`, `PolicyProgramIntegrationTest`, and
-  `ProgramRulesTest`.
-- `openapi/policy.yaml` 2.8.0, `asyncapi/policy.yaml` 1.6.0, and
-  `asyncapi/event-catalog.yaml` 1.17.0 record the implemented shape.
+  `ProgramRulesTest`, including the capacity-pair, positive-amount,
+  currency-format, and zero/negative rejection cases and the domain's
+  `VALIDATION_ERROR` field codes.
+- `openapi/policy.yaml` 2.12.0 records the implemented shape, including the
+  capacity pair and usage members; `asyncapi/policy.yaml` 1.9.0 and
+  `asyncapi/event-catalog.yaml` 1.23.0 are unchanged because capacity is not
+  published on `policy.program.created`.
 
 Resolution: either extend SPEC 10.11.3/11.2.10 with the implemented catalog,
 membership command, and event names, or align the implemented paths,
 vocabulary, and projection with the SPEC master data. Until then the contract
-documents the short paths and the CAPTIVE/POOL/FRONTING/COINSURANCE/MASS_TORT
-vocabulary. Separately, either resolve and tenant-check `leadPolicyId` or
-remove it, add an explicit close command before exposing CLOSED as a reachable
-state, and decide whether the DIRECT book header is required or optional.
+documents the short paths, the CAPTIVE/POOL/FRONTING/COINSURANCE/MASS_TORT
+vocabulary, and the optional flat capacity pair. The capacity shape also needs a
+decision: keep the flat pair with the unconverted `usedAmount` sum, or adopt the
+SPEC `program_capacity`/`program_version` structure with the LE-02 shares; in
+either case the public domain should propagate `INVALID_PROGRAM_CAPACITY`
+instead of remapping the capacity request-shape failures to
+`VALIDATION_ERROR`. Separately, either resolve and tenant-check `leadPolicyId`
+or remove it, add an explicit close command before exposing CLOSED as a
+reachable state, and decide whether the DIRECT book header is required or
+optional.
 
 ## M-40 Document content keeps a current pointer plus revisions, not the SPEC versioned store
 
@@ -2576,7 +2608,7 @@ EV-05 dual-publish treatment if they are aligned to SPEC names.
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-21
-credit-application contract:
+program-capacity contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -2615,7 +2647,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 13282 checks, 0 failures
+  PASS 13320 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -2823,7 +2855,14 @@ Additional checks and limits:
   `PolicyCreditNoteData` payload, and dropping `CREDITED` from
   `Installment.status` each fail with the specific optional-uuid, nullability,
   applied-payload, or status-enum message. All four were run on throwaway
-  copies and exited non-zero (exit 1); the working copy was left unchanged.
+  copies and exited non-zero (exit 1); the working copy was left unchanged. The
+  program-capacity pass added three more: removing `capacityAmount` from the
+  required `Program` keys, replacing the `CreateProgramRequest`
+  `dependentRequired` mapping with an empty map, and removing
+  `INVALID_PROGRAM_CAPACITY` from the create description each fail with the
+  specific required-field, both-or-neither, or missing-code message. All three
+  were run on a throwaway copy and exited non-zero (exit 1); the working copy
+  was left unchanged.
 
 ## Resolution policy
 

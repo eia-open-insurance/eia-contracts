@@ -1274,8 +1274,13 @@ POLICY_PROGRAM_FIELDS = (
     "effectiveFrom",
     "effectiveTo",
     "status",
+    "capacityAmount",
+    "capacityCurrency",
     "leadPolicyId",
     "createdAt",
+    "usedAmount",
+    "utilizationPct",
+    "policyCount",
 )
 
 POLICY_PROGRAM_CREATE_REQUIRED_FIELDS = (
@@ -1291,6 +1296,19 @@ POLICY_PROGRAM_TYPES = ("CAPTIVE", "POOL", "FRONTING", "COINSURANCE", "MASS_TORT
 POLICY_PROGRAM_STATUSES = ("ACTIVE", "CLOSED")
 POLICY_PROGRAM_NAME_MAX_LENGTH = 200
 POLICY_PROGRAM_NUMBER_MAX_LENGTH = 32
+POLICY_PROGRAM_CAPACITY_CODE = "INVALID_PROGRAM_CAPACITY"
+POLICY_PROGRAM_CAPACITY_PATTERN = (
+    r"^(?!0(?:\.0{1,4})?$)(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,4})?$"
+)
+POLICY_PROGRAM_USED_AMOUNT_PATTERN = (
+    r"^(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,4})?$"
+)
+POLICY_PROGRAM_UTILIZATION_PATTERN = r"^[0-9]{1,21}\.[0-9]{2}$"
+POLICY_PROGRAM_CURRENCY_PATTERN = "^[A-Z]{3}$"
+POLICY_PROGRAM_CAPACITY_DEPENDENCIES = {
+    "capacityAmount": ["capacityCurrency"],
+    "capacityCurrency": ["capacityAmount"],
+}
 POLICY_PROGRAM_CREATED_FIELDS = (
     "programId",
     "programNumber",
@@ -5009,12 +5027,13 @@ def check_policy_programs(contracts: ContractSet, document, relative: str):
     """Require the program catalog routes, schemas, and membership command.
 
     The four public operations are mandatory and tenant/DIRECT scoped. The
-    projection carries the nine fields, the create body is
-    ``CreateProgramRequest``, and the PATCH body is
-    ``UpdatePolicyProgramRequest`` with a nullable ``programId``.
-    ``Policy.programId`` must stay nullable and optional so a policy outside a
-    program remains valid, and the implemented catalog paths must not remain in
-    ``x-planned-operations``.
+    projection carries the fourteen fields, including the optional capacity
+    pair and the derived ``usedAmount``/``utilizationPct``/``policyCount``; the
+    create body is ``CreateProgramRequest`` with the both-or-neither capacity
+    pair, and the PATCH body is ``UpdatePolicyProgramRequest`` with a nullable
+    ``programId``. ``Policy.programId`` must stay nullable and optional so a
+    policy outside a program remains valid, and the implemented catalog paths
+    must not remain in ``x-planned-operations``.
     """
     paths = document.get("paths") or {}
     schemas = (document.get("components") or {}).get("schemas") or {}
@@ -5084,6 +5103,46 @@ def check_policy_programs(contracts: ContractSet, document, relative: str):
         ),
         f"{relative}: Program.status must reference ProgramStatus",
     )
+    contracts.check(
+        _schema_types(properties.get("capacityAmount")) == {"string", "null"}
+        and (properties.get("capacityAmount") or {}).get("pattern")
+        == POLICY_PROGRAM_CAPACITY_PATTERN,
+        f"{relative}: Program.capacityAmount must be a nullable positive money "
+        "string",
+    )
+    contracts.check(
+        _schema_types(properties.get("capacityCurrency")) == {"string", "null"}
+        and (properties.get("capacityCurrency") or {}).get("pattern")
+        == POLICY_PROGRAM_CURRENCY_PATTERN,
+        f"{relative}: Program.capacityCurrency must be a nullable three-letter "
+        "currency code",
+    )
+    contracts.check(
+        _schema_types(properties.get("usedAmount")) == {"string"}
+        and (properties.get("usedAmount") or {}).get("pattern")
+        == POLICY_PROGRAM_USED_AMOUNT_PATTERN,
+        f"{relative}: Program.usedAmount must be a non-null non-negative money "
+        "string",
+    )
+    contracts.check(
+        _schema_types(properties.get("utilizationPct")) == {"string", "null"}
+        and (properties.get("utilizationPct") or {}).get("pattern")
+        == POLICY_PROGRAM_UTILIZATION_PATTERN,
+        f"{relative}: Program.utilizationPct must be a nullable two-decimal "
+        "percentage string",
+    )
+    policy_count = properties.get("policyCount") or {}
+    contracts.check(
+        _schema_types(policy_count) == {"integer"}
+        and policy_count.get("minimum") == 0,
+        f"{relative}: Program.policyCount must be an integer >= 0",
+    )
+    program_description = str(program.get("description") or "")
+    for token in ("limitAmount", "usedAmount", "utilizationPct", "policyCount"):
+        contracts.check(
+            token in program_description,
+            f"{relative}: Program description must document {token}",
+        )
 
     for schema_name, expected in (
         ("ProgramType", POLICY_PROGRAM_TYPES),
@@ -5143,6 +5202,39 @@ def check_policy_programs(contracts: ContractSet, document, relative: str):
             (create_properties.get(field) or {}).get("format") == "date",
             f"{relative}: CreateProgramRequest.{field} must be a date",
         )
+    for field in ("capacityAmount", "capacityCurrency"):
+        contracts.check(
+            isinstance(create_properties.get(field), dict),
+            f"{relative}: CreateProgramRequest.{field} must be documented",
+        )
+        contracts.check(
+            field not in create_required,
+            f"{relative}: CreateProgramRequest.{field} must stay optional",
+        )
+    capacity_amount = create_properties.get("capacityAmount") or {}
+    contracts.check(
+        _schema_types(capacity_amount) == {"string"}
+        and capacity_amount.get("pattern") == POLICY_PROGRAM_CAPACITY_PATTERN,
+        f"{relative}: CreateProgramRequest.capacityAmount must be a positive "
+        "money string",
+    )
+    capacity_currency = create_properties.get("capacityCurrency") or {}
+    contracts.check(
+        (
+            _schema_types(capacity_currency) == {"string"}
+            and capacity_currency.get("pattern") == POLICY_PROGRAM_CURRENCY_PATTERN
+        )
+        or str(capacity_currency.get("$ref", "")).endswith(
+            "/schemas/CurrencyCode"
+        ),
+        f"{relative}: CreateProgramRequest.capacityCurrency must be a "
+        "three-letter currency code",
+    )
+    contracts.check(
+        create.get("dependentRequired") == POLICY_PROGRAM_CAPACITY_DEPENDENCIES,
+        f"{relative}: CreateProgramRequest must require capacityAmount and "
+        "capacityCurrency as a pair",
+    )
 
     update = schemas.get("UpdatePolicyProgramRequest") or {}
     update_properties = update.get("properties") or {}
@@ -5297,6 +5389,7 @@ def check_policy_programs(contracts: ContractSet, document, relative: str):
                 "INVALID_PROGRAM_NAME",
                 "INVALID_PROGRAM_TYPE",
                 "INVALID_PROGRAM_DATES",
+                POLICY_PROGRAM_CAPACITY_CODE,
             ):
                 contracts.check(
                     code in description,

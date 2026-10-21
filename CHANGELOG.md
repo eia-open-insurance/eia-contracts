@@ -1187,6 +1187,35 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   notes the CREDITED dunning terminal state in M-38.
 - `python scripts/validate_contracts.py` passes 13,282 checks with 0 failures.
 
+### Added in the Policy program capacity contract (2026-10-21)
+
+- `openapi/policy.yaml` is 2.12.0: `Program` adds the nullable
+  `capacityAmount`/`capacityCurrency` capacity pair and `utilizationPct`, plus
+  the non-null `usedAmount` and `policyCount` aggregates. `usedAmount` is the
+  sum of the tenant's assigned policy `limitAmount` values, `policyCount` is
+  how many policies those are, and `utilizationPct` is
+  `usedAmount / capacityAmount * 100` rounded HALF_UP to two decimals and null
+  without capacity. `CreateProgramRequest` adds the optional
+  `capacityAmount`/`capacityCurrency` pair with the `dependentRequired`
+  both-or-neither rule, a positive amount of at most 15 integer and four
+  fraction digits, and a three-letter ISO 4217 currency. The create operation
+  documents 400 `INVALID_PROGRAM_CAPACITY` for a partial pair, a non-positive
+  amount, or a malformed currency.
+- `scripts/validate_contracts.py` requires the five new `Program` members and
+  their types, nullability, and patterns, the optional create pair with its
+  positive-money and currency schemas, the exact `dependentRequired` mapping,
+  the capacity derivation in the `Program` description, and the
+  `INVALID_PROGRAM_CAPACITY` code on `POST /api/v1/programs`.
+- `README.md` records the new slice, the capacity and usage semantics, the
+  both-or-neither create rule, and the validation count; `MISMATCHES.md`
+  rewrites the M-39 capacity row and consequences for the flat optional pair,
+  the derived usage, the untranslated `usedAmount` sum, and the public domain's
+  400 `VALIDATION_ERROR` mapping.
+- `asyncapi/policy.yaml` stays 1.9.0 and `asyncapi/event-catalog.yaml` stays
+  1.23.0: capacity is not published on `policy.program.created`, and no event
+  name, channel, or count changes.
+- `python scripts/validate_contracts.py` passes 13,320 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

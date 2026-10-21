@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Policy API
-  version: 2.11.0
+  version: 2.12.0
   summary: Direct-book policy administration and the Policy expert API.
   description: >
     This document describes the implemented public Policy domain API and the
@@ -241,6 +241,30 @@ info:
       remainder with 409 `CREDIT_NOTE_EXCEEDS_INSTALLMENT`. The
       `policy.credit-note.applied` payload additionally carries `installmentId`
       and the installment's cumulative `creditedAmount`.
+
+    The 2026-10-21 program-capacity slice adds the optional capacity and the
+    derived usage to the program catalog:
+
+    - `Program` adds `capacityAmount`/`capacityCurrency` (both null when the
+      program has no capacity) and the derived `usedAmount`, `utilizationPct`,
+      and `policyCount`. `usedAmount` is the sum of the `limitAmount` values of
+      the tenant's policies assigned to the program, `policyCount` is how many
+      policies those are, and `utilizationPct` is
+      `usedAmount / capacityAmount * 100` rounded HALF_UP to two decimals. A
+      program without capacity reports a null `utilizationPct`; a program
+      without assigned policies reports a zero `usedAmount` and a zero
+      `policyCount`.
+    - `CreateProgramRequest` accepts the optional
+      `capacityAmount`/`capacityCurrency` pair. The two members are supplied
+      together or not at all; the amount must be greater than zero with at most
+      four fraction digits and the currency must be a three-letter upper-case
+      ISO 4217 code. A partial pair, a non-positive amount, or a malformed
+      currency is 400 `INVALID_PROGRAM_CAPACITY`.
+    - Capacity changes no path, event, or membership rule. The flat optional
+      pair is narrower than the SPEC 10.11.3 capacity structure and the LE-02
+      share rules, and the public domain currently reports a capacity
+      request-shape failure as 400 `VALIDATION_ERROR`; MISMATCHES.md M-39
+      records both deviations.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -2215,8 +2239,10 @@ paths:
         Returns the tenant's programs newest first (`createdAt DESC`, then
         `programId ASC`) as a bare `Program` array. A program groups policies
         into one commercial portfolio; the program number is server-generated
-        per tenant and the effective range is inclusive. The list is not
-        paginated in this slice (M-04).
+        per tenant and the effective range is inclusive. Each item carries the
+        optional capacity pair and the `usedAmount`, `utilizationPct`, and
+        `policyCount` derived on read from the policies assigned to the
+        program. The list is not paginated in this slice (M-04).
 
         `X-EIA-Tenant` is required and `X-EIA-Book` is required and must be
         DIRECT; a missing tenant or book is a 400 (`MISSING_TENANT_HEADER`/
@@ -2264,6 +2290,15 @@ paths:
         `leadPolicyId` is stored as supplied and is not resolved or checked
         against the caller's tenant in this slice (M-39).
 
+        Capacity is optional: `capacityAmount` and `capacityCurrency` are
+        supplied together or not at all. `capacityAmount` must be greater than
+        zero with at most four fraction digits and `capacityCurrency` must be a
+        three-letter upper-case ISO 4217 code. A partial pair, a non-positive
+        amount, or a malformed currency is 400 `INVALID_PROGRAM_CAPACITY` with
+        a field-specific error. The expert owns that canonical code; the public
+        domain currently validates the same request shapes first and returns
+        400 `VALIDATION_ERROR` (MISMATCHES.md M-39).
+
         The accepted create writes `policy.program.created` in the same
         transaction as the row. `X-EIA-Tenant` is required and `X-EIA-Book` is
         required and must be DIRECT; a missing tenant or book is a 400
@@ -2306,10 +2341,13 @@ paths:
         - Policy
       summary: Get one program from the tenant catalog.
       description: >
-        Returns the program detail. The read is tenant-scoped, so a program id
-        from another tenant is indistinguishable from a missing one and is 404
-        `PROGRAM_NOT_FOUND`. `X-EIA-Tenant` is required and `X-EIA-Book` is
-        required and must be DIRECT; a missing tenant or book is a 400
+        Returns the program detail, including the optional capacity pair and
+        the `usedAmount`, `utilizationPct`, and `policyCount` derived from the
+        policies assigned to the program. The read is tenant-scoped, so a
+        program id from another tenant is indistinguishable from a missing one
+        and is 404 `PROGRAM_NOT_FOUND`. `X-EIA-Tenant` is required and
+        `X-EIA-Book` is required and must be DIRECT; a missing tenant or book
+        is a 400
         (`MISSING_TENANT_HEADER`/`INVALID_TENANT_HEADER` or `MISSING_HEADER`),
         and another book is hidden as 404 `BOOK_SCOPE_VIOLATION`.
       parameters:
@@ -5396,10 +5434,17 @@ components:
         captive, pool, fronting arrangement, coinsurance facility, or mass tort
         program. `programId` and the per-tenant `programNumber` are
         server-owned; `status` starts at ACTIVE and CLOSED is reserved for a
-        later lifecycle command. The effective range is inclusive. The
-        projection does not expose `tenantId`, and it is narrower than the SPEC
-        catalogue: no `code`, `description`, owner legal entity, manager
-        organization unit, `program_version`, or capacity structure (M-39).
+        later lifecycle command. The effective range is inclusive.
+        `capacityAmount` and `capacityCurrency` are the optional capacity pair:
+        both are null or both are present. `usedAmount`, `utilizationPct`, and
+        `policyCount` are derived on every read; `usedAmount` is the sum of the
+        `limitAmount` values of the tenant's policies assigned to the program,
+        `policyCount` counts those policies, and `utilizationPct` is
+        `usedAmount / capacityAmount * 100` rounded HALF_UP to two decimals and
+        null when the program has no capacity. The projection does not expose
+        `tenantId`, and it is narrower than the SPEC catalogue: no `code`,
+        `description`, owner legal entity, manager organization unit,
+        `program_version`, capacity-share rows, or LE-02 share check (M-39).
       required:
         - programId
         - programNumber
@@ -5408,8 +5453,13 @@ components:
         - effectiveFrom
         - effectiveTo
         - status
+        - capacityAmount
+        - capacityCurrency
         - leadPolicyId
         - createdAt
+        - usedAmount
+        - utilizationPct
+        - policyCount
       properties:
         programId:
           type: string
@@ -5437,6 +5487,25 @@ components:
           description: Inclusive end; never before effectiveFrom.
         status:
           $ref: '#/components/schemas/ProgramStatus'
+        capacityAmount:
+          type: [string, 'null']
+          pattern: '^(?!0(?:\.0{1,4})?$)(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,4})?$'
+          description: >
+            Optional capacity the program can write, as a positive decimal
+            money string in `capacityCurrency` (SPEC 11.2.16). Null when the
+            program has no capacity; `capacityAmount` and `capacityCurrency`
+            are both null or both present. The value is a JSON string, never a
+            JSON number.
+          examples:
+            - '25000000.00'
+        capacityCurrency:
+          type: [string, 'null']
+          pattern: '^[A-Z]{3}$'
+          description: >
+            ISO 4217 alpha-3 currency of `capacityAmount`. Null when the
+            program has no capacity; set together with `capacityAmount`.
+          examples:
+            - USD
         leadPolicyId:
           type: [string, 'null']
           format: uuid
@@ -5447,6 +5516,35 @@ components:
         createdAt:
           type: string
           format: date-time
+        usedAmount:
+          type: string
+          pattern: '^(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,4})?$'
+          description: >
+            Derived usage: the sum of the `limitAmount` values of the tenant's
+            policies assigned to the program (SPEC 11.2.16 capacity usage).
+            Zero when no policy is assigned or no limit is recorded. The sum is
+            a bare decimal amount and is neither converted nor checked against
+            `capacityCurrency`.
+          examples:
+            - '12500000.0000'
+        utilizationPct:
+          type: [string, 'null']
+          pattern: '^[0-9]{1,21}\.[0-9]{2}$'
+          description: >
+            Derived utilization: `usedAmount / capacityAmount * 100`, rounded
+            HALF_UP to two decimal places. Null when the program has no
+            capacity. The value is not capped at 100, so assigned limits above
+            the capacity report a percentage above 100.00.
+          examples:
+            - '50.00'
+        policyCount:
+          type: integer
+          minimum: 0
+          description: >
+            Number of the tenant's policies currently assigned to the program,
+            across all policy statuses.
+          examples:
+            - 3
     ProgramType:
       type: string
       description: >
@@ -5474,10 +5572,21 @@ components:
       type: object
       description: >
         Public create command for the program catalogue. The tenant comes from
-        `X-EIA-Tenant`; `programId`, `programNumber`, `status`, and `createdAt`
-        are server-owned and rejected or ignored if supplied. `name` and
-        `programType` are trimmed, `programType` is upper-cased, and the
-        effective range is inclusive.
+        `X-EIA-Tenant`; `programId`, `programNumber`, `status`, `createdAt`, and
+        the capacity usage aggregates are server-owned and rejected or ignored
+        if supplied. `name` and `programType` are trimmed, `programType` is
+        upper-cased, and the effective range is inclusive.
+
+        Capacity is optional, but `capacityAmount` and `capacityCurrency` are
+        supplied together or not at all. `capacityAmount` is a positive decimal
+        money string with at most four fraction digits and `capacityCurrency`
+        is a three-letter upper-case ISO 4217 code. A partial pair, an amount
+        of zero or less, or a malformed currency is 400
+        `INVALID_PROGRAM_CAPACITY` with a field-specific error. The expert owns
+        that canonical code; the public domain currently rejects the same
+        request shapes with 400 `VALIDATION_ERROR` and the field codes
+        `CAPACITY_AMOUNT_REQUIRED`, `CAPACITY_CURRENCY_REQUIRED`, `MIN_VALUE`,
+        and `INVALID_FORMAT` (MISMATCHES.md M-39).
       required:
         - name
         - programType
@@ -5503,6 +5612,26 @@ components:
           description: >
             Optional lead policy. Stored as supplied; not resolved or checked
             against the tenant in this slice (M-39).
+        capacityAmount:
+          type: string
+          description: >
+            Optional capacity the program can write. Supply it together with
+            `capacityCurrency`; omit both when the program has no capacity. A
+            positive decimal money string greater than zero with at most four
+            fraction digits (SPEC 10.3), never a JSON number.
+          pattern: '^(?!0(?:\.0{1,4})?$)(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,4})?$'
+          examples:
+            - '25000000.00'
+        capacityCurrency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+          description: >
+            ISO 4217 alpha-3 currency of `capacityAmount`; required exactly
+            when the amount is supplied.
+      dependentRequired:
+        capacityAmount:
+          - capacityCurrency
+        capacityCurrency:
+          - capacityAmount
     UpdatePolicyProgramRequest:
       type: object
       description: >
@@ -6073,16 +6202,23 @@ x-implementation:
     server-generated per-tenant number. The domain proxies the expert's
     `/internal/v1` alias with the tenant and DIRECT book; the expert owns the
     number, the ACTIVE default, and the CAPTIVE/POOL/FRONTING/COINSURANCE/
-    MASS_TORT vocabulary. The public create returns 201 with a `Location`, and
-    the accepted create writes `policy.program.created` against the Program
+    MASS_TORT vocabulary. The optional flat capacity pair and the
+    `usedAmount`/`utilizationPct`/`policyCount` aggregates are computed on every
+    program read; the pair is both-or-neither, the amount is positive, and the
+    usage is a bare sum of the assigned policy limits. The public create returns
+    201 with a `Location`, and the accepted create writes
+    `policy.program.created` against the Program
     aggregate at version 1 in the same transaction. The assignment command
     bumps the policy row version and writes `policy.policy.program-assigned`
     with `programId`, `previousProgramId`, and `changedFields`; the public
     `Policy` carries the nullable `programId` and may omit it when null. The
-    expert's `/internal/v1` program alias is an implementation detail. The
-    narrower catalogue, the different type/status vocabularies, and the
-    SPEC-less create and assignment commands are recorded in M-01, M-22, and
-    M-39.
+    expert's `/internal/v1` program alias is an implementation detail. The flat
+    capacity pair is narrower than the SPEC 10.11.3 capacity structure and
+    LE-02 share rules, and the public domain reports a capacity request-shape
+    failure as `VALIDATION_ERROR` instead of the canonical
+    `INVALID_PROGRAM_CAPACITY`. The narrower catalogue, the different
+    type/status vocabularies, and the SPEC-less create and assignment commands
+    are recorded in M-01, M-22, and M-39.
 
     The credit-note surface is a DIRECT-book child resource. The domain proxies
     the expert's `/internal/v1` alias with the tenant and DIRECT book and
@@ -6117,35 +6253,26 @@ x-implementation:
     catalog, the SPEC 11.2.16 path, and the nullable assignment against LE-01 are
     recorded in M-01, M-12, and M-43.
 x-compatibility:
-  contractVersion: 2.11.0
-  previousContractVersion: 2.10.0
+  contractVersion: 2.12.0
+  previousContractVersion: 2.11.0
   breaking: []
   compatible:
-    - Adds the optional UpdateCreditNoteStatusRequest.installmentId request property; APPLIED now requires it.
-    - Adds the nullable CreditNote.appliedInstallmentId response property.
-    - Adds the BillingSummary schema and the BillingPlan.summary response property.
-    - Adds the BillingSummary waivedAmount, creditedAmount, and outstandingAmount members.
-    - Adds the Installment.creditedAmount and Installment.outstandingAmount response properties and the CREDITED installment status.
-    - Adds the Receivable.creditedAmount and Receivable.outstandingAmount response properties.
-    - Changes ReceivableSummary.totalAmount and .overdueAmount to sum outstanding amounts instead of gross amounts.
-    - Documents the 400 INVALID_CREDIT_NOTE_INSTALLMENT and 409 INSTALLMENT_NOT_CREDITABLE and CREDIT_NOTE_EXCEEDS_INSTALLMENT codes and the credit-application rules.
-    - Adds the optional policy.credit-note.applied payload members installmentId and creditedAmount.
-    - Adds no required request field to an existing operation, changes no existing path, and removes no response field.
+    - Adds the nullable Program.capacityAmount, Program.capacityCurrency, and Program.utilizationPct response properties.
+    - Adds the Program.usedAmount and Program.policyCount response properties.
+    - Adds the optional CreateProgramRequest.capacityAmount and capacityCurrency request properties with the both-or-neither rule.
+    - Documents the capacity usage derivation (sum of assigned policy limits and utilization) and the 400 INVALID_PROGRAM_CAPACITY code.
+    - Adds no path or event, changes no existing field meaning, and removes no response field.
   note: >
-    The credit-application slice is additive over 2.10.0: one optional request
-    property that becomes conditionally required for APPLIED, one nullable
-    CreditNote property, the BillingSummary schema and the BillingPlan summary
-    property, two money members on Installment and Receivable, one installment
-    status value, and two optional `applied` event members. The
-    `ReceivableSummary` totals change meaning from gross to outstanding, which
-    is the SPEC BIL-06 netting rule; a consumer that compared those totals with
-    the gross `amount` sum must switch to the outstanding sum. The routes are
-    siblings under `/api/v1`, so the HTTP API version stays `/api/v1`. The
-    `policy.credit-note.applied` event keeps `eventVersion` 1 because its
-    additions are optional and additive; no event name, catalog count, or
-    channel changes. The closer alignment with SPEC BIL-06, the APPLIED
-    installment link, and the CREDITED installment status are recorded in
-    MISMATCHES.md M-27 and M-41.
+    The program-capacity slice is additive over 2.11.0: three nullable and two
+    required response members on `Program`, plus one optional request pair on
+    `CreateProgramRequest`. A create that omits both capacity members produces
+    the same program as before, so no existing client changes. The flat
+    optional pair is narrower than the SPEC 10.11.3 capacity structure and the
+    LE-02 share rules, and the public domain currently reports a capacity
+    request-shape failure as 400 `VALIDATION_ERROR` rather than the canonical
+    400 `INVALID_PROGRAM_CAPACITY`; MISMATCHES.md M-39 records both. The HTTP
+    API version stays `/api/v1`, no path, event name, channel, or event version
+    changes, and the catalog counts are unchanged.
 x-planned-operations:
   - method: POST
     path: /api/v1/policies/{policyId}/bind
