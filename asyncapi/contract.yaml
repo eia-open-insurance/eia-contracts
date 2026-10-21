@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:contract
 info:
   title: EIA Contract events
-  version: 1.7.0
+  version: 1.8.0
   summary: Published domain event names for the Contract vertical.
   description: >
     Event contract for the Contract vertical. The authoritative event names are
@@ -18,7 +18,9 @@ info:
     `contract.contract.updated`, `contract.contract.bound`,
     `contract.contract.commuted`, `contract.cession.recorded`, the five
     technical-account facts `contract.technical-account.created`, `.issued`,
-    `.settled`, `.line-added`, and `.line-removed`, the three period-bordereau
+    `.settled`, `.line-added`, and `.line-removed` (whose payload `lineType`
+    enum carries the 13 SPEC 11.3.4 detail types and excludes the retired
+    aggregate `LOSS`), the three period-bordereau
     facts `contract.bordereau.received`, `.processed`, and `.failed`, and the
     four cash-call facts `contract.cash-call.requested`, `.issued`, `.settled`,
     and `.cancelled` through the transactional outbox; those channels and
@@ -1088,10 +1090,23 @@ components:
             format: uuid
           lineType:
             type: string
+            description: >
+              The 13 SPEC 11.3.4 detail types; each rolls into one of the four
+              reconciliation buckets. The retired aggregate `LOSS` is not
+              emitted.
             enum:
               - PREMIUM
-              - LOSS
               - COMMISSION
+              - BROKERAGE
+              - PAID_LOSS
+              - OUTSTANDING_LOSS
+              - IBNR
+              - ALAE
+              - REINSTATEMENT
+              - CASH_CALL
+              - FUNDS_WITHHELD
+              - TAX
+              - ADJUSTMENT
               - OTHER
           amount:
             type: string

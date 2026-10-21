@@ -464,7 +464,24 @@ CONTRACT_TECHNICAL_ACCOUNT_LINE_FIELDS = (
     "createdAt",
 )
 
-CONTRACT_TECHNICAL_ACCOUNT_LINE_TYPES = ("PREMIUM", "LOSS", "COMMISSION", "OTHER")
+CONTRACT_TECHNICAL_ACCOUNT_LINE_TYPES = (
+    "PREMIUM",
+    "COMMISSION",
+    "BROKERAGE",
+    "PAID_LOSS",
+    "OUTSTANDING_LOSS",
+    "IBNR",
+    "ALAE",
+    "REINSTATEMENT",
+    "CASH_CALL",
+    "FUNDS_WITHHELD",
+    "TAX",
+    "ADJUSTMENT",
+    "OTHER",
+)
+# The first slice's aggregate loss type. It is still understood when reading an
+# older expert projection but is rejected on create and must not be enumerated.
+CONTRACT_TECHNICAL_ACCOUNT_LINE_RETIRED_TYPES = ("LOSS",)
 CONTRACT_TECHNICAL_ACCOUNT_LINE_SUMMARY_FIELDS = ("items", "totals")
 CONTRACT_TECHNICAL_ACCOUNT_LINE_TOTAL_FIELDS = (
     "premium",
@@ -472,6 +489,28 @@ CONTRACT_TECHNICAL_ACCOUNT_LINE_TOTAL_FIELDS = (
     "commission",
     "other",
 )
+# Detail line type -> the single reconciliation bucket it rolls into. The
+# buckets are also the four header components; the coverage check below proves
+# every one of the 13 types is mapped exactly once.
+CONTRACT_TECHNICAL_ACCOUNT_LINE_BUCKET_TYPES = {
+    "premium": ("PREMIUM",),
+    "loss": (
+        "PAID_LOSS",
+        "OUTSTANDING_LOSS",
+        "IBNR",
+        "ALAE",
+        "REINSTATEMENT",
+        "CASH_CALL",
+    ),
+    "commission": ("COMMISSION", "BROKERAGE"),
+    "other": ("FUNDS_WITHHELD", "TAX", "ADJUSTMENT", "OTHER"),
+}
+CONTRACT_TECHNICAL_ACCOUNT_LINE_BUCKET_HEADER_FIELDS = {
+    "premium": "cededPremium",
+    "loss": "cededLosses",
+    "commission": "commission",
+    "other": "otherCharges",
+}
 CONTRACT_TECHNICAL_ACCOUNT_LINE_REFERENCE_MAX_LENGTH = 64
 CONTRACT_TECHNICAL_ACCOUNT_LINE_DESCRIPTION_MAX_LENGTH = 255
 CONTRACT_TECHNICAL_ACCOUNT_LINE_NOT_EDITABLE = "ACCOUNT_NOT_EDITABLE"
@@ -6575,15 +6614,40 @@ def check_contract_technical_account_lines(
     )
 
     line_type = schemas.get("TechnicalAccountLineType") or {}
+    line_type_enum = line_type.get("enum") or []
     contracts.check(
         line_type.get("type") == "string",
         f"{relative}: TechnicalAccountLineType must be a string enum",
     )
     contracts.check(
-        set(line_type.get("enum") or [])
-        == set(CONTRACT_TECHNICAL_ACCOUNT_LINE_TYPES),
-        f"{relative}: TechnicalAccountLineType must enumerate "
-        f"{list(CONTRACT_TECHNICAL_ACCOUNT_LINE_TYPES)}",
+        line_type_enum == list(CONTRACT_TECHNICAL_ACCOUNT_LINE_TYPES),
+        f"{relative}: TechnicalAccountLineType must enumerate exactly the 13 "
+        f"detail types {list(CONTRACT_TECHNICAL_ACCOUNT_LINE_TYPES)}",
+    )
+    contracts.check(
+        not (
+            set(CONTRACT_TECHNICAL_ACCOUNT_LINE_RETIRED_TYPES)
+            & set(line_type_enum)
+        ),
+        f"{relative}: TechnicalAccountLineType must not enumerate the retired "
+        f"type(s) {list(CONTRACT_TECHNICAL_ACCOUNT_LINE_RETIRED_TYPES)}",
+    )
+
+    mapped_types = [
+        line_type_name
+        for bucket_types in CONTRACT_TECHNICAL_ACCOUNT_LINE_BUCKET_TYPES.values()
+        for line_type_name in bucket_types
+    ]
+    contracts.check(
+        sorted(mapped_types) == sorted(CONTRACT_TECHNICAL_ACCOUNT_LINE_TYPES),
+        f"{relative}: the bucket map must cover each of the 13 line types "
+        "exactly once",
+    )
+    contracts.check(
+        set(CONTRACT_TECHNICAL_ACCOUNT_LINE_BUCKET_TYPES)
+        == set(CONTRACT_TECHNICAL_ACCOUNT_LINE_TOTAL_FIELDS),
+        f"{relative}: the bucket map keys must be the four bucket totals "
+        f"{list(CONTRACT_TECHNICAL_ACCOUNT_LINE_TOTAL_FIELDS)}",
     )
 
     totals = schemas.get("TechnicalAccountLineTotals") or {}
@@ -6606,6 +6670,41 @@ def check_contract_technical_account_lines(
             f"{relative}: TechnicalAccountLineTotals.{field} must reference "
             "MoneyAmount",
         )
+    details = totals_properties.get("details") or {}
+    contracts.check(
+        "details" not in totals_required,
+        f"{relative}: TechnicalAccountLineTotals.details must be optional",
+    )
+    contracts.check(
+        isinstance(details, dict) and details.get("type") == "object",
+        f"{relative}: TechnicalAccountLineTotals.details must be an object map",
+    )
+    contracts.check(
+        str((details.get("additionalProperties") or {}).get("$ref", "")).endswith(
+            "/schemas/MoneyAmount"
+        ),
+        f"{relative}: TechnicalAccountLineTotals.details values must reference "
+        "MoneyAmount",
+    )
+    details_keys = (
+        (details.get("propertyNames") or {}).get("enum") or []
+        if isinstance(details, dict)
+        else []
+    )
+    contracts.check(
+        details_keys == list(CONTRACT_TECHNICAL_ACCOUNT_LINE_TYPES),
+        f"{relative}: TechnicalAccountLineTotals.details.propertyNames.enum "
+        f"must enumerate the 13 line types "
+        f"{list(CONTRACT_TECHNICAL_ACCOUNT_LINE_TYPES)}",
+    )
+    contracts.check(
+        not (
+            set(CONTRACT_TECHNICAL_ACCOUNT_LINE_RETIRED_TYPES)
+            & set(details_keys)
+        ),
+        f"{relative}: TechnicalAccountLineTotals.details must not allow the "
+        f"retired type(s) {list(CONTRACT_TECHNICAL_ACCOUNT_LINE_RETIRED_TYPES)}",
+    )
 
     summary = schemas.get("LineSummary") or {}
     summary_properties = summary.get("properties") or {}
@@ -6635,6 +6734,29 @@ def check_contract_technical_account_lines(
         f"{relative}: LineSummary.totals must reference "
         "TechnicalAccountLineTotals",
     )
+
+    lines_path = CONTRACT_TECHNICAL_ACCOUNT_LINE_PATHS[0][1]
+    lines_get = (paths.get(lines_path) or {}).get("get") or {}
+    lines_get_description = str(lines_get.get("description") or "")
+    contracts.check(
+        "bucketTotals" in lines_get_description,
+        f"{relative}: GET {lines_path} description must document that the "
+        "expert bucketTotals map is normalized into the public buckets",
+    )
+    contracts.check(
+        all(
+            token in lines_get_description
+            for token in ("details", *CONTRACT_TECHNICAL_ACCOUNT_LINE_TOTAL_FIELDS)
+        ),
+        f"{relative}: GET {lines_path} description must document the four "
+        "bucket totals and the optional details map",
+    )
+    for line_type_name in CONTRACT_TECHNICAL_ACCOUNT_LINE_TYPES:
+        contracts.check(
+            line_type_name in lines_get_description,
+            f"{relative}: GET {lines_path} description must document the "
+            f"{line_type_name} bucket mapping",
+        )
 
     create = schemas.get("CreateTechnicalAccountLineRequest") or {}
     create_properties = create.get("properties") or {}
@@ -6704,6 +6826,33 @@ def check_contract_technical_account_lines(
             "DRAFT" in status_description and "ISSUED" in status_description,
             f"{relative}: PATCH {status_path} description must document the "
             "DRAFT -> ISSUED reconciliation point",
+        )
+        for bucket, bucket_types in (
+            CONTRACT_TECHNICAL_ACCOUNT_LINE_BUCKET_TYPES.items()
+        ):
+            contracts.check(
+                bucket in status_description,
+                f"{relative}: PATCH {status_path} description must document "
+                f"the {bucket} bucket",
+            )
+            contracts.check(
+                CONTRACT_TECHNICAL_ACCOUNT_LINE_BUCKET_HEADER_FIELDS[bucket]
+                in status_description,
+                f"{relative}: PATCH {status_path} description must document "
+                f"the {bucket} -> "
+                f"{CONTRACT_TECHNICAL_ACCOUNT_LINE_BUCKET_HEADER_FIELDS[bucket]} "
+                "header mapping",
+            )
+            for line_type_name in bucket_types:
+                contracts.check(
+                    line_type_name in status_description,
+                    f"{relative}: PATCH {status_path} description must document "
+                    f"that {line_type_name} rolls into {bucket}",
+                )
+        contracts.check(
+            "bucket" in status_description,
+            f"{relative}: PATCH {status_path} description must describe the "
+            "bucket reconciliation",
         )
 
     planned = {
@@ -6797,11 +6946,23 @@ def check_contract_technical_account_lines_asyncapi(
             f"{relative}: {CONTRACT_TECHNICAL_ACCOUNT_LINE_EVENT_MESSAGE}."
             f"{field} must be a uuid",
         )
+    line_type_values = (
+        (payload_properties.get("lineType") or {}).get("enum") or []
+    )
     contracts.check(
-        set((payload_properties.get("lineType") or {}).get("enum") or [])
-        == set(CONTRACT_TECHNICAL_ACCOUNT_LINE_TYPES),
+        line_type_values == list(CONTRACT_TECHNICAL_ACCOUNT_LINE_TYPES),
         f"{relative}: {CONTRACT_TECHNICAL_ACCOUNT_LINE_EVENT_MESSAGE}.lineType "
-        f"must enumerate {list(CONTRACT_TECHNICAL_ACCOUNT_LINE_TYPES)}",
+        f"must enumerate exactly the 13 detail types "
+        f"{list(CONTRACT_TECHNICAL_ACCOUNT_LINE_TYPES)}",
+    )
+    contracts.check(
+        not (
+            set(CONTRACT_TECHNICAL_ACCOUNT_LINE_RETIRED_TYPES)
+            & set(line_type_values)
+        ),
+        f"{relative}: {CONTRACT_TECHNICAL_ACCOUNT_LINE_EVENT_MESSAGE}.lineType "
+        f"must not enumerate the retired type(s) "
+        f"{list(CONTRACT_TECHNICAL_ACCOUNT_LINE_RETIRED_TYPES)}",
     )
     amount = payload_properties.get("amount") or {}
     contracts.check(

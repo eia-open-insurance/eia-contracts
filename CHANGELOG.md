@@ -1099,6 +1099,47 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   the two new event names, and updates M-01, M-12, M-13, M-14, and M-22.
 - `python scripts/validate_contracts.py` passes 13,143 checks with 0 failures.
 
+### Added in the expanded technical-account line contract (2026-10-21)
+
+- `openapi/contract.yaml` is 4.3.0: `TechnicalAccountLineType` now enumerates
+  the 13 SPEC 11.3.4 detail types `PREMIUM`, `COMMISSION`, `BROKERAGE`,
+  `PAID_LOSS`, `OUTSTANDING_LOSS`, `IBNR`, `ALAE`, `REINSTATEMENT`,
+  `CASH_CALL`, `FUNDS_WITHHELD`, `TAX`, `ADJUSTMENT`, and `OTHER`; the interim
+  aggregate `LOSS` is retired from the create enum and is rejected with 400
+  `INVALID_LINE_TYPE`. `TechnicalAccountLineTotals` keeps the four required
+  bucket members `premium`, `loss`, `commission`, and `other` and adds the
+  optional `details` map, whose keys are exactly the 13 line types. The
+  `LineSummary`, totals, and account status descriptions document that the
+  expert's authoritative `bucketTotals` map (keys `premium`, `loss`,
+  `commission`, `other`) is normalized into the public buckets, and that issue
+  reconciliation compares bucket sums with the header components: `PREMIUM`
+  -> `premium`; `PAID_LOSS`, `OUTSTANDING_LOSS`, `IBNR`, `ALAE`,
+  `REINSTATEMENT`, and `CASH_CALL` -> `loss`; `COMMISSION` and `BROKERAGE` ->
+  `commission`; and `FUNDS_WITHHELD`, `TAX`, `ADJUSTMENT`, and `OTHER` ->
+  `other`. A mismatch is 409 `ACCOUNT_LINES_DO_NOT_RECONCILE` with one
+  `details[]` entry per offending bucket naming the contributing types. The
+  change is additive for the paths and the four bucket members; a client that
+  posted `LOSS` must post `PAID_LOSS`, and a legacy `LOSS` total is still read
+  into `loss`.
+- `asyncapi/contract.yaml` is 1.8.0: the
+  `ContractTechnicalAccountLineData.lineType` enum carries the same 13 detail
+  types and excludes the retired `LOSS`. No channel, operation, or event name
+  changes, so `asyncapi/event-catalog.yaml` stays 1.23.0 with 205 published and
+  84 implemented names.
+- `scripts/validate_contracts.py` requires the exact 13-value
+  `TechnicalAccountLineType` enum with `LOSS` excluded, the four required
+  bucket totals, the optional `details` map with exactly the 13
+  `propertyNames`, the four-bucket coverage map, the `bucketTotals`
+  normalization and bucket-to-header mapping in the GET and status
+  descriptions, and the same 13-value enum on the line event payload.
+- `README.md` records the 13 detail types, the optional `details` map, the
+  bucket-to-header mapping, the bucket-based issue reconciliation, the retired
+  `LOSS`, the asyncapi payload change, and the validation count;
+  `MISMATCHES.md` rewrites M-42 for the remaining line-correction and
+  line-metadata gaps and updates M-29 for the expanded vocabulary and bucket
+  reconciliation.
+- `python scripts/validate_contracts.py` passes 13,190 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

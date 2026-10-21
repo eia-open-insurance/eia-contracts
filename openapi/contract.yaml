@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Contract API
-  version: 4.2.0
+  version: 4.3.0
   summary: Assumed-book reinsurance contract administration and the Contract expert API.
   description: >
     This document describes the implemented public Contract domain API and the
@@ -44,11 +44,12 @@ info:
     balance is due from the cedent to the reinsurer. The account is created in
     DRAFT and moves DRAFT -> ISSUED -> SETTLED. The SPEC 11.3.4
     `technical_account_line` detail is implemented under
-    `.../{accountId}/lines`: a line names one of the four header components and
-    is editable only while the account is DRAFT, and issuing an account that has
-    lines requires each component's line total to equal the matching header
-    amount (`ACCOUNT_LINES_DO_NOT_RECONCILE`, M-42). The SPEC 11.3.10 `/accounts`
-    route is exposed as `/technical-accounts` (M-29).
+    `.../{accountId}/lines`: a line names one of the 13 SPEC detail types and
+    is editable only while the account is DRAFT. Every type rolls into one of
+    four reconciliation buckets (premium, loss, commission, other), and issuing
+    an account that has lines requires each bucket total to equal the matching
+    header amount (`ACCOUNT_LINES_DO_NOT_RECONCILE`, M-42). The SPEC 11.3.10
+    `/accounts` route is exposed as `/technical-accounts` (M-29).
 
     A cash call is an interim funding request on one contract period. The expert
     generates `callNumber` as `CC-{year}-{sequence}`, creates the row in
@@ -1171,14 +1172,21 @@ paths:
         status, or a concurrent change is 409 `INVALID_STATUS_TRANSITION`.
 
         Issuing also reconciles the line detail (SPEC 11.3.4
-        `technical_account_line`). When at least one line exists, the sum of the
-        lines of each `lineType` must equal the matching header amount:
-        `PREMIUM` = `cededPremium`, `LOSS` = `cededLosses`, `COMMISSION` =
-        `commission`, and `OTHER` = `otherCharges`. Any mismatch rejects the
-        transition with 409 `ACCOUNT_LINES_DO_NOT_RECONCILE`, carrying one
-        `details[]` entry per offending line type; the account stays DRAFT and
-        no event is written. An account with no lines (a header-only account,
-        including one linked by a processed period bordereau) remains issuable.
+        `technical_account_line`). When at least one line exists, the lines are
+        summed into four buckets and each bucket total must equal its matching
+        header component: `premium` = `cededPremium`, `loss` = `cededLosses`,
+        `commission` = `commission`, and `other` = `otherCharges`. The bucket
+        mapping is fixed: `PREMIUM` -> `premium`; `PAID_LOSS`,
+        `OUTSTANDING_LOSS`, `IBNR`, `ALAE`, `REINSTATEMENT`, and `CASH_CALL` ->
+        `loss`; `COMMISSION` and `BROKERAGE` -> `commission`; and
+        `FUNDS_WITHHELD`, `TAX`, `ADJUSTMENT`, and `OTHER` -> `other`. Any
+        mismatch rejects the transition with 409
+        `ACCOUNT_LINES_DO_NOT_RECONCILE`, carrying one `details[]` entry per
+        offending bucket (field `PREMIUM`, `LOSS`, `COMMISSION`, or `OTHER`)
+        whose message names the contributing line types; the account stays
+        DRAFT and no event is written. An account with no lines (a header-only
+        account, including one linked by a processed period bordereau) remains
+        issuable.
 
         A successful transition appends `contract.technical-account.issued` or
         `contract.technical-account.settled` to the outbox in the same
@@ -1223,8 +1231,9 @@ paths:
             409. `INVALID_STATUS_TRANSITION` when the requested edge is not
             DRAFT -> ISSUED or ISSUED -> SETTLED, including a concurrent change.
             `ACCOUNT_LINES_DO_NOT_RECONCILE` when issuing an account that has
-            lines and at least one line-type total differs from the matching
-            header component; `details[]` names each offending `lineType`.
+            lines and at least one bucket total differs from the matching
+            header component; `details[]` names each offending bucket and the
+            line types that roll into it.
           content:
             application/problem+json:
               schema:
@@ -1236,16 +1245,31 @@ paths:
       operationId: listContractTechnicalAccountLines
       tags:
         - Contract
-      summary: List the line detail and component totals of a technical account.
+      summary: List the line detail and bucket totals of a technical account.
       description: >
-        Returns the account's lines plus the per-component totals used by the
-        issue reconciliation. `items` is in insertion order (`createdAt`, then
-        line id); `totals` always carries all four components, with a zero
-        amount for a component that has no line. Each line type maps to exactly
-        one header component: `PREMIUM` -> `cededPremium`, `LOSS` ->
-        `cededLosses`, `COMMISSION` -> `commission`, and `OTHER` ->
-        `otherCharges`. Money is a decimal string (SPEC 10.3). The account
-        header does not embed the lines; this operation is the detail read.
+        Returns the account's lines plus the four bucket totals used by the
+        issue reconciliation and the optional per-line-type detail. `items` is
+        in insertion order (`createdAt`, then line id); `totals` always carries
+        the buckets `premium`, `loss`, `commission`, and `other`, with a zero
+        amount for a bucket that has no line. `totals.details` is an optional
+        map from each present line type to its summed amount and is omitted
+        when the account has no line detail. Each line type maps to exactly one
+        bucket: `PREMIUM` -> `premium`; `PAID_LOSS`, `OUTSTANDING_LOSS`,
+        `IBNR`, `ALAE`, `REINSTATEMENT`, and `CASH_CALL` -> `loss`;
+        `COMMISSION` and `BROKERAGE` -> `commission`; and `FUNDS_WITHHELD`,
+        `TAX`, `ADJUSTMENT`, and `OTHER` -> `other`. Money is a decimal string
+        (SPEC 10.3). The account header does not embed the lines; this
+        operation is the detail read.
+
+        The four buckets are the reconciliation view and map to the account
+        header as `premium` -> `cededPremium`, `loss` -> `cededLosses`,
+        `commission` -> `commission`, and `other` -> `otherCharges`. The
+        expert returns an authoritative `bucketTotals` map with those four
+        keys; the domain normalizes it into the public `totals` buckets (and,
+        when it is absent, derives them from the detailed totals or the line
+        rows). `totals.details` keeps the expert's per-line-type `totals`
+        breakdown. A legacy aggregate `LOSS` total from an older projection is
+        folded into `loss`.
 
         `X-EIA-Tenant` is required and `X-EIA-Book` must be ASSUMED; another
         book is hidden as 404 `BOOK_SCOPE_VIOLATION` (SPEC 3.6.2, WALL-06). The
@@ -1270,7 +1294,7 @@ paths:
             format: uuid
       responses:
         '200':
-          description: Lines and per-component totals of the account.
+          description: Lines and bucket totals of the account.
           content:
             application/json:
               schema:
@@ -1288,11 +1312,15 @@ paths:
       summary: Add a line to a DRAFT technical account.
       description: >
         Records one financial line on the account and returns it with 201.
-        `lineType` is required and is one of `PREMIUM`, `LOSS`, `COMMISSION`,
-        or `OTHER` (trimmed and case-insensitive). `amount` is required and must
-        be strictly positive. `reference` and `description` are optional,
-        trimmed, and treated as absent when blank; `reference` is at most 64
-        characters and `description` at most 255. The tenant comes from
+        `lineType` is required and is one of the 13 SPEC 11.3.4 detail types:
+        `PREMIUM`, `COMMISSION`, `BROKERAGE`, `PAID_LOSS`, `OUTSTANDING_LOSS`,
+        `IBNR`, `ALAE`, `REINSTATEMENT`, `CASH_CALL`, `FUNDS_WITHHELD`, `TAX`,
+        `ADJUSTMENT`, or `OTHER` (trimmed and case-insensitive). The retired
+        aggregate `LOSS` is rejected with 400 `INVALID_LINE_TYPE`; post
+        `PAID_LOSS` instead. `amount` is required and must be strictly
+        positive. `reference` and `description` are optional, trimmed, and
+        treated as absent when blank; `reference` is at most 64 characters and
+        `description` at most 255. The tenant comes from
         `X-EIA-Tenant`, the contract and account from the path, and the line id
         and `createdAt` are server-derived, so none of them is accepted in the
         body.
@@ -3551,8 +3579,8 @@ components:
         strings (SPEC 10.3). The account header is the reconciled view: the
         SPEC 11.3.4 `technical_account_line` detail is read from
         `.../{accountId}/lines` and is not embedded here. An account with lines
-        can be issued only when every line-type total equals its matching
-        header component (M-42).
+        can be issued only when every bucket total equals its matching header
+        component (M-42).
       required:
         - accountId
         - accountNumber
@@ -3663,14 +3691,17 @@ components:
       type: object
       description: >
         One financial line of a technical account (SPEC 11.3.4
-        `technical_account_line`, reduced to the statement's four header
-        components). A line belongs to exactly one account and contributes to
-        exactly one component: `PREMIUM` to `cededPremium`, `LOSS` to
-        `cededLosses`, `COMMISSION` to `commission`, and `OTHER` to
-        `otherCharges`. `reference` and `description` are optional audit text
-        and are null when absent. `amount` is strictly positive and is a
-        decimal string (SPEC 10.3). Lines are add-only and remove-only in the
-        DRAFT account; an ISSUED account is immutable.
+        `technical_account_line`). A line belongs to exactly one account and
+        names one of the 13 detail types. Every type rolls into exactly one of
+        the four reconciliation buckets: `PREMIUM` -> `premium`; `PAID_LOSS`,
+        `OUTSTANDING_LOSS`, `IBNR`, `ALAE`, `REINSTATEMENT`, and `CASH_CALL` ->
+        `loss`; `COMMISSION` and `BROKERAGE` -> `commission`; and
+        `FUNDS_WITHHELD`, `TAX`, `ADJUSTMENT`, and `OTHER` -> `other`. The
+        bucket totals must equal the matching header components on issue.
+        `reference` and `description` are optional audit text and are null when
+        absent. `amount` is strictly positive and is a decimal string
+        (SPEC 10.3). Lines are add-only and remove-only in the DRAFT account;
+        an ISSUED account is immutable.
       required:
         - lineId
         - accountId
@@ -3704,21 +3735,45 @@ components:
     TechnicalAccountLineType:
       type: string
       description: >
-        The header component a technical-account line contributes to. The
-        implemented slice is reduced to these four component types; the richer
-        SPEC 11.3.4 detail vocabulary is not modelled (M-42).
+        The detail type of a technical-account line (SPEC 11.3.4
+        `technical_account_line`). Each type rolls into exactly one of the four
+        reconciliation buckets: `PREMIUM` -> `premium`; `PAID_LOSS`,
+        `OUTSTANDING_LOSS`, `IBNR`, `ALAE`, `REINSTATEMENT`, and `CASH_CALL` ->
+        `loss`; `COMMISSION` and `BROKERAGE` -> `commission`; and
+        `FUNDS_WITHHELD`, `TAX`, `ADJUSTMENT`, and `OTHER` -> `other`. The
+        retired aggregate `LOSS` type is not accepted.
       enum:
         - PREMIUM
-        - LOSS
         - COMMISSION
+        - BROKERAGE
+        - PAID_LOSS
+        - OUTSTANDING_LOSS
+        - IBNR
+        - ALAE
+        - REINSTATEMENT
+        - CASH_CALL
+        - FUNDS_WITHHELD
+        - TAX
+        - ADJUSTMENT
         - OTHER
     TechnicalAccountLineTotals:
       type: object
       description: >
-        Summed line amounts by header component, in insertion order. All four
-        members are always present; a component with no line is `0.0000`.
-        Money is a decimal string (SPEC 10.3). These are the totals reconciled
-        against the account header on DRAFT -> ISSUED.
+        Summed line amounts for the issue reconciliation. The four bucket
+        members `premium`, `loss`, `commission`, and `other` are always
+        present; a bucket with no line is `0.0000`. `details` is an optional
+        map from each present line type to its summed amount and is omitted
+        when there is no line detail. The bucket members are the
+        reconciliation view and map to the account header as `premium` ->
+        `cededPremium`, `loss` -> `cededLosses`, `commission` -> `commission`,
+        and `other` -> `otherCharges`; on DRAFT -> ISSUED each must equal its
+        header component. The expert's authoritative `bucketTotals` map uses
+        exactly these four keys and is normalized into these members. The
+        detail mapping is `PREMIUM` -> `premium`; `PAID_LOSS`,
+        `OUTSTANDING_LOSS`, `IBNR`, `ALAE`, `REINSTATEMENT`, and `CASH_CALL` ->
+        `loss`; `COMMISSION` and `BROKERAGE` -> `commission`; and
+        `FUNDS_WITHHELD`, `TAX`, `ADJUSTMENT`, and `OTHER` -> `other`. Money is
+        a decimal string (SPEC 10.3).
       required:
         - premium
         - loss
@@ -3733,13 +3788,37 @@ components:
           $ref: './components.yaml#/components/schemas/MoneyAmount'
         other:
           $ref: './components.yaml#/components/schemas/MoneyAmount'
+        details:
+          type: object
+          description: >
+            Optional per-line-type totals. Only types with at least one line
+            appear; the map is omitted when it would be empty. Every key is one
+            of the 13 `TechnicalAccountLineType` values and every value is a
+            decimal money string.
+          additionalProperties:
+            $ref: './components.yaml#/components/schemas/MoneyAmount'
+          propertyNames:
+            enum:
+              - PREMIUM
+              - COMMISSION
+              - BROKERAGE
+              - PAID_LOSS
+              - OUTSTANDING_LOSS
+              - IBNR
+              - ALAE
+              - REINSTATEMENT
+              - CASH_CALL
+              - FUNDS_WITHHELD
+              - TAX
+              - ADJUSTMENT
+              - OTHER
     LineSummary:
       type: object
       description: >
-        The line detail of one technical account plus its per-component totals
-        (SPEC 11.3.4 `technical_account_line`). `items` is in insertion order;
-        `totals` is the reconciliation view used on issue. The account header
-        is not repeated here.
+        The line detail of one technical account plus its totals (SPEC 11.3.4
+        `technical_account_line`). `items` is in insertion order; `totals`
+        carries the four reconciliation buckets and the optional per-line-type
+        detail map. The account header is not repeated here.
       required:
         - items
         - totals
@@ -4547,6 +4626,7 @@ x-implementation:
     - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/TechnicalAccountLineService.java
     - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/TechnicalAccountLineClient.java
     - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/TechnicalAccountLine.java
+    - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/TechnicalAccountLineTypes.java
     - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/LineSummary.java
     - repos/eia-contract-domain/src/main/java/com/eia/contract/domain/CreateTechnicalAccountLineCommand.java
     - repos/eia-contract-expert/src/main/java/com/eia/contract/expert/technicalaccount/TechnicalAccountController.java
@@ -4592,11 +4672,14 @@ x-implementation:
     expert generates accountNumber and the balance, and the only statuses are
     DRAFT, ISSUED, and SETTLED. Technical-account lines are projected with
     lineId (the expert row id is remapped by the domain) and accountId and
-    exclude tenantId; lineType is the implemented four-value component enum,
-    amount is strictly positive, and the list normalizes the expert `lines` map
-    into the public `items` plus the four `totals` buckets. Lines are editable
+    exclude tenantId; lineType is the 13-value SPEC 11.3.4 detail enum (the
+    retired aggregate LOSS is rejected on create), amount is strictly
+    positive, and the list normalizes the expert `lines` array plus its
+    per-line-type `totals` map and its authoritative four-bucket
+    `bucketTotals` map into the public `items`, the four `totals` buckets, and
+    the optional `totals.details` map. Lines are editable
     only in DRAFT (409 ACCOUNT_NOT_EDITABLE), and issuing a DRAFT account with
-    lines reconciles each component total to the header (409
+    lines reconciles each bucket total to the header (409
     ACCOUNT_LINES_DO_NOT_RECONCILE); the domain validates description at 300
     characters but the expert caps it at 255 (M-42). Period bordereaux are
     projected with
@@ -4621,8 +4704,8 @@ x-implementation:
     domain accepts an absent X-EIA-Book on the security routes even though the
     canonical contract requires ASSUMED (M-37).
 x-compatibility:
-  contractVersion: 4.2.0
-  previousContractVersion: 4.1.0
+  contractVersion: 4.3.0
+  previousContractVersion: 4.2.0
   breaking:
     - The public GET/POST /api/v1/contracts/{contractId}/security operations now use the ten-field SecurityRecord response and the CreateContractSecurityRequest body. The wide Security and CreateSecurityRequest schemas are internal-expert only; a generated client of the old public Security shape must move to SecurityRecord.
     - PATCH /api/v1/contracts/{contractId}/status no longer accepts BOUND (since 2.0.0); it returns 409 BIND_REQUIRES_COMMAND and bind must use POST /bind.
@@ -4637,6 +4720,7 @@ x-compatibility:
     - Documents the implemented derived ACTIVE/EXPIRED security status, the OUTSTANDING bind-slice value, and the contract.security.recorded event; the HTTP security paths are unchanged.
     - Adds PATCH /api/v1/contracts/{contractId}/security/{securityId}/status with the UpdateContractSecurityStatusRequest schema and the RELEASED/EXPIRED security lifecycle.
     - Adds GET/POST /api/v1/contracts/{contractId}/technical-accounts/{accountId}/lines and DELETE .../lines/{lineId} with the TechnicalAccountLine, TechnicalAccountLineType, LineSummary, TechnicalAccountLineTotals, and CreateTechnicalAccountLineRequest schemas. The technical-account status description now documents issue-time line reconciliation.
+    - Expands TechnicalAccountLineType to the 13 SPEC 11.3.4 detail types, adds the optional LineSummary totals.details per-line-type map, and documents that the expert's authoritative four-key bucketTotals map is normalized into the public premium/loss/commission/other buckets. The issue reconciliation now compares bucket sums with the header components. The retired aggregate LOSS is removed from the create enum: a client that posted LOSS must post PAID_LOSS, while a legacy LOSS total is still read into the loss bucket.
   note: >
     Search, technical accounts, and cash calls are additive. The
     period-bordereau slice replaces the previously documented public bordereau
@@ -4654,7 +4738,13 @@ x-compatibility:
     and five schemas and change no existing request or response field; the one
     behavioural addition is the issue-time reconciliation, which rejects an
     issue that the header alone would have accepted when the account has line
-    detail. The HTTP base path stays /api/v1/contracts.
+    detail. The 4.3.0 line expansion keeps both paths and four bucket members
+    unchanged: it widens the detail enum, adds the optional details map, and
+    rebuilds the reconciliation on the four buckets. The aggregate LOSS create
+    value introduced in 4.2.0 is retired in this release, so a client that
+    posted LOSS must move to PAID_LOSS; a legacy LOSS total from an older
+    projection is still read into loss. The HTTP base path stays
+    /api/v1/contracts.
 x-planned-operations:
   - method: PATCH
     path: /api/v1/contracts/{contractId}

@@ -813,36 +813,46 @@ Technical-account semantics:
   periodEnd, currency, cededPremium, cededLosses, commission, otherCharges,
   balance, status, createdAt}`. `tenantId` is not part of the public projection.
   The SPEC 11.3.4 `technical_account_line` breakdown is implemented from 4.2.0
-  (see the next section); the `AGREED`, `DISPUTED`, and `SUPERSEDED` statuses
-  and the SPEC 11.3.10 `/accounts` path remain gaps (M-29).
+  and expanded to the 13 detail types in 4.3.0 (see the next section); the
+  `AGREED`, `DISPUTED`, and `SUPERSEDED` statuses and the SPEC 11.3.10
+  `/accounts` path remain gaps (M-29).
 - The three event names are child-aggregate facts with no SPEC 11.3.9
   equivalent (M-22, M-29). The envelope uses the account id and its lifecycle
   version (1, 2, 3) while the outbox partition key stays the contract id.
 
 ### Contract technical-account lines (2026-10-21)
 
-Contract 4.2.0 adds the financial line detail behind the technical-account
-header. The change is additive: two paths, five schemas, and two event names are
-new, and no existing path, request field, response field, or event changed. The
-issue command gains one aggregate guard: a DRAFT account that has lines can be
-issued only when every line-type total equals its matching header amount.
+Contract 4.3.0 expands the financial line detail behind the technical-account
+header to the 13 SPEC 11.3.4 detail types. The two paths, the four bucket
+totals, and the line projection are unchanged. The `TechnicalAccountLineType`
+enum gains the detail values and drops the interim aggregate `LOSS`, and
+`LineSummary.totals` gains an optional per-line-type `details` map. The issue
+guard is rebuilt on the four buckets: a DRAFT account that has lines can be
+issued only when every bucket total equals its matching header amount.
 
 | Document | Version | Classification | Change |
 |---|---|---|---|
-| `openapi/contract.yaml` | 4.2.0 | Additive | `GET/POST /api/v1/contracts/{contractId}/technical-accounts/{accountId}/lines` and `DELETE .../lines/{lineId}`, the `TechnicalAccountLine`, `TechnicalAccountLineType`, `LineSummary`, `TechnicalAccountLineTotals`, and `CreateTechnicalAccountLineRequest` schemas, and the issue-time reconciliation rule on the account status PATCH. |
-| `asyncapi/contract.yaml` | 1.7.0 | Additive | Two implemented grandchild channels and `send` operations: `contract.technical-account.line-added` and `.line-removed`, with a shared `ContractTechnicalAccountLineData` payload. |
-| `asyncapi/event-catalog.yaml` | 1.22.0 | Additive | Both names are published and implemented (203 published in total; Contract 32 published and 19 implemented; the platform implemented total is 82). |
+| `openapi/contract.yaml` | 4.3.0 | Additive | `TechnicalAccountLineType` enumerates the 13 SPEC 11.3.4 detail types (the retired aggregate `LOSS` is removed); `TechnicalAccountLineTotals` keeps the four required bucket members and adds the optional `details` map of the 13 types; the `LineSummary`, totals, and account status descriptions document the bucket-to-header mapping and the expert `bucketTotals` normalization; the issue reconciliation compares bucket sums with the header components. |
+| `asyncapi/contract.yaml` | 1.8.0 | Additive | The `ContractTechnicalAccountLineData.lineType` enum carries the 13 detail types; no channel, operation, or event name changes. |
+| `asyncapi/event-catalog.yaml` | 1.23.0 | No change | No event name is added or removed; the catalog totals stay 205 published and 84 implemented (Contract 32 published and 19 implemented). |
 
 Line semantics:
 
-- `GET .../lines` returns the `LineSummary` read model: `items` in insertion
-  order (`createdAt`, then line id) and `totals` keyed by the four header
-  components `premium`, `loss`, `commission`, and `other`. All four totals are
-  always present, as decimal strings, and a component with no line is
-  `0.0000`. The account projection does not embed the lines.
+- `GET .../lines` returns `items` in insertion order (`createdAt`, then line
+  id) and `totals` with the four buckets `premium`, `loss`, `commission`, and
+  `other`. All four are always present, as decimal strings, and a bucket with
+  no line is `0.0000`. `totals.details` is optional: it maps each present line
+  type to its summed amount, has only the 13 `TechnicalAccountLineType` keys,
+  and is omitted when empty. The expert returns an authoritative `bucketTotals`
+  map with the same four keys; the domain normalizes it into the public buckets
+  and, when it is absent, derives the buckets from the detailed totals or the
+  line rows. The account projection does not embed the lines.
 - `POST .../lines` records one line and returns 201. `lineType` is required and
-  is one of `PREMIUM`, `LOSS`, `COMMISSION`, or `OTHER` (trimmed and
-  case-insensitive). `amount` is required and must be strictly positive.
+  is one of `PREMIUM`, `COMMISSION`, `BROKERAGE`, `PAID_LOSS`,
+  `OUTSTANDING_LOSS`, `IBNR`, `ALAE`, `REINSTATEMENT`, `CASH_CALL`,
+  `FUNDS_WITHHELD`, `TAX`, `ADJUSTMENT`, or `OTHER` (trimmed and
+  case-insensitive). The retired aggregate `LOSS` is rejected with 400
+  `INVALID_LINE_TYPE`; post `PAID_LOSS` instead. `amount` is required and must be strictly positive.
   `reference` (at most 64 characters) and `description` (at most 255) are
   optional, trimmed, and null when absent. The line id and `createdAt` are
   server-derived and are not accepted in the body.
@@ -853,16 +863,22 @@ Line semantics:
   SETTLED account is 409 `ACCOUNT_NOT_EDITABLE`. A line does not change the
   header amounts; it is the audit detail that must reconcile to them.
 - **Reconciliation on issue.** `PATCH .../{accountId}/status` to `ISSUED`
-  reconciles the line detail when at least one line exists: the sum of
-  `PREMIUM` lines must equal `cededPremium`, `LOSS` lines `cededLosses`,
-  `COMMISSION` lines `commission`, and `OTHER` lines `otherCharges`. Any
-  mismatch rejects the transition with 409 `ACCOUNT_LINES_DO_NOT_RECONCILE`,
-  carrying one `details[]` entry per offending line type; the account stays
-  DRAFT and no event is written. The account row lock makes the reconciliation
-  and the status write atomic with respect to a concurrent line add or delete.
-  An account with no lines (a header-only account, including one created or
-  linked by a processed period bordereau) remains issuable. The rule applies
-  only at DRAFT -> ISSUED; SETTLED changes no line.
+  reconciles the line detail when at least one line exists. The lines roll into
+  four buckets and each bucket total must equal its header component:
+  `premium` -> `cededPremium`, `loss` -> `cededLosses`, `commission` ->
+  `commission`, and `other` -> `otherCharges`. The mapping is `PREMIUM` ->
+  `premium`; `PAID_LOSS`, `OUTSTANDING_LOSS`, `IBNR`, `ALAE`,
+  `REINSTATEMENT`, and `CASH_CALL` -> `loss`; `COMMISSION` and `BROKERAGE` ->
+  `commission`; and `FUNDS_WITHHELD`, `TAX`, `ADJUSTMENT`, and `OTHER` ->
+  `other`. Any mismatch rejects the transition with 409
+  `ACCOUNT_LINES_DO_NOT_RECONCILE`, carrying one `details[]` entry per
+  offending bucket (field `PREMIUM`, `LOSS`, `COMMISSION`, or `OTHER`) whose
+  message names the contributing line types; the account stays DRAFT and no
+  event is written. The account row lock makes the reconciliation and the
+  status write atomic with respect to a concurrent line add or delete. An
+  account with no lines (a header-only account, including one created or linked
+  by a processed period bordereau) remains issuable. The rule applies only at
+  DRAFT -> ISSUED; SETTLED changes no line.
 - The line projection is `{lineId, accountId, lineType, reference, description,
   amount, createdAt}`; `tenantId` is not exposed and the expert's `id` is
   remapped to `lineId` by the domain. Money is a decimal string (SPEC 10.3).
@@ -874,13 +890,15 @@ Line semantics:
   transactional outbox in the same transaction as the line row. The envelope
   uses the line id and aggregate version 1 while the outbox partition key stays
   the contract id. The payload is `{contractId, accountId, lineId, lineType,
-  amount}`; the optional reference and description are not carried. The names
+  amount}`; `lineType` now carries the 13 detail types and never the retired
+  `LOSS`. The optional reference and description are not carried. The names
   are new and have no SPEC 11.3.9 equivalent (M-22, M-42).
-- The implemented line vocabulary is deliberately reduced to the four header
-  components; the richer SPEC 11.3.4 detail types, a line update, negative or
-  zero lines, a per-line currency, and a line-level source document are not
-  modelled. The domain accepts a 300-character description but the expert caps
-  it at 255, so the effective bound is 255. M-42 records these gaps.
+- The remaining SPEC 11.3.4 gaps are a line update or correction, a per-line
+  currency, a line-level source document, and per-line approval or duplicate
+  detection; negative or zero lines are also rejected. The domain accepts a
+  300-character description but the expert caps it at 255, so the effective
+  bound is 255. M-42 records these gaps.
+- `python scripts/validate_contracts.py` passes 13,190 checks with 0 failures.
 
 ### Contract period bordereaux (2026-10-20)
 
@@ -2250,13 +2268,16 @@ missing directory.
    security conflict codes, the two technical-account line paths and their
    GET/POST/DELETE operations with the required `TenantHeader` and
    `BookHeaderAssumed` parameters, the `contractId`/`accountId`/`lineId` path
-   parameters, the `TechnicalAccountLine`, `TechnicalAccountLineType`,
-   `LineSummary`, `TechnicalAccountLineTotals`, and
-   `CreateTechnicalAccountLineRequest` schemas and their field types, enums,
-   and text bounds, the 200/201/204 successes, the 400/404/409 responses with
-   `ACCOUNT_NOT_EDITABLE`, the issue-time `ACCOUNT_LINES_DO_NOT_RECONCILE`
-   documentation on the status PATCH, and the absence of the implemented line
-   paths from `x-planned-operations`, the two credit-note paths and their
+   parameters, the `TechnicalAccountLine`, `TechnicalAccountLineType` (the 13
+   detail types with the retired aggregate `LOSS` excluded), `LineSummary`,
+   `TechnicalAccountLineTotals` (four required bucket members plus the optional
+   13-key `details` map), and `CreateTechnicalAccountLineRequest` schemas and
+   their field types, enums, and text bounds, the 200/201/204 successes, the
+   400/404/409 responses with `ACCOUNT_NOT_EDITABLE`, the issue-time
+   `ACCOUNT_LINES_DO_NOT_RECONCILE` documentation and the four-bucket/header
+   mapping on the status PATCH, the `bucketTotals` normalization on the
+   line-list description, and the absence of the implemented line paths from
+   `x-planned-operations`, the two credit-note paths and their
    required `TenantHeader` and `BookHeaderDirect` parameters, the ten-field
    `CreditNote` projection and `CreditNoteStatus` enum, the positive
    `CreateCreditNoteRequest.amount` pattern and optional 500-character reason,
@@ -2288,7 +2309,7 @@ missing directory.
    `ContractSecurityStatusChangedData` payload with its contract/security
    identity, type, previous-status, and status members, the
    `ContractTechnicalAccountLineData` payload with its contract, account, line,
-   type, and amount members, and the
+   13-value detail type enum, and amount members, and the
    `PolicyCreditNoteData` payload with its policy and note identity, note
    number, amount, currency, and status members, and the
    `PolicyLegalEntityCreatedData` and
