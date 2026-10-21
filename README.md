@@ -504,9 +504,12 @@ Content semantics:
   aggregate version, so replacing the content produces a new event. The name is
   new and has no SPEC 11.6.9 equivalent; M-22 and M-40 record the naming and
   lifecycle gaps.
-- The SPEC 11.6.10 presigned download, renditions, OCR text, holds, packages,
-  requests, signatures, and retention disposition remain planned and listed
-  under `x-planned-operations`. Version history is implemented from 1.4.0, but
+- The SPEC 11.6.10 presigned download, renditions, OCR text, packages,
+  requests, and signatures remain planned and listed under
+  `x-planned-operations`. Legal holds and retention disposition are implemented
+  from 1.5.0 on the per-document routes described in
+  [Document legal holds and disposition](#document-legal-holds-and-disposition-2026-10-21),
+  not the SPEC hold collection. Version history is implemented from 1.4.0, but
   under `/content/versions` rather than the SPEC `/versions` route.
 - The validator requires the content operations (five from 1.4.0), the tenant
   header and `documentId` parameter, the `X-File-Name` and `Content-Type` upload
@@ -565,8 +568,11 @@ Version semantics:
 - The history is nested under `/content/versions`; SPEC 11.6.10 mounts the
   history at `GET /versions` and the version-creating command at `POST
   /versions`. The upload is the version-creating command in this slice. The
-  SPEC path shape and the remaining presigned-download, rendition, OCR, hold,
-  package, request, signature, and retention gaps are recorded in M-40.
+  SPEC path shape and the remaining presigned-download, rendition, OCR,
+  package, request, and signature gaps are recorded in M-40; the hold and
+  disposition surface is described in
+  [Document legal holds and disposition](#document-legal-holds-and-disposition-2026-10-21)
+  and M-44.
 - The validator requires both version routes, the tenant header and
   `documentId` parameter, the required positive `version` path parameter, the
   `DocumentContentVersion` array and fields, the four binary download headers,
@@ -575,6 +581,72 @@ Version semantics:
   of the implemented version paths from `x-planned-operations`; it also asserts
   that `document.content.uploaded` remains the only `document.content.*` event.
   The full run passes 12,657 checks.
+
+### Document legal holds and disposition (2026-10-21)
+
+Document 1.5.0 adds the per-document legal-hold and retention-disposition
+commands. The change is additive: three new routes, one new request schema,
+four nullable response members, and three implemented event names; no existing
+path, request field, response field, or event name is removed or changes
+meaning.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/document.yaml` | 1.5.0 | Additive | `POST /api/v1/documents/{documentId}/hold` with the required `HoldDocumentRequest.reason`, `POST /api/v1/documents/{documentId}/hold/release`, `POST /api/v1/documents/{documentId}/dispose`, and the nullable `Document` members `holdReason`, `heldAt`, `statusBeforeHold`, and `disposedAt`. |
+| `asyncapi/document.yaml` | 1.5.0 | Additive | The implemented `document.legal-hold.placed`, `document.legal-hold.released`, and `document.document.disposed` channels and operations with the shared `DocumentLifecycleData` payload. |
+| `asyncapi/event-catalog.yaml` | 1.24.0 | Additive | The two legal-hold names are published and implemented and `document.document.disposed` moves into the implemented subset (207 published and 87 implemented in total; Document 23 published and 9 implemented). |
+
+Hold and disposition semantics:
+
+- A hold is placed per document with a required `reason` of 1-500 characters.
+  The reason is trimmed and recorded in `holdReason`, the instant in `heldAt`,
+  and the prior status in `statusBeforeHold`; the document moves to `ON_HOLD`.
+  A hold may be placed from `ACTIVE`, `ARCHIVED`, `CLASSIFIED`, or `SUPERSEDED`.
+  The last two are allowed even though the generic lifecycle has no edge to
+  `ON_HOLD`. A second hold is 409 `DOCUMENT_ALREADY_ON_HOLD`; any other status
+  is 409 `HOLD_STATUS_NOT_ALLOWED`.
+- A release has no request body. It clears the three hold members and restores
+  `statusBeforeHold`; an absent or unrecognised snapshot restores `ARCHIVED`, so
+  a release always lands in a retrievable non-active state. A document that is
+  not `ON_HOLD` is 409 `DOCUMENT_NOT_ON_HOLD`.
+- Disposition is synchronous and requires an expired retention date and no
+  active hold. A missing `retentionUntil` is 409 `RETENTION_DATE_REQUIRED`, a
+  date after today is 409 `RETENTION_NOT_EXPIRED`, `ON_HOLD` is 409
+  `DOCUMENT_ON_LEGAL_HOLD` (checked before the retention clock), and a status
+  outside `ACTIVE`, `ARCHIVED`, or `SUPERSEDED` is 409
+  `DISPOSAL_STATUS_NOT_ALLOWED`. The accepted command tombstones the document as
+  `DISPOSED`, stamps `disposedAt`, keeps the metadata readable, and writes no
+  content deletion.
+- The public dispose command accepts no body, so the expert's optional
+  `{reason}` is not forwarded and the recorded event reason is
+  `RETENTION_EXPIRED`. The hold, release, and dispose writes each bump the
+  document version and append their event in the same transaction; a rejected
+  command writes no row change and no event.
+- `X-EIA-Tenant` is required on all three routes; another tenant's document is
+  404, indistinguishable from a missing document. The expert also accepts the
+  `tenantId` query parameter as a fallback for the domain call.
+- The accepted hold writes `document.legal-hold.placed` with
+  `{documentId, documentNumber, reason, status: ON_HOLD}`; a release writes
+  `document.legal-hold.released` with the lifted reason and the restored status;
+  a disposition writes `document.document.disposed` with the disposition reason
+  and `status: DISPOSED`. All three use the `Document` aggregate and the row
+  version + 1. The two legal-hold names are new with no SPEC 11.6.9 equivalent:
+  the SPEC facts are `document.document.held` and
+  `document.document.hold-released`, which remain planned.
+  `document.document.disposed` is a SPEC name and is now implemented.
+- The implemented hold is the per-document `.../{documentId}/hold` surface, not
+  the SPEC 11.6.10 hold collection with scope, approval, and release by hold id.
+  Disposition has no approval step, retention-scan job, disposition certificate,
+  or content deletion (SPEC 11.6.8). `MISMATCHES.md` M-44 records the deviation;
+  the naming gap is also in M-22.
+- The validator requires the three operations with the shared `TenantHeader` and
+  `documentId` parameter, the `HoldDocumentRequest.reason` bounds, the 200
+  `Document` response, the 400/404/409 responses, all seven conflict codes, the
+  four nullable `Document` members, the `DocumentLifecycleData` payload, and the
+  three implemented channels, operations, and catalog entries. It also asserts
+  that the implemented paths leave `x-planned-operations` and that the SPEC
+  `document.document.held`/`.hold-released` channels stay planned. The full run
+  passes 13,501 checks.
 
 ### Policy billing contract (2026-10-20)
 
@@ -2358,8 +2430,16 @@ missing directory.
    `FILE_TOO_LARGE` documentation, the two content-version operations with
    their `DocumentContentVersion` array and schema, the required positive
    `version` path parameter, the four version-download headers, the
-   `CONTENT_VERSION_NOT_FOUND`/`INVALID_PARAMETER` documentation, and the
-   removal of the content and version paths from
+   `CONTENT_VERSION_NOT_FOUND`/`INVALID_PARAMETER` documentation, the three
+   document hold/disposition operations with their shared `TenantHeader` and
+   `documentId` parameter, the `HoldDocumentRequest.reason` 1..500 bounds, the
+   200 `Document` and 400/404/409 responses, the seven hold and disposition
+   conflict codes (`HOLD_STATUS_NOT_ALLOWED`, `DOCUMENT_ALREADY_ON_HOLD`,
+   `DOCUMENT_NOT_ON_HOLD`, `RETENTION_DATE_REQUIRED`, `RETENTION_NOT_EXPIRED`,
+   `DOCUMENT_ON_LEGAL_HOLD`, and `DISPOSAL_STATUS_NOT_ALLOWED`), the nullable
+   `Document.holdReason`, `heldAt`, `statusBeforeHold`, and `disposedAt`
+   members, the absence of a request body on release and dispose, and the
+   removal of the disposition, content, and version paths from
    `x-planned-operations`, the ten search
    operations' shared parameters and `SearchResponse`/400/404 responses, the
    `SearchResponse` and `SearchItem` keys, the required 422/409/428 response
@@ -2463,7 +2543,9 @@ missing directory.
    `PolicyMassTortProfileUpdatedData` payload with its required
    identity, status, tort, trigger, allocation, and coverage-block members,
    the `DocumentContentUploadedData` payload with its required document
-   identity, revision, filename, MIME type, size, and digest members, and
+   identity, revision, filename, MIME type, size, and digest members, the
+   `DocumentLifecycleData` payload with its required document identity, reason,
+   and status members for the hold, release, and disposition facts, and
    the `ContractSecurityData` payload with its contract/security identity,
    type, money, currency, and status members, and the
    `ContractSecurityStatusChangedData` payload with its contract/security
@@ -2485,6 +2567,8 @@ missing directory.
    `direct.claim.allocation-created`, `assumed.claim.assigned`,
    `document.link.added`,
    `document.link.removed`, `document.content.uploaded`,
+   `document.legal-hold.placed`, `document.legal-hold.released`,
+   `document.document.disposed`,
    `policy.policy.renewed`,
    `policy.billing-plan.created`, `policy.installment.paid`,
    `policy.installment.waived`, `policy.dunning.sent`,
@@ -2581,11 +2665,21 @@ missing directory.
   `/versions` and the version-creating command at `POST /versions`, while the
   implemented history is under `/content/versions` and the upload creates the
   revision; the slice has no presigned download, `Range` support, rendition,
-  OCR text, legal hold, package, request, signature, or retention-disposition
-  surface, and the SPEC 11.6.9 content fact does not exist. A missing tenant on
-  the content routes is still the compact `TENANT_REQUIRED` 400 rather than the
-  canonical Problem, and the download exposes the stored bytes rather than a
-  short-lived URL (M-02, M-22, M-40);
+  OCR text, package, request, or signature surface, and the SPEC 11.6.9 content
+  fact does not exist. A missing tenant on the content routes is still the
+  compact `TENANT_REQUIRED` 400 rather than the canonical Problem, and the
+  download exposes the stored bytes rather than a short-lived URL (M-02, M-22,
+  M-40);
+- document legal holds and disposition are implemented per document at
+  `POST /api/v1/documents/{documentId}/hold`, `.../hold/release`, and
+  `.../dispose`, with the new `document.legal-hold.placed`/`.released` events
+  and the SPEC `document.document.disposed` event. SPEC 11.6.10 models a hold
+  collection with scope, approval, and release by hold id, and SPEC 11.6.8
+  requires an approved disposition job plus a certificate and content deletion;
+  the implemented hold is per-document and synchronous and disposition is an
+  immediate tombstone with no certificate. `statusBeforeHold` also admits
+  CLASSIFIED and SUPERSEDED, wider than the SPEC ACTIVE/ARCHIVED hold states
+  (M-22, M-44);
 - claim assignment is implemented on both claim verticals but has no SPEC 11.4.10
   or 11.5.10 route or SPEC 11.4.9/11.5.9 event name. The Assumed Claims domain
   still requires a team the contract and expert make optional, the Direct Claims

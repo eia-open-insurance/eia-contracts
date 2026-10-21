@@ -132,6 +132,9 @@ REQUIRED_OPENAPI_PATHS = {
         ("/api/v1/documents", "post"),
         ("/api/v1/documents/{documentId}", "get"),
         ("/api/v1/documents/{documentId}/status", "post"),
+        ("/api/v1/documents/{documentId}/hold", "post"),
+        ("/api/v1/documents/{documentId}/hold/release", "post"),
+        ("/api/v1/documents/{documentId}/dispose", "post"),
         ("/internal/v1/documents", "get"),
         ("/internal/v1/documents", "post"),
         ("/internal/v1/documents/{documentId}", "get"),
@@ -1615,6 +1618,9 @@ IMPLEMENTED_EVENTS = {
         "document.link.added",
         "document.link.removed",
         "document.content.uploaded",
+        "document.legal-hold.placed",
+        "document.legal-hold.released",
+        "document.document.disposed",
     ],
     "payment": [
         "payment.payment.created",
@@ -1834,6 +1840,62 @@ DOCUMENT_CONTENT_FILE_NAME_MAX_LENGTH = 255
 DOCUMENT_CONTENT_TYPE_MAX_LENGTH = 128
 DOCUMENT_CONTENT_ERRORS = ("EMPTY_CONTENT", "FILE_TOO_LARGE")
 DOCUMENT_CONTENT_EVENT = "document.content.uploaded"
+
+# Document legal holds and disposition. The implemented hold surface is
+# per-document and synchronous, not the SPEC 11.6.10 hold collection. A hold may
+# be placed only from ACTIVE, ARCHIVED, CLASSIFIED, or SUPERSEDED; release
+# restores the snapshotted status (ARCHIVED when absent); disposition requires
+# an expired retention date and no active hold. The seven conflict codes are the
+# complete state vocabulary the expert returns on 409.
+DOCUMENT_HOLD_PATH = "/api/v1/documents/{documentId}/hold"
+DOCUMENT_HOLD_RELEASE_PATH = "/api/v1/documents/{documentId}/hold/release"
+DOCUMENT_DISPOSAL_PATH = "/api/v1/documents/{documentId}/dispose"
+DOCUMENT_HOLD_FIELDS = (
+    "holdReason",
+    "heldAt",
+    "statusBeforeHold",
+    "disposedAt",
+)
+DOCUMENT_HOLD_REASON_MAX_LENGTH = 500
+DOCUMENT_STATUSES = (
+    "PENDING_UPLOAD",
+    "RECEIVED",
+    "SCANNING",
+    "PROCESSING",
+    "CLASSIFIED",
+    "ACTIVE",
+    "SUPERSEDED",
+    "ON_HOLD",
+    "ARCHIVED",
+    "DISPOSED",
+    "REJECTED",
+    "FAILED",
+)
+DOCUMENT_HOLD_CODES = ("HOLD_STATUS_NOT_ALLOWED", "DOCUMENT_ALREADY_ON_HOLD")
+DOCUMENT_HOLD_RELEASE_CODES = ("DOCUMENT_NOT_ON_HOLD",)
+DOCUMENT_DISPOSAL_CODES = (
+    "DOCUMENT_ON_LEGAL_HOLD",
+    "DISPOSAL_STATUS_NOT_ALLOWED",
+    "RETENTION_DATE_REQUIRED",
+    "RETENTION_NOT_EXPIRED",
+)
+DOCUMENT_LIFECYCLE_CODES = (
+    DOCUMENT_HOLD_CODES
+    + DOCUMENT_HOLD_RELEASE_CODES
+    + DOCUMENT_DISPOSAL_CODES
+)
+DOCUMENT_LIFECYCLE_EVENTS = (
+    "document.legal-hold.placed",
+    "document.legal-hold.released",
+    "document.document.disposed",
+)
+DOCUMENT_LIFECYCLE_DATA = "DocumentLifecycleData"
+DOCUMENT_LIFECYCLE_EVENT_FIELDS = (
+    "documentId",
+    "documentNumber",
+    "reason",
+    "status",
+)
 
 EVENT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$")
 VALID_JSON_TYPES = {"null", "boolean", "object", "array", "number", "string", "integer"}
@@ -3710,6 +3772,278 @@ def check_document_content_openapi(contracts: ContractSet, document, relative: s
             ),
             f"{relative}: {implemented_path} must not remain in x-planned-operations",
         )
+
+
+# ---------------------------------------------------------------------------
+# Document legal-hold and disposition checks
+# ---------------------------------------------------------------------------
+
+
+def check_document_holds_openapi(contracts: ContractSet, document, relative: str):
+    """Require the legal-hold and disposition operations, schemas, and codes."""
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    lifecycle_operations = (
+        (DOCUMENT_HOLD_PATH, "placeDocumentHold", DOCUMENT_HOLD_CODES),
+        (DOCUMENT_HOLD_RELEASE_PATH, "releaseDocumentHold", DOCUMENT_HOLD_RELEASE_CODES),
+        (DOCUMENT_DISPOSAL_PATH, "disposeDocument", DOCUMENT_DISPOSAL_CODES),
+    )
+    documented_conflicts = []
+    for lifecycle_path, operation_id, conflict_codes in lifecycle_operations:
+        path_item = paths.get(lifecycle_path) if isinstance(paths, dict) else None
+        operation = path_item.get("post") if isinstance(path_item, dict) else None
+        where = f"{relative}: POST {lifecycle_path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required hold/disposition operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+        contracts.check(
+            operation.get("operationId") == operation_id,
+            f"{where}: operationId must be {operation_id}",
+        )
+        parameter_refs, inline_names = _link_parameters(operation)
+        contracts.check(
+            "TenantHeader" in parameter_refs,
+            f"{where}: must document the shared TenantHeader parameter",
+        )
+        contracts.check(
+            "documentId" in inline_names,
+            f"{where}: must declare the documentId path parameter",
+        )
+
+        responses = operation.get("responses") or {}
+        for status in ("200", "400", "404", "409"):
+            contracts.check(
+                status in responses,
+                f"{where}: must document the {status} response",
+            )
+        ok_schema = _link_response_schema(operation, "200", "application/json")
+        contracts.check(
+            isinstance(ok_schema, dict)
+            and str(ok_schema.get("$ref", "")).endswith("/schemas/Document"),
+            f"{where}: 200 must return the Document schema",
+        )
+        conflict = responses.get("409")
+        conflict_text = (
+            str(conflict.get("description") or "") if isinstance(conflict, dict) else ""
+        )
+        documented_conflicts.append(conflict_text)
+        for code in conflict_codes:
+            contracts.check(
+                code in conflict_text,
+                f"{where}: 409 must document {code}",
+            )
+        conflict_schema = _link_response_schema(
+            operation, "409", "application/problem+json"
+        )
+        contracts.check(
+            isinstance(conflict_schema, dict)
+            and str(conflict_schema.get("$ref", "")).endswith("/schemas/Problem"),
+            f"{where}: 409 must document the shared Problem schema",
+        )
+
+        if lifecycle_path == DOCUMENT_HOLD_PATH:
+            request_schema = (
+                ((operation.get("requestBody") or {}).get("content") or {})
+                .get("application/json", {})
+                .get("schema")
+            )
+            contracts.check(
+                isinstance(request_schema, dict)
+                and str(request_schema.get("$ref", "")).endswith(
+                    "/schemas/HoldDocumentRequest"
+                ),
+                f"{where}: request body must use the HoldDocumentRequest schema",
+            )
+        else:
+            contracts.check(
+                "requestBody" not in operation,
+                f"{where}: the command must not declare a request body",
+            )
+
+    # Every conflict code of the slice must be documented somewhere, and no
+    # implemented lifecycle path may hide under the planned list.
+    planned = document.get("x-planned-operations") or []
+    for implemented_path in (
+        DOCUMENT_HOLD_PATH,
+        DOCUMENT_HOLD_RELEASE_PATH,
+        DOCUMENT_DISPOSAL_PATH,
+    ):
+        contracts.check(
+            not any(
+                isinstance(entry, dict) and entry.get("path") == implemented_path
+                for entry in planned
+            ),
+            f"{relative}: {implemented_path} must not remain in x-planned-operations",
+        )
+    documented = " ".join(documented_conflicts)
+    for code in DOCUMENT_LIFECYCLE_CODES:
+        contracts.check(
+            code in documented,
+            f"{relative}: hold/disposition 409 responses must document {code}",
+        )
+
+    # The Document projection carries the four nullable lifecycle members.
+    document_schema = schemas.get("Document") or {}
+    document_properties = document_schema.get("properties") or {}
+    document_required = set(document_schema.get("required") or [])
+    for field in DOCUMENT_HOLD_FIELDS:
+        contracts.check(
+            field in document_properties,
+            f"{relative}: Document.properties.{field} is required",
+        )
+        contracts.check(
+            field in document_required,
+            f"{relative}: Document.required must list {field}",
+        )
+    hold_reason = document_properties.get("holdReason") or {}
+    contracts.check(
+        _schema_types(hold_reason) == {"string", "null"}
+        and hold_reason.get("maxLength") == DOCUMENT_HOLD_REASON_MAX_LENGTH,
+        f"{relative}: Document.holdReason must be a nullable string of at most "
+        f"{DOCUMENT_HOLD_REASON_MAX_LENGTH} characters",
+    )
+    for field in ("heldAt", "disposedAt"):
+        member = document_properties.get(field) or {}
+        contracts.check(
+            _schema_types(member) == {"string", "null"}
+            and member.get("format") == "date-time",
+            f"{relative}: Document.{field} must be a nullable date-time",
+        )
+    status_before_hold = document_properties.get("statusBeforeHold") or {}
+    status_branches = [
+        branch
+        for branch in (status_before_hold.get("oneOf") or [])
+        if isinstance(branch, dict)
+    ]
+    contracts.check(
+        any(
+            str(branch.get("$ref", "")).endswith("/schemas/DocumentStatus")
+            for branch in status_branches
+        )
+        and any(branch.get("type") == "null" for branch in status_branches),
+        f"{relative}: Document.statusBeforeHold must be a nullable DocumentStatus",
+    )
+
+    hold_request = schemas.get("HoldDocumentRequest") or {}
+    hold_properties = hold_request.get("properties") or {}
+    hold_required = set(hold_request.get("required") or [])
+    contracts.check(
+        hold_request.get("type") == "object" and hold_required == {"reason"},
+        f"{relative}: HoldDocumentRequest must be an object requiring only reason",
+    )
+    reason = hold_properties.get("reason") or {}
+    contracts.check(
+        reason.get("type") == "string"
+        and reason.get("minLength") == 1
+        and reason.get("maxLength") == DOCUMENT_HOLD_REASON_MAX_LENGTH,
+        f"{relative}: HoldDocumentRequest.reason must be a string of 1 to "
+        f"{DOCUMENT_HOLD_REASON_MAX_LENGTH} characters",
+    )
+
+
+def check_document_holds_asyncapi(contracts: ContractSet, document, relative: str):
+    """Require the implemented hold and disposition channels and payload."""
+    channels = document.get("channels") or {}
+    operations = document.get("operations") or {}
+    messages = (document.get("components") or {}).get("messages") or {}
+
+    addresses = {
+        channel.get("address")
+        for channel in channels.values()
+        if isinstance(channel, dict)
+    }
+    implemented_addresses = {
+        channel.get("address")
+        for channel in channels.values()
+        if isinstance(channel, dict) and channel.get("x-status") == "implemented"
+    }
+    send_events = {
+        operation.get("x-event-type")
+        for operation in operations.values()
+        if isinstance(operation, dict) and operation.get("action") == "send"
+    }
+
+    for event in DOCUMENT_LIFECYCLE_EVENTS:
+        contracts.check(
+            event in addresses,
+            f"{relative}: required hold/disposition event channel '{event}' is missing",
+        )
+        contracts.check(
+            event in implemented_addresses,
+            f"{relative}: hold/disposition event channel '{event}' must be implemented",
+        )
+        contracts.check(
+            event in send_events,
+            f"{relative}: hold/disposition event '{event}' must have a send operation",
+        )
+        channel = next(
+            (
+                channel
+                for channel in channels.values()
+                if isinstance(channel, dict) and channel.get("address") == event
+            ),
+            None,
+        )
+        contracts.check(
+            isinstance(channel, dict)
+            and str(channel.get("x-implemented-by", "")).endswith(
+                "DocumentEvents.java"
+            ),
+            f"{relative}: {event} must name DocumentEvents.java in x-implemented-by",
+        )
+        channel_messages = (
+            channel.get("messages") if isinstance(channel, dict) else None
+        ) or {}
+        contracts.check(
+            DOCUMENT_LIFECYCLE_DATA in channel_messages,
+            f"{relative}: {event} must reference {DOCUMENT_LIFECYCLE_DATA}",
+        )
+
+    # The SPEC 11.6.9 held/hold-released names stay planned; the implemented
+    # names are the two legal-hold facts above.
+    for spec_event in (
+        "document.document.held",
+        "document.document.hold-released",
+    ):
+        contracts.check(
+            spec_event not in implemented_addresses,
+            f"{relative}: {spec_event} must stay planned; the implemented hold "
+            "names are document.legal-hold.placed/.released",
+        )
+
+    message = messages.get(DOCUMENT_LIFECYCLE_DATA) or {}
+    payload = message.get("payload") or {}
+    properties = payload.get("properties") or {}
+    required = set(payload.get("required") or [])
+    for field in DOCUMENT_LIFECYCLE_EVENT_FIELDS:
+        contracts.check(
+            field in properties,
+            f"{relative}: {DOCUMENT_LIFECYCLE_DATA}.properties.{field} is required",
+        )
+        contracts.check(
+            field in required,
+            f"{relative}: {DOCUMENT_LIFECYCLE_DATA}.required must list {field}",
+        )
+    contracts.check(
+        (properties.get("documentId") or {}).get("format") == "uuid",
+        f"{relative}: {DOCUMENT_LIFECYCLE_DATA}.documentId must be a uuid",
+    )
+    contracts.check(
+        (properties.get("reason") or {}).get("maxLength")
+        == DOCUMENT_HOLD_REASON_MAX_LENGTH,
+        f"{relative}: {DOCUMENT_LIFECYCLE_DATA}.reason maxLength must be "
+        f"{DOCUMENT_HOLD_REASON_MAX_LENGTH}",
+    )
+    contracts.check(
+        set((properties.get("status") or {}).get("enum") or [])
+        == set(DOCUMENT_STATUSES),
+        f"{relative}: {DOCUMENT_LIFECYCLE_DATA}.status must enumerate "
+        f"{list(DOCUMENT_STATUSES)}",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -9207,6 +9541,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
         if vertical == "document":
             check_document_links_openapi(contracts, document, relative)
             check_document_content_openapi(contracts, document, relative)
+            check_document_holds_openapi(contracts, document, relative)
         if vertical == "policy":
             check_policy_billing_openapi(contracts, document, relative)
             check_policy_receivables_openapi(contracts, document, relative)
@@ -9697,6 +10032,7 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
             )
 
         if vertical == "document":
+            check_document_holds_asyncapi(contracts, document, relative)
             document_send_events = {
                 operation.get("x-event-type")
                 for operation in operations.values()

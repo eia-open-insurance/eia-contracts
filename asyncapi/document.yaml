@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:document
 info:
   title: EIA Document events
-  version: 1.4.0
+  version: 1.5.0
   summary: Published domain event names for the Document vertical.
   description: >
     Event contract for the Document vertical. The authoritative event names are
@@ -16,25 +16,37 @@ info:
 
     The Document expert now publishes `document.document.created`,
     `document.document.updated`, `document.document.status-changed`,
-    `document.link.added`, `document.link.removed`, and
-    `document.content.uploaded` through the transactional outbox; those
-    channels and operations are marked `x-status: implemented`. A status write
-    emits `updated` and `status-changed` together at the same aggregate
-    version. A link write emits one `added` or `removed` fact with the
-    `DocumentLink` aggregate at version 1. A content write emits one
-    `uploaded` fact with the `DocumentContent` aggregate at the content
-    revision, in the same transaction as the revision append. The content
-    payload carries the revision as `version`; it is also the aggregate
-    version, and the event keeps `eventVersion` 1 because adding a payload
-    field is compatible (EV-05). The SPEC 11.6.9
-    names remain planned. Document metadata is shared by both books and the
-    current API has no book input, so these events are stamped DIRECT.
+    `document.link.added`, `document.link.removed`,
+    `document.content.uploaded`, `document.legal-hold.placed`,
+    `document.legal-hold.released`, and `document.document.disposed` through
+    the transactional outbox; those channels and operations are marked
+    `x-status: implemented`. A status write emits `updated` and
+    `status-changed` together at the same aggregate version. A link write emits
+    one `added` or `removed` fact with the `DocumentLink` aggregate at version
+    1. A content write emits one `uploaded` fact with the `DocumentContent`
+    aggregate at the content revision, in the same transaction as the revision
+    append. A hold write emits one `legal-hold.placed` or
+    `legal-hold.released` fact, and a disposition emits one
+    `document.document.disposed` fact, each with the `Document` aggregate at
+    version + 1. The content payload carries the revision as `version`; it is
+    also the aggregate version, and the fact keeps `eventVersion` 1 because
+    adding a payload field is compatible (EV-05). The hold payload carries the
+    reason and the resulting status; the release reason is the lifted hold
+    reason. The disposed payload carries the disposition reason and DISPOSED.
+    The SPEC 11.6.9 names remain planned, except `document.document.disposed`,
+    which the hold/disposition slice implements. Document metadata is shared by
+    both books and the current API has no book input, so these events are
+    stamped DIRECT.
 
     The two link names and `document.content.uploaded` are new and have no
     SPEC 11.6.9 equivalent: the SPEC association fact is
     `document.document.associated`, and SPEC 11.6.9 defines no content-upload
-    fact (MISMATCHES.md M-22, M-26, M-40). The 2026-10-21 content-version slice
-    adds the `version` payload member but no event name or channel.
+    fact (MISMATCHES.md M-22, M-26, M-40). The two legal-hold names are also new:
+    SPEC 11.6.9 publishes `document.document.held` and
+    `document.document.hold-released`, which remain planned (M-22, M-44). The
+    2026-10-21 content-version slice adds the `version` payload member but no
+    event name or channel; the 2026-10-21 hold/disposition slice adds the two
+    legal-hold names and implements `document.document.disposed`.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -156,6 +168,50 @@ channels:
         $ref: '#/components/messages/DomainEvent'
       DocumentContentUploadedData:
         $ref: '#/components/messages/DocumentContentUploadedData'
+  DocumentLegalHoldPlaced:
+    address: document.legal-hold.placed
+    title: document.legal-hold.placed
+    description: >
+      Emitted by the Document expert when a legal hold is placed on one
+      document, in the same transaction as the row update. The payload carries
+      the document identity and number, the trimmed hold `reason`, and the
+      resulting `status` ON_HOLD. The aggregate is `Document` with the document
+      id, and the aggregate version is the row version + 1. The name is new and
+      has no SPEC 11.6.9 equivalent; the SPEC fact is `document.document.held`,
+      which remains planned (MISMATCHES.md M-22 and M-44).
+    x-event-type: document.legal-hold.placed
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.6.9
+    x-implemented-by: repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      DocumentLifecycleData:
+        $ref: '#/components/messages/DocumentLifecycleData'
+  DocumentLegalHoldReleased:
+    address: document.legal-hold.released
+    title: document.legal-hold.released
+    description: >
+      Emitted by the Document expert when a legal hold is released, in the same
+      transaction as the row update. The payload carries the document identity
+      and number, the lifted hold `reason`, and the restored `status` (the
+      status snapshotted when the hold was placed, or ARCHIVED when the
+      snapshot is absent or unrecognised). The aggregate is `Document` with the
+      document id, and the aggregate version is the row version + 1. The name is
+      new and has no SPEC 11.6.9 equivalent; the SPEC fact is
+      `document.document.hold-released`, which remains planned
+      (MISMATCHES.md M-22 and M-44).
+    x-event-type: document.legal-hold.released
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.6.9
+    x-implemented-by: repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      DocumentLifecycleData:
+        $ref: '#/components/messages/DocumentLifecycleData'
   DocumentDocumentRegistered:
     address: document.document.registered
     title: document.document.registered
@@ -286,16 +342,25 @@ channels:
     address: document.document.disposed
     title: document.document.disposed
     description: >
-      Declared domain event for this vertical (SPEC 11.6.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted by the Document expert when a document is tombstoned as DISPOSED
+      after its retention date has expired and no legal hold applies, in the
+      same transaction as the row update. The payload carries the document
+      identity and number, the disposition `reason` (RETENTION_EXPIRED when the
+      caller supplied none), and the resulting `status` DISPOSED. The aggregate
+      is `Document` with the document id, and the aggregate version is the row
+      version + 1. The SPEC 11.6.9 `document.document.disposed` name is now
+      implemented; the approval, retention-scan job, disposition certificate,
+      and content deletion from SPEC 11.6.8 are not (MISMATCHES.md M-44).
     x-event-type: document.document.disposed
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.6.9
+    x-implemented-by: repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
+      DocumentLifecycleData:
+        $ref: '#/components/messages/DocumentLifecycleData'
   DocumentDocumentRequested:
     address: document.document.requested
     title: document.document.requested
@@ -428,6 +493,28 @@ operations:
       payload `version` are the stored content revision.
     x-event-type: document.content.uploaded
     x-status: implemented
+  publishDocumentLegalHoldPlaced:
+    action: send
+    channel:
+      $ref: '#/channels/DocumentLegalHoldPlaced'
+    summary: Publish document.legal-hold.placed
+    description: >
+      Publishes document.legal-hold.placed through the transactional outbox in
+      the same transaction as the hold row update. The Document aggregate
+      version is the row version + 1.
+    x-event-type: document.legal-hold.placed
+    x-status: implemented
+  publishDocumentLegalHoldReleased:
+    action: send
+    channel:
+      $ref: '#/channels/DocumentLegalHoldReleased'
+    summary: Publish document.legal-hold.released
+    description: >
+      Publishes document.legal-hold.released through the transactional outbox in
+      the same transaction as the hold release. The payload reason is the lifted
+      hold reason and status is the restored status.
+    x-event-type: document.legal-hold.released
+    x-status: implemented
   publishDocumentDocumentRegistered:
     action: send
     channel:
@@ -524,10 +611,11 @@ operations:
       $ref: '#/channels/DocumentDocumentDisposed'
     summary: Publish document.document.disposed
     description: >
-      Publishes document.document.disposed through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes document.document.disposed through the transactional outbox in
+      the same transaction as the disposition tombstone. The payload carries the
+      disposition reason and the resulting DISPOSED status.
     x-event-type: document.document.disposed
-    x-status: planned
+    x-status: implemented
   publishDocumentDocumentRequested:
     action: send
     channel:
@@ -648,6 +736,51 @@ components:
             type: string
             pattern: '^[a-f0-9]{64}$'
             description: Lowercase SHA-256 of the exact stored bytes.
+    DocumentLifecycleData:
+      name: DocumentLifecycleData
+      title: Document hold and disposition lifecycle data
+      summary: The document, the hold or disposition reason, and the resulting status.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - documentId
+          - documentNumber
+          - reason
+          - status
+        properties:
+          documentId:
+            type: string
+            format: uuid
+          documentNumber:
+            type: string
+            description: Tenant-visible document number of the affected document.
+          reason:
+            type: string
+            maxLength: 500
+            description: >
+              Trimmed hold reason for a hold fact, the lifted hold reason for a
+              release, or the disposition reason for a disposed fact. A
+              disposition with no supplied reason records RETENTION_EXPIRED.
+          status:
+            type: string
+            description: >
+              Resulting document status: ON_HOLD for a placed hold, the restored
+              status for a release, and DISPOSED for a disposition.
+            enum:
+              - PENDING_UPLOAD
+              - RECEIVED
+              - SCANNING
+              - PROCESSING
+              - CLASSIFIED
+              - ACTIVE
+              - SUPERSEDED
+              - ON_HOLD
+              - ARCHIVED
+              - DISPOSED
+              - REJECTED
+              - FAILED
   securitySchemes:
     outboxSignature:
       type: httpApiKey
@@ -663,14 +796,16 @@ x-implementation:
   publisher: eia-document-expert
   subscriber: none
   notes: >
-    Six implemented event names are written to the transactional outbox in the
-    same transaction as the document, link, or content write and dispatched by
-    the platform outbox dispatcher when `eia.outbox.enabled=true`: the three
-    document metadata facts by DocumentEvents.java, the two link facts by
+    Nine implemented event names are written to the transactional outbox in the
+    same transaction as the document, link, content, hold, or disposition write
+    and dispatched by the platform outbox dispatcher when
+    `eia.outbox.enabled=true`: the three document metadata facts and the three
+    hold/disposition facts by DocumentEvents.java, the two link facts by
     DocumentLinkEvents.java, and the content fact by DocumentContentEvents.java.
-    The SPEC 11.6.9 names remain planned and the two link names plus
-    `document.content.uploaded` have no SPEC equivalent (M-22, M-26, M-40).
-    There is no subscriber, inbox, or subscription registry yet.
+    The remaining SPEC 11.6.9 names are planned, and the two link names, the
+    content name, and the two legal-hold names have no SPEC equivalent (M-22,
+    M-26, M-40, M-44). `document.document.disposed` is a SPEC name and is now
+    implemented. There is no subscriber, inbox, or subscription registry yet.
 
 x-consumed-events:
   - policy.policy.issued

@@ -1,17 +1,18 @@
 openapi: 3.1.0
 info:
   title: EIA Document API
-  version: 1.4.0
-  summary: Document metadata, lifecycle, association-link, and content administration and the Document expert API.
+  version: 1.5.0
+  summary: Document metadata, lifecycle, association-link, content, legal-hold, and disposition administration and the Document expert API.
   description: >
     This document describes the implemented public Document domain API and the
     internal Document expert API. The authoritative requirement is SPEC 11.6
     and SPEC 12; the implemented surface is the first vertical slice.
 
     The slice carries metadata, lifecycle, association links, the current
-    content bytes, and the retained content-revision history. Renditions, OCR
-    text, holds, packages, requests, signatures, and retention disposition from
-    SPEC 11.6 are planned and listed under x-planned-operations.
+    content bytes, the retained content-revision history, legal holds, and
+    retention disposition. Renditions, OCR text, packages, requests,
+    signatures, the SPEC hold collection, and the approved disposition
+    workflow from SPEC 11.6 are planned and listed under x-planned-operations.
 
     The 2026-10-20 content slice adds the raw `PUT|GET
     /api/v1/documents/{documentId}/content` routes, `GET
@@ -36,6 +37,22 @@ info:
     11.6.10 version routes are `/versions` (GET and POST); the implemented
     history is nested under `/content/versions` and the version-creating
     command is the content upload (MISMATCHES.md M-40).
+
+    The 2026-10-21 hold/disposition slice adds `POST
+    /api/v1/documents/{documentId}/hold` with a required `{reason}`, `POST
+    /api/v1/documents/{documentId}/hold/release`, and `POST
+    /api/v1/documents/{documentId}/dispose`, and adds `holdReason`, `heldAt`,
+    `statusBeforeHold`, and `disposedAt` to the `Document` projection. A hold
+    may be placed from ACTIVE, ARCHIVED, CLASSIFIED, or SUPERSEDED; a second
+    hold is 409 `DOCUMENT_ALREADY_ON_HOLD` and any other status is 409
+    `HOLD_STATUS_NOT_ALLOWED`. Release restores the snapshotted status (ARCHIVED
+    when the snapshot is absent) and is 409 `DOCUMENT_NOT_ON_HOLD` otherwise.
+    Disposition is synchronous and requires an expired retention date and no
+    active hold: 409 `DOCUMENT_ON_LEGAL_HOLD`, `DISPOSAL_STATUS_NOT_ALLOWED`,
+    `RETENTION_DATE_REQUIRED`, or `RETENTION_NOT_EXPIRED`. The SPEC 11.6.10 hold
+    collection, approval steps, disposition job, certificate, and content
+    deletion are not implemented; the implemented hold is per-document
+    (MISMATCHES.md M-44).
 
     The 2026-10-20 link slice adds `GET|POST
     /api/v1/documents/{documentId}/links` and `DELETE
@@ -564,6 +581,174 @@ paths:
           $ref: './components.yaml#/components/responses/ServiceUnavailable'
         default:
           $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/documents/{documentId}/hold:
+    post:
+      operationId: placeDocumentHold
+      tags:
+        - Document
+      summary: Place a legal hold on a document.
+      description: >
+        Moves the document to ON_HOLD and snapshots the current status in
+        `statusBeforeHold`, with the hold reason in `holdReason` and the instant
+        in `heldAt`. The reason is trimmed and must be 1-500 characters; a blank
+        or over-long reason is 400 `VALIDATION_ERROR` (or 400
+        `INVALID_HOLD_REASON` from the expert rule). A hold may be placed only
+        from ACTIVE, ARCHIVED, CLASSIFIED, or SUPERSEDED; this command therefore
+        admits CLASSIFIED and SUPERSEDED even though the generic lifecycle has
+        no edge to ON_HOLD. A document already ON_HOLD is 409
+        `DOCUMENT_ALREADY_ON_HOLD` and any other status is 409
+        `HOLD_STATUS_NOT_ALLOWED`. The accepted write bumps the document version
+        and appends `document.legal-hold.placed` to the transactional outbox in
+        the same transaction; a rejected command writes no row change and no
+        event. `X-EIA-Tenant` is required and another tenant's document is 404,
+        indistinguishable from a missing document. SPEC 11.6.10 models a hold
+        collection with scope and approval; the implemented command is
+        per-document and synchronous (MISMATCHES.md M-44).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: documentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HoldDocumentRequest'
+      responses:
+        '200':
+          description: Document after the hold was placed; status is ON_HOLD.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+        '400':
+          description: >
+            400. `VALIDATION_ERROR` for a missing, blank, or over-long `reason`,
+            `INVALID_HOLD_REASON` for the expert's reason rule,
+            `MALFORMED_REQUEST` for an unreadable body, and `TENANT_REQUIRED`
+            or `INVALID_TENANT_HEADER` for the tenant header. The body is
+            `application/problem+json`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            409. `DOCUMENT_ALREADY_ON_HOLD` when the document is already
+            ON_HOLD, or `HOLD_STATUS_NOT_ALLOWED` when its status is not
+            ACTIVE, ARCHIVED, CLASSIFIED, or SUPERSEDED. No hold, row change, or
+            event is written.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/documents/{documentId}/hold/release:
+    post:
+      operationId: releaseDocumentHold
+      tags:
+        - Document
+      summary: Release a legal hold and restore the prior status.
+      description: >
+        Clears `holdReason`, `heldAt`, and `statusBeforeHold` and restores the
+        snapshotted status; an absent or unrecognised snapshot falls back to
+        ARCHIVED so a release always lands in a retrievable record state. The
+        command has no request body. A document that is not ON_HOLD is 409
+        `DOCUMENT_NOT_ON_HOLD`. The accepted write bumps the document version and
+        appends `document.legal-hold.released` in the same transaction, with the
+        lifted hold reason as the payload `reason`; a rejected command writes no
+        row change and no event. `X-EIA-Tenant` is required and another tenant's
+        document is 404.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: documentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Document after the hold was released; status is restored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            409. `DOCUMENT_NOT_ON_HOLD`: the document has no active legal hold.
+            No row change or event is written.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/documents/{documentId}/dispose:
+    post:
+      operationId: disposeDocument
+      tags:
+        - Document
+      summary: Dispose of a document after its retention date has expired.
+      description: >
+        Tombstones the document as DISPOSED and stamps `disposedAt`; the row and
+        its metadata stay readable. Disposition requires an expired retention
+        date and no active legal hold. A missing `retentionUntil` is 409
+        `RETENTION_DATE_REQUIRED`, a date after today is 409
+        `RETENTION_NOT_EXPIRED`, ON_HOLD is 409 `DOCUMENT_ON_LEGAL_HOLD`, and a
+        status outside ACTIVE, ARCHIVED, or SUPERSEDED is 409
+        `DISPOSAL_STATUS_NOT_ALLOWED`; ON_HOLD is checked before the retention
+        clock. The public command has no request body: the expert's optional
+        `{reason}` is not forwarded, so the recorded event reason is
+        `RETENTION_EXPIRED`. The accepted write bumps the document version and
+        appends `document.document.disposed` in the same transaction. There is
+        no approval, retention-scan job, disposition certificate, or content
+        deletion in this slice (MISMATCHES.md M-44). `X-EIA-Tenant` is required
+        and another tenant's document is 404.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: documentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Document after disposition; status is DISPOSED.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            409. `DOCUMENT_ON_LEGAL_HOLD` when a legal hold is active,
+            `DISPOSAL_STATUS_NOT_ALLOWED` when the status is not ACTIVE,
+            ARCHIVED, or SUPERSEDED, `RETENTION_DATE_REQUIRED` when the document
+            has no retention date, or `RETENTION_NOT_EXPIRED` when the
+            retention date is still in the future. No row change or event is
+            written.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
   /api/v1/documents/{documentId}/links:
     get:
       operationId: listDocumentLinks
@@ -957,7 +1142,10 @@ components:
         Document metadata projection. The SPEC 11.6.4 model calls the type
         docType and the classification confidentiality, and carries content,
         versions, associations, hashes, page counts, OCR status, and tags; the
-        implemented field names are documentType and classification.
+        implemented field names are documentType and classification. The hold
+        and disposition members are null unless the document is on hold or has
+        been disposed; a release clears the three hold members and a hold
+        snapshots the prior status in statusBeforeHold.
       required:
         - id
         - tenantId
@@ -967,6 +1155,10 @@ components:
         - classification
         - status
         - retentionUntil
+        - holdReason
+        - heldAt
+        - statusBeforeHold
+        - disposedAt
       properties:
         id:
           type: string
@@ -991,6 +1183,33 @@ components:
           type: [string, 'null']
           format: date
           description: Retention end date. Required before a document becomes ACTIVE.
+        holdReason:
+          type: [string, 'null']
+          maxLength: 500
+          description: >
+            Reason recorded by the most recent accepted legal hold. Null when
+            the document has never been held or the hold has been released.
+        heldAt:
+          type: [string, 'null']
+          format: date-time
+          description: >
+            Instant at which the current legal hold was placed. Null when the
+            document is not on hold.
+        statusBeforeHold:
+          description: >
+            Status the document had immediately before the current legal hold,
+            restored by a release. Null when the document is not on hold and
+            after a release. An absent or unrecognised snapshot is restored as
+            ARCHIVED.
+          oneOf:
+            - $ref: '#/components/schemas/DocumentStatus'
+            - type: 'null'
+        disposedAt:
+          type: [string, 'null']
+          format: date-time
+          description: >
+            Instant at which the document was disposed. Null until disposition;
+            the tombstoned metadata remains readable afterwards.
     DocumentContent:
       type: object
       description: >
@@ -1268,6 +1487,26 @@ components:
       properties:
         status:
           $ref: '#/components/schemas/DocumentStatus'
+    HoldDocumentRequest:
+      type: object
+      description: >
+        Public legal-hold command. The tenant comes from `X-EIA-Tenant` and is
+        never part of the body. `reason` is trimmed, recorded in
+        `Document.holdReason`, and carried in the
+        `document.legal-hold.placed` event.
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: >
+            Why the document is being placed on hold. Leading and trailing
+            whitespace is removed; a blank value fails the required-field
+            validation.
+          examples:
+            - Litigation hold - Doe v. Acme
     ChangeDocumentStatusRequestInternal:
       type: object
       description: Internal lifecycle transition command accepted by the Document expert.
@@ -1366,6 +1605,8 @@ x-implementation:
     - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentSearchItem.java
     - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentService.java
     - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentExpertClient.java
+    - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentDto.java
+    - repos/eia-document-domain/src/main/java/com/eia/document/domain/HoldDocumentCommand.java
     - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentContentMetadata.java
     - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentContentVersion.java
     - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentContentDownload.java
@@ -1391,6 +1632,11 @@ x-implementation:
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/CreateDocumentLinkRequest.java
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/LinkedType.java
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentRules.java
+    - repos/eia-document-expert/src/main/java/com/eia/document/expert/Document.java
+    - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentLifecycleController.java
+    - repos/eia-document-expert/src/main/java/com/eia/document/expert/HoldDocumentRequest.java
+    - repos/eia-document-expert/src/main/java/com/eia/document/expert/DisposeDocumentRequest.java
+    - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentConflictException.java
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentLinkEvents.java
   errorEnvelope: >
     Vertical-specific ApiError {code, message, details[{field, message}]}. Not
@@ -1400,26 +1646,26 @@ x-implementation:
     `CONTENT_VERSION_NOT_FOUND`, but a missing tenant on a content route is
     still the compact `TENANT_REQUIRED` ApiError.
 x-compatibility:
-  contractVersion: 1.4.0
-  previousContractVersion: 1.3.0
+  contractVersion: 1.5.0
+  previousContractVersion: 1.4.0
   breaking: []
   compatible:
-    - Adds GET /api/v1/documents/{documentId}/content/versions and GET /api/v1/documents/{documentId}/content/versions/{version}.
-    - Adds the DocumentContentVersion schema for the retained revision metadata projection.
-    - Adds currentVersion to the DocumentContent metadata projection and the X-Content-Version header to both content downloads.
-    - Adds the required version member to the document.content.uploaded payload while keeping eventVersion 1.
-    - Removes the implemented content history from x-planned-operations; the upload is the version-creating command.
+    - Adds POST /api/v1/documents/{documentId}/hold with the required HoldDocumentRequest.reason.
+    - Adds POST /api/v1/documents/{documentId}/hold/release.
+    - Adds POST /api/v1/documents/{documentId}/dispose.
+    - Adds the Document projection members holdReason, heldAt, statusBeforeHold, and disposedAt.
+    - Adds the implemented document.legal-hold.placed, document.legal-hold.released, and document.document.disposed events.
+    - Removes the implemented disposition path from x-planned-operations; the SPEC hold collection remains planned.
   note: >
-    The version surface is additive over 1.3.0: no existing path, request field,
-    response field, or event name is removed or changes meaning. The current
-    content upload now appends an immutable revision and advances the current
-    pointer; a replacement still becomes the bytes served by the current
-    download. The metadata projection and the upload response gain a required
-    currentVersion member, and the event payload gains a required version
-    member, so a strict consumer must tolerate the two new fields (EV-05). The
-    SPEC 11.6.10 `/versions` route, renditions, and presigned downloads remain
-    unavailable; the implemented history is nested under `/content/versions`
-    (MISMATCHES.md M-40).
+    The hold and disposition surface is additive over 1.4.0: no existing path,
+    request field, response field, or event name is removed or changes meaning.
+    The four new Document members are always serialized and nullable, so a
+    strict response consumer must tolerate them. The hold command is
+    per-document and synchronous rather than the SPEC 11.6.10 hold collection
+    with scope and approval, and disposition is an immediate tombstone with no
+    approval, job, certificate, or content deletion. The two legal-hold event
+    names are new with no SPEC 11.6.9 equivalent; the SPEC `.held` and
+    `.hold-released` names remain planned (MISMATCHES.md M-22 and M-44).
 x-planned-operations:
   - method: GET
     path: /api/v1/documents/{documentId}/preview
@@ -1456,15 +1702,19 @@ x-planned-operations:
   - method: POST
     path: /api/v1/documents/holds
     spec: SPEC 11.6.10
-    note: Apply a legal hold.
+    note: >
+      SPEC hold collection with scope and approval; the implemented hold is
+      per-document at /documents/{documentId}/hold (M-44).
+  - method: POST
+    path: /api/v1/documents/holds/{holdId}/release
+    spec: SPEC 11.6.10
+    note: >
+      SPEC release by hold id; the implemented release is
+      /documents/{documentId}/hold/release (M-44).
   - method: POST
     path: /api/v1/documents/requests
     spec: SPEC 11.6.10
     note: Request a document from a party.
-  - method: POST
-    path: /api/v1/documents/{documentId}/dispose
-    spec: SPEC 11.6.10
-    note: Dispose of a document.
   - method: GET
     path: /api/v1/documents/templates
     spec: SPEC 11.6.10

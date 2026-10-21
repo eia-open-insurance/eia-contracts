@@ -158,6 +158,7 @@ removed per the resolution policy.
 | M-41 | Policy credit notes use a short path, a four-state lifecycle, free-text reason, and new event names, with no approval or SAP step | L |
 | M-42 | Contract technical-account lines implement the 13-type SPEC vocabulary and bucket reconciliation but omit line correction, per-line currency/source metadata, and per-line approval | L |
 | M-43 | Policy legal entity catalog is a narrow five-type slice with a nullable issuing-entity link | M |
+| M-44 | Document legal holds and disposition are a per-document, synchronous slice without the SPEC hold collection or the approval/certificate workflow | L |
 
 ## M-01 Public base paths
 
@@ -739,7 +740,7 @@ ten publishing verticals now emit a subset:
 | Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.assigned`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted`, `assumed.claim.task-created`, `assumed.claim.task-completed`, `assumed.claim.task-updated`, `assumed.claim.note-added` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
 | Cession | `cession.cession.created`, `cession.cession.updated`, `cession.cession.handed-off` | `repos/eia-cession-expert/.../CessionEvents.java` |
 | Retrocession | `retrocession.retrocession.created`, `retrocession.retrocession.updated`, `retrocession.retrocession.handed-off` | `repos/eia-retrocession-expert/.../RetrocessionEvents.java` |
-| Document | `document.document.created`, `document.document.updated`, `document.document.status-changed`, `document.link.added`, `document.link.removed`, `document.content.uploaded` | `repos/eia-document-expert/.../DocumentEvents.java`, `DocumentLinkEvents.java`, `DocumentContentEvents.java` |
+| Document | `document.document.created`, `document.document.updated`, `document.document.status-changed`, `document.link.added`, `document.link.removed`, `document.content.uploaded`, `document.legal-hold.placed`, `document.legal-hold.released`, `document.document.disposed` | `repos/eia-document-expert/.../DocumentEvents.java`, `DocumentLinkEvents.java`, `DocumentContentEvents.java` |
 | Payment | `payment.payment.created`, `payment.payment.updated`, `payment.payment.status-changed` | `repos/eia-payment-expert/.../PaymentEvents.java` |
 | Notifications | `notifications.notification.created`, `notifications.notification.sent` | `repos/eia-notifications-expert/.../NotificationEvents.java` |
 
@@ -756,7 +757,13 @@ version 1; the three document metadata events are unchanged. A content upload
 appends `document.content.uploaded` from `DocumentContentEvents.java` in the
 same transaction as the revision row, keyed by the `DocumentContent` aggregate
 on the document id with the content revision as the aggregate version; the
-payload repeats that revision as `version` while `eventVersion` stays 1.
+payload repeats that revision as `version` while `eventVersion` stays 1. A hold,
+release, or disposition appends `document.legal-hold.placed`,
+`document.legal-hold.released`, or `document.document.disposed` from
+`DocumentEvents.java` in the same transaction as the row update, with the
+`Document` aggregate at the row version + 1 and the reason plus resulting status
+in the payload. The two legal-hold names are new; the disposed name is the SPEC
+11.6.9 name (M-22, M-44).
 
 Each controller or service calls `outbox.insert(OutboxEvent.fromEnvelope(...))`
 in the same transaction as the aggregate write; for example
@@ -941,7 +948,7 @@ planned name |
 | Assumed Claims | `assumed.claim.updated`; `assumed.claim.assigned`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no assignment, task, or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
 | Cession | `cession.cession.created` / `.updated` / `.handed-off` | `cession.case.created`, `cession.handoff.sent`/`.acknowledged` |
 | Retrocession | `retrocession.retrocession.created` / `.updated` / `.handed-off` | `retrocession.case.created`, `retrocession.handoff.sent`/`.acknowledged` |
-| Document | `document.document.created` / `.updated` / `.status-changed`; `document.link.added` / `.removed`; `document.content.uploaded` | `document.document.registered`, `document.document.associated`, plus the SPEC lifecycle verbs; no SPEC content-upload fact |
+| Document | `document.document.created` / `.updated` / `.status-changed`; `document.link.added` / `.removed`; `document.content.uploaded`; `document.legal-hold.placed` / `.released` | `document.document.registered`, `document.document.associated`, plus the SPEC lifecycle verbs; no SPEC content-upload fact; the SPEC hold facts are `document.document.held` / `.hold-released`. `document.document.disposed` matches SPEC and is implemented. |
 | Payment | `payment.payment.updated` / `.status-changed` | the SPEC per-verb names such as `payment.payment.authorized` |
 | Notifications | `notifications.notification.created` / `.sent` | `notifications.notification.issued` / `.delivered` |
 
@@ -960,7 +967,7 @@ Evidence:
 - `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java:52-65`
 - `repos/eia-cession-expert/.../CessionEvents.java:27-29`
 - `repos/eia-retrocession-expert/.../RetrocessionEvents.java:28-30`
-- `repos/eia-document-expert/.../DocumentEvents.java:29-31`
+- `repos/eia-document-expert/.../DocumentEvents.java:29-40`
 - `repos/eia-document-expert/.../DocumentLinkEvents.java:26-28`
 - `repos/eia-document-expert/.../DocumentContentEvents.java:26-27`
 - `repos/eia-payment-expert/.../PaymentEvents.java:31-33`
@@ -2265,7 +2272,9 @@ Consequences:
 
 - A consumer can now list and download prior revisions and read the current
   revision number, but still cannot retrieve a preview rendition, OCR text, a
-  page count, tags, an access log, a legal hold, or a retention disposition.
+  page count, tags, or an access log. Legal holds and retention disposition are
+  separate surfaces, documented in M-44; they are not part of the content
+  slice.
 - The history is implemented at `/content/versions`, not the SPEC `/versions`
   route, and the version-creating command is the content upload rather than
   `POST /versions`. A client generated from SPEC 11.6.10 must be adapted to the
@@ -2288,8 +2297,10 @@ Consequences:
   (M-22).
 - The SPEC 11.6.9 names (`document.document.registered`, `.classified`,
   `.superseded`, `.generated`, `.signed`, `.held`, `.hold-released`,
-  `.archived`, `.disposed`, `.requested`, `.request-fulfilled`,
-  `document.package.built`, and the two processing facts) remain planned.
+  `.archived`, `.requested`, `.request-fulfilled`, `document.package.built`,
+  and the two processing facts) remain planned. `document.document.disposed`
+  is implemented by the hold/disposition slice, and the two implemented
+  legal-hold facts are new names with no SPEC equivalent (M-22, M-44).
 
 Evidence:
 
@@ -2605,10 +2616,86 @@ an issuing entity before bind/issue), or amend SPEC 10.11.2/11.2.16 to the
 implemented five-type catalog and nullable link. The two event names need the
 EV-05 dual-publish treatment if they are aligned to SPEC names.
 
+## M-44 Document legal holds and disposition are a per-document, synchronous slice
+
+SPEC 11.6.8-11.6.10 model legal holds as a scoped hold collection with
+approval and a release by hold id, and disposition as an approved asynchronous
+job that produces a certificate and deletes the content. The implemented slice
+stores the hold on the document row and exposes three per-document synchronous
+commands; it has no hold entity, scope, approval, disposition job, certificate,
+or content deletion.
+
+| Aspect | Implemented | SPEC 11.6.8-11.6.10 |
+|---|---|---|
+| Hold routes | `POST /api/v1/documents/{documentId}/hold` with `{reason}` | `POST /api/v1/document/holds` (scope plus approval) |
+| Release route | `POST /api/v1/documents/{documentId}/hold/release` | `POST /api/v1/document/holds/{holdId}/release` |
+| Disposition route | `POST /api/v1/documents/{documentId}/dispose`, no body | `POST /api/v1/document/documents/{documentId}/dispose` in the async approval flow |
+| Hold storage | flat `hold_reason`, `held_at`, `status_before_hold` columns on `document` | hold entity with scope and approval; `legal_hold_flag` on the document |
+| Holdable statuses | ACTIVE, ARCHIVED, CLASSIFIED, SUPERSEDED | ACTIVE and ARCHIVED (state diagram) |
+| Release result | restores `status_before_hold`; ARCHIVED when the snapshot is absent or unrecognised | ON_HOLD -> ACTIVE (and ON_HOLD -> ARCHIVED per the hold scope) |
+| Disposition gates | expired `retention_until`, no ON_HOLD, status in ACTIVE/ARCHIVED/SUPERSEDED | approved disposition job, no hold/litigation/regulatory block, certificate |
+| Disposition side effects | tombstone `DISPOSED` + `disposed_at`; metadata stays readable | delete content, mark disposed, store certificate with counts and hashes |
+| Hold events | `document.legal-hold.placed`, `document.legal-hold.released` (new names) | `document.document.held`, `document.document.hold-released` |
+| Disposition event | `document.document.disposed` (SPEC name, implemented) | `document.document.disposed` |
+| Tenant scope | `X-EIA-Tenant` required; expert also accepts `?tenantId=`; another tenant is 404 | tenant wall (M-08) |
+
+Consequences:
+
+- A client generated from SPEC 11.6.10 must use the per-document hold and
+  release paths and cannot list holds, scope a hold, or address a hold by id.
+  There is no approval gate or custody record, so the command does not satisfy
+  the records-manager plus legal approval rule in SPEC 10.8/11.6.
+- Hold release always lands in the snapshot, or ARCHIVED when the snapshot is
+  missing; CLASSIFIED and SUPERSEDED can be snapshotted even though SPEC only
+  draws ACTIVE and ARCHIVED hold edges. A caller cannot force ON_HOLD back to a
+  specific status.
+- Disposition is immediate: there is no retention-scan job, approval step,
+  certificate, or content deletion, so a disposed document retains its metadata
+  (and its content row) as a tombstone. The public command does not forward a
+  reason, so the event reason is `RETENTION_EXPIRED`; the expert accepts an
+  optional reason but the domain never sends one.
+- The two legal-hold event names have no SPEC 11.6.9 equivalent. The SPEC
+  `document.document.held` and `.hold-released` channels remain planned, while
+  the SPEC `document.document.disposed` name is now implemented. This is a name
+  difference, not a payload-version change: all three keep `eventVersion` 1
+  (M-22).
+- A rejected hold, release, or disposition writes no row change and no event,
+  so the outbox remains consistent with the stored state.
+
+Evidence:
+
+- `repos/eia-document-domain/.../DocumentController.java:61-91` (public hold,
+  release, and dispose), `DocumentService.java:103-126` (command
+  pass-through), `HoldDocumentCommand.java`, `DocumentDto.java:11-27`, and
+  `DocumentExpertClient.java:163-201` (expert calls on the public hold and
+  dispose paths with `?tenantId=` and `X-EIA-Tenant`).
+- `repos/eia-document-expert/.../DocumentLifecycleController.java:32-69`
+  (the three routes and the tenant header/query fallback),
+  `HoldDocumentRequest.java`, `DisposeDocumentRequest.java`,
+  `DocumentService.java:160-209` (hold, release, and dispose use cases),
+  `DocumentRules.java:40-64,138-213` (holdable/disposable statuses, reason
+  bound, restore fallback, and the seven conflict codes),
+  `DocumentRepository.java:142-201` (hold, release, and dispose SQL),
+  `Document.java:15-30`, and `DocumentConflictException.java`.
+- `repos/eia-document-expert/.../DocumentEvents.java:29-40,88-117` (the two
+  legal-hold names, the SPEC disposed name, and the lifecycle payload).
+- `repos/eia-document-expert/src/test/java/com/eia/document/expert/DocumentLifecycleControllerTest.java`
+  and `DocumentLegalHoldIntegrationTest.java` (the 409 codes, snapshot fields,
+  events, and rollback behaviour).
+- `openapi/document.yaml` 1.5.0, `asyncapi/document.yaml` 1.5.0, and
+  `asyncapi/event-catalog.yaml` 1.24.0 record the implemented shape.
+
+Resolution: either implement the SPEC hold collection with scope, approval, and
+release by hold id, and the approved disposition job with a certificate and
+content deletion, or amend SPEC 11.6.8-11.6.10 to the per-document hold
+columns, the snapshot restore, and the synchronous tombstone. The two
+legal-hold event names need the EV-05 dual-publish treatment if they are
+aligned to the SPEC names.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-21
-program-capacity contract:
+document legal-hold and disposition contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -2624,7 +2711,7 @@ OpenAPI 3.1 documents
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
   OK openapi/cession.yaml  9 paths, 11 operations
   OK openapi/retrocession.yaml  9 paths, 11 operations
-  OK openapi/document.yaml  15 paths, 20 operations
+  OK openapi/document.yaml  18 paths, 23 operations
   OK openapi/payment.yaml  11 paths, 14 operations
   OK openapi/notifications.yaml  7 paths, 9 operations
 
@@ -2636,10 +2723,10 @@ AsyncAPI 3 documents
   OK asyncapi/assumed-claims.yaml  21 event channels
   OK asyncapi/cession.yaml  17 event channels
   OK asyncapi/retrocession.yaml  17 event channels
-  OK asyncapi/document.yaml  21 event channels
+  OK asyncapi/document.yaml  23 event channels
   OK asyncapi/payment.yaml  19 event channels
   OK asyncapi/notifications.yaml  12 event channels
-  OK catalog: 205 unique published events across 10 verticals
+  OK catalog: 207 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -2647,7 +2734,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 13320 checks, 0 failures
+  PASS 13501 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -2862,7 +2949,15 @@ Additional checks and limits:
   `INVALID_PROGRAM_CAPACITY` from the create description each fail with the
   specific required-field, both-or-neither, or missing-code message. All three
   were run on a throwaway copy and exited non-zero (exit 1); the working copy
-  was left unchanged.
+  was left unchanged. The document hold/disposition pass added four more:
+  renaming the `/api/v1/documents/{documentId}/hold/release` path, removing
+  `statusBeforeHold` from the required `Document` keys, dropping
+  `RETENTION_NOT_EXPIRED` from the dispose 409 description, and dropping
+  `document.legal-hold.placed` from the Document catalog `implemented` list
+  each fail with the specific missing-operation, required-field,
+  conflict-code, or implemented-event message. All four were run on a
+  throwaway copy and exited non-zero (exit 1); the working copy was left
+  unchanged.
 
 ## Resolution policy
 

@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.23.0
+  version: 1.24.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -98,6 +98,15 @@ info:
     event. They add two published and two implemented names, bringing the
     platform totals to 205 published and 84 implemented; Policy becomes 31
     published and 19 implemented (M-22, M-43).
+    The two Document legal-hold facts `document.legal-hold.placed` and
+    `.released` are new names with no SPEC 11.6.9 equivalent: SPEC publishes
+    `document.document.held` and `document.document.hold-released`, which remain
+    planned. The same slice moves the already-published
+    `document.document.disposed` name into the Document implemented subset; it
+    adds no new published name. The two legal-hold names add two published and
+    two implemented names, so the platform totals become 207 published and 87
+    implemented, and Document becomes 23 published and 9 implemented (M-22,
+    M-44).
     The platform
     event-ingest service
     is the inbox:
@@ -463,6 +472,8 @@ x-event-catalog:
       - document.link.added
       - document.link.removed
       - document.content.uploaded
+      - document.legal-hold.placed
+      - document.legal-hold.released
     implemented:
       - document.document.created
       - document.document.updated
@@ -470,6 +481,9 @@ x-event-catalog:
       - document.link.added
       - document.link.removed
       - document.content.uploaded
+      - document.legal-hold.placed
+      - document.legal-hold.released
+      - document.document.disposed
     consumed:
       - policy.policy.issued
       - policy.policy.endorsed

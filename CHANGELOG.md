@@ -1216,6 +1216,42 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   name, channel, or count changes.
 - `python scripts/validate_contracts.py` passes 13,320 checks with 0 failures.
 
+### Added in the Document legal-hold and disposition contract (2026-10-21)
+
+- `openapi/document.yaml` is 1.5.0: `POST
+  /api/v1/documents/{documentId}/hold` accepts the required
+  `HoldDocumentRequest.reason` (1-500 characters), `POST
+  /api/v1/documents/{documentId}/hold/release` restores the snapshotted
+  status, and `POST /api/v1/documents/{documentId}/dispose` tombstones a
+  document after retention expiry. `Document` adds the nullable `holdReason`,
+  `heldAt`, `statusBeforeHold`, and `disposedAt` members. The operations
+  document 200/400/404/409 and the seven conflict codes
+  `HOLD_STATUS_NOT_ALLOWED`, `DOCUMENT_ALREADY_ON_HOLD`,
+  `DOCUMENT_NOT_ON_HOLD`, `RETENTION_DATE_REQUIRED`, `RETENTION_NOT_EXPIRED`,
+  `DOCUMENT_ON_LEGAL_HOLD`, and `DISPOSAL_STATUS_NOT_ALLOWED`, all
+  tenant-scoped.
+- `asyncapi/document.yaml` is 1.5.0: the implemented
+  `document.legal-hold.placed`, `document.legal-hold.released`, and
+  `document.document.disposed` channels and `send` operations, with the shared
+  `DocumentLifecycleData` payload (`documentId`, `documentNumber`, `reason`,
+  `status`). The SPEC `document.document.held` and `.hold-released` channels
+  remain planned.
+- `asyncapi/event-catalog.yaml` is 1.24.0: the two legal-hold names are
+  published and implemented and `document.document.disposed` moves into the
+  Document implemented subset, for 207 published and 87 implemented names
+  (Document 23 published and 9 implemented).
+- `scripts/validate_contracts.py` requires the three operations, the shared
+  tenant and `documentId` parameters, the reason bounds, the 200 `Document`
+  and 400/404/409 responses, all seven conflict codes, the four nullable
+  `Document` members, the `DocumentLifecycleData` payload, the three
+  implemented channels, operations, and catalog entries, the removal of the
+  implemented paths from `x-planned-operations`, and the planned SPEC hold
+  names.
+- `README.md` records the slice and the validation count; `MISMATCHES.md` adds
+  M-44 for the per-document hold and synchronous disposition deviation and
+  updates M-14, M-22, and M-40 for the new events and the implemented hold.
+- `python scripts/validate_contracts.py` passes 13,501 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was
