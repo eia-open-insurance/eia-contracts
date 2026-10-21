@@ -973,6 +973,7 @@ BILLING_PLAN_FIELDS = (
     "firstDueDate",
     "status",
     "installments",
+    "summary",
 )
 
 BILLING_INSTALLMENT_FIELDS = (
@@ -980,6 +981,8 @@ BILLING_INSTALLMENT_FIELDS = (
     "installmentNumber",
     "dueDate",
     "amount",
+    "creditedAmount",
+    "outstandingAmount",
     "status",
     "paidAt",
     "paymentId",
@@ -990,12 +993,42 @@ BILLING_INSTALLMENT_REQUIRED_FIELDS = (
     "installmentNumber",
     "dueDate",
     "amount",
+    "creditedAmount",
+    "outstandingAmount",
     "status",
+)
+
+BILLING_INSTALLMENT_MONEY_FIELDS = (
+    "amount",
+    "creditedAmount",
+    "outstandingAmount",
+)
+
+# The plan money summary returned with the billing read. `outstandingAmount`
+# is net of the paid, waived, and credited portions (SPEC BIL-06).
+BILLING_SUMMARY_FIELDS = (
+    "totalAmount",
+    "paidAmount",
+    "waivedAmount",
+    "creditedAmount",
+    "outstandingAmount",
+    "overdueAmount",
+    "currency",
+    "installmentCount",
+)
+
+BILLING_SUMMARY_MONEY_FIELDS = (
+    "totalAmount",
+    "paidAmount",
+    "waivedAmount",
+    "creditedAmount",
+    "outstandingAmount",
+    "overdueAmount",
 )
 
 BILLING_FREQUENCIES = ("MONTHLY", "QUARTERLY", "SEMI_ANNUAL", "ANNUAL")
 BILLING_PLAN_STATUSES = ("ACTIVE", "COMPLETE", "CANCELLED")
-BILLING_INSTALLMENT_STATUSES = ("DUE", "OVERDUE", "PAID", "WAIVED")
+BILLING_INSTALLMENT_STATUSES = ("DUE", "OVERDUE", "PAID", "WAIVED", "CREDITED")
 BILLING_SETTLE_STATUSES = ("PAID", "WAIVED")
 BILLING_MIN_INSTALLMENTS = 1
 BILLING_MAX_INSTALLMENTS = 24
@@ -1030,6 +1063,8 @@ RECEIVABLE_FIELDS = (
     "installmentNumber",
     "dueDate",
     "amount",
+    "creditedAmount",
+    "outstandingAmount",
     "currency",
     "status",
     "daysPastDue",
@@ -1049,6 +1084,8 @@ RECEIVABLE_REQUIRED_FIELDS = (
     "installmentNumber",
     "dueDate",
     "amount",
+    "creditedAmount",
+    "outstandingAmount",
     "currency",
     "status",
     "daysPastDue",
@@ -1324,6 +1361,7 @@ POLICY_CREDIT_NOTE_FIELDS = (
     "status",
     "issuedAt",
     "appliedAt",
+    "appliedInstallmentId",
     "createdAt",
 )
 
@@ -1347,6 +1385,9 @@ POLICY_CREDIT_NOTE_EVENT_FIELDS = (
     "currency",
     "status",
 )
+# The applied event additionally names the credited installment and its
+# cumulative credited amount; ISSUED and CANCELLED omit both members.
+POLICY_CREDIT_NOTE_APPLIED_EVENT_FIELDS = ("installmentId", "creditedAmount")
 POLICY_CREDIT_NOTE_EVENT_MESSAGE = "PolicyCreditNoteData"
 POLICY_CREDIT_NOTE_EVENT_IMPLEMENTED_BY = "PolicyEvents.java"
 
@@ -3844,6 +3885,21 @@ def check_policy_billing_openapi(contracts: ContractSet, document, relative: str
         ),
         f"{relative}: BillingPlan.installments must be an array of Installment",
     )
+    contracts.check(
+        str((plan_properties.get("summary") or {}).get("$ref", "")).endswith(
+            "/schemas/BillingSummary"
+        ),
+        f"{relative}: BillingPlan.summary must reference BillingSummary",
+    )
+
+    get_billing = paths.get("/api/v1/policies/{policyId}/billing") or {}
+    get_operation = get_billing.get("get") if isinstance(get_billing, dict) else None
+    get_text = str((get_operation or {}).get("description") or "")
+    for term in ("creditedAmount", "outstandingAmount", "summary", "CREDITED"):
+        contracts.check(
+            term in get_text,
+            f"{relative}: GET billing must document {term}",
+        )
 
     installment = schemas.get("Installment") or {}
     installment_properties = installment.get("properties") or {}
@@ -3878,12 +3934,13 @@ def check_policy_billing_openapi(contracts: ContractSet, document, relative: str
         (installment_properties.get("dueDate") or {}).get("format") == "date",
         f"{relative}: Installment.dueDate must be a date",
     )
-    contracts.check(
-        str((installment_properties.get("amount") or {}).get("$ref", "")).endswith(
-            "/schemas/MoneyAmount"
-        ),
-        f"{relative}: Installment.amount must reference MoneyAmount",
-    )
+    for field in BILLING_INSTALLMENT_MONEY_FIELDS:
+        contracts.check(
+            str((installment_properties.get(field) or {}).get("$ref", "")).endswith(
+                "/schemas/MoneyAmount"
+            ),
+            f"{relative}: Installment.{field} must reference MoneyAmount",
+        )
     contracts.check(
         set((installment_properties.get("status") or {}).get("enum") or [])
         == set(BILLING_INSTALLMENT_STATUSES),
@@ -3902,6 +3959,54 @@ def check_policy_billing_openapi(contracts: ContractSet, document, relative: str
         and payment_id.get("format") == "uuid",
         f"{relative}: Installment.paymentId must be a nullable uuid",
     )
+
+    summary = schemas.get("BillingSummary") or {}
+    summary_properties = summary.get("properties") or {}
+    summary_required = set(summary.get("required") or [])
+    contracts.check(
+        isinstance(summary, dict) and summary.get("type") == "object",
+        f"{relative}: BillingSummary must be an object schema",
+    )
+    for field in BILLING_SUMMARY_FIELDS:
+        contracts.check(
+            field in summary_properties,
+            f"{relative}: BillingSummary.properties.{field} is required",
+        )
+        contracts.check(
+            field in summary_required,
+            f"{relative}: BillingSummary.required must list {field}",
+        )
+    for field in BILLING_SUMMARY_MONEY_FIELDS:
+        contracts.check(
+            str((summary_properties.get(field) or {}).get("$ref", "")).endswith(
+                "/schemas/MoneyAmount"
+            ),
+            f"{relative}: BillingSummary.{field} must reference MoneyAmount",
+        )
+    contracts.check(
+        str((summary_properties.get("currency") or {}).get("$ref", "")).endswith(
+            "/schemas/CurrencyCode"
+        ),
+        f"{relative}: BillingSummary.currency must reference CurrencyCode",
+    )
+    summary_count = summary_properties.get("installmentCount") or {}
+    contracts.check(
+        (summary_count.get("type"), summary_count.get("minimum")) == ("integer", 0),
+        f"{relative}: BillingSummary.installmentCount must be an integer >= 0",
+    )
+
+    patch_billing = paths.get(
+        "/api/v1/policies/{policyId}/billing/installments/{installmentId}"
+    ) or {}
+    patch_operation = (
+        patch_billing.get("patch") if isinstance(patch_billing, dict) else None
+    )
+    patch_text = str((patch_operation or {}).get("description") or "")
+    for term in ("CREDITED", "INSTALLMENT_ALREADY_SETTLED", "outstandingAmount"):
+        contracts.check(
+            term in patch_text,
+            f"{relative}: PATCH billing installment must document {term}",
+        )
 
     create = schemas.get("CreateBillingPlanRequest") or {}
     create_properties = create.get("properties") or {}
@@ -4023,6 +4128,11 @@ def check_policy_receivables_openapi(contracts: ContractSet, document, relative:
             "VALIDATION_ERROR" in description,
             f"{where}: description must document the limit VALIDATION_ERROR",
         )
+        for term in ("creditedAmount", "outstandingAmount"):
+            contracts.check(
+                term in description,
+                f"{where}: description must document {term}",
+            )
 
         status_parameter = _inline_parameter(operation, "status")
         contracts.check(
@@ -4147,6 +4257,13 @@ def check_policy_receivables_openapi(contracts: ContractSet, document, relative:
         ),
         f"{relative}: Receivable.amount must reference MoneyAmount",
     )
+    for field in ("creditedAmount", "outstandingAmount"):
+        contracts.check(
+            str((receivable_properties.get(field) or {}).get("$ref", "")).endswith(
+                "/schemas/MoneyAmount"
+            ),
+            f"{relative}: Receivable.{field} must reference MoneyAmount",
+        )
     contracts.check(
         str((receivable_properties.get("currency") or {}).get("$ref", "")).endswith(
             "/schemas/CurrencyCode"
@@ -4207,6 +4324,11 @@ def check_policy_receivables_openapi(contracts: ContractSet, document, relative:
             ),
             f"{relative}: ReceivableSummary.{field} must reference MoneyAmount",
         )
+    summary_text = str(summary.get("description") or "")
+    contracts.check(
+        "outstanding" in summary_text,
+        f"{relative}: ReceivableSummary must document outstanding-based totals",
+    )
     count = summary_properties.get("count") or {}
     contracts.check(
         (count.get("type"), count.get("minimum")) == ("integer", 0),
@@ -4304,6 +4426,11 @@ def check_policy_dunning_openapi(contracts: ContractSet, document, relative: str
                     code in description,
                     f"{where}: description must document the 409 {code}",
                 )
+            contracts.check(
+                "CREDITED" in description,
+                f"{where}: description must document CREDITED as a terminal, "
+                "non-dunnable installment status",
+            )
 
             request_body = operation.get("requestBody") or {}
             contracts.check(
@@ -5478,11 +5605,26 @@ def check_policy_credit_notes_openapi(contracts: ContractSet, document, relative
     for code in (
         "INVALID_CREDIT_NOTE_STATUS",
         "INVALID_CREDIT_NOTE_TRANSITION",
+        "INVALID_CREDIT_NOTE_INSTALLMENT",
+        "INSTALLMENT_NOT_FOUND",
+        "INSTALLMENT_NOT_CREDITABLE",
+        "CREDIT_NOTE_EXCEEDS_INSTALLMENT",
         "CONCURRENT_MODIFICATION",
     ):
         contracts.check(
             code in status_text,
             f"{relative}: PATCH credit-note status must document {code}",
+        )
+    for term in (
+        "installmentId",
+        "creditedAmount",
+        "CREDITED",
+        "partial credit",
+        "outstandingAmount",
+    ):
+        contracts.check(
+            term in status_text,
+            f"{relative}: PATCH credit-note status must document {term}",
         )
     for event in POLICY_CREDIT_NOTE_EVENTS:
         contracts.check(
@@ -5561,6 +5703,12 @@ def check_policy_credit_notes_openapi(contracts: ContractSet, document, relative
             and (properties.get(field) or {}).get("format") == "date-time",
             f"{relative}: CreditNote.{field} must be a nullable date-time",
         )
+    applied_installment = properties.get("appliedInstallmentId") or {}
+    contracts.check(
+        _schema_types(applied_installment) == {"string", "null"}
+        and applied_installment.get("format") == "uuid",
+        f"{relative}: CreditNote.appliedInstallmentId must be a nullable uuid",
+    )
     contracts.check(
         (properties.get("createdAt") or {}).get("format") == "date-time",
         f"{relative}: CreditNote.createdAt must be a date-time",
@@ -5635,6 +5783,41 @@ def check_policy_credit_notes_openapi(contracts: ContractSet, document, relative
         f"{relative}: UpdateCreditNoteStatusRequest.status must enumerate "
         f"{list(POLICY_CREDIT_NOTE_REQUEST_STATUSES)}",
     )
+    request_installment = request_properties.get("installmentId") or {}
+    contracts.check(
+        "installmentId" in request_properties
+        and "installmentId" not in set(request.get("required") or []),
+        f"{relative}: UpdateCreditNoteStatusRequest.installmentId must be optional",
+    )
+    contracts.check(
+        _schema_types(request_installment) == {"string", "null"}
+        and request_installment.get("format") == "uuid",
+        f"{relative}: UpdateCreditNoteStatusRequest.installmentId must be a "
+        "nullable uuid",
+    )
+    applied_condition = next(
+        (
+            entry
+            for entry in request.get("allOf") or []
+            if isinstance(entry, dict)
+            and ((entry.get("if") or {}).get("properties") or {})
+            .get("status", {})
+            .get("const")
+            == "APPLIED"
+        ),
+        None,
+    )
+    contracts.check(
+        isinstance(applied_condition, dict),
+        f"{relative}: UpdateCreditNoteStatusRequest must conditionally require "
+        "installmentId for APPLIED",
+    )
+    contracts.check(
+        set(((applied_condition or {}).get("then") or {}).get("required") or [])
+        == {"installmentId"},
+        f"{relative}: UpdateCreditNoteStatusRequest must require installmentId "
+        "when status is APPLIED",
+    )
 
 
 def check_policy_credit_notes_asyncapi(contracts: ContractSet, document, relative: str):
@@ -5691,6 +5874,13 @@ def check_policy_credit_notes_asyncapi(contracts: ContractSet, document, relativ
             f"{relative}: {event} must reference "
             f"{POLICY_CREDIT_NOTE_EVENT_MESSAGE}",
         )
+        if event == "policy.credit-note.applied":
+            applied_text = str(channel.get("description") or "")
+            for field in POLICY_CREDIT_NOTE_APPLIED_EVENT_FIELDS:
+                contracts.check(
+                    field in applied_text,
+                    f"{relative}: {event} description must document {field}",
+                )
 
     message = messages.get(POLICY_CREDIT_NOTE_EVENT_MESSAGE) or {}
     payload = message.get("payload") or {}
@@ -5733,6 +5923,27 @@ def check_policy_credit_notes_asyncapi(contracts: ContractSet, document, relativ
         == set(POLICY_CREDIT_NOTE_REQUEST_STATUSES),
         f"{relative}: {POLICY_CREDIT_NOTE_EVENT_MESSAGE}.status must enumerate "
         f"{list(POLICY_CREDIT_NOTE_REQUEST_STATUSES)}",
+    )
+    for field in POLICY_CREDIT_NOTE_APPLIED_EVENT_FIELDS:
+        contracts.check(
+            field in payload_properties,
+            f"{relative}: {POLICY_CREDIT_NOTE_EVENT_MESSAGE}.properties.{field} "
+            "is required for the applied event",
+        )
+        contracts.check(
+            field not in payload_required,
+            f"{relative}: {POLICY_CREDIT_NOTE_EVENT_MESSAGE}.{field} must stay "
+            "optional because ISSUED and CANCELLED omit it",
+        )
+    contracts.check(
+        (payload_properties.get("installmentId") or {}).get("format") == "uuid",
+        f"{relative}: {POLICY_CREDIT_NOTE_EVENT_MESSAGE}.installmentId must be "
+        "a uuid",
+    )
+    contracts.check(
+        (payload_properties.get("creditedAmount") or {}).get("type") == "string",
+        f"{relative}: {POLICY_CREDIT_NOTE_EVENT_MESSAGE}.creditedAmount must be "
+        "a decimal string",
     )
 
 

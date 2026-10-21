@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:policy
 info:
   title: EIA Policy events
-  version: 1.8.0
+  version: 1.9.0
   summary: Published domain event names for the Policy vertical.
   description: >
     Event contract for the Policy vertical. The authoritative event names are
@@ -47,6 +47,13 @@ info:
     and the policy assignment both have SPEC 10.11.2/11.2.16 models but no SPEC
     11.2.9 event, and SPEC 11.2.16 names no event at all. The names, the nullable
     assignment, and the narrow catalog vocabulary are recorded in M-22 and M-43.
+    The credit-application slice widens only the `applied` payload: it adds
+    `installmentId`, the billing installment the note was credited against, and
+    `creditedAmount`, that installment's cumulative credited amount after the
+    application. The `issued` and `cancelled` payloads stay unchanged, and the
+    additions keep `eventVersion` 1. The APPLIED installment link, the CREDITED
+    installment state, and the net receivable totals are recorded in M-27 and
+    M-41.
     The remaining SPEC
     11.2.9 and 11.2.13 names are planned.
   contact:
@@ -266,8 +273,8 @@ channels:
       installment, in the same transaction as the action row and the policy
       version bump. The payload carries the policy identity and number, the
       dunned installment id, the escalation level, the delivery channel, the
-      send instant, and the action status. A rejected action (a settled
-      installment or a repeated level) emits no event.
+      send instant, and the action status. A rejected action (a PAID, WAIVED,
+      or fully CREDITED installment, or a repeated level) emits no event.
     x-event-type: policy.dunning.sent
     x-event-version: 1
     x-status: implemented
@@ -301,11 +308,16 @@ channels:
     address: policy.credit-note.applied
     title: policy.credit-note.applied
     description: >
-      Emitted when an ISSUED credit note is applied to the policy receivable, in
-      the same transaction as the note row, the policy-version bump, and the
-      outbox row. The payload carries the policy identity and number, the
-      credit-note identity and number, the note amount as a decimal string, the
-      currency, and status APPLIED. APPLIED is terminal.
+      Emitted when an ISSUED credit note is applied to an open billing
+      installment, in the same transaction as the note row, the installment's
+      credited amount, the policy-version bump, and the outbox row. The payload
+      carries the policy identity and number, the credit-note identity and
+      number, the note amount as a decimal string, the currency, status APPLIED,
+      and the two application members: `installmentId`, the credited
+      installment, and `creditedAmount`, that installment's cumulative credited
+      amount after the application. APPLIED is terminal. A partial credit
+      leaves the installment open; a credit that covers its uncredited
+      remainder also moves it to CREDITED.
     x-event-type: policy.credit-note.applied
     x-event-version: 1
     x-status: implemented
@@ -1182,6 +1194,19 @@ components:
               - ISSUED
               - APPLIED
               - CANCELLED
+          installmentId:
+            type: string
+            format: uuid
+            description: >
+              Installment the note was credited against. Present only when
+              `status` is APPLIED; ISSUED and CANCELLED never name one.
+          creditedAmount:
+            type: string
+            description: >
+              Cumulative credited amount of the APPLIED installment after the
+              application, as a positive decimal money string with up to four
+              fraction digits (SPEC 10.3). Present only when `status` is
+              APPLIED.
     PolicyMassTortProfileUpdatedData:
       name: PolicyMassTortProfileUpdatedData
       title: policy.mass-tort-profile.updated data
@@ -1512,7 +1537,9 @@ x-implementation:
     and the coverage block; and the program events carry the created catalog
     row and the policy membership delta with both sides of the link. The
     credit-note events carry the policy and note identity, the note number, the
-    amount as a decimal string, the currency, and the new status; they are
+    amount as a decimal string, the currency, and the new status; the `applied`
+    payload additionally carries the credited installment id and that
+    installment's cumulative credited amount. They are
     keyed by the policy aggregate because every transition bumps the policy
     version. The legal-entity created fact is keyed by the `LegalEntity`
     aggregate at version 1 and carries the catalog row; the assignment fact is

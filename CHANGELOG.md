@@ -1140,6 +1140,53 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   reconciliation.
 - `python scripts/validate_contracts.py` passes 13,190 checks with 0 failures.
 
+### Added in the Policy credit-application contract (2026-10-21)
+
+- `openapi/policy.yaml` is 2.11.0: the credit-note status body is
+  `{status, installmentId?}`. `installmentId` is required for APPLIED and
+  ignored by ISSUED and CANCELLED; APPLIED credits the note amount to a
+  DUE/OVERDUE installment on the same tenant and policy, a partial credit
+  leaves the installment open, and a credit that covers its uncredited
+  remainder sets the new terminal installment status `CREDITED`. The command
+  documents 400 `INVALID_CREDIT_NOTE_INSTALLMENT`, 404
+  `INSTALLMENT_NOT_FOUND`, and 409 `INSTALLMENT_NOT_CREDITABLE` and
+  `CREDIT_NOTE_EXCEEDS_INSTALLMENT` with their `meta` members.
+  `CreditNote` adds the nullable `appliedInstallmentId`; `Installment` adds
+  `creditedAmount`, `outstandingAmount`, and the `CREDITED` status;
+  `BillingPlan` adds `summary` and the new `BillingSummary` schema carries
+  `totalAmount`, `paidAmount`, `waivedAmount`, `creditedAmount`, the net
+  `outstandingAmount`, `overdueAmount`, `currency`, and `installmentCount`.
+  `Receivable` adds `creditedAmount` and `outstandingAmount`, and
+  `ReceivableSummary.totalAmount` and `.overdueAmount` now sum outstanding
+  amounts. Settlement and dunning document the CREDITED terminal state, and the
+  plan, receivables, and credit-note descriptions carry the partial/full credit
+  rules and the outstanding-based totals.
+- `asyncapi/policy.yaml` is 1.9.0: `policy.credit-note.applied` adds the
+  optional `installmentId` (uuid) and `creditedAmount` (decimal string) members
+  to the shared `PolicyCreditNoteData` payload; ISSUED and CANCELLED keep the
+  unchanged required members, and the additions keep `eventVersion` 1. No
+  channel or event name changes, so `asyncapi/event-catalog.yaml` stays 1.23.0
+  with 205 published and 84 implemented names.
+- `scripts/validate_contracts.py` requires the new
+  `UpdateCreditNoteStatusRequest.installmentId` (optional, nullable uuid, and
+  conditionally required for APPLIED), `CreditNote.appliedInstallmentId`
+  (nullable uuid),
+  the `BillingSummary` fields, money references, and `BillingPlan.summary`
+  reference, the `Installment.creditedAmount`/`outstandingAmount` money fields
+  and the CREDITED status, the `Receivable.creditedAmount`/`outstandingAmount`
+  members and the outstanding-based summary totals, the four new credit
+  application codes and their descriptions in the status operation, the
+  CREDITED terminal status in the settlement and dunning descriptions, and the
+  applied event members (present and optional on the message, documented on the
+  channel).
+- `README.md` records the new slice, the plan summary, the credited and
+  outstanding installment and receivable members, the partial/full credit rules,
+  the new codes, the applied payload, and the validation count; `MISMATCHES.md`
+  rewrites M-41 for the installment application and CREDITED state, updates M-27
+  for the plan summary and net receivable totals and status vocabulary, and
+  notes the CREDITED dunning terminal state in M-38.
+- `python scripts/validate_contracts.py` passes 13,282 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

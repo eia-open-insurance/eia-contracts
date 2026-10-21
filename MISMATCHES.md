@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-21 (expanded technical-account line vocabulary).
+Status: open, reviewed 2026-10-21 (credit-note application to billing installments).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -78,6 +78,10 @@ where the running code does not meet it yet.
   projection, commands, book scope, and client plus the expert credit-note
   controller, service, rules, repository, entity, requests, event factory,
   `schema.sql`, and the domain and expert tests.
+  The credit-application pass re-read the same credit-note sources plus the
+  expert billing repository, installment projection, summary, rules, and event
+  factory, and the domain billing plan, installment, summary, receivable, and
+  client remaps.
   The Policy legal-entity pass reads the domain legal-entity and
   policy-assignment controllers, services, DTO/commands, `PolicyDto`, and
   `PolicyClient` plus the expert legal-entity controller, service, rules,
@@ -1284,16 +1288,21 @@ per-installment dunning history:
 | Installment events | `policy.installment.paid`, `policy.installment.waived` | No SPEC name |
 | Dunning event | `policy.dunning.sent` | `policy.billing.dunning-changed` |
 | Plan status | `ACTIVE`, `COMPLETE`, `CANCELLED` | `DRAFT`, `ACTIVE`, `SUPERSEDED`, `CANCELLED` |
-| Installment status | `DUE`, `OVERDUE`, `PAID`, `WAIVED` | Billing-instruction status values |
+| Installment status | `DUE`, `OVERDUE`, `PAID`, `WAIVED`, `CREDITED` | Billing-instruction status values |
+| Credit application | APPLIED credit note requires an `installmentId`; credits the note amount to a DUE/OVERDUE installment on the same tenant and policy. A partial credit raises `creditedAmount` and leaves the row open; a credit that covers the uncredited remainder sets the new terminal status `CREDITED`. A missing id is 400 `INVALID_CREDIT_NOTE_INSTALLMENT`, an unknown/foreign installment is 404 `INSTALLMENT_NOT_FOUND`, a settled or fully credited target is 409 `INSTALLMENT_NOT_CREDITABLE`, and an oversized note is 409 `CREDIT_NOTE_EXCEEDS_INSTALLMENT` | `credit_note_request` has no installment column and no APPLIED state; `BIL-06` defines only `outstanding = invoiced - paid - credited` and the non-negative rule, with no application command |
+| Plan summary | `totalAmount`, `paidAmount`, `waivedAmount`, `creditedAmount`, net `outstandingAmount`, `overdueAmount`, `currency`, `installmentCount` | No plan summary row; `BIL-06` defines the net outstanding formula |
 | Dunning level | `REMINDER`, `FIRST_NOTICE`, `SECOND_NOTICE`, `COLLECTIONS` | `billing_account.dunning_status`: `CLEAR`, `REMINDER`, `DUNNING`, `LEGAL`, `BLOCKED`; collections flow `CURRENT -> REMINDER -> DUNNING_1 -> DUNNING_2 -> NOTICE -> CANCELLATION_PENDING -> CANCELLED` |
 
 The projection is the domain's flat public DTO, which renames the plan identity
 `planId` and the installment identity `installmentId`; the expert's internal
-view nests `{plan, installments}` and is not part of the public contract. The
-public billing routes accept an absent `X-EIA-Book` for compatibility with the
-other Policy proxy routes, while a supplied value must be DIRECT and another
-book is hidden as 404 `BOOK_SCOPE_VIOLATION`. The domain always sends DIRECT to
-the expert.
+view nests `{plan, installments, summary}` and is not part of the public
+contract. Each installment carries the gross `amount`, the applied
+`creditedAmount`, and the derived `outstandingAmount`; the plan `summary` adds
+the paid, waived, credited, net outstanding, and overdue totals. The public
+billing routes accept an absent `X-EIA-Book` for compatibility with the other
+Policy proxy routes, while a supplied value must be DIRECT and another book is
+hidden as 404 `BOOK_SCOPE_VIOLATION`. The domain always sends DIRECT to the
+expert.
 
 The receivable queue is a separate read over the same installment plan. It has
 no `policyId`, so it is mounted at `/api/v1/billing/installments`, outside
@@ -1305,11 +1314,16 @@ upper-case), defaults and validates `limit` to 1..200 (default 20), forwards
 expert clamps the limit to 1..200 and defaults it to 100 for internal callers,
 derives OVERDUE and `daysPastDue` from the due date without rewriting the
 stored row, and returns only unsettled installments, so `paidAt` and `paymentId`
-are null on every item. The public projection is the domain's
+are null on every item. A partially credited installment stays in the queue; a
+fully CREDITED row does not. The public projection is the domain's
 `Receivable`/`ReceivableSummary`: `{installmentId, planId, planNumber,
 policyId, policyNumber, insuredPartyId, installmentNumber, dueDate, amount,
-currency, status, daysPastDue, paidAt, paymentId}` inside `{items, totalAmount,
-overdueAmount, count}`.
+creditedAmount, outstandingAmount, currency, status, daysPastDue, paidAt,
+paymentId}` inside `{items, totalAmount, overdueAmount, count}`. `amount` stays
+gross, `creditedAmount` is the applied credit total, and `outstandingAmount` is
+`amount - creditedAmount`; `totalAmount` and `overdueAmount` sum the outstanding
+amounts, matching the SPEC `premium_receivable.credited_amount`/
+`outstanding_amount` netting rule (BIL-06).
 
 The dunning slice is a separate per-installment surface at
 `/api/v1/billing/installments/{installmentId}/dunning`: it records and lists
@@ -1322,21 +1336,30 @@ Evidence:
 
 - `repos/eia-policy-domain/.../PolicyBillingController.java` (public routes and
   the `requireDirectWhenPresent` guard).
-- `repos/eia-policy-domain/.../BillingPlan.java`, `Installment.java` (flat
-  public DTO names).
+- `repos/eia-policy-domain/.../BillingPlan.java`, `BillingSummary.java`,
+  `Installment.java` (flat public DTO names, credited/outstanding money, net
+  summary).
 - `repos/eia-policy-domain/.../ReceivableController.java`,
   `ReceivableService.java`, `Receivable.java`, `ReceivableSummary.java`
-  (`/api/v1/billing/installments`, status and limit normalization, projection).
+  (`/api/v1/billing/installments`, status and limit normalization, outstanding
+  projection).
 - `repos/eia-policy-domain/.../PolicyClient.java:379-450`
-  (`/internal/v1/billing/installments` call and projection remap).
+  (`/internal/v1/billing/installments` call and projection remap) and
+  `:800-880` (expert summary/credit mapping).
 - `repos/eia-policy-expert/.../BillingController.java`,
-  `BillingRules.java`, `PolicyEvents.java` (route, vocabulary, event names).
+  `BillingRules.java`, `BillingPlanSummary.java`, `PolicyEvents.java` (route,
+  vocabulary, summary derivation, event names).
 - `repos/eia-policy-expert/.../BillingReceivablesController.java`,
   `BillingService.java:75-102`, `BillingRepository.java:155-194`,
-  `BillingRules.java:101-140`, `InstallmentReceivable.java`,
-  `ReceivablesView.java` (tenant-wide query, derived status, totals).
-- `repos/eia-policy-expert/src/main/resources/schema.sql:388-433` (plan and
-  installment status check constraints).
+  `BillingRules.java:99-140`, `InstallmentReceivable.java`,
+  `ReceivablesView.java` (tenant-wide query, derived status, outstanding
+  totals).
+- `repos/eia-policy-expert/.../CreditNoteRules.java:104-158`,
+  `CreditNoteService.java:97-154`, and `BillingRepository.java:232-270`
+  (installment credit application, CREDITED transition, conditional update).
+- `repos/eia-policy-expert/src/main/resources/schema.sql:388-435,503-537`
+  (plan and installment status checks, `credited_amount` and its
+  non-negative/bounded check).
 
 Resolution: either amend SPEC 11.2.13 to the implemented `/billing`,
 `/billing/installments/{installmentId}/dunning`, and cross-policy
@@ -1345,7 +1368,12 @@ status/level vocabularies, or add the SPEC route and names as aliases with an
 EV-05 dual-publish window. The billing account, instruction, dispute, and
 commission-statement routes remain unimplemented (M-12); the receivable queue
 and the dunning history are implemented as above, and policy credit notes are
-implemented as a separate child resource recorded in M-41.
+implemented as a separate child resource recorded in M-41. Credit application
+targets an installment that is not a SPEC billing entity and defines a
+CREDITED terminal state the SPEC does not name; it is the part of the credit
+note slice that most closely follows BIL-06, because the persisted credited
+total can never exceed the gross amount and the net outstanding amount can
+never go negative.
 
 ## M-28 Policy renewal creates a successor instead of transitioning the source
 
@@ -2038,6 +2066,9 @@ Consequences:
   `COLLECTIONS` itself. No SAP sync job writes these rows.
 - One action per level per installment is allowed, including after a CANCELLED
   history row, so the action history cannot express a re-sent level.
+- PAID, WAIVED, and fully CREDITED installments are terminal and reject dunning
+  with 409 `INSTALLMENT_NOT_DUNNABLE`; the CREDITED state is reached only by
+  applying credit notes and is not a SPEC billing-account state.
 - A missing `X-EIA-Book` is accepted by the domain even though the canonical
   contract requires DIRECT and the SPEC 3.6 wall expects it; another book is
   still hidden as 404 `BOOK_SCOPE_VIOLATION`.
@@ -2060,7 +2091,8 @@ Evidence:
   internal aliases, 201, list), `BillingDunningService.java:58-106` (tenant
   target, effective-status gate, duplicate level, policy touch, outbox insert),
   `BillingDunningRules.java:16-85` (level/channel/status vocabularies,
-  2000-character notes, dunnable states), `BillingDunningRepository.java:62-109`
+  2000-character notes, dunnable states, and CREDITED rejection),
+  `BillingDunningRepository.java:62-109`
   (tenant-safe target join, newest-first history, unique level), and
   `CreateDunningActionRequest.java`.
 - `repos/eia-policy-expert/.../PolicyEvents.java:47,106-122` (`DUNNING_SENT` and
@@ -2266,14 +2298,15 @@ amend SPEC 11.6.9 and 11.6.10 to the current-pointer plus revision proxy, the
 `document.content.uploaded` payload. The contract documents the implemented
 shape until that decision.
 
-## M-41 Policy credit notes use a short path, a four-state lifecycle, and new event names
+## M-41 Policy credit notes use a short path, a four-state lifecycle, installment application, and new event names
 
 SPEC 11.2.13 defines the `credit_note_request` row, mounts the request at
 `POST /api/v1/policy/policies/{policyId}/credit-notes`, routes the request
 through a human approval step and the Payment SAP subtransaction, and publishes
 `policy.billing.credit-note-issued`. The implemented slice is a narrower
-tenant-scoped child resource with its own lifecycle, free-text reason, and three
-new event names.
+tenant-scoped child resource with its own lifecycle, free-text reason, an
+APPLIED transition that credits an open billing installment, and three new
+event names.
 
 | Aspect | Implemented | SPEC 11.2.13 |
 |---|---|---|
@@ -2281,13 +2314,14 @@ new event names.
 | Identity | `creditNoteId` UUID; server-generated `noteNumber` `CN-{7 digits}` | `id`; optional `original_invoice_number` and `sap_credit_memo_number` |
 | Status | `DRAFT`, `ISSUED`, `APPLIED`, `CANCELLED` | `REQUESTED`, `APPROVED`, `SENT_TO_SAP`, `ISSUED`, `REJECTED` |
 | Transitions | DRAFT -> ISSUED -> APPLIED; CANCELLED from DRAFT or ISSUED; APPLIED and CANCELLED terminal | Request, approve, send to SAP, persist the SAP reference, issue, reject |
+| Credit application | APPLIED requires an `installmentId`; the note is credited to a DUE/OVERDUE installment on the same tenant and policy. A partial credit raises the installment's `creditedAmount` and leaves it open; a credit that covers its uncredited remainder sets the new terminal installment status `CREDITED` and a zero `outstandingAmount`. A missing id is 400 `INVALID_CREDIT_NOTE_INSTALLMENT`, an unknown/foreign installment is 404 `INSTALLMENT_NOT_FOUND`, a settled/credited target is 409 `INSTALLMENT_NOT_CREDITABLE`, and an oversized note is 409 `CREDIT_NOTE_EXCEEDS_INSTALLMENT` with the note amount and available remainder | `credit_note_request` has no installment column and no APPLIED state; `BIL-06` defines only `outstanding = invoiced - paid - credited` and the non-negative rule, with no application command |
 | Reason | free text, trimmed, optional, at most 500 characters | closed enum `CANCELLATION`, `ENDORSEMENT`, `AUDIT_RETURN`, `OVERPAYMENT`, `REFUND`, `CORRECTION` |
 | Money | positive `amount` plus `currency`, which must equal the policy premium currency | `amount`, optional `tax_amount`, and `currency` |
 | Approval | none | `policy.credit-note.approve` human approval with `approved_by` |
 | SAP | no credit-memo number, no `payment.finance.credit-note` call, and no Payment link | SAP credit-memo request and persisted reference |
 | Original invoice | not modelled | optional `original_invoice_number` |
-| Projection | flat ten fields; `tenantId` is not exposed | the full request row including tax, approval, and SAP columns |
-| Events | `policy.credit-note.issued`, `.applied`, `.cancelled` | only `policy.billing.credit-note-issued` |
+| Projection | flat eleven fields, including nullable `appliedInstallmentId`; `tenantId` is not exposed | the full request row including tax, approval, and SAP columns |
+| Events | `policy.credit-note.issued`, `.applied`, `.cancelled`; the `applied` payload adds `installmentId` and the installment's cumulative `creditedAmount` | only `policy.billing.credit-note-issued` |
 | Book | the canonical contract requires `X-EIA-Book: DIRECT`; the domain and expert accept an absent header | SPEC 3.6 book wall |
 
 Consequences:
@@ -2300,6 +2334,19 @@ Consequences:
 - The four-state lifecycle collapses the SPEC request/approval/SAP flow into
   DRAFT/ISSUED/APPLIED/CANCELLED, so a client cannot observe REQUESTED,
   APPROVED, SENT_TO_SAP, or REJECTED.
+- Credit application goes beyond the SPEC row: a note is tied to one billing
+  installment that the SPEC does not model as a credit-note target, and the
+  installment gains a CREDITED state the SPEC does not name. The persisted
+  `creditedAmount` is bounded by the gross amount and the derived
+  `outstandingAmount` is clamped at zero, so the implementation satisfies
+  BIL-06 even though the SPEC defines no application command.
+- Application is forward-only: there is no unapply or reversal, a rejected
+  application rolls back both the note and the installment, and CANCELLED is
+  reachable only before APPLIED. A partial credit does not block a later
+  settlement, so an installment can be PAID or WAIVED after carrying a partial
+  credit; its `outstandingAmount` is then zero because the terminal status wins.
+- A legacy APPLIED note that predates installment application has a null
+  `appliedInstallmentId`, which is why the member is required but nullable.
 - Creating a note bumps the policy row version but writes no event, so a
   consumer that only subscribes to the credit-note facts never sees the DRAFT
   creation. Only the three transition facts are published.
@@ -2312,41 +2359,58 @@ Consequences:
   `BOOK_SCOPE_VIOLATION`.
 - The three event names are new and have no SPEC equivalent other than the
   issued fact, so aligning them requires the EV-05 dual-publish window (M-22).
+  The `applied` payload additions keep `eventVersion` 1 because they are
+  optional and additive.
 
 Evidence:
 
 - `repos/eia-policy-domain/.../PolicyCreditNoteController.java:27-76` (public
   GET/POST/PATCH, required tenant header, `requireDirectWhenPresent`, 201),
-  `PolicyCreditNoteService.java` (expert delegation), `CreditNote.java`,
-  `CreateCreditNoteCommand.java`, and `UpdateCreditNoteStatusCommand.java`.
-- `repos/eia-policy-domain/.../PolicyClient.java:652-720` (expert
-  `/internal/v1` calls) and `:1103-1121` (`ExpertCreditNote` aliases; `id` ->
-  `creditNoteId`, `tenantId` dropped).
+  `PolicyCreditNoteService.java` (expert delegation), `CreditNote.java`
+  (`appliedInstallmentId`), `CreateCreditNoteCommand.java`, and
+  `UpdateCreditNoteStatusCommand.java` (optional `installmentId`).
+- `repos/eia-policy-domain/.../PolicyClient.java:780-822` (expert
+  `/internal/v1` calls; `installmentId` forwarded only for APPLIED; `id` ->
+  `creditNoteId`, `tenantId` dropped) and `:1103-1121` (`ExpertCreditNote`
+  aliases).
 - `repos/eia-policy-expert/.../CreditNoteController.java:27-77` (public and
   internal aliases, tenant query/header, 201/200),
-  `CreditNoteService.java:47-124` (policy wall, currency match, number
-  consumption, conditional transition, policy version bump, outbox),
-  `CreditNoteRules.java:16-127` (four states, transition graph, positive
-  amount, currency, 500-character reason), `CreditNoteRepository.java:20-118`
-  (tenant/policy-scoped reads, `CN-{7 digits}` sequence, conditional update),
+  `CreditNoteService.java:84-154` (policy wall, currency match, number
+  consumption, APPLIED installment validation and credit, conditional
+  transition, policy version bump, outbox),
+  `CreditNoteRules.java:16-158` (four states, transition graph, positive
+  amount, currency, 500-character reason, `INVALID_CREDIT_NOTE_INSTALLMENT`,
+  `INSTALLMENT_NOT_CREDITABLE`, `CREDIT_NOTE_EXCEEDS_INSTALLMENT`, CREDITED
+  transition), `CreditNoteRepository.java:20-130` (tenant/policy-scoped reads,
+  `CN-{7 digits}` sequence, `applied_installment_id` update),
   `PolicyCreditNote.java`, `CreateCreditNoteRequest.java`, and
   `UpdateCreditNoteStatusRequest.java`.
-- `repos/eia-policy-expert/.../PolicyEvents.java:22-24,92-116`
+- `repos/eia-policy-expert/.../BillingRepository.java:232-270` (conditional
+  credited-amount update and the status change to CREDITED) and
+  `BillingRules.java:99-114` (zero outstanding for PAID, WAIVED, and CREDITED).
+- `repos/eia-policy-expert/.../PolicyEvents.java:22-24,96-138`
   (`policy.credit-note.issued` / `.applied` / `.cancelled` with policy and note
-  identity, amount, currency, and status) and
-  `src/main/resources/schema.sql:525-554` (`policy_credit_note`, its CHECK
-  constraints, and the number sequence).
+  identity, amount, currency, and status; the applied payload adds
+  `installmentId` and `creditedAmount`) and
+  `src/main/resources/schema.sql:525-620` (`policy_credit_note`, its CHECK
+  constraints, the number sequence, `applied_installment_id`, and the
+  `policy_installment.credited_amount` migration).
 - Tests: `PolicyCreditNoteControllerTest`, `PolicyCreditNoteServiceTest`,
   `PolicyCreditNoteClientTest`, `CreditNoteControllerTest`,
-  `CreditNoteServiceTest`, and `CreditNoteRulesTest`.
-- `openapi/policy.yaml` 2.9.0, `asyncapi/policy.yaml` 1.7.0, and
-  `asyncapi/event-catalog.yaml` 1.20.0 record the implemented shape.
+  `CreditNoteServiceTest`, `CreditNoteRulesTest`, `BillingServiceTest`,
+  `BillingRulesTest`, `BillingSummaryTest`, and
+  `BillingReceivablesServiceTest`.
+- `openapi/policy.yaml` 2.11.0, `asyncapi/policy.yaml` 1.9.0, and
+  `asyncapi/event-catalog.yaml` 1.23.0 record the implemented shape.
 
 Resolution: either extend SPEC 11.2.13 with the implemented short route,
-four-state lifecycle, free-text reason, and three event names, or add the SPEC
-request/approval/SAP lifecycle, reason enum, and `policy.billing.credit-note-issued`
-name behind an EV-05 dual-publish window. Until then the contract documents the
-implemented narrow surface and the DIRECT book requirement.
+four-state lifecycle, free-text reason, installment application, and three
+event names, or add the SPEC request/approval/SAP lifecycle, reason enum, and
+`policy.billing.credit-note-issued` name behind an EV-05 dual-publish window.
+The installment target and the CREDITED installment status are the parts of the
+slice closest to BIL-06 and can be adopted into the SPEC as the credit
+application rule. Until then the contract documents the implemented narrow
+surface and the DIRECT book requirement.
 
 ## M-42 Contract technical-account lines omit correction and line-level metadata
 
@@ -2512,7 +2576,7 @@ EV-05 dual-publish treatment if they are aligned to SPEC names.
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-21
-expanded technical-account line contract:
+credit-application contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -2551,7 +2615,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 13190 checks, 0 failures
+  PASS 13282 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -2752,7 +2816,14 @@ Additional checks and limits:
   restoring per-type reconciliation wording instead of the bucket mapping each
   fail with the specific 13-type enum, details-map, `bucketTotals`, or
   bucket-mapping message. All four were verified by mutating parsed copies in
-  memory; the working copy was left unchanged.
+  memory; the working copy was left unchanged. The credit-application pass
+  added four more: removing the `installmentId` property from
+  `UpdateCreditNoteStatusRequest`, making `CreditNote.appliedInstallmentId`
+  non-nullable, removing `creditedAmount` from the applied
+  `PolicyCreditNoteData` payload, and dropping `CREDITED` from
+  `Installment.status` each fail with the specific optional-uuid, nullability,
+  applied-payload, or status-enum message. All four were run on throwaway
+  copies and exited non-zero (exit 1); the working copy was left unchanged.
 
 ## Resolution policy
 

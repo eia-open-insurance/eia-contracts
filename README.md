@@ -1453,6 +1453,67 @@ Legal-entity semantics:
   catalog entries, and the absence of the implemented paths from
   `x-planned-operations`. The full run passes 13,143 checks.
 
+### Policy credit application to installments (2026-10-21)
+
+Policy 2.11.0 lets an APPLIED credit note settle an open billing installment.
+The change is additive on the wire except that `ReceivableSummary.totalAmount`
+and `.overdueAmount` now sum outstanding rather than gross amounts; no path,
+event name, or required request field changes.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/policy.yaml` | 2.11.0 | Additive, with a documented netting change | The optional `UpdateCreditNoteStatusRequest.installmentId`, the nullable `CreditNote.appliedInstallmentId`, the `BillingSummary` schema and `BillingPlan.summary`, the `Installment.creditedAmount`/`outstandingAmount` and `CREDITED` status, the `Receivable.creditedAmount`/`outstandingAmount` members, outstanding-based receivable totals, and the new credit-application rules and codes. |
+| `asyncapi/policy.yaml` | 1.9.0 | Additive | The optional `installmentId` and `creditedAmount` members on the `policy.credit-note.applied` payload (`PolicyCreditNoteData`). |
+| `asyncapi/event-catalog.yaml` | 1.23.0 | Unchanged | No event name or channel changes; 205 published and 84 implemented names, Policy 31 published and 19 implemented. |
+
+Credit-application semantics:
+
+- `PATCH .../credit-notes/{creditNoteId}/status` now accepts
+  `{status, installmentId?}`. `installmentId` is required for APPLIED and
+  ignored by ISSUED and CANCELLED.
+- APPLIED credits the note amount to a DUE or OVERDUE installment on the same
+  tenant and policy. A partial credit adds to the persisted `creditedAmount`
+  and leaves the installment open; a credit that covers the uncredited
+  remainder (`amount - creditedAmount`) also moves the installment to
+  `CREDITED` with a zero `outstandingAmount`. The note transition and the
+  installment update commit together.
+- Applying rejects a missing `installmentId` with 400
+  `INVALID_CREDIT_NOTE_INSTALLMENT`, an unknown or foreign installment with 404
+  `INSTALLMENT_NOT_FOUND`, a PAID/WAIVED/CREDITED target with 409
+  `INSTALLMENT_NOT_CREDITABLE` (`meta.installmentId`, `meta.currentStatus`), and
+  an oversized note with 409 `CREDIT_NOTE_EXCEEDS_INSTALLMENT`
+  (`meta.creditNoteId`, `meta.installmentId`, `meta.noteAmount`,
+  `meta.availableAmount`). A concurrent application is 409
+  `CONCURRENT_MODIFICATION`.
+- `CreditNote` gains `appliedInstallmentId`, which is null until APPLIED and
+  also null on a legacy APPLIED note that predates installment application.
+- Billing `Installment` now carries the gross `amount`, `creditedAmount`, and
+  the derived `outstandingAmount`; `CREDITED` joins DUE, OVERDUE, PAID, and
+  WAIVED as a terminal status. A PAID, WAIVED, or fully CREDITED row has a zero
+  outstanding amount. Settlement and dunning reject a CREDITED row.
+- `BillingPlan` gains `summary` (`BillingSummary`): `totalAmount`, `paidAmount`,
+  `waivedAmount`, `creditedAmount`, the net `outstandingAmount`,
+  `overdueAmount`, `currency`, and `installmentCount`. `outstandingAmount` sums
+  the per-installment outstanding amounts, so PAID, WAIVED, and CREDITED rows
+  never contribute.
+- `Receivable` gains `creditedAmount` and `outstandingAmount`; `amount` stays
+  gross. A fully CREDITED installment leaves the queue, while a partially
+  credited one stays listed with its reduced outstanding amount.
+  `ReceivableSummary.totalAmount` and `.overdueAmount` sum the outstanding
+  amounts, matching SPEC BIL-06.
+- The `policy.credit-note.applied` payload adds `installmentId` and the
+  installment's cumulative `creditedAmount`; the additions are optional and
+  keep `eventVersion` 1. ISSUED and CANCELLED payloads are unchanged.
+- SPEC 11.2.13's `credit_note_request` has no installment column and no APPLIED
+  state; it defines only the BIL-06 netting rule. The installment link and the
+  CREDITED installment status are recorded in M-27 and M-41.
+- The validator requires the new request and response members, the conditional
+  APPLIED requirement for `installmentId`, the `BillingSummary` fields and
+  money references, the CREDITED status, the outstanding-based totals, the four
+  new codes and their descriptions, and the applied payload members; it also
+  rejects the nullable members becoming required. The full run passes 13,282
+  checks.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -1837,11 +1898,17 @@ adapter, but that internal route is not part of the public contract.
 
 The plan projection is flat and uses the domain DTO names: `planId`,
 `planNumber`, `policyId`, `totalPremium` (decimal string), `currency`,
-`installmentCount`, `frequency`, `firstDueDate`, `status`, and
-`installments[]`. Each installment is `installmentId`, `installmentNumber`,
-`dueDate`, `amount` (decimal string), `status`, `paidAt`, and `paymentId`.
-`paidAt` and `paymentId` are populated only for PAID; a WAIVED installment has
-no payment evidence.
+`installmentCount`, `frequency`, `firstDueDate`, `status`, `installments[]`,
+and `summary`. Each installment is `installmentId`, `installmentNumber`,
+`dueDate`, `amount` (gross decimal string), `creditedAmount`,
+`outstandingAmount`, `status`, `paidAt`, and `paymentId`. `amount` stays the
+scheduled premium, `creditedAmount` is the sum of applied credit notes, and
+`outstandingAmount` is the collectible remainder (`amount - creditedAmount`).
+`summary` is `{totalAmount, paidAmount, waivedAmount, creditedAmount,
+outstandingAmount, overdueAmount, currency, installmentCount}`; its
+`outstandingAmount` nets paid, waived, and credited premium. `paidAt` and
+`paymentId` are populated only for PAID; a WAIVED or CREDITED installment has no
+payment evidence.
 
 Rules:
 
@@ -1853,11 +1920,18 @@ Rules:
 - Plan `frequency` is `MONTHLY`, `QUARTERLY`, `SEMI_ANNUAL`, or `ANNUAL`; the
   due-date cadence applies that step to `firstDueDate`. A blank or unknown
   frequency is 400 `INVALID_BILLING_FREQUENCY`.
-- Installment `status` is `DUE`, `OVERDUE`, `PAID`, or `WAIVED`. The settle
-  command accepts only the terminal targets `PAID` and `WAIVED`; a DUE or
-  OVERDUE row can be settled once. Repeating the same terminal status returns
-  the unchanged row and writes no event; switching terminal statuses is 409
+- Installment `status` is `DUE`, `OVERDUE`, `PAID`, `WAIVED`, or `CREDITED`.
+  PAID, WAIVED, and CREDITED are terminal. CREDITED is reached only by applying
+  credit notes, never by the settle command. The settle command accepts only
+  the terminal targets `PAID` and `WAIVED`; a DUE or OVERDUE row can be settled
+  once. Repeating the same terminal status returns the unchanged row and writes
+  no event; switching terminal statuses, or settling a CREDITED row, is 409
   `INSTALLMENT_ALREADY_SETTLED`.
+- Applying a credit note to an installment is documented in the credit-note
+  section: a partial credit leaves a DUE/OVERDUE row open with a reduced
+  `outstandingAmount`, and a full credit sets `CREDITED` with a zero
+  outstanding amount. CREDITED rows are excluded from the receivables queue and
+  reject dunning with 409 `INSTALLMENT_NOT_DUNNABLE`.
 - `X-EIA-Tenant` is required. `X-EIA-Book` is optional on the public routes for
   compatibility, but a supplied value must be DIRECT and any other book is
   hidden as 404 `BOOK_SCOPE_VIOLATION` (SPEC 3.6.2, WALL-06). The domain always
@@ -1889,10 +1963,14 @@ outside `/api/v1/policies`, because it spans every policy in the tenant.
 
 The summary is `{items, totalAmount, overdueAmount, count}`. An item is
 `{installmentId, planId, planNumber, policyId, policyNumber, insuredPartyId,
-installmentNumber, dueDate, amount, currency, status, daysPastDue, paidAt,
-paymentId}`, matching the domain `Receivable` DTO. Only DUE and OVERDUE rows are
-eligible, so `paidAt` and `paymentId` are null; `overdueAmount` sums the items
-whose effective status is OVERDUE.
+installmentNumber, dueDate, amount, creditedAmount, outstandingAmount,
+currency, status, daysPastDue, paidAt, paymentId}`, matching the domain
+`Receivable` DTO. `amount` stays gross, `creditedAmount` is the premium covered
+by applied credit notes, and `outstandingAmount` is the collectible remainder.
+Only DUE and OVERDUE rows are eligible, so `paidAt` and `paymentId` are null; a
+partially credited row stays listed, while a fully CREDITED row is settled and
+absent. `totalAmount` and `overdueAmount` sum the outstanding amounts, so
+credits reduce the collectible total.
 
 Rules:
 
@@ -1907,6 +1985,9 @@ Rules:
   `BOOK_SCOPE_VIOLATION`.
 - Items are ordered by `dueDate`, then `policyNumber`, `installmentNumber`, and
   `installmentId`. The read writes no event.
+- A partial credit does not remove an installment from the queue: it is still
+  collectible for its `outstandingAmount`. Only a fully credited (CREDITED)
+  installment drops out.
 - The domain proxies the expert's `/internal/v1/billing/installments` read; the
   expert additionally accepts `?tenantId=` for that internal call. Neither is
   part of the public contract.
@@ -1942,9 +2023,9 @@ Rules:
   the expert's `@Size` guard rejects it with a field error before the service
   runs.
 - Only an effective DUE or OVERDUE installment can be dunned. A stored DUE row
-  past its due date is effectively OVERDUE and stays dunnable; PAID and WAIVED
-  are terminal, so dunning them is 409 `INSTALLMENT_NOT_DUNNABLE` with
-  `meta.currentStatus`.
+  past its due date is effectively OVERDUE and stays dunnable; PAID, WAIVED,
+  and fully CREDITED installments are terminal, so dunning them is 409
+  `INSTALLMENT_NOT_DUNNABLE` with `meta.currentStatus`.
 - One action per level per installment is allowed. A repeated level is 409
   `DUNNING_ALREADY_SENT` with `meta.level`, including a level whose history row
   is `CANCELLED`; the unique `(tenantId, installmentId, level)` constraint also
@@ -1985,11 +2066,14 @@ adapter, but that internal route is not part of the public contract.
 | Advance status | `PATCH /api/v1/policies/{policyId}/credit-notes/{creditNoteId}/status` | 200 `CreditNote` | 400, 404, 409 |
 
 `CreditNote` is `{creditNoteId, noteNumber, policyId, amount, currency, reason,
-status, issuedAt, appliedAt, createdAt}`. `reason` is nullable, `issuedAt` and
-`appliedAt` are null until their transition, and `status` is `DRAFT`, `ISSUED`,
+status, issuedAt, appliedAt, appliedInstallmentId, createdAt}`. `reason` is
+nullable, `issuedAt` and `appliedAt` are null until their transition,
+`appliedInstallmentId` is null until APPLIED, and `status` is `DRAFT`, `ISSUED`,
 `APPLIED`, or `CANCELLED`. The create body is `CreateCreditNoteRequest`:
 `amount` is a positive decimal string and `currency` is required to equal the
-policy premium currency; `reason` is optional and capped at 500 characters.
+policy premium currency; `reason` is optional and capped at 500 characters. The
+status body is `UpdateCreditNoteStatusRequest`: `status` is required and
+`installmentId` is optional but required when `status` is APPLIED.
 
 Rules:
 
@@ -2009,18 +2093,37 @@ Rules:
   `INVALID_CREDIT_NOTE_TRANSITION` with `meta.currentStatus` and
   `meta.targetStatus`. A concurrent policy change is 409
   `CONCURRENT_MODIFICATION`.
+- APPLIED requires `installmentId`. The installment must be DUE or OVERDUE on
+  the same tenant and policy, and the note amount must fit inside its
+  uncredited remainder (`amount - creditedAmount`). A partial credit raises
+  `creditedAmount` and leaves the installment open; a credit that covers the
+  remainder also sets `CREDITED` and a zero `outstandingAmount`. The note
+  transition and the installment update commit together. A missing id is 400
+  `INVALID_CREDIT_NOTE_INSTALLMENT`; an unknown or foreign installment is 404
+  `INSTALLMENT_NOT_FOUND`; a PAID/WAIVED/CREDITED target is 409
+  `INSTALLMENT_NOT_CREDITABLE` with `meta.installmentId` and
+  `meta.currentStatus`; an oversized note is 409
+  `CREDIT_NOTE_EXCEEDS_INSTALLMENT` with `meta.creditNoteId`,
+  `meta.installmentId`, `meta.noteAmount`, and `meta.availableAmount`; a
+  concurrent application is 409 `CONCURRENT_MODIFICATION`. ISSUED and
+  CANCELLED ignore the optional `installmentId`.
 - The create bumps the policy version but writes no event. Each accepted
   transition writes `policy.credit-note.issued`, `.applied`, or `.cancelled` in
-  the same transaction as the row and the version bump. Neither command accepts
-  `Idempotency-Key` or `If-Match` (M-06, M-07).
+  the same transaction as the row and the version bump. The `applied` payload
+  additionally carries `installmentId` and the installment's cumulative
+  `creditedAmount`. Neither command accepts `Idempotency-Key` or `If-Match`
+  (M-06, M-07).
 - `X-EIA-Tenant` is required. The canonical contract requires
   `X-EIA-Book: DIRECT` and hides another book as 404 `BOOK_SCOPE_VIOLATION`;
   the domain currently accepts an absent header (M-41).
 - SPEC 11.2.13 uses `/api/v1/policy/policies/{policyId}/credit-notes`, the
   REQUESTED/APPROVED/SENT_TO_SAP/ISSUED/REJECTED statuses, a closed reason
   enum, an approval gate, a SAP credit-memo reference, and the
-  `policy.billing.credit-note-issued` fact. The implemented narrow shape and the
-  three new event names are recorded in M-22 and M-41.
+  `policy.billing.credit-note-issued` fact. Its `credit_note_request` has no
+  installment column or APPLIED state; only the BIL-06 non-negative net
+  outstanding rule applies. The implemented narrow shape, the installment
+  application, and the three new event names are recorded in M-27, M-41, and
+  M-22.
 
 ### Policy legal entities
 
