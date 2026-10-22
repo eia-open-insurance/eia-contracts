@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Policy API
-  version: 2.14.0
+  version: 2.15.0
   summary: Direct-book policy administration and the Policy expert API.
   description: >
     This document describes the implemented public Policy domain API and the
@@ -327,6 +327,30 @@ info:
       `cancellationNumber` for a linked note; an unlinked adjustment omits both.
       A rejected link writes neither the note nor the event. MISMATCHES.md M-22
       and M-41 record the new event name and the link rules.
+
+    The 2026-10-22 premium-audit slice adds the audited-premium command:
+
+    - `POST /api/v1/policies/{policyId}/premium-audit` applies
+      `{auditedPremium, effectiveDate, reason, approvedBy?, approvalRef?}` to a
+      `BOUND`, `ISSUED`, `IN_FORCE`, `ENDORSED`, or `REINSTATED` policy. The
+      command records a `PREMIUM_AUDIT` endorsement and immutable
+      `PREMIUM_AUDIT` policy version, replaces the policy premium with the
+      audited amount, bumps the aggregate version, and returns the updated
+      `Policy` with its strong `ETag`.
+    - The audited premium must be non-negative and must change the current
+      premium: an equal amount is 400 `NO_PREMIUM_CHANGE` and writes nothing.
+      An ineligible status is 409 `PREMIUM_AUDIT_NOT_ALLOWED`; a stale
+      `If-Match` is 409 `CONCURRENT_MODIFICATION`.
+    - The effective date is resolved by the version timeline. An out-of-term
+      date or a timeline regression without justification is 422
+      (`VERSION_OUTSIDE_POLICY_TERM`, `VERSION_REGRESSION`), a missing
+      pre-inception reason is 422 `VERSION_BACKDATE_REASON_REQUIRED`, and a
+      missing approval is 428 `APPROVAL_REQUIRED`.
+    - The accepted command writes `policy.policy.premium-audited` and
+      `policy.policy.version-issued` in the same transaction. SPEC 11.2.9 names
+      the first fact `policy.premium.audited`; the implemented name and the
+      missing `policy_premium_audit` worksheet are recorded in MISMATCHES.md
+      M-22 and M-50.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -2609,6 +2633,118 @@ paths:
           $ref: './components.yaml#/components/responses/NotFound'
         '409':
           $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/premium-audit:
+    post:
+      operationId: applyPolicyPremiumAudit
+      tags:
+        - Policy
+      summary: Apply an audited premium to a bound or in-force policy.
+      description: >
+        Re-rates the policy's written premium after the term has been issued
+        (SPEC 6.12 transaction `policy.premium-audit`,
+        `APPLY_PREMIUM_AUDIT`; SPEC 11.2.8 defines no step sequence for it). The
+        command records a `PREMIUM_AUDIT` endorsement and an immutable
+        `PREMIUM_AUDIT` policy version, replaces `Policy.premiumAmount` with
+        `auditedPremium`, and bumps the aggregate version. The audit is not a
+        coverage endorsement: the coverage grants and policy limits stay exactly
+        as issued. The policy must be `BOUND`, `ISSUED`, `IN_FORCE`, `ENDORSED`, or
+        `REINSTATED`; any other status is 409 `PREMIUM_AUDIT_NOT_ALLOWED` with
+        `meta.sourceStatus` and `meta.allowedStatuses` and writes nothing.
+
+        The audited premium must be non-negative and must differ from the
+        current policy premium. An equal amount is 400 `NO_PREMIUM_CHANGE` and
+        writes no endorsement, version, row change, or event. The reason is
+        trimmed, required, and capped at 500 characters; it is carried on the
+        endorsement and the event.
+
+        The effective date is resolved against the version timeline exactly as
+        an endorsement date is. A date on or after policy expiration is 422
+        `VERSION_OUTSIDE_POLICY_TERM`; a date before the current version's
+        start without justification is 422 `VERSION_REGRESSION`; a date before
+        policy inception without a reason is 422
+        `VERSION_BACKDATE_REASON_REQUIRED`. A pre-inception or regressing date
+        requires both `approvedBy` and `approvalRef`, otherwise the command is
+        428 `APPROVAL_REQUIRED`. A justified pre-inception date is clamped to
+        the policy inception on the version while the endorsement keeps the
+        requested business date and the backdate reason. `approvedBy` and
+        `approvalRef` are optional for a normal audit.
+
+        The accepted command writes a `PREMIUM_AUDIT` endorsement with the
+        signed delta and the description
+        `Premium audit: <old> -> <new> (<delta>)`, issues the policy version
+        with the same change type and delta, and writes
+        `policy.policy.premium-audited` and `policy.policy.version-issued` in
+        the same transaction as the premium replacement. A rejected audit
+        writes neither the endorsement, the version, the row change, nor an
+        event. The first audit of a `BOUND` policy is later superseded by the
+        `ISSUE` version so the policy keeps exactly one `ISSUED` version.
+
+        Optimistic concurrency: send the strong `ETag` from the last read in
+        `If-Match` (for example `"3"`, or `*`). A stale tag is 409
+        `CONCURRENT_MODIFICATION` with `meta.currentVersion` and
+        `meta.expectedVersion`; a malformed tag is 400 `INVALID_IF_MATCH`.
+
+        `X-EIA-Tenant` is required and a supplied `X-EIA-Book` must be DIRECT;
+        an absent book is accepted for compatibility, and another book is
+        hidden as 404 `BOOK_SCOPE_VIOLATION`. An unknown policy or a policy in
+        another tenant is 404 `POLICY_NOT_FOUND`. The 201 body is the updated
+        `Policy` with its new strong `ETag`; the domain also accepts an expert
+        envelope carrying the policy and an audit row. The domain forwards an
+        optional `Idempotency-Key`, but the expert does not replay on it yet,
+        so a retry applies a second audit (MISMATCHES.md M-07, M-50). The
+        `/internal/v1` alias the domain calls is an implementation detail. SPEC
+        11.2.9 names the posting fact `policy.premium.audited`; the implemented
+        name is `policy.policy.premium-audited` (MISMATCHES.md M-22 and M-50).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirectOptional'
+        - $ref: './components.yaml#/components/parameters/IfMatch'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApplyPremiumAuditRequest'
+      responses:
+        '201':
+          description: >
+            Audit applied; the updated Policy carries the audited premium, the
+            new PREMIUM_AUDIT version, and its strong ETag.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Policy'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            The policy status cannot be audited (`PREMIUM_AUDIT_NOT_ALLOWED`)
+            or the policy changed concurrently (`CONCURRENT_MODIFICATION`). A
+            status problem carries `meta.policyId`, `meta.sourceStatus`, and
+            `meta.allowedStatuses`; a concurrency problem carries
+            `meta.currentVersion`, `meta.expectedVersion`, and an `errors` entry
+            whose code is `STALE_VERSION`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        '428':
+          $ref: './components.yaml#/components/responses/PreconditionRequired'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /internal/v1/policies:
@@ -5403,6 +5539,57 @@ components:
           $ref: './components.yaml#/components/schemas/MoneyAmount'
         limitCurrency:
           $ref: './components.yaml#/components/schemas/CurrencyCode'
+    ApplyPremiumAuditRequest:
+      type: object
+      description: >
+        Apply an audited premium to a bound or in-force policy. `auditedPremium`
+        is the final written premium after the audit and must be non-negative;
+        it must differ from the current policy premium. `effectiveDate` is the
+        audit business date and is resolved by the policy version timeline.
+        `reason` is mandatory and is carried on both the `PREMIUM_AUDIT`
+        endorsement and the event. `approvedBy` and `approvalRef` are optional
+        for a normal audit and required only when the effective date is before
+        policy inception or would regress the version timeline.
+      required:
+        - auditedPremium
+        - effectiveDate
+        - reason
+      properties:
+        auditedPremium:
+          type: string
+          description: >
+            Final written premium after the audit, as a non-negative decimal
+            string with at most 15 integer digits and four fraction digits. An
+            amount equal to the current premium is 400 `NO_PREMIUM_CHANGE`.
+          pattern: '^(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,4})?$'
+          examples:
+            - '150000.00'
+        effectiveDate:
+          type: string
+          format: date
+          description: >
+            Audit business date. It must fall inside the policy term; a date
+            before the current version's start needs the same backdate reason
+            and approval as any other versioned change.
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: >
+            Trimmed audit reason, required and carried on the endorsement and
+            the event.
+        approvedBy:
+          type: string
+          format: uuid
+          description: >
+            Approver identity. Required only for a pre-inception or regressing
+            effective date.
+        approvalRef:
+          type: string
+          format: uuid
+          description: >
+            Approval reference. Required only for a pre-inception or
+            regressing effective date.
     MassTortProfile:
       type: object
       description: >
@@ -6473,30 +6660,42 @@ x-implementation:
     `/internal/v1` alias is an implementation detail. The narrower SPEC 10.11.2
     catalog, the SPEC 11.2.16 path, and the nullable assignment against LE-01 are
     recorded in M-01, M-12, and M-43.
+
+    The premium audit is a policy command rather than a billing worksheet. The
+    domain proxies the expert's `/internal/v1` alias with the tenant and DIRECT
+    book; the expert owns the eligible-status gate, the no-change guard, the
+    version-timeline resolution and approval gate, the `PREMIUM_AUDIT`
+    endorsement and version, the premium replacement, and the posting events.
+    The public 201 is the updated `Policy` with the advanced `ETag`; the domain
+    also accepts an expert envelope carrying the policy and an audit row. The
+    implemented command does not create a `policy_premium_audit` row, so the
+    SPEC 11.2.4 audit period, audit type, exposure, deposit/rated/additional/
+    return premium, minimum-premium flag, and SCHEDULED..WAIVED status are not
+    modelled. SPEC 11.2.9 names the fact `policy.premium.audited`, while the
+    expert emits `policy.policy.premium-audited`; the SPEC 11.2.10 surface names
+    no premium-audit route. The command shape, the event name, and the missing
+    worksheet and quarterly batch job are recorded in M-22 and M-50.
 x-compatibility:
-  contractVersion: 2.14.0
-  previousContractVersion: 2.13.0
+  contractVersion: 2.15.0
+  previousContractVersion: 2.14.0
   breaking: []
   compatible:
-    - Adds the optional nullable CreateCreditNoteRequest.cancellationId request property.
-    - Adds the required-but-nullable CreditNote.cancellationId and CreditNote.cancellationNumber response properties.
-    - Adds the nullable Cancellation.cancellationNumber response property.
-    - Documents the same-tenant/policy, ACTIVE, return-premium amount, currency, and one-note-per-cancellation link rules with their 400/404/409 rejections.
-    - Adds the policy.credit-note.created event with the base note fields, createdAt, and the optional cancellationId/cancellationNumber members.
+    - Adds POST /api/v1/policies/{policyId}/premium-audit with the ApplyPremiumAuditRequest body.
+    - Adds the optional approvedBy/approvalRef approval members for a backdated or regressing audit.
+    - Documents the BOUND/ISSUED/IN_FORCE/ENDORSED/REINSTATED eligibility gate, the 400 NO_PREMIUM_CHANGE guard, the 409 PREMIUM_AUDIT_NOT_ALLOWED and CONCURRENT_MODIFICATION conflicts, and the 422/428 version-timeline responses.
+    - Adds the policy.policy.premium-audited event and keeps policy.premium.audited planned.
     - Removes no path or field and changes no existing field meaning.
   note: >
-    The cancellation-linked credit-note slice is additive over 2.13.0: one
-    optional request member, two nullable response members on `CreditNote`, one
-    nullable response member on `Cancellation`, and one event name. A client that
-    never sends `cancellationId` sees the same create and lifecycle as before;
-    `CreditNote.cancellationId`/`cancellationNumber` and
-    `Cancellation.cancellationNumber` are null on every unlinked or historical
-    row. Creation now emits `policy.credit-note.created` under `eventVersion` 1,
-    so a consumer that subscribed only to the transition facts sees one
-    additional event name. The new event brings the catalog to 209 published and
-    89 implemented names, with Policy at 33 published and 21 implemented. The
-    link rules and the missing SPEC equivalent are recorded in MISMATCHES.md
-    M-22 and M-41.
+    The premium-audit slice is additive over 2.14.0: one public command, one
+    request schema, and one implemented event name. The command leaves the
+    policy schema and every existing route unchanged; the audit replaces only
+    the premium amount and advances the aggregate version. The SPEC 11.2.9
+    `policy.premium.audited` name stays published and planned, while the
+    implemented `policy.policy.premium-audited` name is added to the catalog and
+    marked implemented, bringing the catalog to 216 published and 96 implemented
+    names, with Policy at 34 published and 22 implemented. The command shape,
+    the missing `policy_premium_audit` worksheet, and the SPEC-less route are
+    recorded in MISMATCHES.md M-22 and M-50.
 x-planned-operations:
   - method: POST
     path: /api/v1/policies/{policyId}/bind

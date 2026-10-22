@@ -2154,6 +2154,76 @@ Link semantics:
   channels, the `PolicyCreditNoteCreatedData` payload and its optional link
   members, and the catalog entry. The full run passes 13,645 checks.
 
+### Policy premium audit (2026-10-22)
+
+Policy 2.15.0 adds the audited-premium command. The change is additive: one
+public operation, one request schema, and one implemented event name; no
+existing path, field, or event name changes.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/policy.yaml` | 2.15.0 | Additive | `POST /api/v1/policies/{policyId}/premium-audit` with `ApplyPremiumAuditRequest`, the `BOUND`/`ISSUED`/`IN_FORCE`/`ENDORSED`/`REINSTATED` eligibility gate, the `PREMIUM_AUDIT` endorsement and version semantics, the 201 `Policy` with `ETag`, the 400/404/409/422/428 responses, and the implemented event name. |
+| `asyncapi/policy.yaml` | 1.12.0 | Additive | The implemented `policy.policy.premium-audited` channel and `send` operation with the dedicated `PolicyPremiumAuditedData` payload. The SPEC 11.2.9 `policy.premium.audited` channel stays planned. |
+| `asyncapi/event-catalog.yaml` | 1.32.0 | Additive | `policy.policy.premium-audited` is published and implemented (216 published and 96 implemented in total; Policy 34 published and 22 implemented). |
+
+Command semantics:
+
+- The body is `{auditedPremium, effectiveDate, reason, approvedBy?,
+  approvalRef?}`. `auditedPremium` is the final written premium as a
+  non-negative decimal string with four fraction digits; it must differ from
+  the current policy premium, so an equal amount is 400 `NO_PREMIUM_CHANGE` and
+  writes no endorsement, version, row change, or event. `reason` is trimmed,
+  required, and capped at 500 characters.
+- Only a `BOUND`, `ISSUED`, `IN_FORCE`, `ENDORSED`, or `REINSTATED` policy can
+  be audited. Any other status is 409 `PREMIUM_AUDIT_NOT_ALLOWED` with
+  `meta.sourceStatus` and `meta.allowedStatuses`, and nothing is written.
+- The accepted command records a `PREMIUM_AUDIT` endorsement and an immutable
+  `PREMIUM_AUDIT` policy version, replaces the policy premium with
+  `auditedPremium`, and bumps the aggregate version. The endorsement and the
+  version carry the signed delta and the description
+  `Premium audit: <old> -> <new> (<delta>)`; coverage grants and limits are not
+  touched. The first audit of a `BOUND` policy is later superseded by the
+  `ISSUE` version so the policy keeps exactly one `ISSUED` version.
+- The effective date is resolved by the version timeline. A date on or after
+  policy expiration is 422 `VERSION_OUTSIDE_POLICY_TERM`; a regression without
+  justification is 422 `VERSION_REGRESSION`; a pre-inception date without a
+  reason is 422 `VERSION_BACKDATE_REASON_REQUIRED`; a pre-inception or
+  regressing date without both `approvedBy` and `approvalRef` is 428
+  `APPROVAL_REQUIRED`. A justified pre-inception date is clamped to the policy
+  inception on the version while the endorsement keeps the requested business
+  date and the backdate reason. `approvedBy` and `approvalRef` are optional for
+  a normal audit.
+- The 201 body is the updated `Policy` with its new strong `ETag`, and the 200
+  replay path is not implemented. `If-Match` is optional; a stale tag is 409
+  `CONCURRENT_MODIFICATION` with `meta.currentVersion`/`meta.expectedVersion`
+  and a malformed tag is 400 `INVALID_IF_MATCH`. The domain forwards an
+  optional `Idempotency-Key`, but the expert does not replay on it, so a retry
+  applies a second audit (M-07).
+- `X-EIA-Tenant` is required and a supplied `X-EIA-Book` must be DIRECT; an
+  absent book is accepted for compatibility and another book is hidden as 404
+  `BOOK_SCOPE_VIOLATION`. An unknown or foreign policy is 404
+  `POLICY_NOT_FOUND`.
+- The accepted command writes `policy.policy.premium-audited` and
+  `policy.policy.version-issued` in the same transaction as the premium
+  replacement. `PolicyPremiumAuditedData` requires `policyId`, `policyNumber`,
+  `previousPremium`, `auditedPremium`, `delta`, `currency`, `effectiveDate`,
+  and `reason`, and keeps `eventVersion` 1.
+- SPEC 11.2.9 names the posting fact `policy.premium.audited`, which remains
+  published and planned; the implemented name is the new
+  `policy.policy.premium-audited`. The command does not create a
+  `policy_premium_audit` row, so the SPEC 11.2.4 audit period, audit type,
+  exposure, deposit/rated/additional/return premium, minimum-premium flag, and
+  SCHEDULED..WAIVED status are not modelled, and the quarterly
+  `policy.premium-audit-batch` job is not implemented. SPEC 11.2.10 names no
+  premium-audit route. The deviations are recorded in M-22 and M-50.
+- The validator requires the operation with the shared tenant, optional DIRECT
+  book, `IfMatch`, and `policyId` parameters, the required request body and its
+  field bounds, the 201 `Policy` with the shared `ETag`, the 400/404/409/422/428
+  responses and their codes, the auditable-status, transaction, and event
+  wording, the absence of the path from `x-planned-operations`, the implemented
+  channel and its eight-member payload, the `IMPLEMENTED_EVENTS` entry, and the
+  catalog entry. The full run passes 14,576 checks.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -3230,7 +3300,13 @@ missing directory.
    their field bounds, nullability, and enums, the nullable optional
    `Policy.legalEntityId`, the 201 `Location`, the assignment 200 `ETag`, the
    201/200/400/404/409 responses, and the absence of the implemented paths from
-   `x-planned-operations`, and agreement between
+   `x-planned-operations`, the premium-audit POST with the shared
+   `TenantHeader`, optional DIRECT book, and `IfMatch` parameters, the
+   `ApplyPremiumAuditRequest` required/optional split and non-negative money
+   pattern, the 201 `Policy` with the shared `ETag`, the 400/404/409/422/428
+   responses with `NO_PREMIUM_CHANGE`, `PREMIUM_AUDIT_NOT_ALLOWED`, and
+   `CONCURRENT_MODIFICATION`, the auditable-status, version-timeline,
+   same-transaction, and event wording, and agreement between
    `info.version` and `x-compatibility.contractVersion`. It also requires the
    Notifications `NotificationType` member `DUNNING_NOTICE`, its position
    between `ESCHEATMENT_DUE` and `NEW_DOCUMENT_UPLOAD`, no repeated enum value,
@@ -3288,7 +3364,10 @@ missing directory.
    members, and the
    `PolicyLegalEntityCreatedData` and
    `PolicyPolicyLegalEntityAssignedData` payloads with their catalog-row,
-   enum, nullable-link, changed-fields, and policy/money members, and the
+   enum, nullable-link, changed-fields, and policy/money members, the
+   `PolicyPremiumAuditedData` payload with its policy identity, previous and
+   audited premium, signed delta, currency, effective date, and reason members,
+   and the
    `NotificationTemplateData` payload with its template identity, code,
    template version, locale, status, and nullable approver members for the
    created, approved, and retired facts.
@@ -3307,6 +3386,7 @@ missing directory.
    `document.legal-hold.placed`, `document.legal-hold.released`,
    `document.document.disposed`,
    `policy.policy.renewed`,
+   `policy.policy.premium-audited`,
    `policy.billing-plan.created`, `policy.installment.paid`,
    `policy.installment.waived`, `policy.dunning.sent`,
    `policy.mass-tort-profile.updated`,

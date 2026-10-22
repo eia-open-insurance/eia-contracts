@@ -1621,6 +1621,46 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   M-22 and the scope/evidence notes, and refreshes the validation evidence.
 - `python scripts/validate_contracts.py` passes 14,465 checks with 0 failures.
 
+### Added in the Policy premium-audit contract (2026-10-22)
+
+- `openapi/policy.yaml` is 2.15.0: adds
+  `POST /api/v1/policies/{policyId}/premium-audit` with the required
+  `ApplyPremiumAuditRequest` `{auditedPremium, effectiveDate, reason,
+  approvedBy?, approvalRef?}`, the
+  `BOUND`/`ISSUED`/`IN_FORCE`/`ENDORSED`/`REINSTATED` eligibility gate, the
+  `PREMIUM_AUDIT` endorsement and immutable version semantics, the 201
+  `Policy` with the shared `ETag`, the 400 `NO_PREMIUM_CHANGE`, 404
+  `POLICY_NOT_FOUND`, 409 `PREMIUM_AUDIT_NOT_ALLOWED`/`CONCURRENT_MODIFICATION`,
+  422 `VERSION_OUTSIDE_POLICY_TERM`/`VERSION_REGRESSION`/
+  `VERSION_BACKDATE_REASON_REQUIRED`, and 428 `APPROVAL_REQUIRED` responses, and
+  the `policy.policy.premium-audited` fact. The SPEC 11.2.9
+  `policy.premium.audited` name is kept but stays planned. `x-compatibility`
+  moves to 2.15.0 over 2.14.0.
+- `asyncapi/policy.yaml` is 1.12.0: the implemented
+  `policy.policy.premium-audited` channel and `send` operation with the
+  eight-member `PolicyPremiumAuditedData` payload (`policyId`, `policyNumber`,
+  `previousPremium`, `auditedPremium`, `delta`, `currency`, `effectiveDate`,
+  `reason`). The aggregate is the policy at the bumped version and
+  `eventVersion` stays 1.
+- `asyncapi/event-catalog.yaml` is 1.32.0: `policy.policy.premium-audited` is
+  published and implemented, for 216 published and 96 implemented names (Policy
+  34 published and 22 implemented). `policy.premium.audited` remains published
+  and planned.
+- `scripts/validate_contracts.py` requires the premium-audit operation with the
+  shared tenant, optional DIRECT book, `IfMatch`, and `policyId` parameters,
+  the required request body and its field bounds, the 201 `Policy` and `ETag`,
+  the 400/404/409/422/428 responses with their codes, the auditable-status,
+  version-timeline, same-transaction, and event wording, the absence of the
+  path from `x-planned-operations`, the implemented channel and its eight-member
+  payload, and the catalog entry.
+- `README.md` records the additive version, the request and eligibility rules,
+  the endorsement/version and approval semantics, the concurrency and
+  idempotency limits, the event payload, the SPEC-less route and missing
+  `policy_premium_audit` worksheet, and the validation count; `MISMATCHES.md`
+  adds M-50, updates M-01, M-06, M-07, and M-22, the event table, and the
+  validation evidence.
+- `python scripts/validate_contracts.py` passes 14,576 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

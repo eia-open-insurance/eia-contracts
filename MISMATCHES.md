@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-22 (Notifications template management).
+Status: open, reviewed 2026-10-22 (Policy premium audit).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -130,6 +130,11 @@ where the running code does not meet it yet.
   template controllers, services, DTOs, status and channel enums, commands and
   requests, repository, event factory, `schema.sql`, expert client, exception
   mapping, and the template controller, service, integration, and outbox tests.
+  The Policy premium-audit pass reads the domain premium-audit controller,
+  service, command, result, projection, and `PolicyClient` plus the expert
+  premium-audit controller, service, rules, request, `VersionTimeline`,
+  `PolicyEvents`, `schema.sql` endorsement-type migration, and the domain and
+  expert controller, service, and integration tests.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -203,6 +208,8 @@ removed per the resolution policy.
 | M-46 | Payment public status PATCH is SPEC-less and its graph is wider than SPEC 11.7.6 | L |
 | M-47 | Document content tombstones add a SPEC-less DELETE route and event and keep the metadata; a disposition now applies the same tombstone without the SPEC approval/certificate job | L |
 | M-48 | Notifications adds a SPEC-less `DUNNING_NOTICE` type to the closed `NotificationType` enum | L |
+| M-49 | Notification template administration uses a short path, approve/retire commands, and SPEC-less events | L |
+| M-50 | Policy premium audit is a SPEC-less route/event that re-rates the policy premium without the SPEC `policy_premium_audit` worksheet or batch job | L |
 
 ## M-01 Public base paths
 
@@ -234,6 +241,10 @@ Policy legal entities add the short-form catalog row: the implemented
 `/api/v1/legal-entities` versus SPEC 11.2.16's
 `/api/v1/policy/legal-entities`; the implemented assignment command
 `PATCH /api/v1/policies/{policyId}/legal-entity` has no SPEC route (M-43).
+Policy premium audit adds a command row: the implemented
+`POST /api/v1/policies/{policyId}/premium-audit` has no SPEC 11.2.10 route;
+the SPEC 6.12 transaction inventory names the transaction `policy.premium-audit`
+(M-50).
 
 The ten global-search routes follow the same shorter form
 (`/api/v1/{resource}/search`); their SPEC naming gap and validation differences
@@ -262,6 +273,10 @@ Evidence:
   `repos/eia-policy-expert/.../LegalEntityController.java:29` -
   `/api/v1/legal-entities` and
   `/api/v1/policies/{policyId}/legal-entity` (the expert also maps the
+  `/internal/v1` alias).
+- `repos/eia-policy-domain/.../PolicyPremiumAuditController.java:25` and
+  `repos/eia-policy-expert/.../PremiumAuditController.java:22-25` -
+  `/api/v1/policies/{policyId}/premium-audit` (the expert also maps the
   `/internal/v1` alias).
 - `repos/eia-platform/gateway/src/main/resources/application.yml:18-48` - the
   same public prefixes are routed.
@@ -411,6 +426,7 @@ Policy now implements the SPEC 12.6 concurrency mechanism:
 | Policy public erosion | Returns the policy `ETag`; the derived limit state is version-checked internally and a lost update is 409 |
 | Policy public billing | No `ETag`/`If-Match`; the expert still version-checks the policy row and a concurrent change is 409 `CONCURRENT_MODIFICATION` |
 | Policy public renewal | No `If-Match`; the 201 successor carries its own `ETag` and a replay path does not exist |
+| Policy public premium audit | Accepts optional `If-Match` and returns the updated policy `ETag`; a stale tag is 409 `CONCURRENT_MODIFICATION` |
 | Policy public mass tort profile | No `ETag`/`If-Match`; a concurrent profile or policy change is 409 `CONCURRENT_MODIFICATION` |
 | Policy expert GET/create/PATCH | Same ETag and If-Match behaviour as the public service |
 | Contract public PATCH | Required `expectedVersion` body field; no ETag |
@@ -531,8 +547,11 @@ Residual differences:
 - **Coverage.** Contract, Cession, Retrocession, Document, Payment, and
   Notifications create commands still accept no `Idempotency-Key` and emit no
   replay marker. Policy billing's plan create and installment PATCH, the Policy
-  renewal command, and the Policy mass tort profile upsert are also outside the
-  Policy idempotency mechanism. The domain's shared mutation helper still emits
+  renewal command, the Policy mass tort profile upsert, and the Policy premium
+  audit are also outside the Policy idempotency mechanism. The premium-audit
+  command accepts and forwards an optional key, but the expert does not replay
+  on it, so a retry applies a second audit (M-50). The domain's shared mutation
+  helper still emits
   `Idempotent-Replayed: false` on the renewal 201 even though no key is
   accepted, so a client must not read that header as proof that a retry is
   safe. A repeated mass tort PUT rewrites the profile and emits another event,
@@ -1026,7 +1045,7 @@ tables. The differences are:
 | Vertical | Implemented | SPEC /
 planned name |
 |---|---|---|
-| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created`; `policy.installment.paid` / `.waived`; `policy.dunning.sent`; `policy.program.created` / `policy.policy.program-assigned`; `policy.credit-note.created` / `.issued` / `.applied` / `.cancelled` / `.reversed`; `policy.legal-entity.created` / `policy.policy.legal-entity-assigned` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name; the dunning fact differs from SPEC 11.2.13 `policy.billing.dunning-changed`; the two program facts have no SPEC name because SPEC defines no program create or policy-assignment event. SPEC 11.2.13 publishes only `policy.billing.credit-note-issued` and defines no created, applied, cancelled, or reversed fact, so all five credit-note names are new (M-41). The two legal-entity facts are new because SPEC 10.11.2/11.2.16 define the model and link but SPEC 11.2.9 names no catalog-create or assignment event (M-43). `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
+| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created`; `policy.installment.paid` / `.waived`; `policy.dunning.sent`; `policy.program.created` / `policy.policy.program-assigned`; `policy.credit-note.created` / `.issued` / `.applied` / `.cancelled` / `.reversed`; `policy.legal-entity.created` / `policy.policy.legal-entity-assigned`; `policy.policy.premium-audited` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name; the dunning fact differs from SPEC 11.2.13 `policy.billing.dunning-changed`; the two program facts have no SPEC name because SPEC defines no program create or policy-assignment event. SPEC 11.2.13 publishes only `policy.billing.credit-note-issued` and defines no created, applied, cancelled, or reversed fact, so all five credit-note names are new (M-41). The two legal-entity facts are new because SPEC 10.11.2/11.2.16 define the model and link but SPEC 11.2.9 names no catalog-create or assignment event (M-43). The premium-audit fact differs from SPEC 11.2.9 `policy.premium.audited`, which remains planned (M-50). `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
 | Contract | `contract.contract.updated`; `contract.technical-account.created` / `.issued` / `.settled`; `contract.bordereau.processed` / `.failed`; `contract.security.status-changed` | No SPEC name for updated, the technical-account facts, the two terminal bordereau facts, or the security status fact: SPEC 11.3.9 lists lifecycle verbs, the contract-level `contract.account.issued` / `.agreed` facts, `contract.bordereau.posted` / `.rejected`, and only the `contract.security.recorded` / `.breached` security facts. `created`, `bound`, `commuted`, `cession.recorded`, `contract.bordereau.received`, and `contract.security.recorded` match SPEC. |
 | Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned`; `direct.claim.allocation-created`; `direct.claim.settlement-payment-linked` | No SPEC names: SPEC 11.4.9 defines no assignment, task, note, allocation-created, or settlement-payment-link event; it names the allocation fact `direct.claim.allocated`, which remains planned, and models the settlement `payment_id` only as a Payment projection (M-45). `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and `closed` match SPEC. |
 | Assumed Claims | `assumed.claim.updated`; `assumed.claim.assigned`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no assignment, task, or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
@@ -1045,8 +1064,8 @@ implemented name is breaking and needs the EV-05 dual-publish window.
 Evidence:
 
 - `repos/eia-policy-expert/.../PolicyEvents.java:37-56,98-169` (policy, billing,
-  dunning, mass tort, program, credit-note creation, and credit-note-transition
-  names)
+  dunning, mass tort, program, credit-note creation, credit-note-transition, and
+  premium-audit names)
 - `repos/eia-contract-expert/.../ContractEvents.java:41-56`
 - `repos/eia-direct-claims-expert/.../ClaimEvents.java:62-74`
 - `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java:52-65`
@@ -3269,10 +3288,100 @@ publish the three template facts in SPEC 11.8.9, or keep the implemented
 surface and treat these documents as canonical. No `/v2` is needed; the
 surface is additive over the existing notification API.
 
+## M-50 Policy premium audit is a SPEC-less route and event without the SPEC audit worksheet
+
+SPEC 6.12 lists the `policy.premium-audit` transaction
+(`APPLY_PREMIUM_AUDIT`, conditional approval, synchronous), and SPEC 11.2.8's
+command sections define the other policy commands but not the audit steps.
+SPEC 11.2.4 defines the `policy_premium_audit` table
+(audit period, audit type, reported exposure, deposit/rated/additional/return
+premium, minimum-premium flag, audit date, and a SCHEDULED/IN_REVIEW/FINALIZED/
+DISPUTED/WAIVED status), SPEC 7.3 schedules a quarterly
+`policy.premium-audit-batch` worksheet job, and SPEC 11.2.9 publishes
+`policy.premium.audited`. SPEC 11.2.10 names no premium-audit route. The
+2026-10-22 slice implements the command as a policy re-rating:
+
+| Aspect | Implemented | SPEC / gap |
+|---|---|---|
+| Route | `POST /api/v1/policies/{policyId}/premium-audit` (and the expert's `/internal/v1` alias) | SPEC 11.2.10 lists no premium-audit route; the SPEC 6.12 transaction inventory names `policy.premium-audit` (M-01) |
+| Body | `{auditedPremium, effectiveDate, reason, approvedBy?, approvalRef?}` | SPEC models an audit worksheet, not an audited-premium command |
+| Subject | The policy premium itself: `auditedPremium` replaces `policy.premium_amount` | SPEC separates the worksheet (`reported_exposure`, `deposit_premium`, `rated_premium`, `additional_premium`, `return_premium`) from the policy premium |
+| Eligibility | `BOUND`, `ISSUED`, `IN_FORCE`, `ENDORSED`, `REINSTATED`; another status is 409 `PREMIUM_AUDIT_NOT_ALLOWED` | SPEC defines no eligible-status set for the command; the conditional approval is keyed to financial impact |
+| No-op | A zero premium movement is 400 `NO_PREMIUM_CHANGE` and writes nothing | SPEC has no no-change guard; a FINALIZED worksheet with zero movement is meaningful |
+| Version and endorsement | Records a `PREMIUM_AUDIT` endorsement and an immutable `PREMIUM_AUDIT` policy version with the signed delta, description `Premium audit: old -> new (delta)`, and a bumped aggregate version; coverage and limits are untouched | SPEC 11.2.4 has the `PREMIUM_AUDIT` change type but no endorsement type; the SPEC worksheet is not a version by itself |
+| Approval | `approvedBy`/`approvalRef` are optional and required only for a pre-inception or regressing effective date (428 `APPROVAL_REQUIRED`) | SPEC flags the command `Yes*` (conditional approval by financial impact); no approval is required for a normal in-term audit |
+| Timeline | `effectiveDate` is resolved by `VersionTimeline`: 422 `VERSION_OUTSIDE_POLICY_TERM`, `VERSION_REGRESSION` (unjustified), or `VERSION_BACKDATE_REASON_REQUIRED`; a justified pre-inception date is clamped to policy inception on the version | SPEC names no version-timeline rule for the audit |
+| Concurrency | Optional `If-Match`; a stale tag is 409 `CONCURRENT_MODIFICATION`; an optional `Idempotency-Key` is forwarded but not replayed, so the command is not retry-safe | SPEC 12.6 requires the header on transaction submission |
+| Worksheet | No `policy_premium_audit` row is created; no audit period, audit type, exposure, deposit/rated/additional/return premium, minimum-premium flag, audit date, or SCHEDULED..WAIVED status is stored | SPEC 11.2.4 defines all of them; the batch job that generates the worksheets is not implemented either |
+| Event | `policy.policy.premium-audited`, payload `{policyId, policyNumber, previousPremium, auditedPremium, delta, currency, effectiveDate, reason}`, emitted with `policy.policy.version-issued` in the same transaction | SPEC 11.2.9 publishes `policy.premium.audited`; the implemented name is new and the SPEC name stays planned (M-22) |
+| Version | `openapi/policy.yaml` 2.15.0, `asyncapi/policy.yaml` 1.12.0, `asyncapi/event-catalog.yaml` 1.32.0 (additive) | no SPEC version has this command |
+
+Consequences:
+
+- A client generated from SPEC 11.2.9 alone would subscribe to
+  `policy.premium.audited`; the expert emits `policy.policy.premium-audited`.
+  The catalog keeps the SPEC name published and planned and adds the
+  implemented name, so a later alignment can add a dual-publish window (EV-05)
+  without breaking implemented consumers.
+- The audit is not a worksheet lifecycle: there is no SCHEDULED/IN_REVIEW/
+  FINALIZED/DISPUTED/WAIVED state, no audit period or audit type, no reported
+  exposure, and no separate deposit, rated, additional, or return premium. The
+  only persisted evidence is the `PREMIUM_AUDIT` endorsement and version, whose
+  description carries the old premium, the new premium, and the delta.
+- The approval gate protects the version timeline (a pre-inception or regressing
+  date), not the premium movement; a large in-term increase or decrease is
+  accepted without approval. The SPEC `Yes*` conditional approval is therefore
+  not modelled.
+- `auditedPremium` is the final written premium, not an additional or return
+  premium. A decrease is accepted and persisted as a signed negative delta on
+  the endorsement and version, and the event carries the negative `delta`.
+- There is no `policy.premium-audit-batch` quarterly job and no worksheet
+  generation, so an audit cannot be scheduled or reviewed before it is applied.
+
+Evidence:
+
+- `repos/eia-policy-domain/.../PolicyPremiumAuditController.java:25,38-63`
+  (public path, tenant/book/`If-Match`/`Idempotency-Key` headers, 201/200
+  publication and `ETag` fallback), `PolicyPremiumAuditService.java:21-27`
+  (delegation and header validation),
+  `ApplyPremiumAuditCommand.java:23-31` (shape validation and optional
+  approval), `PremiumAuditResult.java`, and `PremiumAuditDto.java`.
+- `repos/eia-policy-domain/.../PolicyClient.java:333-397` (`/internal/v1` call,
+  tenant/DIRECT/book headers, bare-policy and envelope projection, expert
+  `id`/alias handling).
+- `repos/eia-policy-expert/.../PremiumAuditController.java:22-45` (public and
+  internal aliases, 201, `ETag`), `PremiumAuditService.java:55-102` (guard,
+  status gate, no-change gate, timeline resolution, endorsement, premium update,
+  version issue, and outbox writes), `PremiumAuditRules.java:16-92` (auditable
+  statuses, reasons, delta, no-change, and description),
+  `PremiumAuditRequest.java:23-31`, and `VersionTimeline.java:46-88`
+  (backdate, term, and regression rules).
+- `repos/eia-policy-expert/.../PolicyEvents.java:42,436-455,483-496`
+  (`PREMIUM_AUDITED` name, the eight-member `premiumAudited` payload, and the
+  concurrent `versionIssued` fact).
+- Tests: `PremiumAuditControllerTest`, `PremiumAuditServiceTest`, and
+  `PremiumAuditIntegrationTest` in the expert; `PolicyPremiumAuditControllerTest`
+  and `PolicyPremiumAuditServiceTest` in the domain.
+- `openapi/policy.yaml` 2.15.0, `asyncapi/policy.yaml` 1.12.0, and
+  `asyncapi/event-catalog.yaml` 1.32.0 record the implemented shape; the
+  policy-web premium-audit modal posts the same body and `If-Match`
+  (`repos/eia-policy-web/src/premiumAudit.js`,
+  `App.jsx`, and `tests/premium-audit.spec.js`).
+
+Resolution: the audited-premium command is canonical for now. Closing the gap
+means persisting the SPEC `policy_premium_audit` worksheet with its audit
+period, type, exposure, premium buckets, minimum-premium flag, and status
+lifecycle, adding the quarterly worksheet batch job, and deciding whether the
+worksheet or the immediate re-rating is the posting unit. Renaming
+`policy.policy.premium-audited` to `policy.premium.audited` requires the EV-05
+dual-publish window; publishing both is additive. Adding the approval gate for
+a material in-term premium movement is a behaviour change and needs its own
+contract version.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-22
-Notifications template-management contract:
+Policy premium-audit contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -3282,7 +3391,7 @@ python: 3.12.8 (standard library only)
 
 OpenAPI 3.1 documents
   OK openapi/party.yaml  5 paths, 7 operations
-  OK openapi/policy.yaml  51 paths, 67 operations
+  OK openapi/policy.yaml  52 paths, 68 operations
   OK openapi/contract.yaml  43 paths, 62 operations
   OK openapi/direct-claims.yaml  51 paths, 74 operations
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
@@ -3294,7 +3403,7 @@ OpenAPI 3.1 documents
 
 AsyncAPI 3 documents
   OK asyncapi/party.yaml  9 event channels
-  OK asyncapi/policy.yaml  33 event channels
+  OK asyncapi/policy.yaml  34 event channels
   OK asyncapi/contract.yaml  32 event channels
   OK asyncapi/direct-claims.yaml  27 event channels
   OK asyncapi/assumed-claims.yaml  21 event channels
@@ -3303,7 +3412,7 @@ AsyncAPI 3 documents
   OK asyncapi/document.yaml  24 event channels
   OK asyncapi/payment.yaml  20 event channels
   OK asyncapi/notifications.yaml  15 event channels
-  OK catalog: 215 unique published events across 10 verticals
+  OK catalog: 216 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -3311,7 +3420,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 14465 checks, 0 failures
+  PASS 14576 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -3591,6 +3700,14 @@ Additional checks and limits:
   removing the `NotificationTemplateData` message from the created channel each
   fail with the specific missing-operation, conflict-code, nullability,
   implemented-event, or payload-message message. All five were run on a
+  throwaway copy and exited non-zero (exit 1); the working copy was left
+  unchanged. The Policy premium-audit pass added four more: renaming the
+  `/api/v1/policies/{policyId}/premium-audit` path, removing `auditedPremium`
+  from `ApplyPremiumAuditRequest.required`, marking the
+  `policy.policy.premium-audited` channel planned, and dropping
+  `policy.policy.premium-audited` from the Policy catalog `implemented` list
+  each fail with the specific missing-operation, required-list,
+  implemented-channel, or implemented-event message. All four were run on a
   throwaway copy and exited non-zero (exit 1); the working copy was left
   unchanged.
 

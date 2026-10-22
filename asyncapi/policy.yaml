@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:policy
 info:
   title: EIA Policy events
-  version: 1.11.0
+  version: 1.12.0
   summary: Published domain event names for the Policy vertical.
   description: >
     Event contract for the Policy vertical. The authoritative event names are
@@ -68,6 +68,16 @@ info:
     `cancellationId` and `cancellationNumber` when the note refunds a
     cancellation; an unlinked billing adjustment omits both. The event keeps
     `eventVersion` 1, and the link rules are recorded in M-22 and M-41.
+    The premium-audit slice adds the implemented
+    `policy.policy.premium-audited` fact. Its `PolicyPremiumAuditedData` payload
+    requires the policy identity and number, the premium before and after the
+    audit, the signed delta, the policy currency, the audit effective date, and
+    the mandatory reason. The name differs from the SPEC 11.2.9
+    `policy.premium.audited`, which stays planned, and the fact is emitted with
+    `policy.policy.version-issued` in the same transaction as the
+    `PREMIUM_AUDIT` endorsement, version, and premium replacement. The event
+    keeps `eventVersion` 1, and the name difference and the missing
+    `policy_premium_audit` worksheet are recorded in M-22 and M-50.
     The remaining SPEC
     11.2.9 and 11.2.13 names are planned.
   contact:
@@ -499,6 +509,29 @@ channels:
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
+  PolicyPolicyPremiumAudited:
+    address: policy.policy.premium-audited
+    title: policy.policy.premium-audited
+    description: >
+      Emitted when a premium audit replaces the policy premium, in the same
+      transaction as the PREMIUM_AUDIT endorsement, the immutable PREMIUM_AUDIT
+      policy version, the policy row update, and the outbox row. The payload is
+      the audit contract: the policy identity and number, the premium before and
+      after the audit, the signed `delta`, the policy `currency`, the audit
+      `effectiveDate`, and the mandatory `reason`. The event is keyed by the
+      policy id at the bumped aggregate version; the same command also emits
+      `policy.policy.version-issued`. The name differs from the SPEC 11.2.9
+      `policy.premium.audited`, which remains planned (M-22, M-50).
+    x-event-type: policy.policy.premium-audited
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.2.9
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      PolicyPremiumAuditedData:
+        $ref: '#/components/messages/PolicyPremiumAuditedData'
   PolicyOccurrenceRecorded:
     address: policy.occurrence.recorded
     title: policy.occurrence.recorded
@@ -905,6 +938,18 @@ operations:
       HTTPS (SPEC 7.5). Planned.
     x-event-type: policy.premium.audited
     x-status: planned
+  publishPolicyPolicyPremiumAudited:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyPolicyPremiumAudited'
+    summary: Publish policy.policy.premium-audited
+    description: >
+      Publishes policy.policy.premium-audited when a premium audit replaces the
+      policy premium, in the same transaction as the PREMIUM_AUDIT endorsement,
+      the policy version, and the row update. The same command also emits
+      policy.policy.version-issued.
+    x-event-type: policy.policy.premium-audited
+    x-status: implemented
   publishPolicyOccurrenceRecorded:
     action: send
     channel:
@@ -1188,6 +1233,53 @@ components:
             format: uuid
           newPolicyNumber:
             type: string
+    PolicyPremiumAuditedData:
+      name: PolicyPremiumAuditedData
+      title: policy.policy.premium-audited data
+      summary: One premium audit that replaced the policy premium.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - policyId
+          - policyNumber
+          - previousPremium
+          - auditedPremium
+          - delta
+          - currency
+          - effectiveDate
+          - reason
+        properties:
+          policyId:
+            type: string
+            format: uuid
+          policyNumber:
+            type: string
+          previousPremium:
+            type: string
+            description: >
+              Decimal-string policy premium before the audit, at policy money
+              scale (four fraction digits).
+          auditedPremium:
+            type: string
+            description: >
+              Decimal-string written premium after the audit, at policy money
+              scale (four fraction digits).
+          delta:
+            type: string
+            description: >
+              Signed decimal-string movement (`auditedPremium - previousPremium`),
+              at policy money scale. Negative on a return premium.
+          currency:
+            type: string
+            pattern: '^[A-Z]{3}$'
+          effectiveDate:
+            type: string
+            format: date
+          reason:
+            type: string
+            maxLength: 500
     PolicyDunningSentData:
       name: PolicyDunningSentData
       title: policy.dunning.sent data

@@ -1617,6 +1617,48 @@ POLICY_LEGAL_ENTITY_ASSIGNED_EVENT_MESSAGE = "PolicyPolicyLegalEntityAssignedDat
 POLICY_LEGAL_ENTITY_EVENT_IMPLEMENTED_BY = "PolicyEvents.java"
 
 
+# Policy premium audit (SPEC 6.12 policy.premium-audit, SPEC 11.2.10). The
+# public command re-rates the written premium with a PREMIUM_AUDIT endorsement
+# and version. The audited premium must be non-negative and must change the
+# current premium; the eligible statuses, the version-timeline 422/428 rules,
+# and the If-Match conflict are the expert's. The implemented event name differs
+# from the SPEC 11.2.9 `policy.premium.audited`, which stays planned.
+POLICY_PREMIUM_AUDIT_PATH = "/api/v1/policies/{policyId}/premium-audit"
+POLICY_PREMIUM_AUDIT_REQUEST = "ApplyPremiumAuditRequest"
+POLICY_PREMIUM_AUDIT_REQUIRED_FIELDS = (
+    "auditedPremium",
+    "effectiveDate",
+    "reason",
+)
+POLICY_PREMIUM_AUDIT_OPTIONAL_FIELDS = ("approvedBy", "approvalRef")
+POLICY_PREMIUM_AUDIT_ALLOWED_STATUSES = (
+    "BOUND",
+    "ISSUED",
+    "IN_FORCE",
+    "ENDORSED",
+    "REINSTATED",
+)
+POLICY_PREMIUM_AUDIT_AMOUNT_PATTERN = (
+    r"^(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,4})?$"
+)
+POLICY_PREMIUM_AUDIT_REASON_MAX_LENGTH = 500
+POLICY_PREMIUM_AUDIT_CHANGE_TYPE = "PREMIUM_AUDIT"
+POLICY_PREMIUM_AUDIT_EVENT = "policy.policy.premium-audited"
+POLICY_PREMIUM_AUDIT_SPEC_EVENT = "policy.premium.audited"
+POLICY_PREMIUM_AUDIT_EVENT_FIELDS = (
+    "policyId",
+    "policyNumber",
+    "previousPremium",
+    "auditedPremium",
+    "delta",
+    "currency",
+    "effectiveDate",
+    "reason",
+)
+POLICY_PREMIUM_AUDIT_EVENT_MESSAGE = "PolicyPremiumAuditedData"
+POLICY_PREMIUM_AUDIT_EVENT_IMPLEMENTED_BY = "PolicyEvents.java"
+
+
 # Event names the transactional-outbox rollout actually emits. The catalog must
 # list each one as published and implemented, and the vertical document must
 # expose a channel for it. Round 5 covered the first six verticals; the rollout
@@ -1635,6 +1677,7 @@ IMPLEMENTED_EVENTS = {
         "policy.policy.cancelled",
         "policy.policy.reinstated",
         "policy.policy.renewed",
+        "policy.policy.premium-audited",
         "policy.billing-plan.created",
         "policy.installment.paid",
         "policy.installment.waived",
@@ -8210,6 +8253,285 @@ def check_policy_legal_entities_asyncapi(contracts: ContractSet, document, relat
 
 
 # ---------------------------------------------------------------------------
+# Policy premium-audit checks
+# ---------------------------------------------------------------------------
+
+
+def check_policy_premium_audit_openapi(contracts: ContractSet, document, relative: str):
+    """Require the audited-premium command, its schema, and its error rules."""
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    path_item = paths.get(POLICY_PREMIUM_AUDIT_PATH) if isinstance(paths, dict) else None
+    operation = path_item.get("post") if isinstance(path_item, dict) else None
+    where = f"{relative}: POST {POLICY_PREMIUM_AUDIT_PATH}"
+    contracts.check(
+        isinstance(operation, dict),
+        f"{where}: required premium-audit operation is missing",
+    )
+    if isinstance(operation, dict):
+        parameter_refs, inline_names = _parameter_names(operation)
+        for parameter in ("TenantHeader", "BookHeaderDirectOptional", "IfMatch"):
+            contracts.check(
+                parameter in parameter_refs,
+                f"{where}: must document the shared {parameter} parameter",
+            )
+        contracts.check(
+            "policyId" in inline_names,
+            f"{where}: must declare the policyId path parameter",
+        )
+
+        request_body = operation.get("requestBody") or {}
+        contracts.check(
+            request_body.get("required") is True,
+            f"{where}: request body must be required",
+        )
+        request_schema = (
+            ((request_body.get("content") or {}).get("application/json") or {}).get("schema")
+            if isinstance(request_body, dict)
+            else None
+        )
+        contracts.check(
+            isinstance(request_schema, dict)
+            and str(request_schema.get("$ref", "")).endswith(
+                f"/schemas/{POLICY_PREMIUM_AUDIT_REQUEST}"
+            ),
+            f"{where}: request body must use the {POLICY_PREMIUM_AUDIT_REQUEST} schema",
+        )
+
+        created = (operation.get("responses") or {}).get("201")
+        created_headers = created.get("headers") if isinstance(created, dict) else None
+        tag = created_headers.get("ETag") if isinstance(created_headers, dict) else None
+        contracts.check(
+            isinstance(tag, dict)
+            and str(tag.get("$ref", "")).endswith("/headers/ETag"),
+            f"{where}: 201 must declare the shared ETag header",
+        )
+        created_schema = _response_schema(operation, "201")
+        contracts.check(
+            isinstance(created_schema, dict)
+            and str(created_schema.get("$ref", "")).endswith("/schemas/Policy"),
+            f"{where}: 201 must return the updated Policy schema",
+        )
+
+        responses = operation.get("responses") or {}
+        for code, suffix in (
+            ("400", "BadRequest"),
+            ("404", "NotFound"),
+            ("422", "UnprocessableContent"),
+            ("428", "PreconditionRequired"),
+        ):
+            response = responses.get(code) if isinstance(responses, dict) else None
+            contracts.check(
+                isinstance(response, dict)
+                and str(response.get("$ref", "")).endswith(f"/responses/{suffix}"),
+                f"{where}: {code} must reference the shared {suffix} response",
+            )
+        conflict = responses.get("409") if isinstance(responses, dict) else None
+        conflict_text = (
+            str(conflict.get("description") or "") if isinstance(conflict, dict) else ""
+        )
+        for code in ("PREMIUM_AUDIT_NOT_ALLOWED", "CONCURRENT_MODIFICATION"):
+            contracts.check(
+                code in conflict_text,
+                f"{where}: 409 must document {code}",
+            )
+        conflict_schema = _response_schema(operation, "409", "application/problem+json")
+        contracts.check(
+            isinstance(conflict_schema, dict)
+            and str(conflict_schema.get("$ref", "")).endswith("/schemas/Problem"),
+            f"{where}: 409 must document the shared Problem schema",
+        )
+
+        description = str(operation.get("description") or "")
+        for status in POLICY_PREMIUM_AUDIT_ALLOWED_STATUSES:
+            contracts.check(
+                status in description,
+                f"{where}: description must name the auditable status {status}",
+            )
+        for term in (
+            POLICY_PREMIUM_AUDIT_CHANGE_TYPE,
+            "NO_PREMIUM_CHANGE",
+            "PREMIUM_AUDIT_NOT_ALLOWED",
+            "CONCURRENT_MODIFICATION",
+            "VERSION_OUTSIDE_POLICY_TERM",
+            "VERSION_REGRESSION",
+            "VERSION_BACKDATE_REASON_REQUIRED",
+            "APPROVAL_REQUIRED",
+            POLICY_PREMIUM_AUDIT_EVENT,
+            POLICY_PREMIUM_AUDIT_SPEC_EVENT,
+            "same transaction",
+            "ETag",
+        ):
+            contracts.check(
+                term in description,
+                f"{where}: description must document {term}",
+            )
+
+    planned_operations = document.get("x-planned-operations") or []
+    planned_pairs = {
+        (str(entry.get("method", "")).lower(), entry.get("path"))
+        for entry in planned_operations
+        if isinstance(entry, dict)
+    }
+    contracts.check(
+        ("post", POLICY_PREMIUM_AUDIT_PATH) not in planned_pairs,
+        f"{relative}: implemented premium-audit operation must not reappear under "
+        "x-planned-operations",
+    )
+
+    request = schemas.get(POLICY_PREMIUM_AUDIT_REQUEST) or {}
+    request_properties = request.get("properties") or {}
+    request_required = set(request.get("required") or [])
+    contracts.check(
+        isinstance(request, dict) and request.get("type") == "object",
+        f"{relative}: {POLICY_PREMIUM_AUDIT_REQUEST} must be an object schema",
+    )
+    contracts.check(
+        request_required == set(POLICY_PREMIUM_AUDIT_REQUIRED_FIELDS),
+        f"{relative}: {POLICY_PREMIUM_AUDIT_REQUEST} must require exactly "
+        f"{list(POLICY_PREMIUM_AUDIT_REQUIRED_FIELDS)}",
+    )
+    for field in POLICY_PREMIUM_AUDIT_REQUIRED_FIELDS:
+        contracts.check(
+            field in request_properties,
+            f"{relative}: {POLICY_PREMIUM_AUDIT_REQUEST}.properties.{field} "
+            "is required",
+        )
+    for field in POLICY_PREMIUM_AUDIT_OPTIONAL_FIELDS:
+        contracts.check(
+            field in request_properties,
+            f"{relative}: {POLICY_PREMIUM_AUDIT_REQUEST}.properties.{field} "
+            "is required as an optional member",
+        )
+        contracts.check(
+            field not in request_required,
+            f"{relative}: {POLICY_PREMIUM_AUDIT_REQUEST}.{field} must stay optional",
+        )
+        contracts.check(
+            (request_properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: {POLICY_PREMIUM_AUDIT_REQUEST}.{field} must be a uuid",
+        )
+    audited = request_properties.get("auditedPremium") or {}
+    contracts.check(
+        audited.get("type") == "string"
+        and audited.get("pattern") == POLICY_PREMIUM_AUDIT_AMOUNT_PATTERN,
+        f"{relative}: {POLICY_PREMIUM_AUDIT_REQUEST}.auditedPremium must be a "
+        "non-negative money decimal string",
+    )
+    contracts.check(
+        (request_properties.get("effectiveDate") or {}).get("format") == "date",
+        f"{relative}: {POLICY_PREMIUM_AUDIT_REQUEST}.effectiveDate must be a date",
+    )
+    reason = request_properties.get("reason") or {}
+    contracts.check(
+        reason.get("type") == "string"
+        and reason.get("minLength") == 1
+        and reason.get("maxLength") == POLICY_PREMIUM_AUDIT_REASON_MAX_LENGTH,
+        f"{relative}: {POLICY_PREMIUM_AUDIT_REQUEST}.reason must be a non-blank "
+        f"string of at most {POLICY_PREMIUM_AUDIT_REASON_MAX_LENGTH} characters",
+    )
+
+
+def check_policy_premium_audit_asyncapi(contracts: ContractSet, document, relative: str):
+    """Require the implemented premium-audited channel and its eight-member payload."""
+    channels = document.get("channels") or {}
+    operations = document.get("operations") or {}
+    messages = (document.get("components") or {}).get("messages") or {}
+    send_events = {
+        operation.get("x-event-type")
+        for operation in operations.values()
+        if isinstance(operation, dict) and operation.get("action") == "send"
+    }
+
+    channel = next(
+        (
+            candidate
+            for candidate in channels.values()
+            if isinstance(candidate, dict)
+            and candidate.get("address") == POLICY_PREMIUM_AUDIT_EVENT
+        ),
+        None,
+    )
+    contracts.check(
+        isinstance(channel, dict),
+        f"{relative}: required premium-audited channel "
+        f"'{POLICY_PREMIUM_AUDIT_EVENT}' is missing",
+    )
+    if not isinstance(channel, dict):
+        return
+    contracts.check(
+        channel.get("x-status") == "implemented",
+        f"{relative}: {POLICY_PREMIUM_AUDIT_EVENT} channel must be implemented",
+    )
+    contracts.check(
+        channel.get("x-event-version") == 1,
+        f"{relative}: {POLICY_PREMIUM_AUDIT_EVENT} channel must stay at "
+        "x-event-version 1",
+    )
+    contracts.check(
+        str(channel.get("x-implemented-by", "")).endswith(
+            POLICY_PREMIUM_AUDIT_EVENT_IMPLEMENTED_BY
+        ),
+        f"{relative}: {POLICY_PREMIUM_AUDIT_EVENT} must name "
+        f"{POLICY_PREMIUM_AUDIT_EVENT_IMPLEMENTED_BY} in x-implemented-by",
+    )
+    contracts.check(
+        POLICY_PREMIUM_AUDIT_EVENT in send_events,
+        f"{relative}: {POLICY_PREMIUM_AUDIT_EVENT} must have a send operation",
+    )
+    channel_messages = channel.get("messages") or {}
+    contracts.check(
+        (channel_messages.get(POLICY_PREMIUM_AUDIT_EVENT_MESSAGE) or {}).get("$ref")
+        == f"#/components/messages/{POLICY_PREMIUM_AUDIT_EVENT_MESSAGE}",
+        f"{relative}: {POLICY_PREMIUM_AUDIT_EVENT} must reference "
+        f"{POLICY_PREMIUM_AUDIT_EVENT_MESSAGE}",
+    )
+
+    message = messages.get(POLICY_PREMIUM_AUDIT_EVENT_MESSAGE) or {}
+    payload = message.get("payload") or {}
+    properties = payload.get("properties") or {}
+    required = set(payload.get("required") or [])
+    contracts.check(
+        required == set(POLICY_PREMIUM_AUDIT_EVENT_FIELDS),
+        f"{relative}: {POLICY_PREMIUM_AUDIT_EVENT_MESSAGE} must require exactly "
+        f"{list(POLICY_PREMIUM_AUDIT_EVENT_FIELDS)}",
+    )
+    for field in POLICY_PREMIUM_AUDIT_EVENT_FIELDS:
+        contracts.check(
+            field in properties,
+            f"{relative}: {POLICY_PREMIUM_AUDIT_EVENT_MESSAGE}.properties.{field} "
+            "is required",
+        )
+    contracts.check(
+        (properties.get("policyId") or {}).get("format") == "uuid",
+        f"{relative}: {POLICY_PREMIUM_AUDIT_EVENT_MESSAGE}.policyId must be a uuid",
+    )
+    for field in ("previousPremium", "auditedPremium", "delta"):
+        contracts.check(
+            (properties.get(field) or {}).get("type") == "string",
+            f"{relative}: {POLICY_PREMIUM_AUDIT_EVENT_MESSAGE}.{field} must be a "
+            "decimal string",
+        )
+    contracts.check(
+        (properties.get("currency") or {}).get("pattern") == "^[A-Z]{3}$",
+        f"{relative}: {POLICY_PREMIUM_AUDIT_EVENT_MESSAGE}.currency must be an "
+        "uppercase ISO code",
+    )
+    contracts.check(
+        (properties.get("effectiveDate") or {}).get("format") == "date",
+        f"{relative}: {POLICY_PREMIUM_AUDIT_EVENT_MESSAGE}.effectiveDate must be "
+        "a date",
+    )
+    contracts.check(
+        (properties.get("reason") or {}).get("maxLength")
+        == POLICY_PREMIUM_AUDIT_REASON_MAX_LENGTH,
+        f"{relative}: {POLICY_PREMIUM_AUDIT_EVENT_MESSAGE}.reason must be at most "
+        f"{POLICY_PREMIUM_AUDIT_REASON_MAX_LENGTH} characters",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Contract technical-account checks
 # ---------------------------------------------------------------------------
 
@@ -11856,6 +12178,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_policy_programs(contracts, document, relative)
             check_policy_credit_notes_openapi(contracts, document, relative)
             check_policy_legal_entities_openapi(contracts, document, relative)
+            check_policy_premium_audit_openapi(contracts, document, relative)
         if vertical == "contract":
             check_contract_security(contracts, document, relative)
             check_contract_security_status(contracts, document, relative)
@@ -12266,6 +12589,7 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
             check_policy_programs_asyncapi(contracts, document, relative)
             check_policy_credit_notes_asyncapi(contracts, document, relative)
             check_policy_legal_entities_asyncapi(contracts, document, relative)
+            check_policy_premium_audit_asyncapi(contracts, document, relative)
 
         if vertical == "contract":
             check_contract_technical_accounts_asyncapi(

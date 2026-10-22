@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.31.0
+  version: 1.32.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -156,6 +156,15 @@ info:
     They add three published and three implemented names, bringing the platform
     totals to 215 published and 95 implemented; Notifications becomes 15
     published and 5 implemented (M-22, M-49).
+    The 2026-10-22 Policy premium-audit slice adds one Policy name,
+    `policy.policy.premium-audited`, with no matching SPEC 11.2.9 name: SPEC
+    publishes `policy.premium.audited` instead, which stays planned. The
+    implemented fact is keyed by the policy id at the bumped aggregate version
+    and is emitted with `policy.policy.version-issued` in the same transaction
+    as the PREMIUM_AUDIT endorsement, version, and premium replacement. It adds
+    one published and one implemented name, bringing the platform totals to 216
+    published and 96 implemented; Policy becomes 34 published and 22 implemented
+    (M-22, M-50).
     The platform
     event-ingest service
     is the inbox:
@@ -288,6 +297,7 @@ x-event-catalog:
       - policy.policy.voided
       - policy.premium.changed
       - policy.premium.audited
+      - policy.policy.premium-audited
       - policy.occurrence.recorded
       - policy.aggregate.eroded
       - policy.aggregate.reconciled
@@ -305,6 +315,7 @@ x-event-catalog:
       - policy.policy.cancelled
       - policy.policy.reinstated
       - policy.policy.renewed
+      - policy.policy.premium-audited
       - policy.billing-plan.created
       - policy.installment.paid
       - policy.installment.waived
