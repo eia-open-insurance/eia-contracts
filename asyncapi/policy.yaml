@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:policy
 info:
   title: EIA Policy events
-  version: 1.10.0
+  version: 1.11.0
   summary: Published domain event names for the Policy vertical.
   description: >
     Event contract for the Policy vertical. The authoritative event names are
@@ -22,9 +22,9 @@ info:
     `policy.installment.waived`, and `policy.dunning.sent`,
     `policy.mass-tort-profile.updated`, the program facts
     `policy.program.created` and `policy.policy.program-assigned`, and the
-    credit-note facts `policy.credit-note.issued`,
-    `policy.credit-note.applied`, `policy.credit-note.cancelled`, and
-    `policy.credit-note.reversed` through
+    credit-note facts `policy.credit-note.created`,
+    `policy.credit-note.issued`, `policy.credit-note.applied`,
+    `policy.credit-note.cancelled`, and `policy.credit-note.reversed` through
     the transactional outbox; those channels and operations are marked
     `x-status: implemented`. The `created` and `updated` names are additive: the
     catalog had no generic create or update fact. The billing plan name is
@@ -39,7 +39,7 @@ info:
     The two program facts are new names with no SPEC 11.2.9 equivalent: a
     program is a catalog aggregate and the assignment is a policy command, so
     the names, the aggregate type, and the nullable membership fields are
-    recorded in M-22 and M-39. The four credit-note facts are new names as
+    recorded in M-22 and M-39. The five credit-note facts are new names as
     well: SPEC 11.2.13 publishes only `policy.billing.credit-note-issued`, and
     the implemented lifecycle has no approval or SAP step, so the names and the
     narrower status model are recorded in M-22 and M-41. The two legal-entity
@@ -61,6 +61,13 @@ info:
     note), `amount`, `reason`, and `status: REVERSED`. The new event name and the
     payload keep `eventVersion` 1, and the reversal extension is recorded in
     M-22 and M-41.
+    The cancellation-linked credit-note slice adds
+    `policy.credit-note.created`, the DRAFT creation fact. Its
+    `PolicyCreditNoteCreatedData` payload requires the base note identity, money,
+    and DRAFT status members plus `createdAt`, and carries the optional
+    `cancellationId` and `cancellationNumber` when the note refunds a
+    cancellation; an unlinked billing adjustment omits both. The event keeps
+    `eventVersion` 1, and the link rules are recorded in M-22 and M-41.
     The remaining SPEC
     11.2.9 and 11.2.13 names are planned.
   contact:
@@ -292,6 +299,28 @@ channels:
         $ref: '#/components/messages/DomainEvent'
       PolicyDunningSentData:
         $ref: '#/components/messages/PolicyDunningSentData'
+  PolicyCreditNoteCreated:
+    address: policy.credit-note.created
+    title: policy.credit-note.created
+    description: >
+      Emitted when a DRAFT credit note is created, in the same transaction as the
+      note row, the policy-version bump, and the outbox row. The payload carries
+      the policy identity and number, the credit-note identity and number, the
+      note amount as a decimal string, the currency, status DRAFT, and
+      `createdAt`. A cancellation-linked return-premium note additionally carries
+      `cancellationId` and `cancellationNumber`, the `CX-{7 digits}` reference of
+      the cancellation it refunds; an unlinked billing adjustment omits both
+      members. A rejected link writes neither the note nor the event.
+    x-event-type: policy.credit-note.created
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.2.13
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      PolicyCreditNoteCreatedData:
+        $ref: '#/components/messages/PolicyCreditNoteCreatedData'
   PolicyCreditNoteIssued:
     address: policy.credit-note.issued
     title: policy.credit-note.issued
@@ -299,8 +328,8 @@ channels:
       Emitted when a DRAFT credit note is issued, in the same transaction as the
       note row, the policy-version bump, and the outbox row. The payload carries
       the policy identity and number, the credit-note identity and number, the
-      note amount as a decimal string, the currency, and status ISSUED. A
-      created DRAFT note emits no event.
+      note amount as a decimal string, the currency, and status ISSUED. Creation
+      itself writes `policy.credit-note.created`.
     x-event-type: policy.credit-note.issued
     x-event-version: 1
     x-status: implemented
@@ -760,6 +789,17 @@ operations:
       policy-version bump.
     x-event-type: policy.dunning.sent
     x-status: implemented
+  publishPolicyCreditNoteCreated:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyCreditNoteCreated'
+    summary: Publish policy.credit-note.created
+    description: >
+      Publishes policy.credit-note.created when a DRAFT credit note is created,
+      in the same transaction as the note row and the policy-version bump. The
+      payload carries the optional cancellation link for a return-premium note.
+    x-event-type: policy.credit-note.created
+    x-status: implemented
   publishPolicyCreditNoteIssued:
     action: send
     channel:
@@ -1194,6 +1234,65 @@ components:
             enum:
               - SENT
               - CANCELLED
+    PolicyCreditNoteCreatedData:
+      name: PolicyCreditNoteCreatedData
+      title: policy.credit-note.created data
+      summary: One created DRAFT credit note, optionally linked to a cancellation.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - policyId
+          - policyNumber
+          - creditNoteId
+          - noteNumber
+          - amount
+          - currency
+          - status
+          - createdAt
+        properties:
+          policyId:
+            type: string
+            format: uuid
+          policyNumber:
+            type: string
+          creditNoteId:
+            type: string
+            format: uuid
+          noteNumber:
+            type: string
+            maxLength: 32
+            description: Server-generated as `CN-{7 digits}` and unique per policy.
+          amount:
+            type: string
+            description: Positive decimal money string with up to four fraction digits (SPEC 10.3).
+          currency:
+            type: string
+            pattern: '^[A-Z]{3}$'
+          status:
+            type: string
+            enum:
+              - DRAFT
+          createdAt:
+            type: string
+            format: date-time
+            description: The request instant recorded on the created note.
+          cancellationId:
+            type: string
+            format: uuid
+            description: >
+              Cancellation whose return premium the note refunds. Present only
+              on a linked return-premium note; an unlinked billing adjustment
+              omits the member.
+          cancellationNumber:
+            type: [string, 'null']
+            maxLength: 32
+            description: >
+              Linked cancellation's `CX-{7 digits}` reference. Present with
+              `cancellationId`; a historical cancellation without a number
+              falls back to the cancellation id, and an unlinked adjustment
+              omits the member.
     PolicyCreditNoteData:
       name: PolicyCreditNoteData
       title: policy.credit-note.issued/applied/cancelled data
@@ -1602,16 +1701,16 @@ x-implementation:
   publisher: eia-policy-expert
   subscriber: none
   notes: >
-    Twenty Policy events are written to the transactional outbox in the same
+    Twenty-one Policy events are written to the transactional outbox in the same
     transaction as the aggregate write and dispatched by the platform outbox
     dispatcher when `eia.outbox.enabled=true`: `created`, `updated`,
     `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`,
     `billing-plan.created`, `installment.paid`, `installment.waived`,
     `dunning.sent`, `mass-tort-profile.updated`, the program facts
     `policy.program.created` and `policy.policy.program-assigned`, the
-    credit-note facts `policy.credit-note.issued`,
-    `policy.credit-note.applied`, `policy.credit-note.cancelled`, and
-    `policy.credit-note.reversed`, and the
+    credit-note facts `policy.credit-note.created`,
+    `policy.credit-note.issued`, `policy.credit-note.applied`,
+    `policy.credit-note.cancelled`, and `policy.credit-note.reversed`, and the
     legal-entity facts `policy.legal-entity.created` and
     `policy.policy.legal-entity-assigned`. The renewal
     event carries both policy identities and the lineage link; the billing plan
@@ -1622,13 +1721,15 @@ x-implementation:
     and the coverage block; and the program events carry the created catalog
     row and the policy membership delta with both sides of the link. The
     credit-note events carry the policy and note identity, the note number, the
-    amount as a decimal string, the currency, and the new status; the `applied`
-    payload additionally carries the credited installment id and that
+    amount as a decimal string, the currency, and the new status; the `created`
+    payload adds `createdAt` and the optional `cancellationId`/
+    `cancellationNumber` of the cancellation a return-premium note refunds, the
+    `applied` payload additionally carries the credited installment id and that
     installment's cumulative credited amount, and the `reversed` payload carries
     the note identity and number, the nullable released installment id, the
     amount, the required reversal reason, and status REVERSED. They are
-    keyed by the policy aggregate because every transition bumps the policy
-    version. The legal-entity created fact is keyed by the `LegalEntity`
+    keyed by the policy aggregate because every command, including creation,
+    bumps the policy version. The legal-entity created fact is keyed by the `LegalEntity`
     aggregate at version 1 and carries the catalog row; the assignment fact is
     keyed by the policy aggregate at the new version and carries the nullable
     new and previous entity ids and `changedFields`. The other

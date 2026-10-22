@@ -1316,6 +1316,38 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   contract versions.
 - `python scripts/validate_contracts.py` passes 13,576 checks with 0 failures.
 
+### Added in the Policy cancellation-linked credit-note contract (2026-10-21)
+
+- `openapi/policy.yaml` is 2.14.0: `CreateCreditNoteRequest` adds the optional
+  nullable `cancellationId`; `CreditNote` adds the required-but-nullable
+  `cancellationId` and `cancellationNumber`; `Cancellation` adds the nullable
+  `cancellationNumber` (`CX-{7 digits}`). The document records the
+  same-tenant/policy, ACTIVE, return-premium (one-cent), and currency link
+  rules, the one-note-per-cancellation duplicate as 409
+  `DUPLICATE_CANCELLATION_CREDIT_NOTE`, the 404 `CANCELLATION_NOT_FOUND`, 409
+  `CANCELLATION_NOT_ACTIVE`, and 400 `CREDIT_NOTE_AMOUNT_MISMATCH`/
+  `CURRENCY_MISMATCH` rejections, and the `policy.credit-note.created` creation
+  event. `x-compatibility` moves to 2.14.0 over 2.13.0.
+- `asyncapi/policy.yaml` is 1.11.0: the implemented
+  `policy.credit-note.created` channel and `send` operation with the dedicated
+  `PolicyCreditNoteCreatedData` payload (policy/note identity, note number,
+  amount, currency, `status: DRAFT`, `createdAt`, and the optional
+  `cancellationId`/`cancellationNumber` link). The issued channel description
+  no longer says creation writes no event, and `eventVersion` stays 1.
+- `asyncapi/event-catalog.yaml` is 1.26.0: `policy.credit-note.created` is
+  published and implemented, for 209 published and 89 implemented names
+  (Policy 33 published and 21 implemented).
+- `scripts/validate_contracts.py` requires the optional nullable
+  `cancellationId` request member, the required-but-nullable `CreditNote`
+  cancellation members, the nullable `Cancellation.cancellationNumber`, the link
+  codes and documentation, the five implemented channels, the created payload
+  fields and DRAFT status, the optional link members, and the catalog entry.
+- `README.md` records the new slice, the link semantics, the payload, the
+  catalog totals, and the validation count; `MISMATCHES.md` rewrites M-41 for
+  the cancellation link, updates M-14 and M-22, and refreshes the validation
+  evidence.
+- `python scripts/validate_contracts.py` passes 13,645 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

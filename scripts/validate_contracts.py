@@ -1351,8 +1351,10 @@ POLICY_PROGRAM_ASSIGNED_FIELDS = (
 # requires the tenant header and the canonical DIRECT book. A note is created
 # DRAFT and advances once through DRAFT -> ISSUED -> APPLIED, with CANCELLED
 # reachable from DRAFT or ISSUED. APPLIED and CANCELLED are terminal. Creation
-# bumps the policy version but emits no event; each accepted transition writes
-# one credit-note event in the same transaction.
+# bumps the policy version and writes policy.credit-note.created in the same
+# transaction; each accepted transition writes one credit-note event. A create
+# may name an ACTIVE cancellation of the same tenant and policy whose return
+# premium the note refunds, and a cancellation funds at most one note.
 POLICY_CREDIT_NOTE_PATHS = [
     (
         "get",
@@ -1391,16 +1393,28 @@ POLICY_CREDIT_NOTE_FIELDS = (
     "createdAt",
     "reversedAt",
     "reversalReason",
+    "cancellationId",
+    "cancellationNumber",
 )
 
 POLICY_CREDIT_NOTE_STATUSES = ("DRAFT", "ISSUED", "APPLIED", "CANCELLED", "REVERSED")
 POLICY_CREDIT_NOTE_REQUEST_STATUSES = ("ISSUED", "APPLIED", "CANCELLED", "REVERSED")
 POLICY_CREDIT_NOTE_EVENT_STATUSES = ("ISSUED", "APPLIED", "CANCELLED")
 POLICY_CREDIT_NOTE_REASON_MAX_LENGTH = 500
+POLICY_CREDIT_NOTE_CANCELLATION_NUMBER_MAX_LENGTH = 32
 POLICY_CREDIT_NOTE_AMOUNT_PATTERN = (
     r"^(?!0(?:\.0{1,4})?$)(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,4})?$"
 )
 POLICY_CREDIT_NOTE_EVENTS = (
+    "policy.credit-note.created",
+    "policy.credit-note.issued",
+    "policy.credit-note.applied",
+    "policy.credit-note.cancelled",
+    "policy.credit-note.reversed",
+)
+# The created event is a dedicated DRAFT payload; the other four facts are
+# transitions. The status command only ever writes the transition events.
+POLICY_CREDIT_NOTE_TRANSITION_EVENTS = (
     "policy.credit-note.issued",
     "policy.credit-note.applied",
     "policy.credit-note.cancelled",
@@ -1415,10 +1429,17 @@ POLICY_CREDIT_NOTE_EVENT_FIELDS = (
     "currency",
     "status",
 )
+# The created payload adds the creation instant and the optional cancellation
+# link; an unlinked billing adjustment omits both link members.
+POLICY_CREDIT_NOTE_CREATED_EVENT_FIELDS = POLICY_CREDIT_NOTE_EVENT_FIELDS + (
+    "createdAt",
+)
+POLICY_CREDIT_NOTE_LINK_FIELDS = ("cancellationId", "cancellationNumber")
 # The applied event additionally names the credited installment and its
 # cumulative credited amount; ISSUED and CANCELLED omit both members.
 POLICY_CREDIT_NOTE_APPLIED_EVENT_FIELDS = ("installmentId", "creditedAmount")
 POLICY_CREDIT_NOTE_EVENT_MESSAGE = "PolicyCreditNoteData"
+POLICY_CREDIT_NOTE_CREATED_EVENT_MESSAGE = "PolicyCreditNoteCreatedData"
 # The reversal payload is a dedicated message: it has no policy identity members
 # and names the released installment, the amount, the required reason, and the
 # terminal status.
@@ -1565,6 +1586,7 @@ IMPLEMENTED_EVENTS = {
         "policy.mass-tort-profile.updated",
         "policy.program.created",
         "policy.policy.program-assigned",
+        "policy.credit-note.created",
         "policy.credit-note.issued",
         "policy.credit-note.applied",
         "policy.credit-note.cancelled",
@@ -6027,15 +6049,31 @@ def check_policy_credit_notes_openapi(contracts: ContractSet, document, relative
         "INVALID_CREDIT_NOTE_REASON",
         "VALIDATION_ERROR",
         "CONCURRENT_MODIFICATION",
+        "CANCELLATION_NOT_FOUND",
+        "CANCELLATION_NOT_ACTIVE",
+        "CREDIT_NOTE_AMOUNT_MISMATCH",
+        "DUPLICATE_CANCELLATION_CREDIT_NOTE",
     ):
         contracts.check(
             code in create_text,
             f"{relative}: POST credit notes must document {code}",
         )
+    for term in (
+        "cancellationId",
+        "cancellationNumber",
+        "ACTIVE",
+        "one cent",
+        "policy.credit-note.created",
+        "same transaction",
+    ):
+        contracts.check(
+            term in create_text,
+            f"{relative}: POST credit notes must document {term}",
+        )
     contracts.check(
-        "no lifecycle" in create_text.lower()
-        or "emits no" in create_text.lower(),
-        f"{relative}: POST credit notes must document that creation emits no event",
+        "no lifecycle" not in create_text.lower()
+        and "emits no" not in create_text.lower(),
+        f"{relative}: POST credit notes must not claim that creation emits no event",
     )
 
     status_path = (
@@ -6080,7 +6118,7 @@ def check_policy_credit_notes_openapi(contracts: ContractSet, document, relative
             term in status_text,
             f"{relative}: PATCH credit-note status must document {term}",
         )
-    for event in POLICY_CREDIT_NOTE_EVENTS:
+    for event in POLICY_CREDIT_NOTE_TRANSITION_EVENTS:
         contracts.check(
             event in status_text,
             f"{relative}: PATCH credit-note status must document {event}",
@@ -6163,6 +6201,20 @@ def check_policy_credit_notes_openapi(contracts: ContractSet, document, relative
         and applied_installment.get("format") == "uuid",
         f"{relative}: CreditNote.appliedInstallmentId must be a nullable uuid",
     )
+    cancellation_id = properties.get("cancellationId") or {}
+    contracts.check(
+        _schema_types(cancellation_id) == {"string", "null"}
+        and cancellation_id.get("format") == "uuid",
+        f"{relative}: CreditNote.cancellationId must be a nullable uuid",
+    )
+    cancellation_number = properties.get("cancellationNumber") or {}
+    contracts.check(
+        _schema_types(cancellation_number) == {"string", "null"}
+        and cancellation_number.get("maxLength")
+        == POLICY_CREDIT_NOTE_CANCELLATION_NUMBER_MAX_LENGTH,
+        f"{relative}: CreditNote.cancellationNumber must be a nullable string of "
+        f"at most {POLICY_CREDIT_NOTE_CANCELLATION_NUMBER_MAX_LENGTH} characters",
+    )
     contracts.check(
         (properties.get("createdAt") or {}).get("format") == "date-time",
         f"{relative}: CreditNote.createdAt must be a date-time",
@@ -6231,6 +6283,38 @@ def check_policy_credit_notes_openapi(contracts: ContractSet, document, relative
         == POLICY_CREDIT_NOTE_REASON_MAX_LENGTH,
         f"{relative}: CreateCreditNoteRequest.reason must be a nullable string "
         f"of at most {POLICY_CREDIT_NOTE_REASON_MAX_LENGTH} characters",
+    )
+    create_cancellation = create_properties.get("cancellationId") or {}
+    contracts.check(
+        "cancellationId" in create_properties
+        and "cancellationId" not in create_required,
+        f"{relative}: CreateCreditNoteRequest.cancellationId must stay optional",
+    )
+    contracts.check(
+        _schema_types(create_cancellation) == {"string", "null"}
+        and create_cancellation.get("format") == "uuid",
+        f"{relative}: CreateCreditNoteRequest.cancellationId must be a nullable "
+        "uuid",
+    )
+
+    cancellation = schemas.get("Cancellation") or {}
+    cancellation_properties = cancellation.get("properties") or {}
+    cancellation_required = set(cancellation.get("required") or [])
+    cancellation_number = cancellation_properties.get("cancellationNumber") or {}
+    contracts.check(
+        "cancellationNumber" in cancellation_properties
+        and "cancellationNumber" not in cancellation_required,
+        f"{relative}: Cancellation.cancellationNumber must stay optional so the "
+        "historical and public-domain projections remain valid",
+    )
+    contracts.check(
+        _schema_types(cancellation_number) == {"string", "null"}
+        and cancellation_number.get("maxLength")
+        == POLICY_CREDIT_NOTE_CANCELLATION_NUMBER_MAX_LENGTH
+        and "CX-" in str(cancellation_number.get("description") or ""),
+        f"{relative}: Cancellation.cancellationNumber must be a nullable "
+        f"`CX-` reference of at most "
+        f"{POLICY_CREDIT_NOTE_CANCELLATION_NUMBER_MAX_LENGTH} characters",
     )
 
     request = schemas.get("UpdateCreditNoteStatusRequest") or {}
@@ -6334,7 +6418,7 @@ def check_policy_credit_notes_openapi(contracts: ContractSet, document, relative
 
 
 def check_policy_credit_notes_asyncapi(contracts: ContractSet, document, relative: str):
-    """Require the four implemented credit-note channels and their payloads."""
+    """Require the five implemented credit-note channels and their payloads."""
     channels = document.get("channels") or {}
     operations = document.get("operations") or {}
     messages = (
@@ -6378,18 +6462,31 @@ def check_policy_credit_notes_asyncapi(contracts: ContractSet, document, relativ
             event in send_events,
             f"{relative}: credit-note event '{event}' must have a send operation",
         )
+        is_created = event == "policy.credit-note.created"
         is_reversed = event == "policy.credit-note.reversed"
-        expected_message = (
-            POLICY_CREDIT_NOTE_REVERSED_EVENT_MESSAGE
-            if is_reversed
-            else POLICY_CREDIT_NOTE_EVENT_MESSAGE
-        )
+        if is_created:
+            expected_message = POLICY_CREDIT_NOTE_CREATED_EVENT_MESSAGE
+        elif is_reversed:
+            expected_message = POLICY_CREDIT_NOTE_REVERSED_EVENT_MESSAGE
+        else:
+            expected_message = POLICY_CREDIT_NOTE_EVENT_MESSAGE
         channel_messages = channel.get("messages") or {}
         contracts.check(
             (channel_messages.get(expected_message) or {}).get("$ref")
             == f"#/components/messages/{expected_message}",
             f"{relative}: {event} must reference {expected_message}",
         )
+        if is_created:
+            created_text = str(channel.get("description") or "")
+            for field in POLICY_CREDIT_NOTE_LINK_FIELDS:
+                contracts.check(
+                    field in created_text,
+                    f"{relative}: {event} description must document {field}",
+                )
+            contracts.check(
+                "DRAFT" in created_text,
+                f"{relative}: {event} description must document DRAFT",
+            )
         if event == "policy.credit-note.applied":
             applied_text = str(channel.get("description") or "")
             for field in POLICY_CREDIT_NOTE_APPLIED_EVENT_FIELDS:
@@ -6467,6 +6564,81 @@ def check_policy_credit_notes_asyncapi(contracts: ContractSet, document, relativ
         (payload_properties.get("creditedAmount") or {}).get("type") == "string",
         f"{relative}: {POLICY_CREDIT_NOTE_EVENT_MESSAGE}.creditedAmount must be "
         "a decimal string",
+    )
+
+    created_message = messages.get(POLICY_CREDIT_NOTE_CREATED_EVENT_MESSAGE) or {}
+    created_payload = created_message.get("payload") or {}
+    created_properties = created_payload.get("properties") or {}
+    created_required = set(created_payload.get("required") or [])
+    contracts.check(
+        created_required == set(POLICY_CREDIT_NOTE_CREATED_EVENT_FIELDS),
+        f"{relative}: {POLICY_CREDIT_NOTE_CREATED_EVENT_MESSAGE} must require "
+        f"exactly {list(POLICY_CREDIT_NOTE_CREATED_EVENT_FIELDS)}",
+    )
+    for field in POLICY_CREDIT_NOTE_CREATED_EVENT_FIELDS:
+        contracts.check(
+            field in created_properties,
+            f"{relative}: {POLICY_CREDIT_NOTE_CREATED_EVENT_MESSAGE}."
+            f"properties.{field} is required",
+        )
+    for field in ("policyId", "creditNoteId"):
+        contracts.check(
+            (created_properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: {POLICY_CREDIT_NOTE_CREATED_EVENT_MESSAGE}.{field} "
+            "must be a uuid",
+        )
+    contracts.check(
+        (created_properties.get("noteNumber") or {}).get("maxLength") == 32,
+        f"{relative}: {POLICY_CREDIT_NOTE_CREATED_EVENT_MESSAGE}.noteNumber must "
+        "be at most 32 characters",
+    )
+    contracts.check(
+        (created_properties.get("amount") or {}).get("type") == "string",
+        f"{relative}: {POLICY_CREDIT_NOTE_CREATED_EVENT_MESSAGE}.amount must be "
+        "a decimal string",
+    )
+    contracts.check(
+        (created_properties.get("currency") or {}).get("pattern") == "^[A-Z]{3}$",
+        f"{relative}: {POLICY_CREDIT_NOTE_CREATED_EVENT_MESSAGE}.currency must be "
+        "an uppercase ISO code",
+    )
+    contracts.check(
+        tuple((created_properties.get("status") or {}).get("enum") or [])
+        == ("DRAFT",),
+        f"{relative}: {POLICY_CREDIT_NOTE_CREATED_EVENT_MESSAGE}.status must "
+        "enumerate DRAFT only",
+    )
+    contracts.check(
+        (created_properties.get("createdAt") or {}).get("format") == "date-time",
+        f"{relative}: {POLICY_CREDIT_NOTE_CREATED_EVENT_MESSAGE}.createdAt must be "
+        "a date-time",
+    )
+    for field in POLICY_CREDIT_NOTE_LINK_FIELDS:
+        contracts.check(
+            field in created_properties,
+            f"{relative}: {POLICY_CREDIT_NOTE_CREATED_EVENT_MESSAGE}."
+            f"properties.{field} is required for a linked note",
+        )
+        contracts.check(
+            field not in created_required,
+            f"{relative}: {POLICY_CREDIT_NOTE_CREATED_EVENT_MESSAGE}.{field} must "
+            "stay optional because an unlinked billing adjustment omits it",
+        )
+    contracts.check(
+        (created_properties.get("cancellationId") or {}).get("format") == "uuid",
+        f"{relative}: {POLICY_CREDIT_NOTE_CREATED_EVENT_MESSAGE}.cancellationId "
+        "must be a uuid",
+    )
+    created_cancellation_number = (
+        created_properties.get("cancellationNumber") or {}
+    )
+    contracts.check(
+        _schema_types(created_cancellation_number) == {"string", "null"}
+        and created_cancellation_number.get("maxLength")
+        == POLICY_CREDIT_NOTE_CANCELLATION_NUMBER_MAX_LENGTH,
+        f"{relative}: {POLICY_CREDIT_NOTE_CREATED_EVENT_MESSAGE}."
+        "cancellationNumber must be a nullable string of at most "
+        f"{POLICY_CREDIT_NOTE_CANCELLATION_NUMBER_MAX_LENGTH} characters",
     )
 
     reversed_message = messages.get(POLICY_CREDIT_NOTE_REVERSED_EVENT_MESSAGE) or {}

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Policy API
-  version: 2.13.0
+  version: 2.14.0
   summary: Direct-book policy administration and the Policy expert API.
   description: >
     This document describes the implemented public Policy domain API and the
@@ -176,18 +176,21 @@ info:
       DRAFT -> ISSUED -> APPLIED, with CANCELLED reachable from DRAFT or ISSUED
       and REVERSED reachable from APPLIED; APPLIED, CANCELLED, and REVERSED are
       terminal.
-    - The projection is the thirteen-field `CreditNote`; the server owns
+    - The projection is the fifteen-field `CreditNote`; the server owns
       `creditNoteId`, `noteNumber` (`CN-{7 digits}`), the DRAFT creation state,
       the timestamps, and the policy-version bump. `amount` must be greater than
       zero, `currency` must equal the policy premium currency, and `reason` is
-      optional and capped at 500 characters.
+      optional and capped at 500 characters. The later cancellation-link slice
+      adds the optional `CreateCreditNoteRequest.cancellationId` and the nullable
+      `CreditNote.cancellationId`/`cancellationNumber` response members.
     - `X-EIA-Tenant` is required and `X-EIA-Book` is required and fixed to
-      DIRECT. Each accepted transition writes `policy.credit-note.issued`,
-      `policy.credit-note.applied`, or `policy.credit-note.cancelled` in the
-      same transaction as the note row and the policy-version bump; creation
-      itself writes no event. The SPEC 11.2.13 route, approval/SAP lifecycle,
-      reason vocabulary, and event names differ; MISMATCHES.md M-22 and M-41
-      record the deviation.
+      DIRECT. Creation writes `policy.credit-note.created` in the same
+      transaction as the note row and the policy-version bump, and each accepted
+      transition writes `policy.credit-note.issued`,
+      `policy.credit-note.applied`, or `policy.credit-note.cancelled`. The SPEC
+      11.2.13 route, approval/SAP lifecycle, reason vocabulary, cancellation
+      link, and event names differ; MISMATCHES.md M-22 and M-41 record the
+      deviation.
 
     The 2026-10-21 legal-entity slice adds the DIRECT-book issuing-entity
     catalog and the policy assignment command:
@@ -293,6 +296,37 @@ info:
       `policy.credit-note.reversed` in the same transaction as the note row,
       the installment release, and the policy-version bump. MISMATCHES.md M-22
       and M-41 record the implementation extension.
+
+    The 2026-10-21 cancellation-linked credit-note slice ties a return-premium
+    note to the cancellation it refunds:
+
+    - `CreateCreditNoteRequest` accepts the optional `cancellationId`. A linked
+      note is a cancellation return-premium credit: the cancellation must belong
+      to the same tenant and policy (404 `CANCELLATION_NOT_FOUND`), still be
+      ACTIVE (409 `CANCELLATION_NOT_ACTIVE` with `meta.cancellationId` and
+      `meta.currentStatus`; REINSTATED and VOID cannot fund a note), and match
+      the note within one cent of `returnPremiumAmount` (400
+      `CREDIT_NOTE_AMOUNT_MISMATCH`) in the cancellation's `premiumCurrency`
+      (400 `CURRENCY_MISMATCH`). A cancellation funds at most one note: a second
+      request is 409 `DUPLICATE_CANCELLATION_CREDIT_NOTE` with
+      `meta.cancellationId` and, when the existing row is known,
+      `meta.creditNoteId` and `meta.noteNumber`; the
+      `(tenant_id, policy_id, cancellation_id)` unique key arbitrates a
+      concurrent duplicate.
+    - `CreditNote` adds the required-but-nullable `cancellationId` and
+      `cancellationNumber`; both are null for a general billing adjustment and
+      present for a cancellation-linked note. `cancellationNumber` is the linked
+      cancellation's `CX-{7 digits}` reference, falling back to the cancellation
+      id for a historical row that predates numbering.
+    - `Cancellation` adds the nullable `cancellationNumber` (`CX-{7 digits}`,
+      unique per policy). New cancellations always carry one; historical rows
+      may be null.
+    - Creation now writes `policy.credit-note.created` in the same transaction
+      as the note row and the policy-version bump. The payload carries the base
+      note fields and `createdAt`, plus `cancellationId` and
+      `cancellationNumber` for a linked note; an unlinked adjustment omits both.
+      A rejected link writes neither the note nor the event. MISMATCHES.md M-22
+      and M-41 record the new event name and the link rules.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -1881,12 +1915,30 @@ paths:
         `INVALID_CREDIT_NOTE_REASON` is the internal backstop). A malformed
         body is 400 `VALIDATION_ERROR`.
 
+        `cancellationId` is optional and links the note to the cancellation
+        whose return premium it refunds. The cancellation is resolved on the
+        same tenant and policy (404 `CANCELLATION_NOT_FOUND`), must still be
+        ACTIVE (409 `CANCELLATION_NOT_ACTIVE` with `meta.cancellationId` and
+        `meta.currentStatus`; a REINSTATED or VOID cancellation cannot fund a
+        note), and must match the note: `amount` must equal its
+        `returnPremiumAmount` within one cent (400
+        `CREDIT_NOTE_AMOUNT_MISMATCH`) and `currency` must equal its
+        `premiumCurrency` (400 `CURRENCY_MISMATCH`). A cancellation funds at
+        most one note, so a second note for it is 409
+        `DUPLICATE_CANCELLATION_CREDIT_NOTE` with `meta.cancellationId` and,
+        when the existing note is known, `meta.creditNoteId` and
+        `meta.noteNumber`; a concurrent duplicate is arbitrated by the unique
+        `(tenant_id, policy_id, cancellation_id)` key.
+
         `creditNoteId`, `noteNumber` (`CN-{7 digits}`), status DRAFT,
-        `issuedAt`/`appliedAt` null, and `createdAt` are server-owned. The
-        accepted create bumps the policy row version but emits no lifecycle
-        event; only ISSUED, APPLIED, and CANCELLED do. An unknown policy or a
-        policy in another tenant is 404 `POLICY_NOT_FOUND`; another book is
-        hidden as 404 `BOOK_SCOPE_VIOLATION`. A concurrent policy change is 409
+        `issuedAt`/`appliedAt` null, `cancellationNumber`, and `createdAt` are
+        server-owned. The accepted create bumps the policy row version and
+        writes `policy.credit-note.created` in the same transaction as the note
+        row; the event carries the base note fields, `createdAt`, and the
+        optional `cancellationId`/`cancellationNumber` link. A rejected request
+        writes neither the note nor the event. An unknown policy or a policy in
+        another tenant is 404 `POLICY_NOT_FOUND`; another book is hidden as 404
+        `BOOK_SCOPE_VIOLATION`. A concurrent policy change is 409
         `CONCURRENT_MODIFICATION`. The command accepts no `Idempotency-Key` or
         `If-Match` in this slice (M-06, M-07).
       parameters:
@@ -4224,6 +4276,10 @@ components:
       description: >
         Cancellation projection with the return premium computed at cancellation
         time. `proRataPct` is the earned fraction of the term.
+        `cancellationNumber` is the server-generated `CX-{7 digits}` business
+        reference, unique per policy; a new cancellation always carries one and
+        a historical row may be null. A credit note linked to a cancellation
+        exposes the same reference in `CreditNote.cancellationNumber`.
       required:
         - id
         - tenantId
@@ -4251,6 +4307,14 @@ components:
         policyVersionId:
           type: [string, 'null']
           format: uuid
+        cancellationNumber:
+          type: [string, 'null']
+          maxLength: 32
+          description: >
+            Server-generated `CX-{7 digits}` reference, unique per policy. Null
+            for a historical cancellation that predates numbering.
+          examples:
+            - CX-0000001
         cancellationType:
           $ref: '#/components/schemas/CancellationType'
         reason:
@@ -5726,8 +5790,13 @@ components:
         `reversedAt` and `reversalReason` are written only by the REVERSED
         transition and are null for every other status. `reason` is the optional
         creation reason and is null when it was omitted or blank; it is distinct
-        from `reversalReason`. The projection does not expose `tenantId`. The
-        lifecycle, reason freedom, and event names are narrower than the SPEC
+        from `reversalReason`. `cancellationId` and `cancellationNumber` are
+        stamped by creation when the request names a cancellation and are null
+        for a general billing adjustment; the number is the linked
+        cancellation's `CX-{7 digits}` reference, falling back to the
+        cancellation id for a historical row that predates numbering. The
+        projection does not expose `tenantId`. The lifecycle, reason freedom,
+        cancellation link, and event names are narrower than the SPEC
         `credit_note_request` (MISMATCHES.md M-41).
       required:
         - creditNoteId
@@ -5743,6 +5812,8 @@ components:
         - createdAt
         - reversedAt
         - reversalReason
+        - cancellationId
+        - cancellationNumber
       properties:
         creditNoteId:
           type: string
@@ -5798,6 +5869,21 @@ components:
           description: >
             Required, trimmed, non-blank explanation supplied with REVERSED;
             null for every other status.
+        cancellationId:
+          type: [string, 'null']
+          format: uuid
+          description: >
+            Cancellation whose return premium the note refunds, stamped at
+            creation when the request supplies a `cancellationId`; null for a
+            general billing adjustment.
+        cancellationNumber:
+          type: [string, 'null']
+          maxLength: 32
+          description: >
+            Linked cancellation's server-generated `CX-{7 digits}` reference;
+            null when the note has no cancellation link. For a historical
+            cancellation that predates numbering, the linked number falls back
+            to the cancellation id.
     CreditNoteStatus:
       type: string
       description: >
@@ -5827,8 +5913,15 @@ components:
         foreign currency is 400 `CURRENCY_MISMATCH`. `reason` is optional,
         trimmed, stored as null when blank, and capped at 500 characters; a
         longer value is 400 `VALIDATION_ERROR` (the expert's
-        `INVALID_CREDIT_NOTE_REASON` is the internal backstop). The identity,
-        note number, DRAFT status, and timestamps are server-owned.
+        `INVALID_CREDIT_NOTE_REASON` is the internal backstop). `cancellationId`
+        is optional: when supplied, the cancellation must belong to the same
+        tenant and policy (404 `CANCELLATION_NOT_FOUND`), still be ACTIVE (409
+        `CANCELLATION_NOT_ACTIVE`), and match the note within one cent of its
+        `returnPremiumAmount` (400 `CREDIT_NOTE_AMOUNT_MISMATCH`) in its
+        `premiumCurrency` (400 `CURRENCY_MISMATCH`); a second note for the same
+        cancellation is 409 `DUPLICATE_CANCELLATION_CREDIT_NOTE`. Absent or null
+        creates a general billing adjustment. The identity, note number, DRAFT
+        status, cancellation number, and timestamps are server-owned.
       required:
         - amount
         - currency
@@ -5849,6 +5942,16 @@ components:
           type: [string, 'null']
           maxLength: 500
           description: Optional free-text reason; blank input is stored as null.
+        cancellationId:
+          type: [string, 'null']
+          format: uuid
+          description: >
+            Optional cancellation whose return premium this note refunds. When
+            supplied, the cancellation must belong to the same tenant and policy,
+            still be ACTIVE, and have the same `currency` and a
+            `returnPremiumAmount` within one cent of `amount`; a second note for
+            the same cancellation is 409 `DUPLICATE_CANCELLATION_CREDIT_NOTE`.
+            Absent or null creates a general billing adjustment.
     UpdateCreditNoteStatusRequest:
       type: object
       description: >
@@ -6186,6 +6289,10 @@ x-implementation:
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/CreditNoteControllerTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/CreditNoteServiceTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/CreditNoteRulesTest.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/CancellationDto.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/CancellationService.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/CancellationRepository.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyCancellation.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/LegalEntityController.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/LegalEntityService.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/LegalEntityDto.java
@@ -6337,15 +6444,20 @@ x-implementation:
     amount from the installment recorded at application time, clamps the
     credited total at zero, and reopens a CREDITED installment as DUE or OVERDUE
     when it no longer covers its gross amount. The projection carries the
-    nullable `appliedInstallmentId`, `reversedAt`, and `reversalReason`; the
-    `applied` event additionally carries `installmentId` and the cumulative
-    `creditedAmount`, and the `reversed` event carries the note identifiers, the
-    nullable applied installment, the amount, the reason, and status REVERSED.
-    Creation bumps the policy row version without an event; each accepted
-    transition writes its `policy.credit-note.*` event in the same transaction.
-    The short path, the five-state lifecycle, the free-text reason, the missing
-    approval and SAP credit-memo steps, and the event names differ from SPEC
-    11.2.13 and are recorded in M-22 and M-41.
+    nullable `appliedInstallmentId`, `reversedAt`, `reversalReason`,
+    `cancellationId`, and `cancellationNumber`; the `applied` event additionally
+    carries `installmentId` and the cumulative `creditedAmount`, and the
+    `reversed` event carries the note identifiers, the nullable applied
+    installment, the amount, the reason, and status REVERSED. Creation bumps the
+    policy row version and writes `policy.credit-note.created` in the same
+    transaction, with the optional cancellation link when the request supplies
+    one; each accepted transition writes its `policy.credit-note.*` event in the
+    same transaction. A linked note must refund an ACTIVE cancellation of the
+    same tenant and policy within one cent of its return premium and in its
+    currency, and a cancellation funds at most one note. The short path, the
+    five-state lifecycle, the free-text reason, the missing approval and SAP
+    credit-memo steps, the cancellation link, and the event names differ from
+    SPEC 11.2.13 and are recorded in M-22 and M-41.
 
     The legal-entity catalog is a tenant-scoped DIRECT-book resource. The domain
     proxies the expert's `/internal/v1` alias with the tenant and DIRECT book;
@@ -6362,29 +6474,29 @@ x-implementation:
     catalog, the SPEC 11.2.16 path, and the nullable assignment against LE-01 are
     recorded in M-01, M-12, and M-43.
 x-compatibility:
-  contractVersion: 2.13.0
-  previousContractVersion: 2.12.0
+  contractVersion: 2.14.0
+  previousContractVersion: 2.13.0
   breaking: []
   compatible:
-    - Adds the optional UpdateCreditNoteStatusRequest.reason request property with the required-for-REVERSED rule and the 500-character cap.
-    - Adds REVERSED to the CreditNoteStatus enum and the status request enum.
-    - Adds the nullable CreditNote.reversedAt and CreditNote.reversalReason response properties.
-    - Documents the APPLIED -> REVERSED transition, the credit-release and installment-reopen rules, and the 400/409 rejections.
-    - Adds the policy.credit-note.reversed event and its creditNoteId, noteNumber, installmentId, amount, reason, and status payload.
-    - Removes no path or response field and changes no existing field meaning; consumers must tolerate the new enum value.
+    - Adds the optional nullable CreateCreditNoteRequest.cancellationId request property.
+    - Adds the required-but-nullable CreditNote.cancellationId and CreditNote.cancellationNumber response properties.
+    - Adds the nullable Cancellation.cancellationNumber response property.
+    - Documents the same-tenant/policy, ACTIVE, return-premium amount, currency, and one-note-per-cancellation link rules with their 400/404/409 rejections.
+    - Adds the policy.credit-note.created event with the base note fields, createdAt, and the optional cancellationId/cancellationNumber members.
+    - Removes no path or field and changes no existing field meaning.
   note: >
-    The credit-note reversal slice is additive over 2.12.0: one optional request
-    member, one enum value on the credit-note status and request vocabularies,
-    two nullable response members, one transition, and one event name. A client
-    that never sends REVERSED sees the same credit-note lifecycle and response
-    fields as before; a client that reads `status` must tolerate the new
-    REVERSED value, and `reversedAt`/`reversalReason` are null on every existing
-    note. The HTTP API version stays `/api/v1` and the event keeps `eventVersion`
-    1 because the payload is a new name rather than a change to the existing
-    credit-note payload. The new event brings the catalog to 208 published and
-    88 implemented names, with Policy at 32 published and 20 implemented. The
-    reversal extension and its missing SPEC equivalent are recorded in
-    MISMATCHES.md M-22 and M-41.
+    The cancellation-linked credit-note slice is additive over 2.13.0: one
+    optional request member, two nullable response members on `CreditNote`, one
+    nullable response member on `Cancellation`, and one event name. A client that
+    never sends `cancellationId` sees the same create and lifecycle as before;
+    `CreditNote.cancellationId`/`cancellationNumber` and
+    `Cancellation.cancellationNumber` are null on every unlinked or historical
+    row. Creation now emits `policy.credit-note.created` under `eventVersion` 1,
+    so a consumer that subscribed only to the transition facts sees one
+    additional event name. The new event brings the catalog to 209 published and
+    89 implemented names, with Policy at 33 published and 21 implemented. The
+    link rules and the missing SPEC equivalent are recorded in MISMATCHES.md
+    M-22 and M-41.
 x-planned-operations:
   - method: POST
     path: /api/v1/policies/{policyId}/bind

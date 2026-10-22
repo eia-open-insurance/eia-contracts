@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.25.0
+  version: 1.26.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -112,6 +112,12 @@ info:
     published and one implemented name, bringing the platform totals to 208
     published and 88 implemented; Policy becomes 32 published and 20 implemented
     (M-22, M-41).
+    The 2026-10-21 Policy cancellation-linked credit-note slice adds one Policy
+    name, `policy.credit-note.created`, with no SPEC 11.2.13 equivalent: SPEC
+    publishes only the issued fact and creation was previously unobservable. It
+    adds one published and one implemented name, bringing the platform totals to
+    209 published and 89 implemented; Policy becomes 33 published and 21
+    implemented (M-22, M-41).
     The platform
     event-ingest service
     is the inbox:
@@ -233,6 +239,7 @@ x-event-catalog:
       - policy.installment.paid
       - policy.installment.waived
       - policy.dunning.sent
+      - policy.credit-note.created
       - policy.credit-note.issued
       - policy.credit-note.applied
       - policy.credit-note.cancelled
@@ -264,6 +271,7 @@ x-event-catalog:
       - policy.installment.paid
       - policy.installment.waived
       - policy.dunning.sent
+      - policy.credit-note.created
       - policy.credit-note.issued
       - policy.credit-note.applied
       - policy.credit-note.cancelled
