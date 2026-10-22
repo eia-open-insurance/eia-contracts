@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-22 (Notifications DUNNING_NOTICE type).
+Status: open, reviewed 2026-10-22 (Notifications template management).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -126,6 +126,10 @@ where the running code does not meet it yet.
   `NotificationType` enums and their create validation, the notification
   service and controller tests, the web workbench's notification-type list and
   prefill defaults, and the shell receivables hand-off constants and links.
+  The Notifications template-management pass reads the domain and expert
+  template controllers, services, DTOs, status and channel enums, commands and
+  requests, repository, event factory, `schema.sql`, expert client, exception
+  mapping, and the template controller, service, integration, and outbox tests.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -1030,7 +1034,7 @@ planned name |
 | Retrocession | `retrocession.retrocession.created` / `.updated` / `.handed-off` | `retrocession.case.created`, `retrocession.handoff.sent`/`.acknowledged` |
 | Document | `document.document.created` / `.updated` / `.status-changed`; `document.link.added` / `.removed`; `document.content.uploaded` / `.deleted`; `document.legal-hold.placed` / `.released` | `document.document.registered`, `document.document.associated`, plus the SPEC lifecycle verbs; no SPEC content-upload or content-tombstone fact (SPEC 11.6.8 deletes content only inside the approved disposition job, whose deletion step the disposition now performs without its approval or certificate); the SPEC hold facts are `document.document.held` / `.hold-released`. `document.document.disposed` matches SPEC and is implemented. |
 | Payment | `payment.payment.updated` / `.status-changed`; `payment.allocation.created` / `.reversed` | the SPEC per-verb names such as `payment.payment.authorized`; SPEC 11.7.10 publishes no allocation fact, so both allocation names are new (M-35) |
-| Notifications | `notifications.notification.created` / `.sent` | `notifications.notification.issued` / `.delivered` |
+| Notifications | `notifications.notification.created` / `.sent`; `notifications.template.created` / `.approved` / `.retired` | `notifications.notification.issued` / `.delivered`; SPEC 11.8.9 publishes no template fact, so all three template names are new (M-49) |
 
 The catalog lists both sets and marks only the implemented ones. The names
 without a SPEC equivalent are additive under EV-05: the catalog now publishes
@@ -1053,6 +1057,7 @@ Evidence:
 - `repos/eia-document-expert/.../DocumentContentEvents.java:26-27`
 - `repos/eia-payment-expert/.../PaymentEvents.java:31-39,103-190`
 - `repos/eia-notifications-expert/.../NotificationEvents.java:36-37`
+- `repos/eia-notifications-expert/.../NotificationTemplateEvents.java:26-28,80-91`
 
 Resolution: either align the implemented names with the SPEC (with a
 dual-publish window) or amend the SPEC event tables. The contracts document
@@ -3208,10 +3213,66 @@ hand-off in SPEC 11.2.13, or keep the implemented type and treat the OpenAPI
 enum as canonical. The addition needs no `/v2`; removing the member later would
 be breaking under SPEC 10.4.
 
+## M-49 Notification template administration uses a short path, approve/retire commands, and SPEC-less events
+
+SPEC 11.8.10 mounts the template administration surface at
+`GET /api/v1/notifications/admin/templates` and names
+`POST .../admin/templates/{templateId}/publish` for activation. The implemented
+registry is the short `/api/v1/notifications/templates` resource: list, create
+DRAFT, approve, and retire. Approval is the only path to ACTIVE (NTF-14), and
+retirement is a separate command from DRAFT or ACTIVE. The three lifecycle
+facts are new names with no SPEC 11.8.9 equivalent.
+
+| Aspect | Implemented | SPEC / gap |
+|---|---|---|
+| Path | `/api/v1/notifications/templates` for the collection, `.../{id}/approve`, and `.../{id}/retire` | SPEC 11.8.10 mounts `/api/v1/notifications/admin/templates` and a publish command |
+| Lifecycle | create always DRAFT; approve DRAFT -> ACTIVE with `approvedBy`/`approvedAt`; retire DRAFT or ACTIVE -> RETIRED (terminal); duplicate create 409 `TEMPLATE_ALREADY_EXISTS`, repeat approval 409 `TEMPLATE_ALREADY_ACTIVE`, other illegal transition or concurrent loss 409 `TEMPLATE_STATUS_CONFLICT` | SPEC 11.8.10 names publish, not a draft/approve/retire split; the stable conflict codes are the implementation's |
+| Projection | `NotificationTemplate` `{id, code, version, channel, locale, bodyTemplate, status, approvedBy, approvedAt, createdAt, updatedAt}`; tenant id and effective dates are hidden; a null channel means channel-neutral | SPEC 11.8.7 describes a template registry with effective dates and a channel; the public projection omits tenant and effective dating |
+| List | bare array ordered by `createdAt` newest first, then `code`, `version` descending, and `id`; optional exact `status` and `code` filters | SPEC 11.8.10 names no list filter or ordering |
+| Events | `notifications.template.created` (aggregate version 1), `.approved` (2), `.retired` (3), payload `{templateId, code, version, locale, status, approvedBy}` | SPEC 11.8.9 publishes notification lifecycle facts only; no template event |
+| Version | `openapi/notifications.yaml` 1.3.0, `asyncapi/notifications.yaml` 1.2.0, `asyncapi/event-catalog.yaml` 1.31.0 (additive) | no SPEC version has this surface |
+
+Consequences:
+
+- A client generated from SPEC 11.8.10 alone would call the admin path and
+  publish; the implemented client calls the short path and approve/retire.
+- `Notification.templateCode`/`templateVersion` still resolve an approved
+  ACTIVE template for the tenant and channel (NTF-01). Retirement removes a
+  template from the eligible set but does not rewrite notifications that
+  already reference it.
+- A template that is channel-neutral (`channel` null) can serve any channel; a
+  channel-specific row wins over the neutral row, matching
+  `NotificationTemplateRepository.find`.
+- The three events are additive; the catalog publishes and implements them and
+  the validator requires them. Renaming one later is breaking under EV-05.
+
+Evidence:
+
+- `repos/eia-notifications-domain/.../NotificationTemplateController.java:32-57`
+  (list, create, approve, retire), `NotificationTemplateService.java:41-50`
+  (approvedBy required), and `NotificationTemplateDto.java:11-23`.
+- `repos/eia-notifications-expert/.../NotificationTemplateController.java:39-74`
+  (the public and `/internal/v1` mappings), `NotificationTemplateService.java:32-124`
+  (filters, duplicate, ACTIVE/STATUS guards), `NotificationTemplateRepository.java:76-147`
+  (ordering and conditional updates), `NotificationTemplateDto.java:10-23`, and
+  `schema.sql:6-24` (unique key and status/approval checks).
+- `repos/eia-notifications-expert/.../NotificationTemplateEvents.java:26-28,50-91`
+  (names, aggregate versions, and payload).
+- `repos/eia-notifications-domain/.../NotificationExpertClient.java:90-156`
+  (list/create/approve/retire forwarding and problem translation).
+- `repos/eia-notifications-expert/src/test/java/com/eia/notifications/expert/NotificationTemplateControllerTest.java`,
+  `NotificationTemplateServiceTest.java`, and `NotificationTemplateIntegrationTest.java`.
+
+Resolution: either move the route and command shape to SPEC 11.8.10
+(publish -> approve, admin -> short path, and add the retire command) and
+publish the three template facts in SPEC 11.8.9, or keep the implemented
+surface and treat these documents as canonical. No `/v2` is needed; the
+surface is additive over the existing notification API.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-22
-payment allocation reversal contract:
+Notifications template-management contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -3229,7 +3290,7 @@ OpenAPI 3.1 documents
   OK openapi/retrocession.yaml  9 paths, 11 operations
   OK openapi/document.yaml  18 paths, 24 operations
   OK openapi/payment.yaml  13 paths, 16 operations
-  OK openapi/notifications.yaml  7 paths, 9 operations
+  OK openapi/notifications.yaml  10 paths, 13 operations
 
 AsyncAPI 3 documents
   OK asyncapi/party.yaml  9 event channels
@@ -3241,8 +3302,8 @@ AsyncAPI 3 documents
   OK asyncapi/retrocession.yaml  17 event channels
   OK asyncapi/document.yaml  24 event channels
   OK asyncapi/payment.yaml  20 event channels
-  OK asyncapi/notifications.yaml  12 event channels
-  OK catalog: 212 unique published events across 10 verticals
+  OK asyncapi/notifications.yaml  15 event channels
+  OK catalog: 215 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -3250,7 +3311,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 14205 checks, 0 failures
+  PASS 14465 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -3522,7 +3583,16 @@ Additional checks and limits:
   `payment.allocation.reversed` from the Payment catalog `implemented` list
   each fail with the specific missing-operation, conflict-code, nullability, or
   implemented-event message. All four were run on a throwaway copy and exited
-  non-zero (exit 1); the working copy was left unchanged.
+  non-zero (exit 1); the working copy was left unchanged. The Notifications
+  template-management pass added five more: renaming the approve path, removing
+  `TEMPLATE_ALREADY_ACTIVE` from the approve 409 description, making
+  `NotificationTemplate.approvedBy` non-nullable, dropping
+  `notifications.template.retired` from the catalog `implemented` list, and
+  removing the `NotificationTemplateData` message from the created channel each
+  fail with the specific missing-operation, conflict-code, nullability,
+  implemented-event, or payload-message message. All five were run on a
+  throwaway copy and exited non-zero (exit 1); the working copy was left
+  unchanged.
 
 ## Resolution policy
 

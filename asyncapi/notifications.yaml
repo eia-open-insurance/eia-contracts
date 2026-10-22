@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:notifications
 info:
   title: EIA Notifications events
-  version: 1.1.0
+  version: 1.2.0
   summary: Published domain event names for the Notifications vertical.
   description: >
     Event contract for the Notifications vertical. The authoritative event names
@@ -14,12 +14,15 @@ info:
     signature (SPEC 7.5.1). A channel address is the logical routing key and
     equals the event name; it is not a broker topic.
 
-    The Notifications expert now publishes `notifications.notification.created`
-    and `notifications.notification.sent` through the transactional outbox;
-    those channels and operations are marked `x-status: implemented`. The
-    SPEC 11.8.9 verbs (`issued`, `delivered`, and so on) remain planned. The
-    shared event library requires the vertical segment to be `notifications`
-    (plural), which is why the implemented names use that prefix.
+    The Notifications expert publishes `notifications.notification.created`,
+    `notifications.notification.sent`, and the template-registry facts
+    `notifications.template.created`, `.approved`, and `.retired` through the
+    transactional outbox; those channels and operations are marked
+    `x-status: implemented`. The SPEC 11.8.9 notification verbs (`issued`,
+    `delivered`, and so on) remain planned, and the template facts have no SPEC
+    name. The shared event library requires the vertical segment to be
+    `notifications` (plural), which is why the implemented names use that
+    prefix.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -66,6 +69,64 @@ channels:
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
+  NotificationsTemplateCreated:
+    address: notifications.template.created
+    title: notifications.template.created
+    description: >
+      Emitted by the Notifications expert when a notification template is
+      created DRAFT, in the same transaction as the row insert. The
+      `NotificationTemplate` aggregate uses aggregate version 1 for the create.
+      The payload carries the template identity, code, and template version, its
+      locale, `DRAFT` status, and a null approver.
+    x-event-type: notifications.template.created
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.8.9
+    x-implemented-by: repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationTemplateEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      NotificationTemplateData:
+        $ref: '#/components/messages/NotificationTemplateData'
+  NotificationsTemplateApproved:
+    address: notifications.template.approved
+    title: notifications.template.approved
+    description: >
+      Emitted when a DRAFT template is approved into ACTIVE, in the same
+      transaction as the status update that records `approvedBy` and
+      `approvedAt`. The `NotificationTemplate` aggregate moves to version 2.
+      The payload carries the template identity, code, and template version, its
+      locale, `ACTIVE` status, and the approver.
+    x-event-type: notifications.template.approved
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.8.9
+    x-implemented-by: repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationTemplateEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      NotificationTemplateData:
+        $ref: '#/components/messages/NotificationTemplateData'
+  NotificationsTemplateRetired:
+    address: notifications.template.retired
+    title: notifications.template.retired
+    description: >
+      Emitted when a DRAFT or ACTIVE template is retired, in the same
+      transaction as the status update, so it can no longer issue notifications
+      (NTF-14). The `NotificationTemplate` aggregate moves to version 3. The
+      payload carries the template identity, code, and template version, its
+      locale, `RETIRED` status, and the approver (null when the template was
+      retired from DRAFT).
+    x-event-type: notifications.template.retired
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.8.9
+    x-implemented-by: repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationTemplateEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      NotificationTemplateData:
+        $ref: '#/components/messages/NotificationTemplateData'
   NotificationsNotificationIssued:
     address: notifications.notification.issued
     title: notifications.notification.issued
@@ -227,6 +288,36 @@ operations:
       and `sentAt` is recorded.
     x-event-type: notifications.notification.sent
     x-status: implemented
+  publishNotificationsTemplateCreated:
+    action: send
+    channel:
+      $ref: '#/channels/NotificationsTemplateCreated'
+    summary: Publish notifications.template.created
+    description: >
+      Publishes notifications.template.created through the transactional outbox
+      in the same transaction as the DRAFT template insert (SPEC 7.5.1).
+    x-event-type: notifications.template.created
+    x-status: implemented
+  publishNotificationsTemplateApproved:
+    action: send
+    channel:
+      $ref: '#/channels/NotificationsTemplateApproved'
+    summary: Publish notifications.template.approved
+    description: >
+      Publishes notifications.template.approved in the same transaction as the
+      DRAFT-to-ACTIVE update that records the approver and approval instant.
+    x-event-type: notifications.template.approved
+    x-status: implemented
+  publishNotificationsTemplateRetired:
+    action: send
+    channel:
+      $ref: '#/channels/NotificationsTemplateRetired'
+    summary: Publish notifications.template.retired
+    description: >
+      Publishes notifications.template.retired in the same transaction as the
+      DRAFT-or-ACTIVE-to-RETIRED update.
+    x-event-type: notifications.template.retired
+    x-status: implemented
   publishNotificationsNotificationIssued:
     action: send
     channel:
@@ -353,6 +444,52 @@ components:
             type: string
       payload:
         $ref: '../schemas/event-envelope.schema.json'
+    NotificationTemplateData:
+      name: NotificationTemplateData
+      title: notifications.template.* data
+      summary: Minimal schema for the envelope data object of a notification template fact.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - templateId
+          - code
+          - version
+          - locale
+          - status
+          - approvedBy
+        properties:
+          templateId:
+            type: string
+            format: uuid
+            description: Template id, which is also the outbox aggregate id.
+          code:
+            type: string
+            maxLength: 64
+            description: Template code; with version and locale it is the tenant-local identity.
+          version:
+            type: integer
+            minimum: 1
+            description: >
+              Template version from the `(code, version, locale)` identity. It
+              is not the event envelope's `aggregateVersion`, which is 1 on
+              create, 2 on approval, and 3 on retirement.
+          locale:
+            type: string
+            maxLength: 16
+          status:
+            type: string
+            enum:
+              - DRAFT
+              - ACTIVE
+              - RETIRED
+          approvedBy:
+            type: [string, 'null']
+            format: uuid
+            description: >
+              Approver recorded by the approval command; JSON null on a DRAFT
+              create and on a retirement from DRAFT.
   securitySchemes:
     outboxSignature:
       type: httpApiKey
@@ -368,10 +505,13 @@ x-implementation:
   publisher: eia-notifications-expert
   subscriber: none
   notes: >
-    Two implemented event names are written to the transactional outbox in the
-    same transaction as the notification write and dispatched by the platform
-    outbox dispatcher when `eia.outbox.enabled=true`. The SPEC 11.8.9 names
-    remain planned. There is no subscriber, inbox, or subscription registry yet.
+    Five implemented event names are written to the transactional outbox in the
+    same transaction as the notification or template write and dispatched by the
+    platform outbox dispatcher when `eia.outbox.enabled=true`. Two are
+    notification facts; three are the notification template lifecycle facts
+    (created, approved, retired). The SPEC 11.8.9 notification names remain
+    planned and the template facts have no SPEC name. There is no subscriber,
+    inbox, or subscription registry yet.
 
 x-consumed-events: []
 x-consumed-events-note: >

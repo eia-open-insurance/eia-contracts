@@ -1,18 +1,26 @@
 openapi: 3.1.0
 info:
   title: EIA Notifications API
-  version: 1.2.0
-  summary: Notification drafting and delivery administration and the Notifications expert API.
+  version: 1.3.0
+  summary: Notification drafting, delivery, and template administration and the Notifications expert API.
   description: >
     This document describes the implemented public Notifications domain API and
     the internal Notifications expert API. The authoritative requirement is
-    SPEC 11.8 and SPEC 12; the implemented surface is the first vertical slice.
-    `NotificationType` is the closed SPEC 11.8.5 v1 list plus the implemented
-    `DUNNING_NOTICE` dunning escalation type.
+    SPEC 11.8 and SPEC 12; the implemented surface is the first vertical slice
+    plus notification template administration. `NotificationType` is the closed
+    SPEC 11.8.5 v1 list plus the implemented `DUNNING_NOTICE` dunning escalation
+    type.
 
-    The slice supports list, detail, create, and send. Inbox, read and
+    The slice supports list, detail, create, send, and the template registry:
+    list with `status`/`code` filters, create DRAFT, approve, and retire.
+    Approval is the only path to ACTIVE (NTF-14); a template is created DRAFT
+    and may be retired from DRAFT or ACTIVE. SPEC 11.8.10 mounts template
+    administration at `/api/v1/notifications/admin/templates` and names a
+    publish command; the implemented short route
+    `/api/v1/notifications/templates` and its approve/retire commands are
+    documented here and recorded in MISMATCHES.md M-49. Inbox, read and
     acknowledge, actions, dismiss, unread count, the SSE stream, subscriptions,
-    preferences, and the admin template, rule, delivery, and queue surfaces
+    preferences, and the rule, delivery, queue, and remaining admin surfaces
     from SPEC 11.8.10 are planned and listed under x-planned-operations.
 
     Notifications already emits the canonical RFC 9457 Problem envelope with
@@ -121,6 +129,205 @@ paths:
                 $ref: './components.yaml#/components/schemas/SearchResponse'
         '400':
           $ref: './components.yaml#/components/responses/BadRequest'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/notifications/templates:
+    get:
+      operationId: listNotificationTemplates
+      tags:
+        - Notifications
+      summary: List notification templates for the caller's tenant.
+      description: >
+        Returns a bare JSON array ordered by `createdAt` newest first, then
+        `code` ascending, `version` descending, and `id`. `status` restricts the
+        result to one lifecycle state and `code` to one exact template code;
+        both are optional, are trimmed, and treat a blank value as absent. The
+        tenant is always the `X-EIA-Tenant` header, never a query parameter.
+        Templates are tenant-scoped: a row of another tenant is never returned.
+        An unknown `status` is 400 `EIA-NTF-9408` `INVALID_TEMPLATE_STATUS`; a
+        missing or malformed `X-EIA-Tenant` is 400 `EIA-NTF-9501` or
+        `EIA-NTF-9502`. Every error body is `application/problem+json`.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: status
+          in: query
+          required: false
+          description: >
+            Optional exact lifecycle filter. A value outside DRAFT, ACTIVE, and
+            RETIRED is 400 `INVALID_TEMPLATE_STATUS`.
+          schema:
+            $ref: '#/components/schemas/NotificationTemplateStatus'
+        - name: code
+          in: query
+          required: false
+          description: Optional exact template code filter, at most 64 characters.
+          schema:
+            type: string
+            maxLength: 64
+      responses:
+        '200':
+          description: Templates of the tenant matching the filters.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NotificationTemplate'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createNotificationTemplate
+      tags:
+        - Notifications
+      summary: Create a notification template in DRAFT.
+      description: >
+        Creates a template in DRAFT. `status`, `approvedBy`, and `approvedAt`
+        are never accepted from the caller: activation is the separate approval
+        command (NTF-14). The unique key is
+        `(tenant, templateCode, templateVersion, locale)`; a duplicate is 409
+        `TEMPLATE_ALREADY_EXISTS` (`EIA-NTF-9205`) with no row and no event.
+        `templateVersion` must be at least 1 (400 `EIA-NTF-9405`
+        `INVALID_TEMPLATE_VERSION`); a non-blank `channel` must be one of
+        `NotificationChannel` (400 `EIA-NTF-9401` `INVALID_CHANNEL`).
+        `templateCode`, `locale`, and `bodyTemplate` are required and trimmed,
+        with `templateCode` at most 64 characters and `locale` at most 16. A
+        rejected body is 400 `EIA-NTF-9404` `VALIDATION_FAILED` with per-field
+        details. An accepted create returns 201 with the DRAFT template and
+        writes `notifications.template.created` to the transactional outbox in
+        the same transaction as the insert.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateNotificationTemplateRequest'
+      responses:
+        '201':
+          description: DRAFT template created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationTemplate'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '409':
+          description: >
+            409. `TEMPLATE_ALREADY_EXISTS` (`EIA-NTF-9205`): a template with the
+            same `templateCode`, `templateVersion`, and `locale` already exists
+            for the tenant. The unique key is the authority, so a concurrent
+            duplicate also maps here. No row and no event is written.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/notifications/templates/{id}/approve:
+    post:
+      operationId: approveNotificationTemplate
+      tags:
+        - Notifications
+      summary: Approve a DRAFT notification template.
+      description: >
+        Moves a DRAFT template to ACTIVE and records the approver and the
+        approval instant in `approvedBy` and `approvedAt`. Approval is the only
+        path to ACTIVE (NTF-14). A template that is already ACTIVE is 409
+        `TEMPLATE_ALREADY_ACTIVE` (`EIA-NTF-9206`); any other non-DRAFT status
+        is 409 `TEMPLATE_STATUS_CONFLICT` (`EIA-NTF-9207`); a concurrent change
+        that loses the conditional update is the same 409
+        `TEMPLATE_STATUS_CONFLICT`. A template outside the caller's tenant is
+        404, indistinguishable from a missing template. `approvedBy` is
+        required (400 `EIA-NTF-9404` `VALIDATION_FAILED` when absent). An
+        accepted approval returns 200 with the ACTIVE template and writes
+        `notifications.template.approved` in the same transaction; a rejected
+        command writes no status change and no event.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApproveNotificationTemplateRequest'
+      responses:
+        '200':
+          description: Template after approval; status is ACTIVE.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationTemplate'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            409. `TEMPLATE_ALREADY_ACTIVE` (`EIA-NTF-9206`) when the template is
+            already ACTIVE, or `TEMPLATE_STATUS_CONFLICT` (`EIA-NTF-9207`) when
+            it is RETIRED or changed concurrently. No status change and no
+            event is written.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/notifications/templates/{id}/retire:
+    post:
+      operationId: retireNotificationTemplate
+      tags:
+        - Notifications
+      summary: Retire a DRAFT or ACTIVE notification template.
+      description: >
+        Moves a DRAFT or ACTIVE template to RETIRED so it can no longer issue
+        notifications (NTF-14). The command has no request body and does not
+        clear `approvedBy` or `approvedAt`, so the approval evidence stays on
+        the retired row. A template that is already RETIRED, or whose status is
+        not DRAFT or ACTIVE, is 409 `TEMPLATE_STATUS_CONFLICT`
+        (`EIA-NTF-9207`); a concurrent change that loses the conditional update
+        is the same 409. A template outside the caller's tenant is 404,
+        indistinguishable from a missing template. An accepted retirement
+        returns 200 with the RETIRED template and writes
+        `notifications.template.retired` in the same transaction; a rejected
+        command writes no status change and no event.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Template after retirement; status is RETIRED.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationTemplate'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            409. `TEMPLATE_STATUS_CONFLICT` (`EIA-NTF-9207`): the template is
+            already RETIRED or changed concurrently. No status change and no
+            event is written.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /api/v1/notifications/{notificationId}:
@@ -471,6 +678,125 @@ components:
         - SUPPRESSED
         - EXPIRED
         - CANCELLED
+    NotificationTemplate:
+      type: object
+      description: >
+        Tenant-scoped notification template registry entry. The projection is
+        the template identity plus its lifecycle evidence; `tenantId` and the
+        effective dates are deliberately not exposed. `approvedBy` and
+        `approvedAt` are null until approval and stay as recorded after
+        retirement.
+      required:
+        - id
+        - code
+        - version
+        - channel
+        - locale
+        - bodyTemplate
+        - status
+        - approvedBy
+        - approvedAt
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+          maxLength: 64
+        version:
+          type: integer
+          minimum: 1
+          description: >
+            Template version, part of the tenant-local `(code, version, locale)`
+            identity. It is not the event aggregate version.
+        channel:
+          description: >
+            Optional delivery channel. Null means the template is
+            channel-neutral and can serve any channel; a non-null value is one
+            of `NotificationChannel`.
+          oneOf:
+            - $ref: '#/components/schemas/NotificationChannel'
+            - type: 'null'
+        locale:
+          type: string
+          maxLength: 16
+        bodyTemplate:
+          type: string
+          minLength: 1
+        status:
+          $ref: '#/components/schemas/NotificationTemplateStatus'
+        approvedBy:
+          type: [string, 'null']
+          format: uuid
+        approvedAt:
+          type: [string, 'null']
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    NotificationTemplateStatus:
+      type: string
+      description: >
+        Notification template lifecycle. A template is created DRAFT, becomes
+        ACTIVE only through approval (NTF-14), and is retired when it must no
+        longer issue notifications. ACTIVE and RETIRED templates cannot return
+        to DRAFT, and RETIRED is terminal.
+      enum:
+        - DRAFT
+        - ACTIVE
+        - RETIRED
+    CreateNotificationTemplateRequest:
+      type: object
+      description: >
+        Public create command. The tenant comes from `X-EIA-Tenant`; the created
+        template is always DRAFT and the lifecycle evidence fields are not
+        accepted. The domain command also accepts `body` as an alias of
+        `bodyTemplate`. A duplicate
+        `(templateCode, templateVersion, locale)` for the tenant is 409
+        `TEMPLATE_ALREADY_EXISTS`.
+      required:
+        - templateCode
+        - templateVersion
+        - locale
+        - bodyTemplate
+      properties:
+        templateCode:
+          type: string
+          minLength: 1
+          maxLength: 64
+        templateVersion:
+          type: integer
+          minimum: 1
+        channel:
+          description: >
+            Optional delivery channel. Null or absent means channel-neutral; a
+            non-null value is one of `NotificationChannel`.
+          oneOf:
+            - $ref: '#/components/schemas/NotificationChannel'
+            - type: 'null'
+        locale:
+          type: string
+          minLength: 1
+          maxLength: 16
+        bodyTemplate:
+          type: string
+          minLength: 1
+    ApproveNotificationTemplateRequest:
+      type: object
+      description: >
+        Approval command. The approver is required audit evidence and is copied
+        to the template together with the server-assigned approval instant.
+      required:
+        - approvedBy
+      properties:
+        approvedBy:
+          type: string
+          format: uuid
     CreateNotificationRequest:
       type: object
       description: Public create command. The tenant comes from X-EIA-Tenant.
@@ -545,7 +871,7 @@ components:
 x-vertical: notifications
 x-implementation:
   status: implemented
-  verifiedAt: '2026-10-20'
+  verifiedAt: '2026-10-22'
   verifiedAgainst:
     - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationController.java
     - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationSearchResponse.java
@@ -553,13 +879,26 @@ x-implementation:
     - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationService.java
     - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationExpertClient.java
     - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/ApiExceptionHandler.java
+    - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationTemplateController.java
+    - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationTemplateService.java
+    - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationTemplateDto.java
+    - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationTemplateStatus.java
     - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationController.java
     - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationService.java
+    - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationTemplateController.java
+    - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationTemplateService.java
+    - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationTemplateRepository.java
+    - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationTemplateDto.java
+    - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationTemplateEvents.java
+    - repos/eia-notifications-expert/src/main/resources/schema.sql
   errorEnvelope: Canonical RFC 9457 Problem envelope with EIA-NTF-9xxx codes.
   notes: >
     The expert returns application/problem+json and the domain translates expert
     failures into the same envelope. Template and channel rules are enforced in
-    NotificationService.
+    NotificationService. The expert also serves the template routes under
+    `/internal/v1/notifications/templates` for direct internal callers; the
+    domain uses the public path, so the internal alias is an implementation
+    detail and is not documented as a separate public contract.
 x-planned-operations:
   - method: GET
     path: /api/v1/notifications/inbox
@@ -602,14 +941,6 @@ x-planned-operations:
     spec: SPEC 11.8.10
     note: Channel preferences.
   - method: GET
-    path: /api/v1/notifications/admin/templates
-    spec: SPEC 11.8.10
-    note: Templates.
-  - method: POST
-    path: /api/v1/notifications/admin/templates/{templateId}/publish
-    spec: SPEC 11.8.10
-    note: Publish a template (approval).
-  - method: GET
     path: /api/v1/notifications/admin/rules
     spec: SPEC 11.8.10
     note: Notification rules.
@@ -625,3 +956,21 @@ x-planned-operations:
     path: /internal/v1/notifications/issue
     spec: SPEC 11.8.10
     note: Issue a notification from an event or a direct call.
+x-compatibility:
+  contractVersion: 1.3.0
+  previousContractVersion: 1.2.0
+  breaking: []
+  compatible:
+    - Adds GET and POST /api/v1/notifications/templates for tenant-scoped template listing and DRAFT creation.
+    - Adds POST /api/v1/notifications/templates/{id}/approve and POST /api/v1/notifications/templates/{id}/retire.
+    - Adds the NotificationTemplate, NotificationTemplateStatus, CreateNotificationTemplateRequest, and ApproveNotificationTemplateRequest schemas.
+    - Documents the notifications.template.created, notifications.template.approved, and notifications.template.retired events.
+  note: >
+    Template administration is additive over 1.2.0: four new operations, four
+    new schemas, and three new event names. No existing path, request field,
+    response field, or event changes, so a client that never calls the template
+    routes is unaffected. The HTTP API version stays /api/v1. The three new
+    facts bring the catalog to 215 published and 95 implemented names, with
+    Notifications at 15 published and 5 implemented. The SPEC 11.8.10 admin
+    path and publish command are replaced by the implemented short route and
+    approve/retire commands, recorded in MISMATCHES.md M-49.

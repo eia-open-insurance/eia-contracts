@@ -1734,6 +1734,9 @@ IMPLEMENTED_EVENTS = {
     "notifications": [
         "notifications.notification.created",
         "notifications.notification.sent",
+        "notifications.template.created",
+        "notifications.template.approved",
+        "notifications.template.retired",
     ],
 }
 
@@ -2160,6 +2163,100 @@ NOTIFICATION_TYPE_REFERENCES = (
     ("CreateNotificationRequest", "notificationType"),
     ("CreateNotificationRequestInternal", "notificationType"),
 )
+
+# Notification template administration (SPEC 11.8.10, NTF-14). The implemented
+# public surface is the short /api/v1/notifications/templates resource rather
+# than the SPEC admin path: list with optional status/code filters, create DRAFT,
+# approve with an approver, and retire. A template is created DRAFT, approval is
+# the only path to ACTIVE, and RETIRED is terminal. The unique key is
+# (tenant, templateCode, templateVersion, locale), so a duplicate create is 409
+# TEMPLATE_ALREADY_EXISTS; a repeated approval of an ACTIVE template is 409
+# TEMPLATE_ALREADY_ACTIVE; any other illegal transition or concurrent loss is
+# 409 TEMPLATE_STATUS_CONFLICT. Every accepted write emits one template event.
+NOTIFICATION_TEMPLATE_OPENAPI_PATHS = [
+    (
+        "get",
+        "/api/v1/notifications/templates",
+        "200",
+        "NotificationTemplate",
+        None,
+        ("400",),
+    ),
+    (
+        "post",
+        "/api/v1/notifications/templates",
+        "201",
+        "NotificationTemplate",
+        "CreateNotificationTemplateRequest",
+        ("400", "409"),
+    ),
+    (
+        "post",
+        "/api/v1/notifications/templates/{id}/approve",
+        "200",
+        "NotificationTemplate",
+        "ApproveNotificationTemplateRequest",
+        ("400", "404", "409"),
+    ),
+    (
+        "post",
+        "/api/v1/notifications/templates/{id}/retire",
+        "200",
+        "NotificationTemplate",
+        None,
+        ("400", "404", "409"),
+    ),
+]
+
+NOTIFICATION_TEMPLATE_FIELDS = (
+    "id",
+    "code",
+    "version",
+    "channel",
+    "locale",
+    "bodyTemplate",
+    "status",
+    "approvedBy",
+    "approvedAt",
+    "createdAt",
+    "updatedAt",
+)
+NOTIFICATION_TEMPLATE_STATUSES = ("DRAFT", "ACTIVE", "RETIRED")
+NOTIFICATION_TEMPLATE_CREATE_PROPERTIES = (
+    "templateCode",
+    "templateVersion",
+    "channel",
+    "locale",
+    "bodyTemplate",
+)
+NOTIFICATION_TEMPLATE_CREATE_REQUIRED = (
+    "templateCode",
+    "templateVersion",
+    "locale",
+    "bodyTemplate",
+)
+NOTIFICATION_TEMPLATE_CODE_MAX_LENGTH = 64
+NOTIFICATION_TEMPLATE_LOCALE_MAX_LENGTH = 16
+NOTIFICATION_TEMPLATE_CONFLICT_CODES = (
+    "TEMPLATE_ALREADY_EXISTS",
+    "TEMPLATE_ALREADY_ACTIVE",
+    "TEMPLATE_STATUS_CONFLICT",
+)
+NOTIFICATION_TEMPLATE_EVENTS = (
+    "notifications.template.created",
+    "notifications.template.approved",
+    "notifications.template.retired",
+)
+NOTIFICATION_TEMPLATE_EVENT_FIELDS = (
+    "templateId",
+    "code",
+    "version",
+    "locale",
+    "status",
+    "approvedBy",
+)
+NOTIFICATION_TEMPLATE_EVENT_MESSAGE = "NotificationTemplateData"
+NOTIFICATION_TEMPLATE_EVENT_IMPLEMENTED_BY = "NotificationTemplateEvents.java"
 
 EVENT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$")
 VALID_JSON_TYPES = {"null", "boolean", "object", "array", "number", "string", "integer"}
@@ -10826,6 +10923,327 @@ def check_notifications_openapi(contracts: ContractSet, document, relative: str)
         )
 
 
+def _notification_template_channel(schema) -> bool:
+    """A template channel is either a NotificationChannel or null."""
+    options = [option for option in (schema.get("oneOf") or []) if isinstance(option, dict)]
+    return (
+        any(
+            option.get("$ref") == "#/components/schemas/NotificationChannel"
+            for option in options
+        )
+        and any(option.get("type") == "null" for option in options)
+    )
+
+
+def check_notification_templates_openapi(contracts: ContractSet, document, relative: str):
+    """Require the implemented notification-template administration surface.
+
+    The short `/api/v1/notifications/templates` resource is the implemented
+    registry: list with exact status/code filters, create DRAFT, approve, and
+    retire. The lifecycle is closed (DRAFT -> ACTIVE, DRAFT|ACTIVE -> RETIRED),
+    the create body never carries a status, and the three conflicts name the
+    stable TEMPLATE_* codes.
+    """
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    template = schemas.get("NotificationTemplate") or {}
+    properties = template.get("properties") or {}
+    required = template.get("required") or []
+    contracts.check(
+        template.get("type") == "object",
+        f"{relative}: NotificationTemplate must be an object schema",
+    )
+    contracts.check(
+        set(properties) == set(NOTIFICATION_TEMPLATE_FIELDS),
+        f"{relative}: NotificationTemplate must declare exactly "
+        f"{list(NOTIFICATION_TEMPLATE_FIELDS)}",
+    )
+    for field in NOTIFICATION_TEMPLATE_FIELDS:
+        contracts.check(
+            field in required,
+            f"{relative}: NotificationTemplate.required must list {field}",
+        )
+    contracts.check(
+        (properties.get("id") or {}).get("format") == "uuid",
+        f"{relative}: NotificationTemplate.id must be a uuid",
+    )
+    code_schema = properties.get("code") or {}
+    contracts.check(
+        (code_schema.get("type"), code_schema.get("maxLength"))
+        == ("string", NOTIFICATION_TEMPLATE_CODE_MAX_LENGTH),
+        f"{relative}: NotificationTemplate.code must be a string of at most "
+        f"{NOTIFICATION_TEMPLATE_CODE_MAX_LENGTH} characters",
+    )
+    version_schema = properties.get("version") or {}
+    contracts.check(
+        (version_schema.get("type"), version_schema.get("minimum")) == ("integer", 1),
+        f"{relative}: NotificationTemplate.version must be a positive integer",
+    )
+    contracts.check(
+        _notification_template_channel(properties.get("channel")),
+        f"{relative}: NotificationTemplate.channel must be NotificationChannel or null",
+    )
+    locale_schema = properties.get("locale") or {}
+    contracts.check(
+        (locale_schema.get("type"), locale_schema.get("maxLength"))
+        == ("string", NOTIFICATION_TEMPLATE_LOCALE_MAX_LENGTH),
+        f"{relative}: NotificationTemplate.locale must be a string of at most "
+        f"{NOTIFICATION_TEMPLATE_LOCALE_MAX_LENGTH} characters",
+    )
+    body_schema = properties.get("bodyTemplate") or {}
+    contracts.check(
+        body_schema.get("type") == "string" and body_schema.get("minLength") == 1,
+        f"{relative}: NotificationTemplate.bodyTemplate must be a non-empty string",
+    )
+    contracts.check(
+        (properties.get("status") or {}).get("$ref")
+        == "#/components/schemas/NotificationTemplateStatus",
+        f"{relative}: NotificationTemplate.status must reference "
+        "NotificationTemplateStatus",
+    )
+    approved_by = properties.get("approvedBy") or {}
+    contracts.check(
+        _schema_types(approved_by) == {"string", "null"}
+        and approved_by.get("format") == "uuid",
+        f"{relative}: NotificationTemplate.approvedBy must be a nullable uuid",
+    )
+    approved_at = properties.get("approvedAt") or {}
+    contracts.check(
+        _schema_types(approved_at) == {"string", "null"}
+        and approved_at.get("format") == "date-time",
+        f"{relative}: NotificationTemplate.approvedAt must be a nullable date-time",
+    )
+    for field in ("createdAt", "updatedAt"):
+        field_schema = properties.get(field) or {}
+        contracts.check(
+            field_schema.get("type") == "string"
+            and field_schema.get("format") == "date-time",
+            f"{relative}: NotificationTemplate.{field} must be a date-time",
+        )
+
+    status_schema = schemas.get("NotificationTemplateStatus") or {}
+    contracts.check(
+        status_schema.get("type") == "string",
+        f"{relative}: NotificationTemplateStatus.type must be string",
+    )
+    contracts.check(
+        tuple(status_schema.get("enum") or []) == NOTIFICATION_TEMPLATE_STATUSES,
+        f"{relative}: NotificationTemplateStatus.enum must be "
+        f"{list(NOTIFICATION_TEMPLATE_STATUSES)}",
+    )
+
+    create = schemas.get("CreateNotificationTemplateRequest") or {}
+    create_properties = create.get("properties") or {}
+    create_required = create.get("required") or []
+    contracts.check(
+        create.get("type") == "object",
+        f"{relative}: CreateNotificationTemplateRequest must be an object schema",
+    )
+    contracts.check(
+        set(create_properties) == set(NOTIFICATION_TEMPLATE_CREATE_PROPERTIES),
+        f"{relative}: CreateNotificationTemplateRequest must declare exactly "
+        f"{list(NOTIFICATION_TEMPLATE_CREATE_PROPERTIES)}",
+    )
+    for field in NOTIFICATION_TEMPLATE_CREATE_REQUIRED:
+        contracts.check(
+            field in create_required,
+            f"{relative}: CreateNotificationTemplateRequest.required must list {field}",
+        )
+    contracts.check(
+        "status" not in create_properties,
+        f"{relative}: CreateNotificationTemplateRequest must not accept a status",
+    )
+    create_code = create_properties.get("templateCode") or {}
+    contracts.check(
+        (create_code.get("type"), create_code.get("minLength"), create_code.get("maxLength"))
+        == ("string", 1, NOTIFICATION_TEMPLATE_CODE_MAX_LENGTH),
+        f"{relative}: CreateNotificationTemplateRequest.templateCode must be a "
+        f"1-{NOTIFICATION_TEMPLATE_CODE_MAX_LENGTH} character string",
+    )
+    create_version = create_properties.get("templateVersion") or {}
+    contracts.check(
+        (create_version.get("type"), create_version.get("minimum")) == ("integer", 1),
+        f"{relative}: CreateNotificationTemplateRequest.templateVersion must be a "
+        "positive integer",
+    )
+    contracts.check(
+        _notification_template_channel(create_properties.get("channel")),
+        f"{relative}: CreateNotificationTemplateRequest.channel must be "
+        "NotificationChannel or null",
+    )
+    create_locale = create_properties.get("locale") or {}
+    contracts.check(
+        (
+            create_locale.get("type"),
+            create_locale.get("minLength"),
+            create_locale.get("maxLength"),
+        )
+        == ("string", 1, NOTIFICATION_TEMPLATE_LOCALE_MAX_LENGTH),
+        f"{relative}: CreateNotificationTemplateRequest.locale must be a "
+        f"1-{NOTIFICATION_TEMPLATE_LOCALE_MAX_LENGTH} character string",
+    )
+    create_body = create_properties.get("bodyTemplate") or {}
+    contracts.check(
+        create_body.get("type") == "string" and create_body.get("minLength") == 1,
+        f"{relative}: CreateNotificationTemplateRequest.bodyTemplate must be a "
+        "non-empty string",
+    )
+
+    approve = schemas.get("ApproveNotificationTemplateRequest") or {}
+    approve_properties = approve.get("properties") or {}
+    contracts.check(
+        approve.get("type") == "object" and "approvedBy" in (approve.get("required") or []),
+        f"{relative}: ApproveNotificationTemplateRequest must require approvedBy",
+    )
+    contracts.check(
+        (approve_properties.get("approvedBy") or {}).get("format") == "uuid",
+        f"{relative}: ApproveNotificationTemplateRequest.approvedBy must be a uuid",
+    )
+
+    planned = {
+        (str(entry.get("method") or "").lower(), entry.get("path"))
+        for entry in document.get("x-planned-operations") or []
+        if isinstance(entry, dict)
+    }
+    for method, template_path, success, response_schema, request_schema, errors in (
+        NOTIFICATION_TEMPLATE_OPENAPI_PATHS
+    ):
+        path_item = paths.get(template_path) if isinstance(paths, dict) else None
+        operation = path_item.get(method) if isinstance(path_item, dict) else None
+        where = f"{relative}: {method.upper()} {template_path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required template operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+        contracts.check(
+            (method, template_path) not in planned,
+            f"{where}: implemented template operation must not be listed in "
+            "x-planned-operations",
+        )
+        parameter_refs, inline_names = _parameter_names(operation)
+        contracts.check(
+            "TenantHeader" in parameter_refs,
+            f"{where}: must require the shared TenantHeader",
+        )
+        if "{id}" in template_path:
+            contracts.check(
+                "id" in inline_names,
+                f"{where}: must declare the id path parameter",
+            )
+        response_schema_object = _response_schema(operation, success)
+        if method != "get":
+            contracts.check(
+                isinstance(response_schema_object, dict)
+                and str(response_schema_object.get("$ref", "")).endswith(
+                    f"/schemas/{response_schema}"
+                ),
+                f"{where}: {success} must return the {response_schema} schema",
+            )
+        responses = operation.get("responses") or {}
+        for code in errors:
+            contracts.check(code in responses, f"{where}: must document the {code} response")
+        if method == "get":
+            array_schema = _response_schema(operation, success) or {}
+            items = array_schema.get("items") or {}
+            contracts.check(
+                array_schema.get("type") == "array"
+                and str(items.get("$ref", "")).endswith("/schemas/NotificationTemplate"),
+                f"{where}: 200 must be an array of NotificationTemplate",
+            )
+            status_parameter = _inline_parameter(operation, "status") or {}
+            contracts.check(
+                (status_parameter.get("schema") or {}).get("$ref")
+                == "#/components/schemas/NotificationTemplateStatus",
+                f"{where}: status must reference NotificationTemplateStatus",
+            )
+            code_parameter = _inline_parameter(operation, "code") or {}
+            contracts.check(
+                (code_parameter.get("schema") or {}).get("maxLength")
+                == NOTIFICATION_TEMPLATE_CODE_MAX_LENGTH,
+                f"{where}: code must be capped at "
+                f"{NOTIFICATION_TEMPLATE_CODE_MAX_LENGTH} characters",
+            )
+        if request_schema:
+            request_body = operation.get("requestBody") or {}
+            request_object = (
+                ((request_body.get("content") or {}).get("application/json") or {})
+                .get("schema")
+                if isinstance(request_body, dict)
+                else None
+            )
+            contracts.check(
+                isinstance(request_object, dict)
+                and str(request_object.get("$ref", "")).endswith(
+                    f"/schemas/{request_schema}"
+                ),
+                f"{where}: request body must use the {request_schema} schema",
+            )
+        else:
+            contracts.check(
+                "requestBody" not in operation,
+                f"{where}: retire must not declare a request body",
+            )
+        if "409" in errors:
+            conflict = responses.get("409") or {}
+            conflict_text = str(conflict.get("description") or "")
+            problem_schema = (((conflict.get("content") or {}).get(
+                "application/problem+json"
+            ) or {}).get("schema")) if isinstance(conflict, dict) else None
+            contracts.check(
+                isinstance(problem_schema, dict)
+                and str(problem_schema.get("$ref", "")).endswith("/schemas/Problem"),
+                f"{where}: 409 must document the shared Problem schema",
+            )
+            if method == "post" and request_schema is None:
+                expected_codes = (NOTIFICATION_TEMPLATE_CONFLICT_CODES[2],)
+                expected_event = NOTIFICATION_TEMPLATE_EVENTS[2]
+            elif request_schema == "ApproveNotificationTemplateRequest":
+                expected_codes = NOTIFICATION_TEMPLATE_CONFLICT_CODES[1:]
+                expected_event = NOTIFICATION_TEMPLATE_EVENTS[1]
+            else:
+                expected_codes = (NOTIFICATION_TEMPLATE_CONFLICT_CODES[0],)
+                expected_event = NOTIFICATION_TEMPLATE_EVENTS[0]
+            for conflict_code in expected_codes:
+                contracts.check(
+                    conflict_code in conflict_text,
+                    f"{where}: 409 must document {conflict_code}",
+                )
+            contracts.check(
+                expected_event in str(operation.get("description") or ""),
+                f"{where}: description must name the emitted {expected_event} event",
+            )
+        if request_schema == "CreateNotificationTemplateRequest":
+            contracts.check(
+                "DRAFT" in str(operation.get("summary") or ""),
+                f"{where}: create must document the DRAFT initial status",
+            )
+            contracts.check(
+                "notifications.template.created"
+                in str(operation.get("description") or ""),
+                f"{where}: create must document notifications.template.created",
+            )
+
+    compatibility = document.get("x-compatibility") or {}
+    contracts.check(
+        isinstance(compatibility, dict) and compatibility.get("contractVersion") == (
+            (document.get("info") or {}).get("version")
+        ),
+        f"{relative}: x-compatibility must name the current contract version",
+    )
+    implementation = document.get("x-implementation") or {}
+    verified = [
+        str(entry) for entry in implementation.get("verifiedAgainst") or []
+    ]
+    contracts.check(
+        any(entry.endswith("NotificationTemplateController.java") for entry in verified),
+        f"{relative}: x-implementation.verifiedAgainst must name the template "
+        "controller",
+    )
+
+
 def check_openapi(contracts: ContractSet, verbose: bool):
     print("\nOpenAPI 3.1 documents")
     expected = {"components"} | set(VERTICAL_FILES)
@@ -11451,6 +11869,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_direct_claim_settlement_payment(contracts, document, relative)
         if vertical == "notifications":
             check_notifications_openapi(contracts, document, relative)
+            check_notification_templates_openapi(contracts, document, relative)
         contracts.check_openapi_schemas(document, relative)
         if verbose:
             print(f"  OK {relative}  paths={len(paths)} operations={operation_count}")
@@ -11458,6 +11877,131 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             print(f"  OK {relative}  {len(paths)} paths, {operation_count} operations")
     contracts.check_openapi_schemas(components, Path("openapi/components.yaml"))
 
+
+
+def check_notification_templates_asyncapi(contracts: ContractSet, document, relative: str):
+    """Require the three implemented template lifecycle channels.
+
+    Each channel carries the shared DomainEvent envelope and the dedicated
+    NotificationTemplateData payload with the six-member data object. The
+    template version is the identity version from the row, not the aggregate
+    version (1 create, 2 approve, 3 retire).
+    """
+    channels = document.get("channels") or {}
+    operations = document.get("operations") or {}
+    messages = (document.get("components") or {}).get("messages") or {}
+
+    message = messages.get(NOTIFICATION_TEMPLATE_EVENT_MESSAGE) or {}
+    payload = message.get("payload") or {}
+    properties = payload.get("properties") or {}
+    required = set(payload.get("required") or [])
+    contracts.check(
+        isinstance(message, dict) and message.get("contentType") == "application/json",
+        f"{relative}: {NOTIFICATION_TEMPLATE_EVENT_MESSAGE} must declare "
+        "application/json",
+    )
+    contracts.check(
+        set(properties) == set(NOTIFICATION_TEMPLATE_EVENT_FIELDS),
+        f"{relative}: {NOTIFICATION_TEMPLATE_EVENT_MESSAGE} must declare exactly "
+        f"{list(NOTIFICATION_TEMPLATE_EVENT_FIELDS)}",
+    )
+    for field in NOTIFICATION_TEMPLATE_EVENT_FIELDS:
+        contracts.check(
+            field in required,
+            f"{relative}: {NOTIFICATION_TEMPLATE_EVENT_MESSAGE}.required must list "
+            f"{field}",
+        )
+    contracts.check(
+        (properties.get("templateId") or {}).get("format") == "uuid",
+        f"{relative}: {NOTIFICATION_TEMPLATE_EVENT_MESSAGE}.templateId must be a uuid",
+    )
+    payload_code = properties.get("code") or {}
+    contracts.check(
+        (payload_code.get("type"), payload_code.get("maxLength"))
+        == ("string", NOTIFICATION_TEMPLATE_CODE_MAX_LENGTH),
+        f"{relative}: {NOTIFICATION_TEMPLATE_EVENT_MESSAGE}.code must be a string of "
+        f"at most {NOTIFICATION_TEMPLATE_CODE_MAX_LENGTH} characters",
+    )
+    payload_version = properties.get("version") or {}
+    contracts.check(
+        (payload_version.get("type"), payload_version.get("minimum")) == ("integer", 1),
+        f"{relative}: {NOTIFICATION_TEMPLATE_EVENT_MESSAGE}.version must be a "
+        "positive integer",
+    )
+    payload_locale = properties.get("locale") or {}
+    contracts.check(
+        (payload_locale.get("type"), payload_locale.get("maxLength"))
+        == ("string", NOTIFICATION_TEMPLATE_LOCALE_MAX_LENGTH),
+        f"{relative}: {NOTIFICATION_TEMPLATE_EVENT_MESSAGE}.locale must be a string "
+        f"of at most {NOTIFICATION_TEMPLATE_LOCALE_MAX_LENGTH} characters",
+    )
+    contracts.check(
+        tuple((properties.get("status") or {}).get("enum") or [])
+        == NOTIFICATION_TEMPLATE_STATUSES,
+        f"{relative}: {NOTIFICATION_TEMPLATE_EVENT_MESSAGE}.status must enumerate "
+        f"{list(NOTIFICATION_TEMPLATE_STATUSES)}",
+    )
+    payload_approver = properties.get("approvedBy") or {}
+    contracts.check(
+        _schema_types(payload_approver) == {"string", "null"}
+        and payload_approver.get("format") == "uuid",
+        f"{relative}: {NOTIFICATION_TEMPLATE_EVENT_MESSAGE}.approvedBy must be a "
+        "nullable uuid",
+    )
+
+    send_events = {
+        operation.get("x-event-type")
+        for operation in operations.values()
+        if isinstance(operation, dict) and operation.get("action") == "send"
+    }
+    template_addresses = {
+        channel.get("address")
+        for channel in channels.values()
+        if isinstance(channel, dict)
+        and str(channel.get("address") or "").startswith("notifications.template.")
+    }
+    contracts.check(
+        template_addresses == set(NOTIFICATION_TEMPLATE_EVENTS),
+        f"{relative}: the notifications.template.* channels must be exactly "
+        f"{list(NOTIFICATION_TEMPLATE_EVENTS)}",
+    )
+    for event in NOTIFICATION_TEMPLATE_EVENTS:
+        channel = next(
+            (
+                channel
+                for channel in channels.values()
+                if isinstance(channel, dict) and channel.get("address") == event
+            ),
+            None,
+        )
+        where = f"{relative}: {event}"
+        contracts.check(isinstance(channel, dict), f"{where} channel is missing")
+        if not isinstance(channel, dict):
+            continue
+        contracts.check(
+            channel.get("x-status") == "implemented",
+            f"{where} channel must be implemented",
+        )
+        contracts.check(
+            channel.get("x-event-version") == 1,
+            f"{where} channel must stay at x-event-version 1",
+        )
+        contracts.check(
+            str(channel.get("x-implemented-by", "")).endswith(
+                NOTIFICATION_TEMPLATE_EVENT_IMPLEMENTED_BY
+            ),
+            f"{where} must name {NOTIFICATION_TEMPLATE_EVENT_IMPLEMENTED_BY} in "
+            "x-implemented-by",
+        )
+        channel_messages = channel.get("messages") or {}
+        contracts.check(
+            NOTIFICATION_TEMPLATE_EVENT_MESSAGE in channel_messages,
+            f"{where} must reference {NOTIFICATION_TEMPLATE_EVENT_MESSAGE}",
+        )
+        contracts.check(
+            event in send_events,
+            f"{where} must have an implemented send operation",
+        )
 
 
 def check_asyncapi(contracts: ContractSet, verbose: bool):
@@ -12182,6 +12726,9 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
                 f"{relative}: DocumentContentDeletedData.deletedAt must be a "
                 "date-time",
             )
+
+        if vertical == "notifications":
+            check_notification_templates_asyncapi(contracts, document, relative)
 
         entry = catalog_entries.get(vertical) or {}
         published = entry.get("published") or []

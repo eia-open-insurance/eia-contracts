@@ -1584,6 +1584,43 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   and M-35 for the reversal and refreshes the validation evidence.
 - `python scripts/validate_contracts.py` passes 14,205 checks with 0 failures.
 
+### Added in the Notifications template-management contract (2026-10-22)
+
+- `openapi/notifications.yaml` is 1.3.0: adds
+  `GET/POST /api/v1/notifications/templates`,
+  `POST /api/v1/notifications/templates/{id}/approve`, and
+  `POST /api/v1/notifications/templates/{id}/retire` with the shared tenant
+  header, the optional exact `status`/`code` list filters, the
+  `NotificationTemplate`, `NotificationTemplateStatus`,
+  `CreateNotificationTemplateRequest`, and
+  `ApproveNotificationTemplateRequest` schemas, the DRAFT-on-create rule, the
+  unique `(templateCode, templateVersion, locale)` key with 409
+  `TEMPLATE_ALREADY_EXISTS`, the approve 409 `TEMPLATE_ALREADY_ACTIVE` and
+  `TEMPLATE_STATUS_CONFLICT`, the retire 409 `TEMPLATE_STATUS_CONFLICT`, the
+  201/200/400/404/409 responses, and the three emitted event names. The two
+  SPEC 11.8.10 admin-template planned entries are replaced by the implemented
+  short route. `x-compatibility` moves to 1.3.0 over 1.2.0.
+- `asyncapi/notifications.yaml` is 1.2.0: the implemented
+  `notifications.template.created`, `.approved`, and `.retired` channels and
+  `send` operations with the shared `NotificationTemplateData` payload
+  (`templateId`, `code`, `version`, `locale`, `status`, `approvedBy`).
+  `eventVersion` stays 1; the aggregate version is 1, 2, and 3.
+- `asyncapi/event-catalog.yaml` is 1.31.0: the three names are published and
+  implemented, for 215 published and 95 implemented names (Notifications 15
+  published and 5 implemented).
+- `scripts/validate_contracts.py` requires the four template operations with
+  the shared tenant header and list filters, the eleven-member
+  `NotificationTemplate` projection, the closed `NotificationTemplateStatus`
+  enum, the create and approve request schemas and their bounds, the
+  DRAFT-on-create rule, the 201/200/400/404/409 responses, the three
+  `TEMPLATE_*` conflict codes, the three implemented channels with the
+  six-member payload, and the catalog entries.
+- `README.md` records the additive versions, the DRAFT/approve/retire
+  lifecycle, the filter and conflict semantics, the three events, the SPEC-less
+  route and names, and the validation count; `MISMATCHES.md` adds M-49, updates
+  M-22 and the scope/evidence notes, and refreshes the validation evidence.
+- `python scripts/validate_contracts.py` passes 14,465 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

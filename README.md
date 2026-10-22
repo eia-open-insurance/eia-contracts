@@ -433,6 +433,67 @@ allocation GET and no reversal, and SPEC 11.7.10 publishes no allocation fact.
 `MISMATCHES.md` M-22 and M-35 record the extension. The full run passes 14,205
 checks.
 
+### Notifications template management (2026-10-22)
+
+Notifications 1.3.0 adds the notification-template registry. The change is
+additive: four new operations, four new schemas, and three new event names; no
+existing path, request field, response field, or event changes.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/notifications.yaml` | 1.3.0 | Additive | `GET/POST /api/v1/notifications/templates`, `POST /api/v1/notifications/templates/{id}/approve`, `POST /api/v1/notifications/templates/{id}/retire`, and the `NotificationTemplate`, `NotificationTemplateStatus`, `CreateNotificationTemplateRequest`, and `ApproveNotificationTemplateRequest` schemas. |
+| `asyncapi/notifications.yaml` | 1.2.0 | Additive | The implemented `notifications.template.created`, `.approved`, and `.retired` channels and operations with the shared `NotificationTemplateData` payload. |
+| `asyncapi/event-catalog.yaml` | 1.31.0 | Additive | The three template names are published and implemented (215 published and 95 implemented in total; Notifications 15 published and 5 implemented). |
+
+Semantics:
+
+- A template is created DRAFT by `POST /api/v1/notifications/templates`. The
+  body is `{templateCode, templateVersion, channel?, locale, bodyTemplate}`;
+  `templateCode` is 1-64 characters, `templateVersion` is at least 1, `channel`
+  is optional and null means channel-neutral, `locale` is 1-16 characters, and
+  `bodyTemplate` is non-empty. `status`, `approvedBy`, and `approvedAt` are
+  never accepted. The domain command also accepts `body` as an alias of
+  `bodyTemplate`. The unique key is `(tenant, templateCode, templateVersion,
+  locale)`: a duplicate, including a concurrent insert, is 409
+  `TEMPLATE_ALREADY_EXISTS` (`EIA-NTF-9205`) with no row and no event.
+- `POST /api/v1/notifications/templates/{id}/approve` requires `{approvedBy}`.
+  Approval is the only path to ACTIVE (NTF-14) and records the approver and the
+  server-assigned instant in `approvedBy` and `approvedAt`. An already-ACTIVE
+  template is 409 `TEMPLATE_ALREADY_ACTIVE` (`EIA-NTF-9206`); a RETIRED template
+  or a lost concurrent conditional update is 409 `TEMPLATE_STATUS_CONFLICT`
+  (`EIA-NTF-9207`).
+- `POST /api/v1/notifications/templates/{id}/retire` has no request body and
+  moves a DRAFT or ACTIVE template to RETIRED, which is terminal. The approval
+  evidence is retained. An already-RETIRED template or a lost concurrent update
+  is 409 `TEMPLATE_STATUS_CONFLICT`. A template outside the caller's tenant is
+  404, indistinguishable from a missing template.
+- `GET /api/v1/notifications/templates` returns a bare JSON array ordered by
+  `createdAt` newest first, then `code`, `version` descending, and `id`.
+  `status` filters one lifecycle state and `code` filters one exact template
+  code; both are optional and trimmed. An unknown `status` is 400
+  `INVALID_TEMPLATE_STATUS` (`EIA-NTF-9408`). The tenant is always the required
+  `X-EIA-Tenant` header.
+- Every accepted write emits one template fact in the same transaction:
+  `notifications.template.created` on the DRAFT insert,
+  `notifications.template.approved` on the transition to ACTIVE, and
+  `notifications.template.retired` on the transition to RETIRED. The
+  `NotificationTemplate` aggregate version is 1, 2, and 3 respectively, while
+  `eventVersion` stays 1. The payload is `{templateId, code, version, locale,
+  status, approvedBy}`; `version` is the template identity version, and
+  `approvedBy` is JSON null on a DRAFT create and on a retirement from DRAFT.
+- SPEC 11.8.10 mounts template administration at
+  `/api/v1/notifications/admin/templates` and names a publish command; the
+  implemented short route and its approve/retire commands replace that shape,
+  and SPEC 11.8.9 publishes no template event. `MISMATCHES.md` M-22 and M-49
+  record the route, command, and event-name differences.
+- The validator requires the four operations, the shared tenant header, the
+  `status`/`code` list filters, the `NotificationTemplate` and
+  `NotificationTemplateStatus` shapes, the create and approve request schemas,
+  the DRAFT-on-create rule, the 201/200/400/404/409 responses, the three
+  `TEMPLATE_*` conflict codes, the three implemented channels with the shared
+  `NotificationTemplateData` payload, and the catalog entries. The full run
+  passes 14,465 checks.
+
 ### Claim task and note idempotency (2026-10-20)
 
 Direct Claims and Assumed Claims 1.4.0 make task and note creation retry-safe
@@ -3174,7 +3235,15 @@ missing directory.
    Notifications `NotificationType` member `DUNNING_NOTICE`, its position
    between `ESCHEATMENT_DUE` and `NEW_DOCUMENT_UPLOAD`, no repeated enum value,
    and the `NotificationType` reference on the `Notification` projection and on
-   both create commands with `notificationType` required on all three.
+   both create commands with `notificationType` required on all three. It also
+   requires the four notification-template operations with the shared
+   `TenantHeader` and the `status`/`code` list filters, the eleven-member
+   `NotificationTemplate` projection, the closed `NotificationTemplateStatus`
+   enum, the create and approve request schemas and their field bounds, the
+   DRAFT-on-create rule, the 201/200/400/404/409 responses, the
+   `TEMPLATE_ALREADY_EXISTS`/`TEMPLATE_ALREADY_ACTIVE`/`TEMPLATE_STATUS_CONFLICT`
+   documentation, and the absence of the implemented routes from
+   `x-planned-operations`.
 4. **AsyncAPI structure.** `asyncapi: 3.0.0`, channel addresses, `x-event-type`,
    `x-status: planned|implemented`, `x-implemented-by` on every implemented
    channel, one `send` operation per channel, a `DomainEvent` message on
@@ -3219,7 +3288,10 @@ missing directory.
    members, and the
    `PolicyLegalEntityCreatedData` and
    `PolicyPolicyLegalEntityAssignedData` payloads with their catalog-row,
-   enum, nullable-link, changed-fields, and policy/money members.
+   enum, nullable-link, changed-fields, and policy/money members, and the
+   `NotificationTemplateData` payload with its template identity, code,
+   template version, locale, status, and nullable approver members for the
+   created, approved, and retired facts.
 5. **Event catalog cross-check.** The published set in `event-catalog.yaml`
    must equal the channel addresses in the matching vertical document, event
    names must be unique across the platform and must match
@@ -3240,6 +3312,8 @@ missing directory.
    `policy.mass-tort-profile.updated`,
    `payment.allocation.created`,
    `payment.allocation.reversed`,
+   `notifications.template.created`, `notifications.template.approved`,
+   `notifications.template.retired`,
    `contract.bordereau.received`, `contract.bordereau.processed`,
    `contract.bordereau.failed`, the four `contract.cash-call.*` facts
    (`requested`, `issued`, `settled`, and `cancelled`),
@@ -3363,6 +3437,12 @@ missing directory.
   v1 does not list. The type is the target of the shell's dunning draft
   hand-off, and the expert still rejects any value outside the closed list
   (M-48);
+- notification templates are implemented at the short
+  `/api/v1/notifications/templates` resource with list, create DRAFT, approve,
+  and retire, while SPEC 11.8.10 mounts `/api/v1/notifications/admin/templates`
+  and names a publish command. The three lifecycle facts
+  `notifications.template.created`/`.approved`/`.retired` have no SPEC 11.8.9
+  name, and a template is channel-neutral when `channel` is null (M-22, M-49);
 - document legal holds and disposition are implemented per document at
   `POST /api/v1/documents/{documentId}/hold`, `.../hold/release`, and
   `.../dispose`, with the new `document.legal-hold.placed`/`.released` events

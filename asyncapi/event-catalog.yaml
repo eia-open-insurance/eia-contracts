@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.30.0
+  version: 1.31.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -148,6 +148,14 @@ info:
     published and one implemented name, bringing the platform totals to 212
     published and 92 implemented; Payment becomes 20 published and 5 implemented
     (M-22, M-35).
+    The 2026-10-22 Notifications template-administration slice adds three
+    Notifications names, `notifications.template.created`, `.approved`, and
+    `.retired`, with no SPEC 11.8.9 equivalent: SPEC defines notification
+    lifecycle facts and a template registry, but publishes no template event.
+    They are `NotificationTemplate` aggregate facts at versions 1, 2, and 3.
+    They add three published and three implemented names, bringing the platform
+    totals to 215 published and 95 implemented; Notifications becomes 15
+    published and 5 implemented (M-22, M-49).
     The platform
     event-ingest service
     is the inbox:
@@ -604,9 +612,15 @@ x-event-catalog:
       - notifications.digest.sent
       - notifications.notification.created
       - notifications.notification.sent
+      - notifications.template.created
+      - notifications.template.approved
+      - notifications.template.retired
     implemented:
       - notifications.notification.created
       - notifications.notification.sent
+      - notifications.template.created
+      - notifications.template.approved
+      - notifications.template.retired
     consumed: []
     consumedNote: >
       Consumed events are every domain event with a notification rule. The subscription registry, not this catalog, is the authoritative list (SPEC 11.8.9).
