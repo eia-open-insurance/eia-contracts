@@ -2519,6 +2519,64 @@ last in the OpenAPI schema and in both AsyncAPI payload enums, and still
 requires the nullable source members, the pairing rules, both list filters, and
 the documented 400 codes. The full run passes 15,481 checks.
 
+### Notifications delivery attempts (2026-10-22)
+
+Notifications 1.7.0 adds the tenant-scoped delivery-attempt history and the
+provider delivery evidence recorded by send. The change is additive: one read
+operation on the public and expert surfaces, one new projection, two
+required-but-nullable members on the notification, and two optional members on
+the implemented sent event payload; no path, required request field, or event
+name is removed.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/notifications.yaml` | 1.7.0 | Additive | `GET /api/v1/notifications/{notificationId}/attempts` and its `/internal/v1` expert equivalent return a bare `NotificationDeliveryAttempt` array. `Notification` adds the nullable `deliveredAt`/`providerReference` delivery evidence, and the `NotificationDeliveryAttempt`/`NotificationDeliveryAttemptStatus` schemas describe the history. |
+| `asyncapi/notifications.yaml` | 1.5.0 | Additive | `NotificationSentData` adds the optional `deliveredAt` and `providerReference` members; `eventVersion` stays 1 and the channel set is unchanged. |
+| `asyncapi/event-catalog.yaml` | 1.35.0 | Unchanged | No event name changes; the catalog stays at 220 published and 101 implemented names (Notifications 15 published and 5 implemented). |
+
+Semantics:
+
+- `GET /api/v1/notifications/{notificationId}/attempts` returns a bare JSON
+  array ordered by `attemptNumber` ascending. Each row carries `id`,
+  `tenantId`, `notificationId`, `attemptNumber`, `channel`, `provider`,
+  `providerReference`, `status`, `errorCode`, `errorMessage`, and
+  `attemptedAt`. The `(notificationId, attemptNumber)` pair is unique.
+- The notification lookup is the tenant wall: an unknown notification and a
+  notification owned by another tenant are both 404 `EIA-NTF-9001`
+  `NOT_FOUND`, indistinguishable from each other. A known notification that has
+  not been sent returns an empty array, not 404. A missing `X-EIA-Tenant` is 400
+  `EIA-NTF-9501`, a malformed tenant is 400 `EIA-NTF-9502`, and a malformed
+  `notificationId` is 400 `EIA-NTF-9503` `INVALID_ARGUMENT`.
+- The implemented provider is the local simulator (`SIMULATOR`), selected by
+  `eia.notifications.provider=simulator` and also the default when the property
+  is absent. It never contacts an external system, always confirms delivery,
+  and returns the deterministic reference `SIM-<notification uuid>` as the
+  NTF-11 provider idempotency key. A send records attempt 1 with status
+  `DELIVERED`, copies the reference to the notification, and sets `deliveredAt`
+  to the send instant (`sentAt`).
+- An unsent notification has null `deliveredAt` and `providerReference`, and
+  rows that predate the provider keep null. A provider that reports failure
+  aborts the send with 502 `DELIVERY_FAILED` (`EIA-NTF-9304`) before an attempt
+  row is written, so the attempt schema admits `FAILED` but this slice never
+  produces it, and no retry command exists (attempt 1 is the only attempt).
+- The sent event carries `deliveredAt` and `providerReference` in its `data`
+  object when present. `eventVersion` stays 1 and no event name changes;
+  `notifications.notification.delivered` remains a planned SPEC 11.8.9 name.
+- SPEC 11.8.4 models a wider `notification_delivery` row (recipient, provider
+  message id, requested/responded timestamps, retry schedule, and the
+  `PENDING`/`SENT`/`DELIVERED`/`BOUNCED`/`FAILED`/`SUPPRESSED` statuses), and
+  SPEC 11.8.10 exposes tenant-wide delivery diagnostics and a retry command.
+  The implemented slice keeps the evidence on the notification, exposes the
+  per-notification history, and uses the simulator provider;
+  `MISMATCHES.md` M-56 records the differences.
+- The validator requires both attempts operations, the tenant parameter, the
+  required `notificationId` path parameter, the 200 `NotificationDeliveryAttempt`
+  array, the shared 400/404 responses, the exact eleven-member projection, the
+  two-value attempt status, the nullable notification evidence, and the
+  simulator/404/empty-array wording. It also requires the two optional
+  sent-payload members and rejects them on the created payload. The full run
+  passes 15,608 checks.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -3173,6 +3231,69 @@ Rules and semantics:
   message are the expert's. A missing tenant header is 400 `EIA-NTF-9501`; a
   malformed tenant is 400 `EIA-NTF-9502` (`INVALID_TENANT`), whose title differs
   from the expert's malformed-`sourceId` `EIA-NTF-9502` (`INVALID_ARGUMENT`).
+
+### Notification delivery attempts
+
+The delivery history is read at
+`GET /api/v1/notifications/{notificationId}/attempts`, mirrored for the domain
+adapter at `GET /internal/v1/notifications/{notificationId}/attempts`, and
+returns a bare array ordered by `attemptNumber` ascending:
+
+| Field | Type | Rule |
+|---|---|---|
+| `id` | UUID | Attempt id. |
+| `tenantId` | UUID | Tenant that owns the notification and the attempt. |
+| `notificationId` | UUID | Notification the attempt belongs to. |
+| `attemptNumber` | integer >= 1 | Sequential per notification; `(notificationId, attemptNumber)` is unique. |
+| `channel` | enum | The notification's `NotificationChannel` at send time. |
+| `provider` | string, max 32 | Provider code; `SIMULATOR` for the implemented provider. |
+| `providerReference` | string, max 64, nullable | Provider reference/idempotency key; `SIM-<notification uuid>` for the simulator. |
+| `status` | enum | `DELIVERED` or `FAILED`. |
+| `errorCode` | string, max 64, nullable | Provider error code, populated only for a `FAILED` attempt. |
+| `errorMessage` | string, max 500, nullable | Provider error text, populated only for a `FAILED` attempt. |
+| `attemptedAt` | date-time | Instant the attempt was made; the send records the same instant as `sentAt`. |
+
+Rules and semantics:
+
+- The history is a bare array ordered by `attemptNumber` ascending. The
+  implemented slice records the single attempt made by a successful send and
+  has no retry command, so a sent notification has one attempt and an unsent
+  notification has none.
+- The notification lookup is the tenant wall. An unknown notification and a
+  notification owned by another tenant are both 404 `EIA-NTF-9001`
+  `NOT_FOUND`, indistinguishable from each other, and no attempt row of another
+  tenant is ever returned. A known notification that has not been sent returns
+  an empty array, not 404.
+- A missing `X-EIA-Tenant` is 400 `EIA-NTF-9501`; a malformed tenant is 400
+  `EIA-NTF-9502` (`INVALID_TENANT`); a `notificationId` that is not a UUID is
+  400 `EIA-NTF-9503` (`INVALID_ARGUMENT`). On the expert route the tenant travels
+  as `?tenantId=`; a missing value is 400 `EIA-NTF-9501` and a malformed value
+  or id is 400 `EIA-NTF-9502` (`INVALID_ARGUMENT`).
+- The only implemented provider is the local simulator (`SIMULATOR`), selected
+  by `eia.notifications.provider=simulator` and also the default when the
+  property is absent. It never contacts an external system and always confirms
+  delivery, returning the deterministic reference `SIM-<notification uuid>` as
+  the NTF-11 provider idempotency key. The same reference is returned on the
+  attempt and on `Notification.providerReference`.
+- The send sets `deliveredAt` to the same instant as `sentAt`, so a simulator
+  delivery has `attemptedAt` = `sentAt` = `deliveredAt`. An unsent notification
+  and a row that predates the provider carry null `deliveredAt` and
+  `providerReference`.
+- A provider that reports failure aborts the send with 502 `DELIVERY_FAILED`
+  (`EIA-NTF-9304`) before the attempt row is written and before the notification
+  changes status. The attempt status set admits `FAILED` for a future provider
+  that records a rejected attempt, but this slice produces only `DELIVERED`.
+- The sent event carries `deliveredAt` and `providerReference` in its `data`
+  object when present. The members are additive and optional, so
+  `notifications.notification.sent` stays at `eventVersion` 1;
+  `notifications.notification.delivered` remains planned.
+- SPEC 11.8.4 models the wider `notification_delivery` row (recipient, provider
+  message id, requested and responded timestamps, retry schedule, and the
+  `PENDING`/`SENT`/`DELIVERED`/`BOUNCED`/`FAILED`/`SUPPRESSED` statuses), and
+  SPEC 11.8.10 mounts tenant-wide delivery diagnostics and a retry command. The
+  implemented per-notification history, the notification-level evidence, the
+  simulator provider, and the absent retry are recorded in `MISMATCHES.md`
+  M-56.
 
 ### Policy billing
 
@@ -3930,7 +4051,13 @@ missing directory.
    template version, locale, status, and nullable approver members for the
    created, approved, and retired facts, the `NotificationCreatedData` and
    `NotificationSentData` payloads with their optional `sourceType`,
-   `sourceId`, and `sourceReference` members on the two notification facts, and
+   `sourceId`, and `sourceReference` members on the two notification facts, the
+   two delivery-attempt reads with their tenant parameter, the required
+   `notificationId` path parameter, the 200 `NotificationDeliveryAttempt`
+   array, the shared 400/404 responses, the exact eleven-member projection, the
+   two-value attempt status, the simulator and 404/empty-array wording, the
+   nullable `Notification.deliveredAt`/`providerReference` evidence, and the two
+   optional sent-payload delivery members (absent from the created payload), and
    the `PartyIdentifierAddedData` and `PartyAddressAddedData` payloads with
    their Party identity and row version, child id, normalized type and values,
    optional authority, effective date, second line, and region, country, actor,
@@ -4108,6 +4235,17 @@ missing directory.
   link has no referential-integrity check against the source vertical. All six
   source types require a `sourceId`, while a reference-only link is accepted;
   the created and sent facts carry the optional members (M-12, M-13, M-53);
+- notification delivery attempts are implemented per notification at
+  `GET /api/v1/notifications/{notificationId}/attempts` with a narrower
+  `NotificationDeliveryAttempt` row than SPEC 11.8.4's `notification_delivery`
+  (no recipient, provider message id, requested/responded timestamps, retry
+  schedule, or `PENDING`/`SENT`/`BOUNCED`/`SUPPRESSED` statuses). The delivery
+  evidence `deliveredAt`/`providerReference` lives on the notification rather
+  than only on the delivery row, and the only provider is the local
+  `SIMULATOR`, which always delivers and returns `SIM-<notification uuid>`. A
+  provider failure is a 502 with no persisted attempt, and the SPEC 11.8.10
+  tenant-wide delivery diagnostics and retry command are not implemented
+  (M-56);
 - document legal holds and disposition are implemented per document at
   `POST /api/v1/documents/{documentId}/hold`, `.../hold/release`, and
   `.../dispose`, with the new `document.legal-hold.placed`/`.released` events

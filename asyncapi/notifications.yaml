@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:notifications
 info:
   title: EIA Notifications events
-  version: 1.4.0
+  version: 1.5.0
   summary: Published domain event names for the Notifications vertical.
   description: >
     Event contract for the Notifications vertical. The authoritative event names
@@ -31,6 +31,13 @@ info:
     `sourceType` and `sourceId` are emitted together; `sourceReference` is
     optional metadata of at most 64 characters. An unlinked notification omits
     all three members, so `eventVersion` stays 1.
+
+    The sent payload additionally carries the provider delivery evidence
+    `deliveredAt` and `providerReference` recorded by the send. The implemented
+    provider is the local simulator (`SIMULATOR`), which always confirms
+    delivery and returns the deterministic reference
+    `SIM-<notification uuid>` as the NTF-11 idempotency key. A send without
+    provider evidence omits both members, so `eventVersion` stays 1.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -73,11 +80,14 @@ channels:
     description: >
       Emitted when a CREATED or QUEUED notification is issued and `sentAt` is
       recorded, after the approved-template and schedule checks. The payload
-      carries `from`, `to`, `status`, `sentAt`, the row version, and the
-      optional source link (`sourceType`, `sourceId`, `sourceReference`)
-      identifying the business record that caused the notification. Each present
-      source field is emitted; all three are omitted when the notification has
-      no source link.
+      carries `from`, `to`, `status`, `sentAt`, the provider delivery evidence
+      `deliveredAt` and `providerReference`, the row version, and the optional
+      source link (`sourceType`, `sourceId`, `sourceReference`) identifying the
+      business record that caused the notification. The `SIMULATOR` provider
+      records `deliveredAt` equal to `sentAt` and the deterministic reference
+      `SIM-<notification uuid>`. Each present delivery or source field is
+      emitted; a null member is omitted. All three source members are omitted
+      when the notification has no source link.
     x-event-type: notifications.notification.sent
     x-event-version: 1
     x-status: implemented
@@ -306,7 +316,8 @@ operations:
     summary: Publish notifications.notification.sent
     description: >
       Publishes notifications.notification.sent when the notification is issued
-      and `sentAt` is recorded. The data object carries the optional source link
+      and `sentAt` is recorded. The data object carries the provider delivery
+      evidence `deliveredAt` and `providerReference` and the optional source link
       when the notification is linked to a business record.
     x-event-type: notifications.notification.sent
     x-status: implemented
@@ -625,6 +636,21 @@ components:
             type: [string, 'null']
             format: date-time
             description: Instant the send was recorded; omitted when null.
+          deliveredAt:
+            type: [string, 'null']
+            format: date-time
+            description: >
+              Provider-confirmed delivery instant; omitted when null. For the
+              `SIMULATOR` provider it equals `sentAt`, and the same instant is
+              returned as `attemptedAt` on the delivery attempt.
+          providerReference:
+            type: [string, 'null']
+            maxLength: 64
+            description: >
+              Provider reference and idempotency key, for example
+              `SIM-<notification uuid>` for the `SIMULATOR`; omitted when null.
+              It matches `Notification.providerReference` and the delivery
+              attempt's reference and is reused by a retry (NTF-11).
           sourceType:
             oneOf:
               - type: string
@@ -727,9 +753,14 @@ x-implementation:
     flat source link (`sourceType`, `sourceId`, `sourceReference`) in their
     `data` object, emitted only for a linked notification, so `eventVersion`
     stays 1. The link type is the ten-value `NotificationSourceType` set, with
-    `OTHER` last. The SPEC 11.8.9 notification names remain planned and the
-    template facts have no SPEC name. There is no subscriber, inbox, or
-    subscription registry yet.
+    `OTHER` last. The sent payload also carries the provider delivery evidence
+    `deliveredAt` and `providerReference` emitted by the send; the default
+    `SIMULATOR` provider always confirms delivery, records `deliveredAt` equal
+    to `sentAt`, and returns the deterministic `SIM-<notification uuid>`
+    idempotency reference. A failed provider call aborts the send with 502
+    `DELIVERY_FAILED` and emits no sent event. The SPEC 11.8.9 notification
+    names remain planned and the template facts have no SPEC name. There is no
+    subscriber, inbox, or subscription registry yet.
 
 x-consumed-events: []
 x-consumed-events-note: >

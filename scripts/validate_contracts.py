@@ -168,10 +168,12 @@ REQUIRED_OPENAPI_PATHS = {
         ("/api/v1/notifications", "get"),
         ("/api/v1/notifications", "post"),
         ("/api/v1/notifications/{notificationId}", "get"),
+        ("/api/v1/notifications/{notificationId}/attempts", "get"),
         ("/api/v1/notifications/{notificationId}/send", "post"),
         ("/internal/v1/notifications", "get"),
         ("/internal/v1/notifications", "post"),
         ("/internal/v1/notifications/{notificationId}", "get"),
+        ("/internal/v1/notifications/{notificationId}/attempts", "get"),
         ("/internal/v1/notifications/{notificationId}/send", "post"),
     ],
 }
@@ -2402,6 +2404,48 @@ NOTIFICATION_SOURCE_EVENT_MESSAGES = (
         NOTIFICATION_SENT_MESSAGE,
     ),
 )
+
+# Notification delivery attempts (SPEC 11.8.4 notification_delivery, NTF-11,
+# NTF-15). The implemented slice exposes the tenant-scoped history at
+# GET /api/v1/notifications/{notificationId}/attempts and its /internal/v1
+# expert equivalent, returns a bare array ordered by attemptNumber, and records
+# one attempt per successful send. The SPEC table is wider (recipient, provider
+# message id, requested/responded timestamps, retry schedule, and more statuses),
+# which MISMATCHES.md M-56 records. The public and expert reads must document
+# the 404 EIA-NTF-9001 tenant wall, the empty array for a known unsent
+# notification, and the simulator provider semantics.
+NOTIFICATION_DELIVERY_ATTEMPT_SCHEMA = "NotificationDeliveryAttempt"
+NOTIFICATION_DELIVERY_ATTEMPT_STATUS_SCHEMA = "NotificationDeliveryAttemptStatus"
+NOTIFICATION_DELIVERY_ATTEMPT_STATUSES = ("DELIVERED", "FAILED")
+NOTIFICATION_DELIVERY_ATTEMPT_FIELDS = (
+    "id",
+    "tenantId",
+    "notificationId",
+    "attemptNumber",
+    "channel",
+    "provider",
+    "providerReference",
+    "status",
+    "errorCode",
+    "errorMessage",
+    "attemptedAt",
+)
+NOTIFICATION_DELIVERY_EVIDENCE_FIELDS = ("deliveredAt", "providerReference")
+NOTIFICATION_PROVIDER_REFERENCE_MAX_LENGTH = 64
+NOTIFICATION_PROVIDER_CODE_MAX_LENGTH = 32
+NOTIFICATION_DELIVERY_ATTEMPT_ERROR_CODE_MAX_LENGTH = 64
+NOTIFICATION_DELIVERY_ATTEMPT_ERROR_MESSAGE_MAX_LENGTH = 500
+NOTIFICATION_DELIVERY_ATTEMPT_PATHS = (
+    ("/api/v1/notifications/{notificationId}/attempts", "TenantHeader", "public"),
+    (
+        "/internal/v1/notifications/{notificationId}/attempts",
+        "TenantIdQuery",
+        "expert",
+    ),
+)
+NOTIFICATION_NOT_FOUND_CODE = "EIA-NTF-9001"
+NOTIFICATION_DELIVERY_PROVIDER = "SIMULATOR"
+NOTIFICATION_DELIVERY_REFERENCE_PREFIX = "SIM-"
 
 # Notification template administration (SPEC 11.8.10, NTF-14). The implemented
 # public surface is the short /api/v1/notifications/templates resource rather
@@ -13225,6 +13269,221 @@ def check_notification_source_filter(contracts: ContractSet, document, relative:
         )
 
 
+def check_notification_delivery_attempts_openapi(contracts: ContractSet, document, relative: str):
+    """Require the delivery-attempt history and the notification delivery evidence.
+
+    The public and expert reads return a bare ``NotificationDeliveryAttempt``
+    array ordered by ``attemptNumber``. Both name the tenant wall (unknown and
+    foreign-tenant notifications are the same 404 ``EIA-NTF-9001``), the empty
+    array for a known unsent notification, and the simulator provider semantics
+    (always delivered, deterministic ``SIM-<notification uuid>`` reference,
+    502 ``DELIVERY_FAILED`` before an attempt row on a provider failure). The
+    ``Notification`` projection carries the nullable ``deliveredAt`` and
+    ``providerReference`` evidence, and the attempt schema carries the exact
+    implemented field set with the two-value attempt status.
+    """
+    schemas = (document.get("components") or {}).get("schemas") or {}
+    paths = document.get("paths") or {}
+
+    notification = schemas.get("Notification") or {}
+    properties = notification.get("properties") or {}
+    required = set(notification.get("required") or [])
+    for field in NOTIFICATION_DELIVERY_EVIDENCE_FIELDS:
+        contracts.check(
+            field in properties,
+            f"{relative}: Notification.properties.{field} is required",
+        )
+        contracts.check(
+            field in required,
+            f"{relative}: Notification.required must list {field}",
+        )
+    delivered_at = properties.get("deliveredAt") or {}
+    contracts.check(
+        _schema_types(delivered_at) == {"string", "null"}
+        and delivered_at.get("format") == "date-time",
+        f"{relative}: Notification.deliveredAt must be a nullable date-time",
+    )
+    provider_reference = properties.get("providerReference") or {}
+    contracts.check(
+        _schema_types(provider_reference) == {"string", "null"}
+        and provider_reference.get("maxLength")
+        == NOTIFICATION_PROVIDER_REFERENCE_MAX_LENGTH,
+        f"{relative}: Notification.providerReference must be a nullable string "
+        f"of at most {NOTIFICATION_PROVIDER_REFERENCE_MAX_LENGTH} characters",
+    )
+
+    attempt = schemas.get(NOTIFICATION_DELIVERY_ATTEMPT_SCHEMA) or {}
+    attempt_properties = attempt.get("properties") or {}
+    attempt_required = set(attempt.get("required") or [])
+    contracts.check(
+        attempt.get("type") == "object",
+        f"{relative}: {NOTIFICATION_DELIVERY_ATTEMPT_SCHEMA} must be an object",
+    )
+    contracts.check(
+        set(attempt_properties) == set(NOTIFICATION_DELIVERY_ATTEMPT_FIELDS),
+        f"{relative}: {NOTIFICATION_DELIVERY_ATTEMPT_SCHEMA} must declare exactly "
+        f"{list(NOTIFICATION_DELIVERY_ATTEMPT_FIELDS)}",
+    )
+    for field in NOTIFICATION_DELIVERY_ATTEMPT_FIELDS:
+        contracts.check(
+            field in attempt_required,
+            f"{relative}: {NOTIFICATION_DELIVERY_ATTEMPT_SCHEMA}.required must list "
+            f"{field}",
+        )
+    for field in ("id", "tenantId", "notificationId"):
+        contracts.check(
+            (attempt_properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: {NOTIFICATION_DELIVERY_ATTEMPT_SCHEMA}.{field} must be a uuid",
+        )
+    attempt_number = attempt_properties.get("attemptNumber") or {}
+    contracts.check(
+        (attempt_number.get("type"), attempt_number.get("minimum")) == ("integer", 1),
+        f"{relative}: {NOTIFICATION_DELIVERY_ATTEMPT_SCHEMA}.attemptNumber must be a "
+        "positive integer",
+    )
+    contracts.check(
+        (attempt_properties.get("channel") or {}).get("$ref")
+        == "#/components/schemas/NotificationChannel",
+        f"{relative}: {NOTIFICATION_DELIVERY_ATTEMPT_SCHEMA}.channel must reference "
+        "NotificationChannel",
+    )
+    provider = attempt_properties.get("provider") or {}
+    contracts.check(
+        (provider.get("type"), provider.get("maxLength"))
+        == ("string", NOTIFICATION_PROVIDER_CODE_MAX_LENGTH),
+        f"{relative}: {NOTIFICATION_DELIVERY_ATTEMPT_SCHEMA}.provider must be a "
+        f"string of at most {NOTIFICATION_PROVIDER_CODE_MAX_LENGTH} characters",
+    )
+    contracts.check(
+        NOTIFICATION_DELIVERY_PROVIDER in str(provider.get("description") or ""),
+        f"{relative}: {NOTIFICATION_DELIVERY_ATTEMPT_SCHEMA}.provider must name the "
+        f"{NOTIFICATION_DELIVERY_PROVIDER} provider",
+    )
+    attempt_reference = attempt_properties.get("providerReference") or {}
+    contracts.check(
+        _schema_types(attempt_reference) == {"string", "null"}
+        and attempt_reference.get("maxLength")
+        == NOTIFICATION_PROVIDER_REFERENCE_MAX_LENGTH,
+        f"{relative}: {NOTIFICATION_DELIVERY_ATTEMPT_SCHEMA}.providerReference must be "
+        f"a nullable string of at most "
+        f"{NOTIFICATION_PROVIDER_REFERENCE_MAX_LENGTH} characters",
+    )
+    contracts.check(
+        (attempt_properties.get("status") or {}).get("$ref")
+        == f"#/components/schemas/{NOTIFICATION_DELIVERY_ATTEMPT_STATUS_SCHEMA}",
+        f"{relative}: {NOTIFICATION_DELIVERY_ATTEMPT_SCHEMA}.status must reference "
+        f"{NOTIFICATION_DELIVERY_ATTEMPT_STATUS_SCHEMA}",
+    )
+    attempt_error_code = attempt_properties.get("errorCode") or {}
+    contracts.check(
+        _schema_types(attempt_error_code) == {"string", "null"}
+        and attempt_error_code.get("maxLength")
+        == NOTIFICATION_DELIVERY_ATTEMPT_ERROR_CODE_MAX_LENGTH,
+        f"{relative}: {NOTIFICATION_DELIVERY_ATTEMPT_SCHEMA}.errorCode must be a "
+        f"nullable string of at most "
+        f"{NOTIFICATION_DELIVERY_ATTEMPT_ERROR_CODE_MAX_LENGTH} characters",
+    )
+    attempt_error_message = attempt_properties.get("errorMessage") or {}
+    contracts.check(
+        _schema_types(attempt_error_message) == {"string", "null"}
+        and attempt_error_message.get("maxLength")
+        == NOTIFICATION_DELIVERY_ATTEMPT_ERROR_MESSAGE_MAX_LENGTH,
+        f"{relative}: {NOTIFICATION_DELIVERY_ATTEMPT_SCHEMA}.errorMessage must be a "
+        f"nullable string of at most "
+        f"{NOTIFICATION_DELIVERY_ATTEMPT_ERROR_MESSAGE_MAX_LENGTH} characters",
+    )
+    attempted_at = attempt_properties.get("attemptedAt") or {}
+    contracts.check(
+        attempted_at.get("type") == "string"
+        and attempted_at.get("format") == "date-time",
+        f"{relative}: {NOTIFICATION_DELIVERY_ATTEMPT_SCHEMA}.attemptedAt must be a "
+        "date-time",
+    )
+
+    status_schema = schemas.get(NOTIFICATION_DELIVERY_ATTEMPT_STATUS_SCHEMA) or {}
+    contracts.check(
+        status_schema.get("type") == "string"
+        and tuple(status_schema.get("enum") or [])
+        == NOTIFICATION_DELIVERY_ATTEMPT_STATUSES,
+        f"{relative}: {NOTIFICATION_DELIVERY_ATTEMPT_STATUS_SCHEMA} must enumerate "
+        f"{list(NOTIFICATION_DELIVERY_ATTEMPT_STATUSES)}",
+    )
+
+    for attempt_path, tenant_parameter, surface in NOTIFICATION_DELIVERY_ATTEMPT_PATHS:
+        path_item = paths.get(attempt_path) if isinstance(paths, dict) else None
+        operation = path_item.get("get") if isinstance(path_item, dict) else None
+        where = f"{relative}: GET {attempt_path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required {surface} delivery-attempt operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+
+        parameter_refs, _ = _parameter_names(operation)
+        contracts.check(
+            tenant_parameter in parameter_refs,
+            f"{where}: must document the shared {tenant_parameter} parameter",
+        )
+        notification_id = _inline_parameter(operation, "notificationId") or {}
+        notification_id_schema = notification_id.get("schema") or {}
+        contracts.check(
+            notification_id.get("in") == "path"
+            and notification_id.get("required") is True
+            and notification_id_schema.get("type") == "string"
+            and notification_id_schema.get("format") == "uuid",
+            f"{where}: notificationId must be a required uuid path parameter",
+        )
+
+        description = str(operation.get("description") or "").lower()
+        for term in (
+            NOTIFICATION_DELIVERY_PROVIDER.lower(),
+            NOTIFICATION_DELIVERY_REFERENCE_PREFIX.lower(),
+            "always",
+            "empty array",
+            "attemptnumber",
+            NOTIFICATION_NOT_FOUND_CODE.lower(),
+            "404",
+        ):
+            contracts.check(
+                term in description,
+                f"{where}: description must document {term!r}",
+            )
+        contracts.check(
+            "502" in description
+            and "delivery_failed" in description
+            and "attempt row" in description,
+            f"{where}: description must document the 502 DELIVERY_FAILED "
+            "before-an-attempt-row rule",
+        )
+
+        responses = operation.get("responses") or {}
+        contracts.check(
+            "400" in responses
+            and str((responses.get("400") or {}).get("$ref", "")).endswith(
+                "/responses/BadRequest"
+            ),
+            f"{where}: must document the shared problem+json 400 response",
+        )
+        contracts.check(
+            "404" in responses
+            and str((responses.get("404") or {}).get("$ref", "")).endswith(
+                "/responses/NotFound"
+            ),
+            f"{where}: must document the shared problem+json 404 tenant-wall response",
+        )
+        ok = responses.get("200") or {}
+        ok_schema = ((ok.get("content") or {}).get("application/json") or {}).get(
+            "schema"
+        ) or {}
+        contracts.check(
+            ok_schema.get("type") == "array"
+            and (ok_schema.get("items") or {}).get("$ref")
+            == f"#/components/schemas/{NOTIFICATION_DELIVERY_ATTEMPT_SCHEMA}",
+            f"{where}: 200 must be an array of {NOTIFICATION_DELIVERY_ATTEMPT_SCHEMA}",
+        )
+
+
 def _notification_template_channel(schema) -> bool:
     """A template channel is either a NotificationChannel or null."""
     options = [option for option in (schema.get("oneOf") or []) if isinstance(option, dict)]
@@ -14176,6 +14435,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_notification_sources_openapi(contracts, document, relative)
             check_notification_source_filter(contracts, document, relative)
             check_notification_templates_openapi(contracts, document, relative)
+            check_notification_delivery_attempts_openapi(contracts, document, relative)
         if vertical == "party":
             check_party_status_openapi(contracts, document, relative)
             check_party_reference_data_openapi(contracts, document, relative)
@@ -14286,6 +14546,80 @@ def check_notifications_asyncapi_sources(contracts: ContractSet, document, relat
             f"{relative}: {message_name}.sourceReference must be a nullable "
             f"string of at most {NOTIFICATION_SOURCE_REFERENCE_MAX_LENGTH} "
             "characters",
+        )
+
+
+def check_notification_delivery_asyncapi(contracts: ContractSet, document, relative: str):
+    """Require the provider delivery evidence on the sent notification payload.
+
+    A successful send records ``deliveredAt`` and ``providerReference`` and emits
+    both in the ``notifications.notification.sent`` data object. They are
+    additive optional members because a null member is omitted and the event
+    version stays 1; the created fact must not declare them because no delivery
+    exists at draft time. The sent channel description names both members and
+    the simulator provider.
+    """
+    channels = document.get("channels") or {}
+    messages = (document.get("components") or {}).get("messages") or {}
+
+    channel = channels.get("NotificationsNotificationSent") or {}
+    channel_description = str(channel.get("description") or "")
+    for field in NOTIFICATION_DELIVERY_EVIDENCE_FIELDS:
+        contracts.check(
+            field in channel_description,
+            f"{relative}: {NOTIFICATION_SENT_EVENT} channel description must name "
+            f"{field}",
+        )
+    contracts.check(
+        NOTIFICATION_DELIVERY_PROVIDER in channel_description,
+        f"{relative}: {NOTIFICATION_SENT_EVENT} channel description must name the "
+        f"{NOTIFICATION_DELIVERY_PROVIDER} provider",
+    )
+    contracts.check(
+        channel.get("x-event-version") == 1,
+        f"{relative}: {NOTIFICATION_SENT_EVENT} channel must stay at "
+        "x-event-version 1",
+    )
+
+    message = messages.get(NOTIFICATION_SENT_MESSAGE) or {}
+    payload = message.get("payload") or {}
+    properties = payload.get("properties") or {}
+    required = set(payload.get("required") or [])
+    for field in NOTIFICATION_DELIVERY_EVIDENCE_FIELDS:
+        contracts.check(
+            field in properties,
+            f"{relative}: {NOTIFICATION_SENT_MESSAGE}.payload.properties.{field} "
+            "is required",
+        )
+        contracts.check(
+            field not in required,
+            f"{relative}: {NOTIFICATION_SENT_MESSAGE}.payload.{field} must stay "
+            "optional",
+        )
+    delivered_at = properties.get("deliveredAt") or {}
+    contracts.check(
+        _schema_types(delivered_at) == {"string", "null"}
+        and delivered_at.get("format") == "date-time",
+        f"{relative}: {NOTIFICATION_SENT_MESSAGE}.deliveredAt must be a nullable "
+        "date-time",
+    )
+    provider_reference = properties.get("providerReference") or {}
+    contracts.check(
+        _schema_types(provider_reference) == {"string", "null"}
+        and provider_reference.get("maxLength")
+        == NOTIFICATION_PROVIDER_REFERENCE_MAX_LENGTH,
+        f"{relative}: {NOTIFICATION_SENT_MESSAGE}.providerReference must be a "
+        f"nullable string of at most "
+        f"{NOTIFICATION_PROVIDER_REFERENCE_MAX_LENGTH} characters",
+    )
+
+    created = messages.get(NOTIFICATION_CREATED_MESSAGE) or {}
+    created_properties = (created.get("payload") or {}).get("properties") or {}
+    for field in NOTIFICATION_DELIVERY_EVIDENCE_FIELDS:
+        contracts.check(
+            field not in created_properties,
+            f"{relative}: {NOTIFICATION_CREATED_MESSAGE}.payload.{field} must not "
+            "exist because no delivery exists at draft time",
         )
 
 
@@ -15145,6 +15479,7 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
         if vertical == "notifications":
             check_notifications_asyncapi_sources(contracts, document, relative)
             check_notification_templates_asyncapi(contracts, document, relative)
+            check_notification_delivery_asyncapi(contracts, document, relative)
 
         if vertical == "party":
             check_party_status_asyncapi(contracts, document, relative)

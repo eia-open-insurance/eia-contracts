@@ -1908,6 +1908,41 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   scope, version, evidence, and validation notes.
 - `python scripts/validate_contracts.py` passes 15,481 checks with 0 failures.
 
+### Added in the Notifications delivery-attempt contract (2026-10-22)
+
+- `openapi/notifications.yaml` is 1.7.0: adds
+  `GET /api/v1/notifications/{notificationId}/attempts` and its
+  `/internal/v1/notifications/{notificationId}/attempts` expert mirror, both
+  returning a bare `NotificationDeliveryAttempt` array ordered by
+  `attemptNumber` ascending with the shared 400/404 responses. Adds the
+  `NotificationDeliveryAttempt` (eleven members) and
+  `NotificationDeliveryAttemptStatus` (`DELIVERED`, `FAILED`) schemas, and the
+  required-but-nullable `Notification.deliveredAt` and
+  `Notification.providerReference` delivery evidence. Documents the tenant-wall
+  404 `EIA-NTF-9001`, the empty array for a known unsent notification, and the
+  `SIMULATOR` provider semantics (default, always delivered, deterministic
+  `SIM-<notification uuid>` NTF-11 reference, 502 `DELIVERY_FAILED` before an
+  attempt row).
+- `asyncapi/notifications.yaml` is 1.5.0: `NotificationSentData` adds the
+  optional nullable `deliveredAt` and `providerReference` members, and the sent
+  channel and operation descriptions name the simulator evidence. `eventVersion`
+  stays 1; no channel or event name is added or renamed.
+- `asyncapi/event-catalog.yaml` is unchanged at 1.35.0 because no event name
+  changes; the catalog stays at 220 published and 101 implemented names
+  (Notifications 15 published and 5 implemented).
+- `scripts/validate_contracts.py` requires both attempts operations, the tenant
+  parameter, the required `notificationId` path parameter, the 200
+  `NotificationDeliveryAttempt` array, the shared 400/404 responses, the exact
+  eleven-member projection, the two-value attempt status, the nullable
+  notification evidence, and the simulator/404/empty-array wording. It requires
+  the two optional sent-payload delivery members and rejects them on the
+  created payload.
+- `README.md` records the additive versions and provider semantics;
+  `MISMATCHES.md` adds M-56 for the SPEC-less attempts route, the narrowed
+  SPEC 11.8.4 delivery row, the notification-level evidence, the simulator
+  provider, and the absent retry.
+- `python scripts/validate_contracts.py` passes 15,608 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

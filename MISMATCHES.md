@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-22 (Party reference data and status transitions).
+Status: open, reviewed 2026-10-22 (Notification delivery attempts).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -169,6 +169,12 @@ where the running code does not meet it yet.
   status request, party record, repository, `PartyEvents`, `schema.sql`, the
   expert `ApiExceptionHandler`, and the domain and expert status and outbox
   tests.
+  The Notifications delivery-attempt pass reads the domain attempts controller,
+  service, expert client, delivery-attempt projection, and exception handling
+  plus the expert attempts controller, service, attempt record and repository,
+  the delivery-provider abstraction and simulator, the notification repository
+  send transition, `NotificationEvents`, `schema.sql`, and the domain and expert
+  delivery and controller tests.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -249,6 +255,7 @@ removed per the resolution policy.
 | M-53 | Notification source linkage and list source filter are a flat SPEC-less triple and exact pair rather than the SPEC subject reference | L |
 | M-54 | Party identifiers and addresses are SPEC-less append-only child routes with wider type sets, a plaintext value, and no implemented address duplicate guard | M |
 | M-55 | Party status transitions are a SPEC-less command with no transition graph, no status history, event-only reason, and unenforced concurrency/idempotency headers | M |
+| M-56 | Notification delivery attempts use a SPEC-less per-notification route, a narrower delivery row than SPEC 11.8.4, notification-level evidence, and a simulator-only provider with no retry | L |
 
 ## M-01 Public base paths
 
@@ -283,7 +290,10 @@ Policy legal entities add the short-form catalog row: the implemented
 Policy premium audit adds a command row: the implemented
 `POST /api/v1/policies/{policyId}/premium-audit` has no SPEC 11.2.10 route;
 the SPEC 6.12 transaction inventory names the transaction `policy.premium-audit`
-(M-50).
+(M-50). The notification delivery-attempt history adds
+`GET /api/v1/notifications/{notificationId}/attempts`, which SPEC 11.8.10 does
+not list; its tenant-wide delivery diagnostics and retry command remain planned
+(M-56).
 
 The ten global-search routes follow the same shorter form
 (`/api/v1/{resource}/search`); their SPEC naming gap and validation differences
@@ -3902,10 +3912,106 @@ If a dedicated fact is required, emit `party.party.status-changed` (or an agreed
 new `party.party.status-updated`) with an EV-05 dual-publish window rather than
 overloading `party.party.updated`.
 
+## M-56 Notification delivery attempts use a SPEC-less route and simulator and keep the evidence on the notification
+
+SPEC 11.8.4 models delivery as a `notification_delivery` row under
+`notification_recipient`, with a recipient, a provider message id, requested and
+responded timestamps, a retry schedule, and the `PENDING`/`SENT`/`DELIVERED`/
+`BOUNCED`/`FAILED`/`SUPPRESSED` statuses. SPEC 11.8.10 surfaces tenant-wide
+delivery diagnostics at `GET /api/v1/notifications/admin/deliveries` and a retry
+command at `POST .../admin/deliveries/{id}/retry`. The 2026-10-22
+Notifications delivery slice instead adds a tenant-scoped, per-notification
+history at `GET /api/v1/notifications/{notificationId}/attempts` (and its
+`/internal/v1` expert mirror), records one attempt on a successful send, keeps
+the delivery evidence on the notification, and uses a local simulator provider.
+
+| Aspect | Implemented | SPEC 11.8.4 / 11.8.10 |
+|---|---|---|
+| Route | `GET /api/v1/notifications/{notificationId}/attempts` and `GET /internal/v1/notifications/{notificationId}/attempts`, tenant-scoped, bare array ordered by `attemptNumber` ascending | No per-notification attempts route; the SPEC surface is the tenant-wide `/api/v1/notifications/admin/deliveries` list and a retry command |
+| Projection | `NotificationDeliveryAttempt` with exactly `id`, `tenantId`, `notificationId`, `attemptNumber`, `channel`, `provider`, `providerReference`, `status`, `errorCode`, `errorMessage`, `attemptedAt` | `notification_delivery` also has `recipient_id`, `provider_message_id`, `requested_at`, `responded_at`, and `next_retry_at`; `provider` is varchar(48) and `provider_message_id` varchar(128) |
+| Status | `DELIVERED` or `FAILED` only | `PENDING`, `SENT`, `DELIVERED`, `BOUNCED`, `FAILED`, `SUPPRESSED` |
+| Identity and order | `attemptNumber` is sequential per notification and unique on `(notificationId, attemptNumber)`; reads order by `attemptNumber` | `attempt_number` plus the recipient determine one delivery row; the SPEC defines no tenant-local uniqueness rule |
+| Delivery evidence | `Notification.deliveredAt` and `Notification.providerReference` are required-but-nullable on the notification projection and row; `deliveredAt` equals `sentAt` for a simulator delivery | `notification` has only `sent_at`; `delivered_at` belongs to `notification_recipient` and the provider reference to `notification_delivery` |
+| Provider | The only implementation is the local `SIMULATOR`, selected by `eia.notifications.provider=simulator` and the default when absent; it never contacts an external system, always returns `DELIVERED`, and uses the deterministic `SIM-<notification uuid>` reference as the NTF-11 idempotency key | External email relay, SMS gateway, push, and webhook integrations; provider values `EMAIL_RELAY`, `SMS_GATEWAY`, `IN_APP`, and `WEBHOOK` |
+| Failure | A provider failure aborts the send with 502 `EIA-NTF-9304` `DELIVERY_FAILED` before an attempt row, a status change, or an event is written; the `FAILED` attempt status is admitted by the schema but not produced | A failed delivery is a persisted row with `FAILED` (or `BOUNCED`), an error code and message, and a `next_retry_at` |
+| Retry | None: a send records attempt 1, and a second send is rejected by the CREATED/QUEUED guard | Retry command and retry schedule (NTF-11 idempotency) |
+| Events | `notifications.notification.sent` carries the optional `deliveredAt` and `providerReference` members; `notifications.notification.delivered` remains planned | SPEC 11.8.9 publishes `notifications.notification.delivered` and `notifications.delivery.failed`; neither is emitted |
+| Version | `openapi/notifications.yaml` 1.7.0 and `asyncapi/notifications.yaml` 1.5.0 (additive) | No SPEC version defines the per-notification history or the notification-level evidence |
+
+Consequences:
+
+- A client generated from SPEC 11.8.10 has no per-notification history route;
+  the implemented `GET /api/v1/notifications/{notificationId}/attempts` is a
+  new, additive read. The tenant-wide diagnostics list and retry command remain
+  unimplemented and are listed under `x-planned-operations`.
+- A consumer of the SPEC `notification_delivery` row must not expect a
+  recipient, provider message id, requested/responded timestamps, or a retry
+  schedule. The implemented row is a narrow attempt record, and the delivery
+  evidence is denormalized onto the notification for the web detail view.
+- The simulator is a local-development provider, not an integration. In a
+  deployment with a real provider the attempt shape can stay the same, but the
+  provider failure path must persist a `FAILED` attempt with its error evidence
+  and retry schedule instead of only returning 502.
+- Because the history is tenant-scoped through the notification lookup, an
+  unknown notification and a foreign-tenant notification are the same 404
+  `EIA-NTF-9001`; a known unsent notification returns an empty array. The read
+  never exposes another tenant's attempt rows.
+- Adding the SPEC delivery columns and the admin/retry surface later is
+  additive. Removing the notification-level evidence or renaming the attempt
+  members is breaking under SPEC 10.4 and needs a major contract version.
+
+Evidence:
+
+- `repos/eia-notifications-expert/.../NotificationController.java:43-46`
+  (expert attempts mapping), `NotificationService.java:66-74` (notification
+  lookup is the tenant wall, then the tenant-scoped attempt read) and
+  `:129-171` (send: provider call, attempt 1 insert, `markSent` with
+  `deliveredAt`/`providerReference`, sent event; the failure branch throws
+  `DELIVERY_FAILED` before the insert), and
+  `NotificationDeliveryAttemptRepository.java:42-62` (ascending order and
+  insert).
+- `repos/eia-notifications-expert/.../NotificationDeliveryAttempt.java:12-33`
+  (eleven-member record), `DeliveryProvider.java`, `DeliveryRequest.java`,
+  `DeliveryResult.java:14-26` (two attempt statuses), and
+  `SimulatedDeliveryProvider.java:15-30` (`SIMULATOR`, always delivered,
+  `SIM-<notification uuid>`).
+- `repos/eia-notifications-expert/.../NotificationEvents.java:68-89` (sent
+  payload puts `deliveredAt` and `providerReference` when present) and
+  `schema.sql:75-118` (notification `delivered_at`/`provider_reference` columns,
+  attempt table, two-value status check, unique `(notification_id,
+  attempt_number)`, 64/32/64/500 widths).
+- `repos/eia-notifications-domain/.../NotificationController.java:51-55`
+  (public attempts mapping), `NotificationService.java:77-84` (forward with the
+  expert 404 preserved), `NotificationExpertClient.java:90-108` (tenant on the
+  query parameter and header), `NotificationDeliveryAttemptDto.java:1-37`
+  (eleven-member projection), and `NotificationDto.java:8-27`
+  (`deliveredAt`/`providerReference`).
+- Tests: `repos/eia-notifications-expert/src/test/java/com/eia/notifications/expert/NotificationDeliveryIntegrationTest.java:75-206`
+  (default simulator, attempt 1 evidence, sent payload, tenant wall and 404,
+  legacy rows, unique attempt number) and `NotificationServiceTest.java:219-239`
+  (provider failure writes no attempt and no event);
+  `repos/eia-notifications-domain/src/test/java/com/eia/notifications/domain/NotificationControllerTest.java:297-363`
+  and `NotificationServiceTest.java:187-214` (delivery evidence on the
+  projection, attempts forwarding, preserved 404, tenant and malformed-id
+  problems).
+- SPEC 11.8.4 `notification`/`notification_recipient`/`notification_delivery`
+  tables, 11.8.9 published names, and 11.8.10 API surface; NTF-11 and NTF-15.
+- `openapi/notifications.yaml` 1.7.0 and `asyncapi/notifications.yaml` 1.5.0
+  record the implemented shape; `asyncapi/event-catalog.yaml` stays 1.35.0
+  because no event name changes.
+
+Resolution: either implement the SPEC `notification_delivery` row, the
+tenant-wide diagnostic list, the retry command, and a real provider, or amend
+SPEC 11.8.4/11.8.10 to accept the per-notification attempt history, the
+notification-level evidence, and the simulator as the first delivery slice.
+The per-notification history and the notification evidence are canonical for
+this release; the simulator is a local provider and the admin/retry surface
+remains planned.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-22
-Notifications source-type contract:
+Notifications delivery-attempt contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -3923,7 +4029,7 @@ OpenAPI 3.1 documents
   OK openapi/retrocession.yaml  9 paths, 11 operations
   OK openapi/document.yaml  18 paths, 24 operations
   OK openapi/payment.yaml  13 paths, 16 operations
-  OK openapi/notifications.yaml  10 paths, 13 operations
+  OK openapi/notifications.yaml  12 paths, 15 operations
 
 AsyncAPI 3 documents
   OK asyncapi/party.yaml  11 event channels
@@ -3944,7 +4050,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 15481 checks, 0 failures
+  PASS 15608 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -4292,7 +4398,15 @@ Additional checks and limits:
   `OTHER` before `PARTY` fails three checks with the exact-enum and
   `OTHER`-last messages; and removing `DOCUMENT` from the sent payload enum
   fails one check with the `NotificationSentData` enumeration message. The
-  working copy was left unchanged.
+  working copy was left unchanged. The Notifications delivery-attempt pass
+  added three more: renaming the public
+  `/api/v1/notifications/{notificationId}/attempts` path fails with the missing
+  required-path and missing delivery-attempt operation messages; removing
+  `providerReference` from `Notification.required` fails with the
+  required-member message; and renaming `deliveredAt` in the
+  `NotificationSentData` payload fails with the missing-property and
+  nullable-date-time messages. All three were run on a throwaway copy, exited
+  non-zero (exit 1), and the working copy was left unchanged.
 
 ## Resolution policy
 

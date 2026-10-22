@@ -1,27 +1,46 @@
 openapi: 3.1.0
 info:
   title: EIA Notifications API
-  version: 1.6.0
+  version: 1.7.0
   summary: Notification drafting, delivery, and template administration and the Notifications expert API.
   description: >
     This document describes the implemented public Notifications domain API and
     the internal Notifications expert API. The authoritative requirement is
     SPEC 11.8 and SPEC 12; the implemented surface is the first vertical slice
-    plus notification template administration. `NotificationType` is the closed
+    plus notification template administration and delivery-attempt history.
+    `NotificationType` is the closed
     SPEC 11.8.5 v1 list plus the implemented `DUNNING_NOTICE` dunning escalation
     type.
 
-    The slice supports list, detail, create, send, and the template registry:
-    list with `status`/`code` filters, create DRAFT, approve, and retire.
-    Approval is the only path to ACTIVE (NTF-14); a template is created DRAFT
-    and may be retired from DRAFT or ACTIVE. SPEC 11.8.10 mounts template
-    administration at `/api/v1/notifications/admin/templates` and names a
-    publish command; the implemented short route
-    `/api/v1/notifications/templates` and its approve/retire commands are
-    documented here and recorded in MISMATCHES.md M-49. Inbox, read and
-    acknowledge, actions, dismiss, unread count, the SSE stream, subscriptions,
-    preferences, and the rule, delivery, queue, and remaining admin surfaces
-    from SPEC 11.8.10 are planned and listed under x-planned-operations.
+    The slice supports list, detail, create, send, the delivery-attempt history,
+    and the template registry: list with `status`/`code` filters, create DRAFT,
+    approve, and retire. Approval is the only path to ACTIVE (NTF-14); a
+    template is created DRAFT and may be retired from DRAFT or ACTIVE. SPEC
+    11.8.10 mounts template administration at
+    `/api/v1/notifications/admin/templates` and names a publish command; the
+    implemented short route `/api/v1/notifications/templates` and its
+    approve/retire commands are documented here and recorded in MISMATCHES.md
+    M-49. Inbox, read and acknowledge, actions, dismiss, unread count, the SSE
+    stream, subscriptions, preferences, and the rule, admin-delivery, queue, and
+    remaining admin surfaces from SPEC 11.8.10 are planned and listed under
+    x-planned-operations.
+
+    The tenant-scoped delivery history is
+    `GET /api/v1/notifications/{notificationId}/attempts`, a bare
+    `NotificationDeliveryAttempt` array ordered by `attemptNumber` ascending.
+    An unknown notification and a notification owned by another tenant are both
+    404 `EIA-NTF-9001`, indistinguishable from each other; a known, unsent
+    notification returns an empty array. The only implemented provider is the
+    local simulator (`SIMULATOR`, selected by
+    `eia.notifications.provider=simulator` and also the default): it never
+    contacts an external system, always confirms delivery, and returns the
+    deterministic reference `SIM-<notification uuid>` as the NTF-11 provider
+    idempotency key. A send records attempt 1 and copies the same evidence to
+    `deliveredAt` and `providerReference` on the notification. A provider that
+    reports failure aborts the send with 502 `DELIVERY_FAILED`
+    (`EIA-NTF-9304`) before an attempt row is written. See MISMATCHES.md M-56
+    for the difference from the SPEC 11.8.4 `notification_delivery` row and the
+    SPEC 11.8.10 admin-delivery and retry routes.
 
     Notifications already emits the canonical RFC 9457 Problem envelope with
     stable EIA-NTF-9xxx codes and `application/problem+json`.
@@ -409,6 +428,64 @@ paths:
           $ref: './components.yaml#/components/responses/NotFound'
         default:
           $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/notifications/{notificationId}/attempts:
+    get:
+      operationId: listNotificationDeliveryAttempts
+      tags:
+        - Notifications
+      summary: List the delivery attempts of a notification.
+      description: >
+        Returns a bare JSON array ordered by `attemptNumber` ascending. Each row
+        is one provider delivery attempt on the notification's channel; the
+        implemented slice records attempt 1 on a successful send and has no
+        retry command, so the history is empty before the notification is sent
+        and holds exactly one row afterwards. `attemptNumber` is unique per
+        notification.
+
+        The notification must exist in the caller's tenant. An unknown
+        notification and a notification owned by another tenant are both 404
+        `EIA-NTF-9001` `NOT_FOUND`, indistinguishable from each other; attempts
+        of a foreign tenant are never returned. A known, unsent notification
+        returns an empty array rather than 404. A missing `X-EIA-Tenant` is 400
+        `EIA-NTF-9501`, a malformed tenant 400 `EIA-NTF-9502`, and a
+        `notificationId` that is not a UUID 400 `EIA-NTF-9503`
+        `INVALID_ARGUMENT`.
+
+        The only implemented provider is the local simulator (`SIMULATOR`),
+        selected by `eia.notifications.provider=simulator` and also the default
+        when the property is absent. It never contacts an external system,
+        always confirms delivery with attempt status `DELIVERED`, and returns
+        the deterministic reference `SIM-<notification uuid>` on both the
+        attempt and the notification. That reference is the NTF-11 provider
+        idempotency key and is reused by a retry. A provider that reports
+        failure aborts the send with 502 `DELIVERY_FAILED` (`EIA-NTF-9304`)
+        before an attempt row is written, so the `FAILED` attempt status is
+        admitted by the schema but is not produced by this slice. `attemptedAt`
+        is the send instant, and the notification's `deliveredAt` is the same
+        instant for a simulator delivery.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: notificationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Delivery attempts of the notification, ordered by attempt number.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NotificationDeliveryAttempt'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
   /api/v1/notifications/{notificationId}/send:
     post:
       operationId: sendNotification
@@ -560,6 +637,52 @@ paths:
           $ref: './components.yaml#/components/responses/NotFound'
         default:
           $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/notifications/{notificationId}/attempts:
+    get:
+      operationId: expertListNotificationDeliveryAttempts
+      tags:
+        - Notifications internal
+      summary: List the delivery attempts of a notification (expert).
+      description: >
+        Returns a bare JSON array ordered by `attemptNumber` ascending. The
+        notification lookup is the tenant wall: an unknown notification and a
+        notification owned by another tenant are both 404 `EIA-NTF-9001`
+        `NOT_FOUND`, and no attempt row of another tenant is ever returned. A
+        known, unsent notification returns an empty array. `tenantId` is
+        required; a missing value is 400 `EIA-NTF-9501`, and a malformed
+        `tenantId` or `notificationId` is 400 `EIA-NTF-9502`
+        `INVALID_ARGUMENT`.
+
+        The expert records one attempt per send with the configured provider.
+        The default simulator (`SIMULATOR`) always confirms delivery with status
+        `DELIVERED` and the deterministic reference `SIM-<notification uuid>`,
+        which is the NTF-11 provider idempotency key. A provider failure is 502
+        `DELIVERY_FAILED` (`EIA-NTF-9304`) and writes no attempt row.
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: notificationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Delivery attempts of the notification, ordered by attempt number.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NotificationDeliveryAttempt'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
   /internal/v1/notifications/{notificationId}/send:
     post:
       operationId: expertSendNotification
@@ -604,7 +727,10 @@ components:
         actions[], and _links; those are planned. The implemented projection
         also carries an optional flat source link (`sourceType`, `sourceId`,
         `sourceReference`) to the business record that caused the notification;
-        all three are null when there is no link. See MISMATCHES.md M-53.
+        all three are null when there is no link. See MISMATCHES.md M-53. The
+        provider delivery evidence `deliveredAt` and `providerReference` is
+        recorded by the send; both are null until a send succeeds and stay null
+        on rows that predate the delivery provider. See MISMATCHES.md M-56.
       required:
         - id
         - tenantId
@@ -619,6 +745,8 @@ components:
         - templateVersion
         - scheduledAt
         - sentAt
+        - deliveredAt
+        - providerReference
       properties:
         id:
           type: string
@@ -656,6 +784,23 @@ components:
         sentAt:
           type: [string, 'null']
           format: date-time
+        deliveredAt:
+          type: [string, 'null']
+          format: date-time
+          description: >
+            Provider-confirmed delivery instant recorded on the notification by
+            the send that succeeded. For the `SIMULATOR` provider it equals
+            `sentAt`; null before the first send and on rows that predate
+            delivery evidence.
+        providerReference:
+          type: [string, 'null']
+          maxLength: 64
+          description: >
+            Provider reference/idempotency key of the delivery, for example
+            `SIM-<notification uuid>` for the `SIMULATOR` provider. The same
+            value is returned on the matching `NotificationDeliveryAttempt` and
+            reused by a retry (NTF-11). Null before the first send and on rows
+            that predate delivery evidence.
         sourceType:
           oneOf:
             - $ref: '#/components/schemas/NotificationSourceType'
@@ -820,6 +965,99 @@ components:
         - SUPPRESSED
         - EXPIRED
         - CANCELLED
+    NotificationDeliveryAttempt:
+      type: object
+      description: >
+        One provider delivery attempt for a notification on one channel. Attempt
+        numbers are sequential per notification and unique together with
+        `notificationId`. The implemented slice records the single attempt made
+        by a successful send; it has no retry command, so one sent notification
+        has one attempt. `providerReference` is the provider idempotency key and
+        is populated on a delivered attempt; `errorCode` and `errorMessage` are
+        populated only for a failed attempt (SPEC 11.8.4, NTF-11). Delivery
+        metadata is retained for 7 years (NTF-15). See MISMATCHES.md M-56 for
+        the difference from the SPEC `notification_delivery` row.
+      required:
+        - id
+        - tenantId
+        - notificationId
+        - attemptNumber
+        - channel
+        - provider
+        - providerReference
+        - status
+        - errorCode
+        - errorMessage
+        - attemptedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        notificationId:
+          type: string
+          format: uuid
+        attemptNumber:
+          type: integer
+          minimum: 1
+          description: >
+            Sequential attempt number within the notification. The first
+            implemented send records 1, and `(notificationId, attemptNumber)` is
+            unique.
+        channel:
+          $ref: '#/components/schemas/NotificationChannel'
+        provider:
+          type: string
+          maxLength: 32
+          examples:
+            - SIMULATOR
+          description: >
+            Provider code persisted on the attempt. The implemented provider is
+            the local `SIMULATOR`; a deployment can replace it through the
+            delivery-provider abstraction.
+        providerReference:
+          type: [string, 'null']
+          maxLength: 64
+          description: >
+            Provider reference and idempotency key, for example
+            `SIM-<notification uuid>` for the `SIMULATOR`. It matches the
+            notification's `providerReference` for the latest attempt and is
+            reused by a retry (NTF-11); null when the provider returned no
+            reference.
+        status:
+          $ref: '#/components/schemas/NotificationDeliveryAttemptStatus'
+        errorCode:
+          type: [string, 'null']
+          maxLength: 64
+          description: >
+            Provider error code for a `FAILED` attempt; null for a delivered
+            attempt.
+        errorMessage:
+          type: [string, 'null']
+          maxLength: 500
+          description: >
+            Provider error text for a `FAILED` attempt; null for a delivered
+            attempt.
+        attemptedAt:
+          type: string
+          format: date-time
+          description: >
+            Instant the attempt was made. The send records the same instant as
+            the notification's `sentAt`.
+    NotificationDeliveryAttemptStatus:
+      type: string
+      description: >
+        Outcome of one delivery attempt. `DELIVERED` means the provider
+        confirmed delivery; `FAILED` means the provider rejected it and the
+        attempt carries the error code and message. The implemented
+        `SIMULATOR` always returns `DELIVERED`; a failing provider currently
+        aborts the send with 502 `DELIVERY_FAILED` before an attempt row is
+        written, so no `FAILED` attempt is produced by this slice.
+      enum:
+        - DELIVERED
+        - FAILED
     NotificationTemplate:
       type: object
       description: >
@@ -1124,6 +1362,7 @@ x-implementation:
     - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationService.java
     - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/CreateNotificationCommand.java
     - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationDto.java
+    - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationDeliveryAttemptDto.java
     - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationExpertClient.java
     - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/ApiExceptionHandler.java
     - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationTemplateController.java
@@ -1133,6 +1372,12 @@ x-implementation:
     - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationController.java
     - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationService.java
     - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/Notification.java
+    - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationDeliveryAttempt.java
+    - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationDeliveryAttemptRepository.java
+    - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/DeliveryProvider.java
+    - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/DeliveryRequest.java
+    - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/DeliveryResult.java
+    - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/SimulatedDeliveryProvider.java
     - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationSourceType.java
     - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationRepository.java
     - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationEvents.java
@@ -1153,7 +1398,17 @@ x-implementation:
     The expert also serves the template routes under
     `/internal/v1/notifications/templates` for direct internal callers; the
     domain uses the public path, so the internal alias is an implementation
-    detail and is not documented as a separate public contract.
+    detail and is not documented as a separate public contract. The delivery
+    history is served by the expert at
+    `/internal/v1/notifications/{notificationId}/attempts` and proxied by the
+    domain at `/api/v1/notifications/{notificationId}/attempts`; the expert
+    checks that the notification belongs to the tenant before reading the
+    tenant-scoped attempt rows, so an unknown or foreign-tenant notification is
+    the same 404. The attempt row is written before the notification is marked
+    SENT in the same transaction, and the sent event carries `deliveredAt` and
+    `providerReference`. The only provider is the `SIMULATOR` implementation of
+    `DeliveryProvider`, which always returns the deterministic
+    `SIM-<notification uuid>` reference.
 x-planned-operations:
   - method: GET
     path: /api/v1/notifications/inbox
@@ -1202,29 +1457,39 @@ x-planned-operations:
   - method: GET
     path: /api/v1/notifications/admin/deliveries
     spec: SPEC 11.8.10
-    note: Delivery diagnostics.
+    note: >
+      Tenant-wide delivery diagnostics. The per-notification history is the
+      implemented GET /api/v1/notifications/{notificationId}/attempts.
   - method: POST
     path: /api/v1/notifications/admin/deliveries/{deliveryId}/retry
     spec: SPEC 11.8.10
-    note: Retry a delivery.
+    note: Retry a delivery. No retry command is implemented; a send records attempt 1 only.
   - method: POST
     path: /internal/v1/notifications/issue
     spec: SPEC 11.8.10
     note: Issue a notification from an event or a direct call.
 x-compatibility:
-  contractVersion: 1.6.0
-  previousContractVersion: 1.5.0
+  contractVersion: 1.7.0
+  previousContractVersion: 1.6.0
   breaking: []
   compatible:
-    - Adds CESSION, RETROCESSION, DOCUMENT, and PARTY to the NotificationSourceType enum before OTHER, so a notification can link a cession, retrocession, document, or party record as well as the original six source types.
-    - The existing source-linkage members, the both-or-neither rule, and the optional sourceType/sourceId list filters are unchanged.
+    - Adds GET /api/v1/notifications/{notificationId}/attempts and its /internal/v1 expert equivalent, returning a bare NotificationDeliveryAttempt array ordered by attemptNumber ascending.
+    - Adds the required-but-nullable Notification.deliveredAt and Notification.providerReference delivery evidence recorded by send.
+    - Adds the NotificationDeliveryAttempt and NotificationDeliveryAttemptStatus schemas.
+    - Documents the SIMULATOR provider semantics, the deterministic SIM-<notification uuid> idempotency reference, and the 502 DELIVERY_FAILED behaviour before an attempt row is written.
+    - Documents the tenant-wall 404 EIA-NTF-9001 for an unknown or foreign-tenant notification and the empty array for a known, unsent notification.
   note: >
-    The four new source types are additive over 1.5.0: a consumer that already
-    tolerates unknown enum values keeps working, and no path, required field,
-    response member, or event name changes. The HTTP API version stays /api/v1,
-    asyncapi/notifications.yaml moves to 1.4.0 with the same enum, and the event
-    catalog stays at 220 published and 101 implemented names, with Notifications
-    at 15 published and 5 implemented, because no event name changes.
-    MISMATCHES.md M-53 records the flat source link, the exact-pair filter, the
-    wider ten-value enum, and the malformed-sourceId code against the SPEC 12.5.5
-    subject EntityRef.
+    The delivery-attempt history and provider evidence are additive over 1.6.0:
+    two read operations, one projection schema, one attempt-status enum, two
+    required-but-nullable response members on Notification, and two optional
+    members on the sent event payload. No existing path, request field, response
+    member, event name, or field meaning is removed or changed, and the HTTP API
+    stays /api/v1. A client that never reads the new route still receives the
+    same notifications, with the two delivery members null on rows that predate
+    the provider. asyncapi/notifications.yaml moves to 1.5.0 and keeps
+    notifications.notification.sent at eventVersion 1 because the payload change
+    is additive. The event catalog stays at 1.35.0 and at 220 published and 101
+    implemented names, with Notifications at 15 published and 5 implemented,
+    because no event name changes. MISMATCHES.md M-56 records the SPEC-less
+    attempts route, the narrowed SPEC 11.8.4 delivery row, the
+    notification-level evidence, and the simulator provider.
