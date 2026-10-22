@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: EIA Document API
-  version: 1.5.0
-  summary: Document metadata, lifecycle, association-link, content, legal-hold, and disposition administration and the Document expert API.
+  version: 1.6.0
+  summary: Document metadata, lifecycle, association-link, content, content-tombstone, legal-hold, and disposition administration and the Document expert API.
   description: >
     This document describes the implemented public Document domain API and the
     internal Document expert API. The authoritative requirement is SPEC 11.6
@@ -50,9 +50,29 @@ info:
     Disposition is synchronous and requires an expired retention date and no
     active hold: 409 `DOCUMENT_ON_LEGAL_HOLD`, `DISPOSAL_STATUS_NOT_ALLOWED`,
     `RETENTION_DATE_REQUIRED`, or `RETENTION_NOT_EXPIRED`. The SPEC 11.6.10 hold
-    collection, approval steps, disposition job, certificate, and content
-    deletion are not implemented; the implemented hold is per-document
-    (MISMATCHES.md M-44).
+    collection and approval steps, the disposition job and certificate, and the
+    disposition-coupled content deletion are not implemented; the implemented
+    hold is per-document and content tombstones are the separate 2026-10-22
+    command (MISMATCHES.md M-44, M-47).
+
+    The 2026-10-22 content-tombstone slice adds `DELETE
+    /api/v1/documents/{documentId}/content`. The command tombstones the stored
+    content instead of deleting the rows: it clears the bytes of the current
+    pointer and every not-yet-tombstoned revision and records `deletedAt`, while
+    the filename, MIME type, size, digest, upload instant, and revision number
+    stay readable. Success is 204 with no body. A document with no stored
+    content is 404 `CONTENT_NOT_FOUND`; a document under legal hold is 409
+    `DOCUMENT_ON_LEGAL_HOLD` and is left untouched (SPEC DOC-06); repeating the
+    delete is 409 `CONTENT_ALREADY_DELETED` and writes no second event. The
+    accepted write appends `document.content.deleted` to the transactional
+    outbox in the same transaction. The `DocumentContent` projection adds the
+    nullable `deletedAt` and the derived boolean `deleted`; downloading the
+    current or a revision of tombstoned content is 410 `CONTENT_DELETED`. A
+    later upload clears the tombstone on the current pointer and appends a
+    fresh downloadable revision, while the earlier revisions keep their
+    deletion timestamps. SPEC 11.6.8 deletes content inside the approved
+    disposition job; the implemented standalone tombstone is not that job and
+    carries no approval or certificate (MISMATCHES.md M-47).
 
     The 2026-10-20 link slice adds `GET|POST
     /api/v1/documents/{documentId}/links` and `DELETE
@@ -335,8 +355,9 @@ paths:
         carries the lowercase digest of the bytes, and `X-Content-Version`
         carries the revision number naming the newest retained revision. A
         document outside the caller's tenant is 404; a document with no stored
-        content is 404 `CONTENT_NOT_FOUND`. There is no presigned URL, no
-        `Range` support, and the response must not be parsed as JSON.
+        content is 404 `CONTENT_NOT_FOUND`; tombstoned content is 410
+        `CONTENT_DELETED`. There is no presigned URL, no `Range` support, and
+        the response must not be parsed as JSON.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - name: documentId
@@ -387,6 +408,83 @@ paths:
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
           $ref: './components.yaml#/components/responses/NotFound'
+        '410':
+          description: >
+            410. `CONTENT_DELETED`: the content of the document was tombstoned,
+            so the bytes are no longer downloadable. The content metadata route
+            remains readable and reports `deleted: true` with `deletedAt`. The
+            body is `application/problem+json`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    delete:
+      operationId: deleteDocumentContent
+      tags:
+        - Document
+      summary: Tombstone the stored content of a document.
+      description: >
+        Tombstones the stored content instead of deleting the rows. The bytes of
+        the current content pointer and of every not-yet-tombstoned revision are
+        cleared and `deletedAt` is recorded, while the filename, MIME type, exact
+        size, SHA-256 digest, upload instant, and current revision number stay
+        readable on `GET .../content/metadata`. The command has no request body;
+        success is 204 with no body. A document with no stored content is 404
+        `CONTENT_NOT_FOUND`; a missing document or one outside the caller's
+        tenant is 404 `NOT_FOUND`. A document under an active legal hold is 409
+        `DOCUMENT_ON_LEGAL_HOLD` and is left untouched (SPEC DOC-06); repeating
+        a delete is 409 `CONTENT_ALREADY_DELETED`, checked from the stored
+        `deletedAt`, and writes no second event. Downloads of the current bytes
+        and of any revision are then 410 `CONTENT_DELETED`. The accepted write
+        appends `document.content.deleted` to the transactional outbox in the
+        same transaction, with the tombstoned revision as the aggregate version;
+        a rejected command writes no row change and no event. A later upload
+        clears the tombstone on the current pointer and appends a fresh
+        downloadable revision, while the earlier revisions keep their deletion
+        timestamps. SPEC 11.6.8 deletes content as a step of the approved
+        disposition job; this standalone command is not that job and carries no
+        approval or certificate (MISMATCHES.md M-47).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: documentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: >
+            Content tombstoned. No body is returned. The document metadata and
+            the content metadata row remain readable, and a later upload may
+            create a new current revision.
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          description: >
+            404. `CONTENT_NOT_FOUND` when the document exists but has no stored
+            content; a missing document or one outside the caller's tenant is
+            `NOT_FOUND`, indistinguishable from a missing document. The body is
+            `application/problem+json`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        '409':
+          description: >
+            409. `DOCUMENT_ON_LEGAL_HOLD` when the document is ON_HOLD: a legal
+            hold freezes the record, so the bytes, `deletedAt`, and outbox are
+            left untouched. `CONTENT_ALREADY_DELETED` when the current content
+            was already tombstoned; that check is made before the hold check, so
+            a repeated delete is reported as already deleted. No row change or
+            event is written on either conflict. The body is
+            `application/problem+json`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /api/v1/documents/{documentId}/content/metadata:
@@ -399,10 +497,12 @@ paths:
         Returns the `DocumentContent` projection without the bytes. The
         projection carries the owning document, the stored display filename,
         the stored MIME type, the exact size in bytes, the lowercase SHA-256
-        digest, the upload instant, and the current revision number. A document
-        outside the caller's tenant is 404, indistinguishable from a missing
-        document; a document with no stored content is 404
-        `CONTENT_NOT_FOUND`.
+        digest, the upload instant, the current revision number, the nullable
+        `deletedAt`, and the derived boolean `deleted`. The metadata stays
+        readable after a tombstone; only the bytes and their download
+        availability are gone. A document outside the caller's tenant is 404,
+        indistinguishable from a missing document; a document with no stored
+        content is 404 `CONTENT_NOT_FOUND`.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - name: documentId
@@ -479,7 +579,10 @@ paths:
         caller's tenant is 404, indistinguishable from a missing document; a
         revision that does not exist, including a number below 1, is 404
         `CONTENT_VERSION_NOT_FOUND`. A non-numeric `version` is 400
-        `INVALID_PARAMETER`. There is no presigned URL and no `Range` support.
+        `INVALID_PARAMETER`. A revision whose bytes were tombstoned by `DELETE
+        .../content` is 410 `CONTENT_DELETED`, including a revision that was
+        current when the tombstone was written. There is no presigned URL and no
+        `Range` support.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - name: documentId
@@ -537,6 +640,16 @@ paths:
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
           $ref: './components.yaml#/components/responses/NotFound'
+        '410':
+          description: >
+            410. `CONTENT_DELETED`: the requested revision belongs to content
+            that was tombstoned, so its bytes are no longer downloadable. The
+            revision metadata still appears in the history and its digest and
+            size are retained. The body is `application/problem+json`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /api/v1/documents/{documentId}/status:
@@ -713,9 +826,11 @@ paths:
         `{reason}` is not forwarded, so the recorded event reason is
         `RETENTION_EXPIRED`. The accepted write bumps the document version and
         appends `document.document.disposed` in the same transaction. There is
-        no approval, retention-scan job, disposition certificate, or content
-        deletion in this slice (MISMATCHES.md M-44). `X-EIA-Tenant` is required
-        and another tenant's document is 404.
+        no approval, retention-scan job, or disposition certificate in this
+        slice, and disposition does not tombstone the content; content deletion
+        is the separate `DELETE /api/v1/documents/{documentId}/content` command
+        (MISMATCHES.md M-44, M-47). `X-EIA-Tenant` is required and another
+        tenant's document is 404.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - name: documentId
@@ -1219,7 +1334,12 @@ components:
         computed over the exact stored bytes and is repeated in the download's
         `X-Content-SHA256` header, so a caller can verify the transfer.
         `currentVersion` names the newest retained revision, which is the
-        revision returned by the current download.
+        revision returned by the current download. `deletedAt` is null while the
+        content is downloadable and carries the tombstone instant after `DELETE
+        .../content`; `deleted` is its derived boolean form. A tombstoned
+        document keeps the filename, MIME type, size, digest, upload instant,
+        and revision number, so this projection remains readable after the
+        bytes are gone.
       required:
         - documentId
         - fileName
@@ -1228,6 +1348,8 @@ components:
         - sha256
         - uploadedAt
         - currentVersion
+        - deletedAt
+        - deleted
       properties:
         documentId:
           type: string
@@ -1281,6 +1403,26 @@ components:
             download's `X-Content-Version` header.
           examples:
             - 2
+        deletedAt:
+          type: [string, 'null']
+          format: date-time
+          description: >
+            Instant at which the content was tombstoned, or null while the
+            bytes are downloadable. The tombstone clears the bytes of the
+            current pointer and of every not-yet-deleted revision but keeps the
+            metadata. A later upload clears this pointer value and appends a
+            fresh, non-deleted revision; earlier revisions keep their own
+            deletion timestamps.
+          examples:
+            - '2026-10-22T10:15:00Z'
+        deleted:
+          type: boolean
+          description: >
+            Derived flag, true exactly when `deletedAt` is non-null. It lets a
+            consumer test one field without a null check; it is never supplied
+            by the caller and is not stored.
+          examples:
+            - false
     DocumentContentVersion:
       type: object
       description: >
@@ -1598,7 +1740,7 @@ components:
 x-vertical: document
 x-implementation:
   status: implemented
-  verifiedAt: '2026-10-21'
+  verifiedAt: '2026-10-22'
   verifiedAgainst:
     - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentController.java
     - repos/eia-document-domain/src/main/java/com/eia/document/domain/DocumentSearchResponse.java
@@ -1626,6 +1768,8 @@ x-implementation:
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentContentRules.java
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentContentEvents.java
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/ContentVersionNotFoundException.java
+    - repos/eia-document-expert/src/main/java/com/eia/document/expert/ContentDeletedException.java
+    - repos/eia-document-expert/src/main/java/com/eia/document/expert/ContentAlreadyDeletedException.java
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/ApiExceptionHandler.java
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentLinkController.java
     - repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentLinkDto.java
@@ -1643,29 +1787,28 @@ x-implementation:
     the canonical Problem envelope yet. Content uploads add a
     `application/problem+json` 413 `FILE_TOO_LARGE` before the expert call and
     preserve the expert's 400/404 problem bodies, including the version routes'
-    `CONTENT_VERSION_NOT_FOUND`, but a missing tenant on a content route is
-    still the compact `TENANT_REQUIRED` ApiError.
+    `CONTENT_VERSION_NOT_FOUND`, the tombstone's `CONTENT_NOT_FOUND`, both 409
+    conflicts, and the tombstoned downloads' 410 `CONTENT_DELETED`; a missing
+    tenant on a content route is still the compact `TENANT_REQUIRED` ApiError.
 x-compatibility:
-  contractVersion: 1.5.0
-  previousContractVersion: 1.4.0
+  contractVersion: 1.6.0
+  previousContractVersion: 1.5.0
   breaking: []
   compatible:
-    - Adds POST /api/v1/documents/{documentId}/hold with the required HoldDocumentRequest.reason.
-    - Adds POST /api/v1/documents/{documentId}/hold/release.
-    - Adds POST /api/v1/documents/{documentId}/dispose.
-    - Adds the Document projection members holdReason, heldAt, statusBeforeHold, and disposedAt.
-    - Adds the implemented document.legal-hold.placed, document.legal-hold.released, and document.document.disposed events.
-    - Removes the implemented disposition path from x-planned-operations; the SPEC hold collection remains planned.
+    - Adds DELETE /api/v1/documents/{documentId}/content with the 204, 404 CONTENT_NOT_FOUND, and 409 DOCUMENT_ON_LEGAL_HOLD/CONTENT_ALREADY_DELETED responses.
+    - Adds the DocumentContent members deletedAt and deleted.
+    - Adds the 410 CONTENT_DELETED response to the current and revision content downloads.
+    - Adds the implemented document.content.deleted event.
+    - Keeps every existing content path, request field, response field, and event name.
   note: >
-    The hold and disposition surface is additive over 1.4.0: no existing path,
+    The content-tombstone surface is additive over 1.5.0: no existing path,
     request field, response field, or event name is removed or changes meaning.
-    The four new Document members are always serialized and nullable, so a
-    strict response consumer must tolerate them. The hold command is
-    per-document and synchronous rather than the SPEC 11.6.10 hold collection
-    with scope and approval, and disposition is an immediate tombstone with no
-    approval, job, certificate, or content deletion. The two legal-hold event
-    names are new with no SPEC 11.6.9 equivalent; the SPEC `.held` and
-    `.hold-released` names remain planned (MISMATCHES.md M-22 and M-44).
+    `deletedAt` and `deleted` are always serialized on the content metadata
+    projection (a tombstone is null until the delete), so a strict response
+    consumer must tolerate them. The delete is a standalone tombstone rather
+    than the content-deletion step of the SPEC 11.6.8 approved disposition job,
+    and `document.content.deleted` is a new name with no SPEC 11.6.9
+    equivalent (MISMATCHES.md M-22, M-40, and M-47).
 x-planned-operations:
   - method: GET
     path: /api/v1/documents/{documentId}/preview

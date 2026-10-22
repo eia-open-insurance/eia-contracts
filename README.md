@@ -666,6 +666,57 @@ Hold and disposition semantics:
   `document.document.held`/`.hold-released` channels stay planned. The full run
   passes 13,501 checks.
 
+### Document content tombstones (2026-10-22)
+
+Document 1.6.0 adds the standalone content tombstone. The change is additive:
+one new route, two always-serialized metadata members, two 410 responses, and
+one implemented event name; no existing path, request field, response field, or
+event name is removed or changes meaning.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/document.yaml` | 1.6.0 | Additive | `DELETE /api/v1/documents/{documentId}/content`, the `DocumentContent.deletedAt` and `deleted` members, and 410 `CONTENT_DELETED` on the current and revision downloads. |
+| `asyncapi/document.yaml` | 1.6.0 | Additive | The implemented `document.content.deleted` channel and `send` operation with a `DocumentContentDeletedData` payload. |
+| `asyncapi/event-catalog.yaml` | 1.28.0 | Additive | The name is published and implemented (211 published and 91 implemented in total; Document 24 published and 10 implemented). |
+
+Tombstone semantics:
+
+- `DELETE .../content` is a tombstone, not a row delete. It clears the bytes of
+  the current pointer and of every not-yet-tombstoned revision and records
+  `deletedAt`; `fileName`, `contentType`, `sizeBytes`, `sha256`, `uploadedAt`,
+  and `currentVersion` stay readable. Success is 204 with no body.
+- `X-EIA-Tenant` is required. A document with no stored content is 404
+  `CONTENT_NOT_FOUND`; a missing document and another tenant's document are 404
+  `NOT_FOUND`, indistinguishable from each other.
+- A document under an active legal hold is 409 `DOCUMENT_ON_LEGAL_HOLD` and is
+  left untouched (SPEC DOC-06). Repeating a delete is 409
+  `CONTENT_ALREADY_DELETED`; the stored `deletedAt` is checked before the hold,
+  so a repeated delete on a held document reports already deleted. Neither
+  conflict writes a row change or an event.
+- The accepted delete appends `document.content.deleted` in the same transaction
+  as the byte clear. The aggregate is `DocumentContent`, keyed by the document
+  id, and the aggregate version is the current revision that was tombstoned;
+  `eventVersion` stays 1.
+- The current download and every revision download answer 410
+  `CONTENT_DELETED` for tombstoned bytes. `GET .../content/metadata` still
+  answers 200 with the retained metadata, `deleted: true`, and the tombstone
+  instant. The history still lists every revision.
+- A later upload clears the tombstone on the current pointer and appends a
+  fresh, downloadable revision; the earlier revisions keep their deletion
+  timestamps and remain 410 on download.
+- SPEC 11.6.8 deletes content as a step of the approved disposition job, and
+  SPEC 11.6.9 names no content-tombstone event. The implemented standalone
+  command carries no approval or disposition certificate and is not invoked by
+  `POST .../dispose`; M-40, M-44, and M-47 record the deviation. M-22 records
+  the new name.
+- The validator requires the delete operation with the shared `TenantHeader`,
+  the `documentId` parameter, the 204 response and no request body, the 404
+  `CONTENT_NOT_FOUND` and 409 `DOCUMENT_ON_LEGAL_HOLD`/
+  `CONTENT_ALREADY_DELETED` documentation, the `DocumentContent.deletedAt` and
+  `deleted` members, the 410 responses on both downloads, the implemented
+  `document.content.deleted` channel and its exact six-member payload, and the
+  catalog published and implemented entries. The full run passes 14,058 checks.
+
 ### Policy billing contract (2026-10-20)
 
 Policy 2.3.0 adds the premium installment plan and its settlement surface. The
@@ -2791,14 +2842,19 @@ missing directory.
    the six document association-link operations on
    the public and expert surfaces, the `DocumentLink`, `CreateDocumentLinkRequest`,
    and `DocumentLinkedType` schemas, the `linkedType` + `linkedId` list filter,
-   the expert list `q`, and the search `linkedReference` match, the three
+   the expert list `q`, and the search `linkedReference` match, the six
    document content operations with their shared `TenantHeader` and
    `documentId` parameter, the required `X-File-Name` and optional
    `Content-Type` upload headers, the binary request and 200 response bodies,
    the `Content-Disposition`, `X-Content-SHA256`, and `X-Content-Version`
    download headers, the `DocumentContent` schema and its field bounds
-   (including `currentVersion`), the 400 `EMPTY_CONTENT` and 413
-   `FILE_TOO_LARGE` documentation, the two content-version operations with
+   (including `currentVersion`, the nullable `deletedAt`, and the derived
+   `deleted`), the 400 `EMPTY_CONTENT` and 413
+   `FILE_TOO_LARGE` documentation, the bodyless content tombstone with its 204,
+   the 404 `CONTENT_NOT_FOUND` and 409
+   `DOCUMENT_ON_LEGAL_HOLD`/`CONTENT_ALREADY_DELETED` documentation, the 410
+   `CONTENT_DELETED` responses on the current and revision downloads, the two
+   content-version operations with
    their `DocumentContentVersion` array and schema, the required positive
    `version` path parameter, the four version-download headers, the
    `CONTENT_VERSION_NOT_FOUND`/`INVALID_PARAMETER` documentation, the three
@@ -2940,6 +2996,9 @@ missing directory.
    identity, status, tort, trigger, allocation, and coverage-block members,
    the `DocumentContentUploadedData` payload with its required document
    identity, revision, filename, MIME type, size, and digest members, the
+   `DocumentContentDeletedData` payload with its exact six members (document
+   identity and number, retained filename, size, digest, and `deletedAt`) and
+   no MIME type or revision, the
    `DocumentLifecycleData` payload with its required document identity, reason,
    and status members for the hold, release, and disposition facts, and
    the `ContractSecurityData` payload with its contract/security identity,
@@ -2975,6 +3034,7 @@ missing directory.
    `assumed.claim.assigned`,
    `document.link.added`,
    `document.link.removed`, `document.content.uploaded`,
+   `document.content.deleted`,
    `document.legal-hold.placed`, `document.legal-hold.released`,
    `document.document.disposed`,
    `policy.policy.renewed`,
@@ -2993,8 +3053,9 @@ missing directory.
    `policy.credit-note.reversed`,
    `policy.legal-entity.created`, and
    `policy.policy.legal-entity-assigned`. The Document document must also keep
-   `document.content.uploaded` as its only `document.content.*` event, so the
-   content-version slice cannot add an event name silently.
+   the two content events `document.content.uploaded` and
+   `document.content.deleted` as its complete `document.content.*` set, so a
+   content slice cannot add an event name silently.
 6. **JSON Schema checks.** All three files parse as JSON, declare the 2020-12
    dialect and an `$id`, carry the required members, keep required properties
    defined, and validate their own examples against a small schema subset.
@@ -3076,28 +3137,35 @@ missing directory.
   `document.document.associated` (M-22, M-26);
 - document content keeps one current raw-byte pointer per document plus an
   append-only revision history
-  (`PUT|GET /api/v1/documents/{documentId}/content`, `GET .../content/metadata`,
+  (`PUT|GET|DELETE /api/v1/documents/{documentId}/content`,
+  `GET .../content/metadata`,
   and `GET .../content/versions` plus `GET .../content/versions/{version}`) with
-  a 10 MiB cap, SHA-256 verification, and the new
-  `document.content.uploaded` event. SPEC 11.6.10 mounts the history at
+  a 10 MiB cap, SHA-256 verification, the new
+  `document.content.uploaded` event, and the new standalone
+  `document.content.deleted` tombstone. The tombstone clears the bytes of the
+  current and every not-yet-deleted revision, answers 204, keeps the metadata
+  with `deletedAt`/`deleted`, hides both downloads as 410 `CONTENT_DELETED`,
+  refuses a document under legal hold, and is not the SPEC 11.6.8 disposition
+  step. SPEC 11.6.10 mounts the history at
   `/versions` and the version-creating command at `POST /versions`, while the
   implemented history is under `/content/versions` and the upload creates the
   revision; the slice has no presigned download, `Range` support, rendition,
   OCR text, package, request, or signature surface, and the SPEC 11.6.9 content
-  fact does not exist. A missing tenant on the content routes is still the
+  facts do not exist. A missing tenant on the content routes is still the
   compact `TENANT_REQUIRED` 400 rather than the canonical Problem, and the
   download exposes the stored bytes rather than a short-lived URL (M-02, M-22,
-  M-40);
+  M-40, M-47);
 - document legal holds and disposition are implemented per document at
   `POST /api/v1/documents/{documentId}/hold`, `.../hold/release`, and
   `.../dispose`, with the new `document.legal-hold.placed`/`.released` events
   and the SPEC `document.document.disposed` event. SPEC 11.6.10 models a hold
   collection with scope, approval, and release by hold id, and SPEC 11.6.8
   requires an approved disposition job plus a certificate and content deletion;
-  the implemented hold is per-document and synchronous and disposition is an
-  immediate tombstone with no certificate. `statusBeforeHold` also admits
+  the implemented hold is per-document and synchronous, disposition is an
+  immediate tombstone with no certificate, and disposition does not invoke the
+  separate content tombstone. `statusBeforeHold` also admits
   CLASSIFIED and SUPERSEDED, wider than the SPEC ACTIVE/ARCHIVED hold states
-  (M-22, M-44);
+  (M-22, M-44, M-47);
 - claim assignment is implemented on both claim verticals but has no SPEC 11.4.10
   or 11.5.10 route or SPEC 11.4.9/11.5.9 event name. The Assumed Claims domain
   still requires a team the contract and expert make optional, the Direct Claims

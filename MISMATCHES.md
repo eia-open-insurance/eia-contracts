@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-21 (Payment status transitions).
+Status: open, reviewed 2026-10-22 (Document content tombstones).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -112,6 +112,11 @@ where the running code does not meet it yet.
   `PolicyClient` plus the expert legal-entity controller, service, rules,
   repository, entity, view, create and assignment requests, event factory,
   `schema.sql`, and the domain and expert tests.
+  The Document content-tombstone pass reads the domain content controller,
+  service, client, projection, and exception handling plus the expert content
+  controller, service, rules, repository, tombstone SQL, content and metadata
+  records, `DocumentContentEvents`, the two deletion exceptions, the exception
+  handler, and the domain and expert tombstone tests.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -183,6 +188,7 @@ removed per the resolution policy.
 | M-44 | Document legal holds and disposition are a per-document, synchronous slice without the SPEC hold collection or the approval/certificate workflow | L |
 | M-45 | Direct Claims settlement payment links are a SPEC-less route and event over one stored Payment id | L |
 | M-46 | Payment public status PATCH is SPEC-less, its graph is wider than SPEC 11.7.6, and the 200-character reason is not pre-validated | L |
+| M-47 | Document content tombstones add a SPEC-less standalone DELETE route and event and keep the metadata, where SPEC deletes content only inside an approved disposition | L |
 
 ## M-01 Public base paths
 
@@ -771,7 +777,7 @@ ten publishing verticals now emit a subset:
 | Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.assigned`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted`, `assumed.claim.task-created`, `assumed.claim.task-completed`, `assumed.claim.task-updated`, `assumed.claim.note-added` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
 | Cession | `cession.cession.created`, `cession.cession.updated`, `cession.cession.handed-off` | `repos/eia-cession-expert/.../CessionEvents.java` |
 | Retrocession | `retrocession.retrocession.created`, `retrocession.retrocession.updated`, `retrocession.retrocession.handed-off` | `repos/eia-retrocession-expert/.../RetrocessionEvents.java` |
-| Document | `document.document.created`, `document.document.updated`, `document.document.status-changed`, `document.link.added`, `document.link.removed`, `document.content.uploaded`, `document.legal-hold.placed`, `document.legal-hold.released`, `document.document.disposed` | `repos/eia-document-expert/.../DocumentEvents.java`, `DocumentLinkEvents.java`, `DocumentContentEvents.java` |
+| Document | `document.document.created`, `document.document.updated`, `document.document.status-changed`, `document.link.added`, `document.link.removed`, `document.content.uploaded`, `document.content.deleted`, `document.legal-hold.placed`, `document.legal-hold.released`, `document.document.disposed` | `repos/eia-document-expert/.../DocumentEvents.java`, `DocumentLinkEvents.java`, `DocumentContentEvents.java` |
 | Payment | `payment.payment.created`, `payment.payment.updated`, `payment.payment.status-changed` | `repos/eia-payment-expert/.../PaymentEvents.java` |
 | Notifications | `notifications.notification.created`, `notifications.notification.sent` | `repos/eia-notifications-expert/.../NotificationEvents.java` |
 
@@ -788,7 +794,12 @@ version 1; the three document metadata events are unchanged. A content upload
 appends `document.content.uploaded` from `DocumentContentEvents.java` in the
 same transaction as the revision row, keyed by the `DocumentContent` aggregate
 on the document id with the content revision as the aggregate version; the
-payload repeats that revision as `version` while `eventVersion` stays 1. A hold,
+payload repeats that revision as `version` while `eventVersion` stays 1. A
+content tombstone appends `document.content.deleted` from the same factory in
+the same transaction as the byte clear, keyed by the `DocumentContent` aggregate
+on the document id at the revision it tombstoned, with
+`{documentId, documentNumber, fileName, sizeBytes, sha256, deletedAt}` and
+`eventVersion` 1. A hold,
 release, or disposition appends `document.legal-hold.placed`,
 `document.legal-hold.released`, or `document.document.disposed` from
 `DocumentEvents.java` in the same transaction as the row update, with the
@@ -995,7 +1006,7 @@ planned name |
 | Assumed Claims | `assumed.claim.updated`; `assumed.claim.assigned`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no assignment, task, or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
 | Cession | `cession.cession.created` / `.updated` / `.handed-off` | `cession.case.created`, `cession.handoff.sent`/`.acknowledged` |
 | Retrocession | `retrocession.retrocession.created` / `.updated` / `.handed-off` | `retrocession.case.created`, `retrocession.handoff.sent`/`.acknowledged` |
-| Document | `document.document.created` / `.updated` / `.status-changed`; `document.link.added` / `.removed`; `document.content.uploaded`; `document.legal-hold.placed` / `.released` | `document.document.registered`, `document.document.associated`, plus the SPEC lifecycle verbs; no SPEC content-upload fact; the SPEC hold facts are `document.document.held` / `.hold-released`. `document.document.disposed` matches SPEC and is implemented. |
+| Document | `document.document.created` / `.updated` / `.status-changed`; `document.link.added` / `.removed`; `document.content.uploaded` / `.deleted`; `document.legal-hold.placed` / `.released` | `document.document.registered`, `document.document.associated`, plus the SPEC lifecycle verbs; no SPEC content-upload or content-tombstone fact (SPEC 11.6.8 deletes content only inside the approved disposition job); the SPEC hold facts are `document.document.held` / `.hold-released`. `document.document.disposed` matches SPEC and is implemented. |
 | Payment | `payment.payment.updated` / `.status-changed` | the SPEC per-verb names such as `payment.payment.authorized` |
 | Notifications | `notifications.notification.created` / `.sent` | `notifications.notification.issued` / `.delivered` |
 
@@ -2343,21 +2354,23 @@ content history at `GET /versions` and the version-creating command at `POST
 OCR status, holds, and retention. The implemented slice stores one current
 content pointer per document plus immutable revision rows, serves the bytes
 through a raw-byte proxy under `/content`, exposes the history under
-`/content/versions`, and emits a content-upload fact that has no SPEC 11.6.9
-name.
+`/content/versions`, tombstones the bytes with a standalone `DELETE
+/content` that keeps the metadata, and emits content-upload and content-delete
+facts that have no SPEC 11.6.9 names. SPEC 11.6.8 deletes content only inside
+the approved disposition job, which is not implemented (M-47).
 
 | Aspect | Implemented | SPEC 11.6.10 / 11.6 |
 |---|---|---|
-| Routes | `PUT|GET /api/v1/documents/{documentId}/content`, `GET .../content/metadata`, `GET .../content/versions`, and `GET .../content/versions/{version}` | authorized content download (presigned), `GET`/`POST .../versions`, preview, text, access log |
-| Upload | raw bytes; each accepted body appends an immutable revision and advances the current pointer | versioned content with a history |
+| Routes | `PUT|GET|DELETE /api/v1/documents/{documentId}/content`, `GET .../content/metadata`, `GET .../content/versions`, and `GET .../content/versions/{version}` | authorized content download (presigned), `GET`/`POST .../versions`, preview, text, access log |
+| Upload | raw bytes; each accepted body appends an immutable revision and advances the current pointer; a later upload after a tombstone clears the pointer tombstone and appends a fresh revision | versioned content with a history |
 | Size limit | 10 MiB (10,485,760 bytes); a zero-byte body is 400 `EMPTY_CONTENT`; an over-limit body is 413 `FILE_TOO_LARGE` | no implemented limit stated |
-| Metadata | `DocumentContent` with `documentId`, `fileName`, `contentType`, `sizeBytes`, `sha256`, `uploadedAt`, `currentVersion` | content, hash, page count, OCR status, tags, versions |
-| Download | proxied bytes with `Content-Type`, `Content-Disposition`, `X-Content-SHA256`, and `X-Content-Version`; one revision is downloadable through `/content/versions/{version}`; no `Range`, no presigned URL | short-lived presigned URL |
+| Metadata | `DocumentContent` with `documentId`, `fileName`, `contentType`, `sizeBytes`, `sha256`, `uploadedAt`, `currentVersion`, nullable `deletedAt`, and derived `deleted`; the metadata survives a tombstone | content, hash, page count, OCR status, tags, versions |
+| Download | proxied bytes with `Content-Type`, `Content-Disposition`, `X-Content-SHA256`, and `X-Content-Version`; one revision is downloadable through `/content/versions/{version}`; tombstoned current or revision bytes are 410 `CONTENT_DELETED`; no `Range`, no presigned URL | short-lived presigned URL |
 | Filename | URL-encoded `X-File-Name`, reduced to its last path component; at most 255 characters | not specified |
-| Versioning | append-only `document_content_version` rows; revisions start at 1 and the history is newest first; every upload appends one revision and advances `current_version`; no deletion, retention, or lineage | superseded/version rows at `/versions` |
-| Concurrency | a per-document pointer lock allocates the next revision, so concurrent uploads both retain their bytes; the last committed upload wins the current pointer without `If-Match` or `Idempotency-Key` | not specified |
+| Versioning | append-only `document_content_version` rows; revisions start at 1 and the history is newest first; every upload appends one revision and advances `current_version`; `DELETE .../content` clears the bytes and stamps `deleted_at` on the pointer and every not-yet-deleted revision; no retention or lineage | superseded/version rows at `/versions` |
+| Concurrency | a per-document pointer lock allocates the next revision, so concurrent uploads both retain their bytes; the delete locks the pointer and the `deleted_at IS NULL` predicate is the duplicate guard; the last committed upload wins the current pointer without `If-Match` or `Idempotency-Key` | not specified |
 | Book | none; tenant-scoped only | SPEC 3.6 book wall |
-| Event | `document.content.uploaded` (new; no SPEC 11.6.9 name); payload `version` is the revision and the aggregate version, `eventVersion` 1 | no content-upload fact |
+| Event | `document.content.uploaded` and `document.content.deleted` (both new; no SPEC 11.6.9 name); the upload payload `version` is the revision and the aggregate version, the delete payload is the retained file metadata plus `deletedAt`, and both keep `eventVersion` 1 | no content-upload fact; content deletion is only the disposition step |
 | Missing tenant | 404 `NOT_FOUND` on the expert; 400 `TENANT_REQUIRED` on the public domain route | canonical 400 Problem |
 
 Consequences:
@@ -2366,11 +2379,16 @@ Consequences:
   revision number, but still cannot retrieve a preview rendition, OCR text, a
   page count, tags, or an access log. Legal holds and retention disposition are
   separate surfaces, documented in M-44; they are not part of the content
-  slice.
+  slice. The 2026-10-22 tombstone is also separate: a caller can clear the
+  bytes while keeping the metadata, and then cannot download the current or any
+  revision (410 `CONTENT_DELETED`) until a new upload creates a fresh current
+  revision.
 - The history is implemented at `/content/versions`, not the SPEC `/versions`
   route, and the version-creating command is the content upload rather than
   `POST /versions`. A client generated from SPEC 11.6.10 must be adapted to the
-  nested path.
+  nested path. The tombstone is a standalone `DELETE .../content` command;
+  SPEC 11.6.8 deletes content only as a step of the approved disposition job,
+  so the route and the event have no SPEC equivalent (M-47).
 - The public download proxies the bytes instead of issuing a short-lived
   presigned URL, so the Document domain remains a data-path hop and the
   response has no `Range` support. A caller that expected a redirect or a
@@ -2379,14 +2397,17 @@ Consequences:
   no optimistic concurrency token: two concurrent uploads both retain a
   revision and the last writer wins the current read. No `If-Match` or
   `Idempotency-Key` is accepted.
-- The public 413 is `application/problem+json` `FILE_TOO_LARGE` and an unknown
-  revision is 404 `CONTENT_VERSION_NOT_FOUND`, but the missing-tenant 400 is
-  still the compact `TENANT_REQUIRED` `ApiError` rather than the canonical
-  Problem (M-02).
-- The event name is new and has no SPEC 11.6.9 equivalent, so a subscriber
-  cannot rely on a SPEC-defined content fact. The added payload `version` is
-  additive under EV-05 and keeps `eventVersion` 1; no event name is added
-  (M-22).
+- The public 413 is `application/problem+json` `FILE_TOO_LARGE`, the tombstone
+  preserves the expert's `CONTENT_NOT_FOUND` 404 and
+  `DOCUMENT_ON_LEGAL_HOLD`/`CONTENT_ALREADY_DELETED` 409 as
+  `application/problem+json`, and tombstoned downloads preserve 410
+  `CONTENT_DELETED`, but the missing-tenant 400 is still the compact
+  `TENANT_REQUIRED` `ApiError` rather than the canonical Problem (M-02).
+- The two event names are new and have no SPEC 11.6.9 equivalent, so a
+  subscriber cannot rely on a SPEC-defined content fact. The added upload
+  payload `version` is additive under EV-05 and keeps `eventVersion` 1; the
+  delete payload is exactly the retained metadata plus `deletedAt` and also
+  keeps `eventVersion` 1 (M-22, M-47).
 - The SPEC 11.6.9 names (`document.document.registered`, `.classified`,
   `.superseded`, `.generated`, `.signed`, `.held`, `.hold-released`,
   `.archived`, `.requested`, `.request-fulfilled`, `document.package.built`,
@@ -2396,34 +2417,45 @@ Consequences:
 
 Evidence:
 
-- `repos/eia-document-domain/.../DocumentController.java:61-132` (public
-  upload, current download, metadata, version list, and version download;
-  `X-EIA-Tenant` required), the `DocumentContentMetadata`,
+- `repos/eia-document-domain/.../DocumentController.java:98-161` (public
+  upload, current download, content tombstone, metadata, version list, and
+  version download; `X-EIA-Tenant` required), the `DocumentContentMetadata`,
   `DocumentContentVersion`, `DocumentContentDownload`, `DocumentContentPolicy`,
   `DocumentContentSizeLimitFilter`, and `DocumentContentTooLargeException`
-  helpers, and `DocumentExpertClient.java:163-230` (expert calls and header
+  helpers, and `DocumentExpertClient.java:209-286` (expert calls and header
   pass-through).
-- `repos/eia-document-expert/.../DocumentContentController.java:43-106` (raw
-  upload, current download, metadata, newest-first version list, and revision
-  download), `DocumentContentService.java:39-101` (tenant document lookup,
-  revision append, pointer refresh, outbox, version reads),
-  `DocumentContentRepository.java:97-193` (revision allocation, pointer update,
-  newest-first list, revision read), `DocumentContentRules.java:27-157`
-  (10 MiB, filename, MIME, SHA-256 rules), `DocumentContentEvents.java:35-68`
-  (`document.content.uploaded` with `version`), `DocumentContentVersion.java`,
-  `DocumentContentVersionMetadata.java`, `ContentVersionNotFoundException.java`,
-  `ApiExceptionHandler.java:35-39` (`CONTENT_VERSION_NOT_FOUND`),
+- `repos/eia-document-expert/.../DocumentContentController.java:66-128` (raw
+  upload, current download, content tombstone, metadata, newest-first version
+  list, and revision download), `DocumentContentService.java:47-147` (tenant
+  document lookup, revision append, pointer refresh, outbox, version reads, and
+  the tombstone with its duplicate and legal-hold guards),
+  `DocumentContentRepository.java:96-228` (revision allocation, pointer update,
+  tombstone SQL, newest-first list, and revision read),
+  `DocumentContentRules.java:46-173`
+  (10 MiB, filename, MIME, SHA-256, and legal-hold delete rules),
+  `DocumentContentEvents.java:42-115`
+  (`document.content.uploaded` with `version` and
+  `document.content.deleted` with the six retained-metadata members + `deletedAt`),
+  `DocumentContentVersion.java`,
+  `DocumentContentVersionMetadata.java`, `DocumentContentMetadata.java`,
+  `ContentVersionNotFoundException.java`, `ContentDeletedException.java`,
+  `ContentAlreadyDeletedException.java`,
+  `ApiExceptionHandler.java:30-52` (`CONTENT_NOT_FOUND`,
+  `CONTENT_VERSION_NOT_FOUND`, `CONTENT_DELETED`, and
+  `CONTENT_ALREADY_DELETED`),
   `TenantResolver.java:28-41` (content routes hide a missing tenant as 404),
   and `DocumentContentRules`/`DocumentContentMetadata`/`DocumentContent.java`.
 - `repos/eia-document-expert/src/main/resources/schema.sql:48-110`
   (`document_content` current pointer, `document_content_version` revision
-  table with `UNIQUE (document_id, version)` and the newest-first index, and the
-  version-1 backfill).
+  table with `UNIQUE (document_id, version)` and the newest-first index, the
+  nullable bytes and `deleted_at` tombstone columns, and the version-1
+  backfill).
 - Tests: `DocumentContentApiTest`, `DocumentContentVersionApiTest`,
   `DocumentContentClientTest`, `DocumentContentVersionClientTest`,
-  `DocumentContentIntegrationTest`, and `DocumentContentRulesTest`.
-- `openapi/document.yaml` 1.4.0, `asyncapi/document.yaml` 1.4.0, and
-  `asyncapi/event-catalog.yaml` 1.21.0 record the implemented shape.
+  `DocumentContentIntegrationTest`, `DocumentContentDeletionIntegrationTest`,
+  and `DocumentContentRulesTest`.
+- `openapi/document.yaml` 1.6.0, `asyncapi/document.yaml` 1.6.0, and
+  `asyncapi/event-catalog.yaml` 1.28.0 record the implemented shape.
 
 Resolution: either align the implementation with SPEC 11.6.10 (move the
 history to `/versions`, add the `POST /versions` command, presigned download,
@@ -2790,7 +2822,7 @@ or content deletion.
 | Holdable statuses | ACTIVE, ARCHIVED, CLASSIFIED, SUPERSEDED | ACTIVE and ARCHIVED (state diagram) |
 | Release result | restores `status_before_hold`; ARCHIVED when the snapshot is absent or unrecognised | ON_HOLD -> ACTIVE (and ON_HOLD -> ARCHIVED per the hold scope) |
 | Disposition gates | expired `retention_until`, no ON_HOLD, status in ACTIVE/ARCHIVED/SUPERSEDED | approved disposition job, no hold/litigation/regulatory block, certificate |
-| Disposition side effects | tombstone `DISPOSED` + `disposed_at`; metadata stays readable | delete content, mark disposed, store certificate with counts and hashes |
+| Disposition side effects | tombstone `DISPOSED` + `disposed_at`; metadata stays readable; content is tombstoned only by the separate `DELETE .../content` command | delete content, mark disposed, store certificate with counts and hashes |
 | Hold events | `document.legal-hold.placed`, `document.legal-hold.released` (new names) | `document.document.held`, `document.document.hold-released` |
 | Disposition event | `document.document.disposed` (SPEC name, implemented) | `document.document.disposed` |
 | Tenant scope | `X-EIA-Tenant` required; expert also accepts `?tenantId=`; another tenant is 404 | tenant wall (M-08) |
@@ -2806,8 +2838,11 @@ Consequences:
   draws ACTIVE and ARCHIVED hold edges. A caller cannot force ON_HOLD back to a
   specific status.
 - Disposition is immediate: there is no retention-scan job, approval step,
-  certificate, or content deletion, so a disposed document retains its metadata
-  (and its content row) as a tombstone. The public command does not forward a
+  certificate, or automatic content deletion, so a disposed document retains
+  its metadata (and its content row) as a tombstone. Content bytes are cleared
+  only by the separate standalone `DELETE .../content` command, which carries
+  no approval or certificate and is not invoked by disposition (M-47). The
+  public dispose command does not forward a
   reason, so the event reason is `RETENTION_EXPIRED`; the expert accepts an
   optional reason but the domain never sends one.
 - The two legal-hold event names have no SPEC 11.6.9 equivalent. The SPEC
@@ -2838,8 +2873,8 @@ Evidence:
 - `repos/eia-document-expert/src/test/java/com/eia/document/expert/DocumentLifecycleControllerTest.java`
   and `DocumentLegalHoldIntegrationTest.java` (the 409 codes, snapshot fields,
   events, and rollback behaviour).
-- `openapi/document.yaml` 1.5.0, `asyncapi/document.yaml` 1.5.0, and
-  `asyncapi/event-catalog.yaml` 1.24.0 record the implemented shape.
+- `openapi/document.yaml` 1.6.0, `asyncapi/document.yaml` 1.6.0, and
+  `asyncapi/event-catalog.yaml` 1.28.0 record the implemented shape.
 
 Resolution: either implement the SPEC hold collection with scope, approval, and
 release by hold id, and the approved disposition job with a certificate and
@@ -2968,10 +3003,84 @@ status reason plus a status-history read (the SPEC 11.7.11 `/history` read
 remains planned). A future `/v2` or an EV-05 dual-publish window applies if a
 route or event name is renamed.
 
+## M-47 Document content tombstones are a standalone SPEC-less command and event
+
+SPEC 11.6.8 deletes content only as step 5 of the `document.dispose` approved
+asynchronous transaction, after the retention and hold gates, an approval, and
+a disposition certificate; SPEC 11.6.10 lists no content `DELETE` route and
+SPEC 11.6.9 publishes no content-tombstone fact. The 2026-10-22 slice documents
+the implemented standalone tombstone:
+`DELETE /api/v1/documents/{documentId}/content` clears the bytes of the current
+pointer and every revision and keeps the metadata, and the expert publishes
+`document.content.deleted`.
+
+| Aspect | Implemented | SPEC / gap |
+|---|---|---|
+| Route | `DELETE /api/v1/documents/{documentId}/content` (the M-01 short form), no request body | SPEC 11.6.8 deletes content inside `document.dispose`; SPEC 11.6.10 has no content-delete route |
+| Success | 204 with no body; the content metadata stays readable | no standalone command |
+| Tenant | `X-EIA-Tenant` required; a missing document or another tenant's document is 404 `NOT_FOUND`, indistinguishable | tenant wall (M-08) |
+| Missing content | 404 `CONTENT_NOT_FOUND` | not specified |
+| Legal hold | 409 `DOCUMENT_ON_LEGAL_HOLD`; the bytes, `deletedAt`, and outbox are untouched (DOC-06) | the SPEC blocks disposition under a hold; a standalone content delete is not modeled |
+| Repeat | 409 `CONTENT_ALREADY_DELETED` from the stored `deletedAt`, checked before the hold; no second event | not specified |
+| Storage effect | tombstone, not a row delete: `content = NULL` and `deleted_at` on the current pointer and every not-yet-deleted revision; filename, MIME type, size, digest, upload instant, and revision retained | SPEC step 5 deletes the content object |
+| Downloads | current and revision bytes answer 410 `CONTENT_DELETED`; the metadata and history routes remain 200 | not specified |
+| Re-upload | a later upload clears the pointer tombstone and appends a fresh downloadable revision; earlier revisions keep their deletion timestamps | not specified |
+| Event | `document.content.deleted`, payload `{documentId, documentNumber, fileName, sizeBytes, sha256, deletedAt}`, no `contentType` or `version`; aggregate `DocumentContent`, aggregate version = tombstoned revision, `eventVersion` 1 | SPEC 11.6.9 names no content-delete fact; M-22 records the name |
+| Approval, certificate, disposition coupling | none; `POST .../dispose` does not call the tombstone | SPEC requires approval, a certificate with counts and hashes, and deletion as part of disposition |
+
+Consequences:
+
+- A caller can clear the bytes of a document without the retention check,
+  approval, or certificate that SPEC 11.6.8 requires for disposition. The only
+  state guard is an active legal hold (DOC-06); any document that is not
+  ON_HOLD can be tombstoned, including ACTIVE, ARCHIVED, and DISPOSED records.
+- The tombstone is reversible only by a new upload: the cleared revisions are
+  not recoverable and keep their `deletedAt`, while the history and the retained
+  digest and size remain available for audit and correlation.
+- A consumer that expected the SPEC disposition to be the only content deletion
+  must tolerate a new `document.content.deleted` fact and the 410 response on
+  both download routes.
+- The 409 and 410 bodies preserve the expert problem as
+  `application/problem+json`; a missing tenant is still the compact
+  `TENANT_REQUIRED` 400 (M-02).
+
+Evidence:
+
+- `repos/eia-document-domain/.../DocumentController.java:109-121` (public
+  tombstone route and 204), `DocumentService.java:149-153` (pass-through), and
+  `DocumentExpertClient.java:221-234` (the expert DELETE and preserved 4xx
+  vocabulary).
+- `repos/eia-document-expert/.../DocumentContentController.java:79-87` (the
+  DELETE mapping), `DocumentContentService.java:77-93` (locked lookup,
+  already-deleted guard, legal-hold rule, tombstone, and outbox),
+  `DocumentContentRules.java:46-58` (DOC-06 hold block),
+  `DocumentContentRepository.java:188-208` (the nullable-bytes `deleted_at`
+  writes and the duplicate guard), and `ContentDeletedException.java` /
+  `ContentAlreadyDeletedException.java` with
+  `ApiExceptionHandler.java:42-52` (410 `CONTENT_DELETED` and 409
+  `CONTENT_ALREADY_DELETED`).
+- `repos/eia-document-expert/.../DocumentContentEvents.java:77-115` (name,
+  payload, aggregate version, and DIRECT book) and
+  `DocumentContentMetadata.java:20-33` (the nullable `deletedAt` and derived
+  `deleted`).
+- `repos/eia-document-expert/src/main/resources/schema.sql` (nullable `content`
+  and `deleted_at` on both content tables) and
+  `DocumentContentDeletionIntegrationTest` (tombstone, 410 downloads, hold
+  block, repeat conflict, tenant wall, outbox payload, re-upload, rollback, and
+  idempotent DDL).
+- `openapi/document.yaml` 1.6.0, `asyncapi/document.yaml` 1.6.0, and
+  `asyncapi/event-catalog.yaml` 1.28.0 record the implemented shape.
+
+Resolution: either implement the SPEC 11.6.8 disposition deletion with
+approval, certificate, and hold/litigation gates and treat this route as the
+expert primitive behind it, or amend SPEC 11.6.8/11.6.10 to the standalone
+tombstone and add the fact to SPEC 11.6.9. Renaming the route or event is
+breaking and needs an ADR and a `/v2` or EV-05 dual-publish window.
+
 ## Validation evidence
 
-The repository validator was run on the working tree after the 2026-10-21
-payment status-transition contract:
+The repository validator was run on the working tree after the 2026-10-22
+Document content-tombstone contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -2987,7 +3096,7 @@ OpenAPI 3.1 documents
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
   OK openapi/cession.yaml  9 paths, 11 operations
   OK openapi/retrocession.yaml  9 paths, 11 operations
-  OK openapi/document.yaml  18 paths, 23 operations
+  OK openapi/document.yaml  18 paths, 24 operations
   OK openapi/payment.yaml  12 paths, 15 operations
   OK openapi/notifications.yaml  7 paths, 9 operations
 
@@ -2999,10 +3108,10 @@ AsyncAPI 3 documents
   OK asyncapi/assumed-claims.yaml  21 event channels
   OK asyncapi/cession.yaml  17 event channels
   OK asyncapi/retrocession.yaml  17 event channels
-  OK asyncapi/document.yaml  23 event channels
+  OK asyncapi/document.yaml  24 event channels
   OK asyncapi/payment.yaml  19 event channels
   OK asyncapi/notifications.yaml  12 event channels
-  OK catalog: 210 unique published events across 10 verticals
+  OK catalog: 211 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -3010,7 +3119,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 13978 checks, 0 failures
+  PASS 14058 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -3263,7 +3372,14 @@ Additional checks and limits:
   and re-adding the implemented status path to `x-planned-operations` each fail
   with the specific missing-operation, missing-edge, required-field, bounds, or
   planned-route message. All five were run on a throwaway copy and exited
-  non-zero (exit 1); the working copy was left unchanged.
+  non-zero (exit 1); the working copy was left unchanged. The Document
+  content-tombstone pass added four more: removing the DELETE operation,
+  dropping `deleted` from the required `DocumentContent` keys, removing
+  `document.content.deleted` from the Document catalog `implemented` list, and
+  removing the 410 responses each fail with the specific missing-operation,
+  required-field, implemented-event, or gone-response message. All four were run
+  on a throwaway copy and exited non-zero (exit 1); the working copy was left
+  unchanged.
 
 ## Resolution policy
 

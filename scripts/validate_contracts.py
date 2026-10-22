@@ -1719,6 +1719,7 @@ IMPLEMENTED_EVENTS = {
         "document.link.added",
         "document.link.removed",
         "document.content.uploaded",
+        "document.content.deleted",
         "document.legal-hold.placed",
         "document.legal-hold.released",
         "document.document.disposed",
@@ -1996,9 +1997,10 @@ DOCUMENT_LINK_REFERENCE_MAX_LENGTH = 64
 
 # Document content. One document owns one current content pointer and an
 # append-only revision history; every upload appends a revision and advances
-# the pointer. The public surface is five routes. The metadata projection is
-# named DocumentContent because the bytes are not part of it, and the history
-# projection is DocumentContentVersion.
+# the pointer. The public surface is six routes from 1.6.0, including the
+# content tombstone. The metadata projection is named DocumentContent because
+# the bytes are not part of it, and the history projection is
+# DocumentContentVersion.
 DOCUMENT_CONTENT_PATH = "/api/v1/documents/{documentId}/content"
 DOCUMENT_CONTENT_METADATA_PATH = "/api/v1/documents/{documentId}/content/metadata"
 DOCUMENT_CONTENT_VERSIONS_PATH = "/api/v1/documents/{documentId}/content/versions"
@@ -2012,6 +2014,8 @@ DOCUMENT_CONTENT_FIELDS = (
     "sizeBytes",
     "sha256",
     "uploadedAt",
+    "deletedAt",
+    "deleted",
 )
 DOCUMENT_CONTENT_VERSION_FIELDS = (
     "documentId",
@@ -2027,6 +2031,20 @@ DOCUMENT_CONTENT_FILE_NAME_MAX_LENGTH = 255
 DOCUMENT_CONTENT_TYPE_MAX_LENGTH = 128
 DOCUMENT_CONTENT_ERRORS = ("EMPTY_CONTENT", "FILE_TOO_LARGE")
 DOCUMENT_CONTENT_EVENT = "document.content.uploaded"
+DOCUMENT_CONTENT_DELETED_EVENT = "document.content.deleted"
+DOCUMENT_CONTENT_DELETED_EVENT_FIELDS = (
+    "documentId",
+    "documentNumber",
+    "fileName",
+    "sizeBytes",
+    "sha256",
+    "deletedAt",
+)
+DOCUMENT_CONTENT_DELETE_CODES = (
+    "CONTENT_NOT_FOUND",
+    "DOCUMENT_ON_LEGAL_HOLD",
+    "CONTENT_ALREADY_DELETED",
+)
 
 # Document legal holds and disposition. The implemented hold surface is
 # per-document and synchronous, not the SPEC 11.6.10 hold collection. A hold may
@@ -3804,6 +3822,7 @@ def check_document_content_openapi(contracts: ContractSet, document, relative: s
     for method, content_path, operation_id in (
         ("put", DOCUMENT_CONTENT_PATH, "uploadDocumentContent"),
         ("get", DOCUMENT_CONTENT_PATH, "downloadDocumentContent"),
+        ("delete", DOCUMENT_CONTENT_PATH, "deleteDocumentContent"),
         ("get", DOCUMENT_CONTENT_METADATA_PATH, "getDocumentContentMetadata"),
         ("get", DOCUMENT_CONTENT_VERSIONS_PATH, "listDocumentContentVersions"),
         ("get", DOCUMENT_CONTENT_VERSION_PATH, "downloadDocumentContentVersion"),
@@ -3925,6 +3944,55 @@ def check_document_content_openapi(contracts: ContractSet, document, relative: s
                 and str(too_large_schema.get("$ref", "")).endswith("/schemas/Problem"),
                 f"{where}: 413 must use the shared Problem schema",
             )
+        elif method == "delete":
+            contracts.check(
+                "204" in responses,
+                f"{where}: must document the 204 no-content response",
+            )
+            no_content = responses.get("204")
+            contracts.check(
+                isinstance(no_content, dict) and "content" not in no_content,
+                f"{where}: 204 must not declare a response body",
+            )
+            contracts.check(
+                "requestBody" not in operation,
+                f"{where}: the content tombstone must not declare a request body",
+            )
+            not_found = responses.get("404")
+            not_found_text = (
+                str(not_found.get("description") or "")
+                if isinstance(not_found, dict)
+                else ""
+            )
+            contracts.check(
+                "CONTENT_NOT_FOUND" in not_found_text,
+                f"{where}: 404 must document CONTENT_NOT_FOUND",
+            )
+            conflict = responses.get("409")
+            conflict_text = (
+                str(conflict.get("description") or "")
+                if isinstance(conflict, dict)
+                else ""
+            )
+            for code in DOCUMENT_CONTENT_DELETE_CODES[1:]:
+                contracts.check(
+                    code in conflict_text,
+                    f"{where}: 409 must document {code}",
+                )
+            conflict_schema = _response_schema(
+                operation, "409", "application/problem+json"
+            )
+            contracts.check(
+                isinstance(conflict_schema, dict)
+                and str(conflict_schema.get("$ref", "")).endswith("/schemas/Problem"),
+                f"{where}: 409 must use the shared Problem schema",
+            )
+            description = str(operation.get("description") or "")
+            for term in ("document.content.deleted", "deletedAt", "204"):
+                contracts.check(
+                    term in description,
+                    f"{where}: description must document {term}",
+                )
         elif content_path == DOCUMENT_CONTENT_PATH:
             ok_response = responses.get("200")
             ok_content = (
@@ -3967,6 +4035,22 @@ def check_document_content_openapi(contracts: ContractSet, document, relative: s
                 version_header_schema.get("type") == "integer"
                 and version_header_schema.get("minimum") == 1,
                 f"{where}: X-Content-Version must be a positive integer",
+            )
+            gone = responses.get("410")
+            gone_text = (
+                str(gone.get("description") or "") if isinstance(gone, dict) else ""
+            )
+            contracts.check(
+                "CONTENT_DELETED" in gone_text,
+                f"{where}: 410 must document CONTENT_DELETED",
+            )
+            gone_schema = _response_schema(
+                operation, "410", "application/problem+json"
+            )
+            contracts.check(
+                isinstance(gone_schema, dict)
+                and str(gone_schema.get("$ref", "")).endswith("/schemas/Problem"),
+                f"{where}: 410 must use the shared Problem schema",
             )
         elif content_path == DOCUMENT_CONTENT_VERSIONS_PATH:
             ok_schema = _response_schema(operation, "200")
@@ -4032,6 +4116,22 @@ def check_document_content_openapi(contracts: ContractSet, document, relative: s
                 version_header_schema.get("type") == "integer"
                 and version_header_schema.get("minimum") == 1,
                 f"{where}: X-Content-Version must be a positive integer",
+            )
+            gone = responses.get("410")
+            gone_text = (
+                str(gone.get("description") or "") if isinstance(gone, dict) else ""
+            )
+            contracts.check(
+                "CONTENT_DELETED" in gone_text,
+                f"{where}: 410 must document CONTENT_DELETED",
+            )
+            gone_schema = _response_schema(
+                operation, "410", "application/problem+json"
+            )
+            contracts.check(
+                isinstance(gone_schema, dict)
+                and str(gone_schema.get("$ref", "")).endswith("/schemas/Problem"),
+                f"{where}: 410 must use the shared Problem schema",
             )
             description = str(operation.get("description") or "")
             contracts.check(
@@ -4115,6 +4215,17 @@ def check_document_content_openapi(contracts: ContractSet, document, relative: s
     contracts.check(
         "currentVersion" in content_required,
         f"{relative}: DocumentContent.required must list currentVersion",
+    )
+    deleted_at = content_properties.get("deletedAt") or {}
+    contracts.check(
+        _schema_types(deleted_at) == {"string", "null"}
+        and deleted_at.get("format") == "date-time",
+        f"{relative}: DocumentContent.deletedAt must be a nullable date-time",
+    )
+    deleted = content_properties.get("deleted") or {}
+    contracts.check(
+        deleted.get("type") == "boolean",
+        f"{relative}: DocumentContent.deleted must be a boolean",
     )
 
     version_schema = schemas.get("DocumentContentVersion") or {}
@@ -11357,9 +11468,10 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
                 if isinstance(address, str) and address.startswith("document.content.")
             }
             contracts.check(
-                content_event_names == {DOCUMENT_CONTENT_EVENT},
-                f"{relative}: {DOCUMENT_CONTENT_EVENT} must remain the only "
-                "document.content.* event name; the version slice adds no event",
+                content_event_names
+                == {DOCUMENT_CONTENT_EVENT, DOCUMENT_CONTENT_DELETED_EVENT},
+                f"{relative}: the document.content.* event names must be exactly "
+                f"{[DOCUMENT_CONTENT_EVENT, DOCUMENT_CONTENT_DELETED_EVENT]}",
             )
             contracts.check(
                 DOCUMENT_CONTENT_EVENT in addresses,
@@ -11454,6 +11566,97 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
                 == "^[a-f0-9]{64}$",
                 f"{relative}: DocumentContentUploadedData.sha256 must be a "
                 "lowercase 64-character digest",
+            )
+
+            contracts.check(
+                DOCUMENT_CONTENT_DELETED_EVENT in addresses,
+                f"{relative}: required content event channel "
+                f"'{DOCUMENT_CONTENT_DELETED_EVENT}' is missing",
+            )
+            contracts.check(
+                DOCUMENT_CONTENT_DELETED_EVENT in implemented_addresses,
+                f"{relative}: content event channel "
+                f"'{DOCUMENT_CONTENT_DELETED_EVENT}' must be implemented",
+            )
+            contracts.check(
+                DOCUMENT_CONTENT_DELETED_EVENT in document_send_events,
+                f"{relative}: content event '{DOCUMENT_CONTENT_DELETED_EVENT}' "
+                "must have a send operation",
+            )
+            deleted_channel = next(
+                (
+                    channel
+                    for channel in channels.values()
+                    if isinstance(channel, dict)
+                    and channel.get("address") == DOCUMENT_CONTENT_DELETED_EVENT
+                ),
+                None,
+            )
+            contracts.check(
+                isinstance(deleted_channel, dict)
+                and str(deleted_channel.get("x-implemented-by", "")).endswith(
+                    "DocumentContentEvents.java"
+                ),
+                f"{relative}: {DOCUMENT_CONTENT_DELETED_EVENT} must name "
+                "DocumentContentEvents.java in x-implemented-by",
+            )
+            deleted_messages = (
+                deleted_channel.get("messages")
+                if isinstance(deleted_channel, dict)
+                else None
+            ) or {}
+            contracts.check(
+                "DocumentContentDeletedData" in deleted_messages,
+                f"{relative}: {DOCUMENT_CONTENT_DELETED_EVENT} must reference "
+                "DocumentContentDeletedData",
+            )
+            deleted_message = (
+                ((document.get("components") or {}).get("messages") or {}).get(
+                    "DocumentContentDeletedData"
+                )
+                or {}
+            )
+            deleted_payload = deleted_message.get("payload") or {}
+            deleted_properties = deleted_payload.get("properties") or {}
+            deleted_required = set(deleted_payload.get("required") or [])
+            contracts.check(
+                set(deleted_properties) == set(DOCUMENT_CONTENT_DELETED_EVENT_FIELDS),
+                f"{relative}: DocumentContentDeletedData must declare exactly "
+                f"{list(DOCUMENT_CONTENT_DELETED_EVENT_FIELDS)}",
+            )
+            for field in DOCUMENT_CONTENT_DELETED_EVENT_FIELDS:
+                contracts.check(
+                    field in deleted_properties,
+                    f"{relative}: DocumentContentDeletedData.properties.{field} "
+                    "is required",
+                )
+                contracts.check(
+                    field in deleted_required,
+                    f"{relative}: DocumentContentDeletedData.required must list "
+                    f"{field}",
+                )
+            contracts.check(
+                (deleted_properties.get("documentId") or {}).get("format") == "uuid",
+                f"{relative}: DocumentContentDeletedData.documentId must be a uuid",
+            )
+            deleted_size = deleted_properties.get("sizeBytes") or {}
+            contracts.check(
+                (deleted_size.get("type"), deleted_size.get("maximum"))
+                == ("integer", DOCUMENT_CONTENT_MAX_BYTES),
+                f"{relative}: DocumentContentDeletedData.sizeBytes must be an "
+                f"integer capped at {DOCUMENT_CONTENT_MAX_BYTES}",
+            )
+            contracts.check(
+                (deleted_properties.get("sha256") or {}).get("pattern")
+                == "^[a-f0-9]{64}$",
+                f"{relative}: DocumentContentDeletedData.sha256 must be a "
+                "lowercase 64-character digest",
+            )
+            contracts.check(
+                (deleted_properties.get("deletedAt") or {}).get("format")
+                == "date-time",
+                f"{relative}: DocumentContentDeletedData.deletedAt must be a "
+                "date-time",
             )
 
         entry = catalog_entries.get(vertical) or {}

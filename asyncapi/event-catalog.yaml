@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.27.0
+  version: 1.28.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -125,6 +125,13 @@ info:
     one implemented name, bringing the platform totals to 210 published and 90
     implemented; Direct Claims becomes 27 published and 13 implemented (M-22,
     M-45).
+    The 2026-10-22 Document content-tombstone slice adds one Document name,
+    `document.content.deleted`, with no SPEC 11.6.9 equivalent: SPEC 11.6.8
+    deletes content only as a step of the approved disposition job, while the
+    implemented standalone tombstone is its own command. It adds one published
+    and one implemented name, bringing the platform totals to 211 published and
+    91 implemented; Document becomes 24 published and 10 implemented (M-22,
+    M-47).
     The platform
     event-ingest service
     is the inbox:
@@ -496,6 +503,7 @@ x-event-catalog:
       - document.link.added
       - document.link.removed
       - document.content.uploaded
+      - document.content.deleted
       - document.legal-hold.placed
       - document.legal-hold.released
     implemented:
@@ -505,6 +513,7 @@ x-event-catalog:
       - document.link.added
       - document.link.removed
       - document.content.uploaded
+      - document.content.deleted
       - document.legal-hold.placed
       - document.legal-hold.released
       - document.document.disposed

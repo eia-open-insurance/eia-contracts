@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:document
 info:
   title: EIA Document events
-  version: 1.5.0
+  version: 1.6.0
   summary: Published domain event names for the Document vertical.
   description: >
     Event contract for the Document vertical. The authoritative event names are
@@ -17,15 +17,20 @@ info:
     The Document expert now publishes `document.document.created`,
     `document.document.updated`, `document.document.status-changed`,
     `document.link.added`, `document.link.removed`,
-    `document.content.uploaded`, `document.legal-hold.placed`,
-    `document.legal-hold.released`, and `document.document.disposed` through
+    `document.content.uploaded`, `document.content.deleted`,
+    `document.legal-hold.placed`, `document.legal-hold.released`, and
+    `document.document.disposed` through
     the transactional outbox; those channels and operations are marked
     `x-status: implemented`. A status write emits `updated` and
     `status-changed` together at the same aggregate version. A link write emits
     one `added` or `removed` fact with the `DocumentLink` aggregate at version
     1. A content write emits one `uploaded` fact with the `DocumentContent`
     aggregate at the content revision, in the same transaction as the revision
-    append. A hold write emits one `legal-hold.placed` or
+    append; a content tombstone emits one `deleted` fact at the revision it
+    tombstoned, in the same transaction as the byte clear, with
+    `{documentId, documentNumber, fileName, sizeBytes, sha256, deletedAt}` and
+    deliberately without `contentType` or `version`. A hold write emits one
+    `legal-hold.placed` or
     `legal-hold.released` fact, and a disposition emits one
     `document.document.disposed` fact, each with the `Document` aggregate at
     version + 1. The content payload carries the revision as `version`; it is
@@ -38,15 +43,18 @@ info:
     both books and the current API has no book input, so these events are
     stamped DIRECT.
 
-    The two link names and `document.content.uploaded` are new and have no
-    SPEC 11.6.9 equivalent: the SPEC association fact is
-    `document.document.associated`, and SPEC 11.6.9 defines no content-upload
-    fact (MISMATCHES.md M-22, M-26, M-40). The two legal-hold names are also new:
+    The two link names, `document.content.uploaded`, and
+    `document.content.deleted` are new and have no SPEC 11.6.9 equivalent: the
+    SPEC association fact is `document.document.associated`, and SPEC 11.6.9
+    defines no content-upload or content-tombstone fact (SPEC 11.6.8 deletes
+    content inside the approved disposition job) (MISMATCHES.md M-22, M-26,
+    M-40, M-47). The two legal-hold names are also new:
     SPEC 11.6.9 publishes `document.document.held` and
     `document.document.hold-released`, which remain planned (M-22, M-44). The
     2026-10-21 content-version slice adds the `version` payload member but no
     event name or channel; the 2026-10-21 hold/disposition slice adds the two
-    legal-hold names and implements `document.document.disposed`.
+    legal-hold names and implements `document.document.disposed`; the
+    2026-10-22 content-tombstone slice adds `document.content.deleted`.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -168,6 +176,32 @@ channels:
         $ref: '#/components/messages/DomainEvent'
       DocumentContentUploadedData:
         $ref: '#/components/messages/DocumentContentUploadedData'
+  DocumentContentDeleted:
+    address: document.content.deleted
+    title: document.content.deleted
+    description: >
+      Emitted by the Document expert when the stored content of a document is
+      tombstoned, in the same transaction as the byte clear. The payload carries
+      the document identity and number, the retained display filename, the
+      exact size in bytes, the lowercase SHA-256 digest of the cleared bytes,
+      and the tombstone instant `deletedAt`; it deliberately omits the MIME
+      type and the revision number. `DocumentContent` is the aggregate, keyed by
+      the document id, and the aggregate version is the current content revision
+      that was tombstoned, so the fact shares that revision with the upload fact
+      but has a distinct event id. A document under legal hold or a repeated
+      delete writes no fact. The name is new and has no SPEC 11.6.9 equivalent:
+      SPEC 11.6.8 deletes content only inside the approved disposition job
+      (MISMATCHES.md M-22, M-40, M-47).
+    x-event-type: document.content.deleted
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.6.9
+    x-implemented-by: repos/eia-document-expert/src/main/java/com/eia/document/expert/DocumentContentEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      DocumentContentDeletedData:
+        $ref: '#/components/messages/DocumentContentDeletedData'
   DocumentLegalHoldPlaced:
     address: document.legal-hold.placed
     title: document.legal-hold.placed
@@ -493,6 +527,20 @@ operations:
       payload `version` are the stored content revision.
     x-event-type: document.content.uploaded
     x-status: implemented
+  publishDocumentContentDeleted:
+    action: send
+    channel:
+      $ref: '#/channels/DocumentContentDeleted'
+    summary: Publish document.content.deleted
+    description: >
+      Publishes document.content.deleted through the transactional outbox in
+      the same transaction as the content tombstone. The aggregate is
+      DocumentContent keyed by the document id; the aggregate version is the
+      current content revision that was tombstoned, and the payload carries the
+      retained file metadata plus `deletedAt`. A legal-hold conflict or a
+      repeated delete writes no event.
+    x-event-type: document.content.deleted
+    x-status: implemented
   publishDocumentLegalHoldPlaced:
     action: send
     channel:
@@ -736,6 +784,50 @@ components:
             type: string
             pattern: '^[a-f0-9]{64}$'
             description: Lowercase SHA-256 of the exact stored bytes.
+    DocumentContentDeletedData:
+      name: DocumentContentDeletedData
+      title: document.content.deleted data
+      summary: The retained content metadata and the tombstone instant.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - documentId
+          - documentNumber
+          - fileName
+          - sizeBytes
+          - sha256
+          - deletedAt
+        properties:
+          documentId:
+            type: string
+            format: uuid
+          documentNumber:
+            type: string
+            description: Tenant-visible document number of the owning document.
+          fileName:
+            type: string
+            description: >
+              Retained display filename, with directory components removed. The
+              tombstone does not erase the name.
+          sizeBytes:
+            type: integer
+            minimum: 0
+            maximum: 10485760
+            description: Retained exact size of the cleared bytes in bytes.
+          sha256:
+            type: string
+            pattern: '^[a-f0-9]{64}$'
+            description: >
+              Retained lowercase SHA-256 digest of the cleared bytes, so a
+              consumer can correlate the tombstone with the upload fact.
+          deletedAt:
+            type: string
+            format: date-time
+            description: >
+              Instant at which the bytes were cleared and the tombstone was
+              recorded, in UTC.
     DocumentLifecycleData:
       name: DocumentLifecycleData
       title: Document hold and disposition lifecycle data
@@ -796,16 +888,17 @@ x-implementation:
   publisher: eia-document-expert
   subscriber: none
   notes: >
-    Nine implemented event names are written to the transactional outbox in the
+    Ten implemented event names are written to the transactional outbox in the
     same transaction as the document, link, content, hold, or disposition write
     and dispatched by the platform outbox dispatcher when
     `eia.outbox.enabled=true`: the three document metadata facts and the three
     hold/disposition facts by DocumentEvents.java, the two link facts by
-    DocumentLinkEvents.java, and the content fact by DocumentContentEvents.java.
-    The remaining SPEC 11.6.9 names are planned, and the two link names, the
-    content name, and the two legal-hold names have no SPEC equivalent (M-22,
-    M-26, M-40, M-44). `document.document.disposed` is a SPEC name and is now
-    implemented. There is no subscriber, inbox, or subscription registry yet.
+    DocumentLinkEvents.java, and the content upload and tombstone facts by
+    DocumentContentEvents.java. The remaining SPEC 11.6.9 names are planned, and
+    the two link names, the two content names, and the two legal-hold names have
+    no SPEC equivalent (M-22, M-26, M-40, M-44, M-47).
+    `document.document.disposed` is a SPEC name and is implemented. There is no
+    subscriber, inbox, or subscription registry yet.
 
 x-consumed-events:
   - policy.policy.issued

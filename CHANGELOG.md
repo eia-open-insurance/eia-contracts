@@ -1442,6 +1442,39 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   refreshes the validation evidence.
 - `python scripts/validate_contracts.py` passes 13,978 checks with 0 failures.
 
+### Added in the Document content tombstone contract (2026-10-22)
+
+- `openapi/document.yaml` is 1.6.0: adds `DELETE
+  /api/v1/documents/{documentId}/content`. The command tombstones the current
+  pointer and every not-yet-tombstoned revision (clearing the bytes and
+  recording `deletedAt`) while keeping the filename, MIME type, size, digest,
+  upload instant, and revision; it answers 204, is tenant-scoped, and documents
+  404 `CONTENT_NOT_FOUND`, 409 `DOCUMENT_ON_LEGAL_HOLD` and
+  `CONTENT_ALREADY_DELETED`, and the `document.content.deleted` fact.
+  `DocumentContent` adds the required nullable `deletedAt` and required boolean
+  `deleted`, and the current and revision content downloads document 410
+  `CONTENT_DELETED`. `x-compatibility` moves to 1.6.0 over 1.5.0.
+- `asyncapi/document.yaml` is 1.6.0: the implemented
+  `document.content.deleted` channel and `send` operation with a dedicated
+  `DocumentContentDeletedData` payload (`documentId`, `documentNumber`,
+  `fileName`, `sizeBytes`, `sha256`, and `deletedAt`; no `contentType` or
+  `version`). The aggregate is `DocumentContent` at the tombstoned revision and
+  `eventVersion` stays 1.
+- `asyncapi/event-catalog.yaml` is 1.28.0: `document.content.deleted` is
+  published and implemented, for 211 published and 91 implemented names
+  (Document 24 published and 10 implemented).
+- `scripts/validate_contracts.py` requires the delete operation with the shared
+  tenant and `documentId` parameters, the 204 response and no request body, the
+  404/409 code documentation with the shared `Problem` schema, the
+  `DocumentContent.deletedAt`/`deleted` members and their types, the 410
+  responses on both downloads, the two `document.content.*` channels, the exact
+  six-member deleted payload, and the catalog entries.
+- `README.md` records the tombstone semantics, the metadata and 410 rules, the
+  re-upload behaviour, the SPEC gaps, and the validation count;
+  `MISMATCHES.md` adds M-47 for the standalone route and event, updates M-14,
+  M-22, M-40, and M-44, and refreshes the validation evidence.
+- `python scripts/validate_contracts.py` passes 14,058 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was
