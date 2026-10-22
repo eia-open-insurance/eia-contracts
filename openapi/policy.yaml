@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Policy API
-  version: 2.16.0
+  version: 2.17.0
   summary: Direct-book policy administration and the Policy expert API.
   description: >
     This document describes the implemented public Policy domain API and the
@@ -379,6 +379,39 @@ info:
       compare or replay them in this slice (MISMATCHES.md M-06, M-07). The
       SPEC-less route, the derived-delta rule, and the new event name are
       recorded in M-22, M-27, and M-51.
+
+    The 2026-10-22 rating slice adds the policy rating worksheet:
+
+    - `POST /api/v1/policies/{policyId}/rating` persists one immutable
+      `RatingWorksheet` from `{ratingMethod, baseRate, exposureAmount?, factor?,
+      apply?}` and returns 201 with the `{worksheet, policy?}` envelope.
+      `ratingMethod` is `RATE_TIMES_EXPOSURE` (`baseRate * exposureAmount *
+      factor`) or `FLAT` (`baseRate * factor`); `factor` defaults to 1 and
+      `apply` defaults to false. A calculation-only request leaves the policy
+      untouched and omits `policy`; an applied calculation replaces the policy
+      premium, bumps the aggregate version, and returns the refreshed `Policy`
+      with its strong `ETag`.
+    - Only a `DRAFT` or `QUOTED` policy is rateable. Any other status is 409
+      `POLICY_NOT_RATEABLE` with `meta.policyId`, `meta.sourceStatus`, and
+      `meta.allowedStatuses` and writes nothing. The computed premium is
+      `baseRate * exposureAmount * factor` for `RATE_TIMES_EXPOSURE` and
+      `baseRate * factor` for `FLAT`, rounded once to four fraction digits
+      HALF_UP. `calcHash` is the lower-case SHA-256 of the canonical normalized
+      inputs and result, so equivalent decimal spellings reproduce the same
+      hash: `100` and `100.000000` hash alike.
+    - `GET /api/v1/policies/{policyId}/rating` returns the newest worksheet with
+      no `ETag`. A policy that has never been rated is 404
+      `RATING_WORKSHEET_NOT_FOUND`; an unknown or foreign policy is 404
+      `POLICY_NOT_FOUND`. The worksheet `status` is always `CALCULATED`; whether
+      a calculation was applied is observable through the policy premium, its
+      bumped aggregate version, and the `policy.policy.rated` fact.
+    - The worksheet is keyed to the policy, not to a submission or product
+      version, and the SPEC 11.2.14 `exposure_lines`, `factor_trace`, tax, and
+      fee members are absent. SPEC 11.2.14 mounts the rating command at
+      `/api/v1/policy/submissions/{submissionId}/rating` and SPEC 11.2.9
+      publishes `policy.rating.completed`; the implemented policy-scoped route,
+      `CALCULATED`-only status, and `policy.policy.rated` name are recorded in
+      MISMATCHES.md M-01, M-22, and M-57.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -2867,6 +2900,149 @@ paths:
           $ref: './components.yaml#/components/responses/UnprocessableContent'
         '428':
           $ref: './components.yaml#/components/responses/PreconditionRequired'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/rating:
+    post:
+      operationId: ratePolicy
+      tags:
+        - Policy
+      summary: Calculate a rating worksheet and optionally apply it.
+      description: >
+        Calculates one premium from the policy's rating inputs and persists the
+        result as an immutable `RatingWorksheet`. `ratingMethod` is
+        `RATE_TIMES_EXPOSURE` (`baseRate * exposureAmount * factor`) or `FLAT`
+        (`baseRate * factor`); `factor` defaults to 1 and `apply` defaults to
+        false. `baseRate` and `factor` must be non-negative, and
+        `RATE_TIMES_EXPOSURE` requires a strictly positive `exposureAmount`
+        (SPEC 10.3 money: four fraction digits, rounded once HALF_UP). `FLAT`
+        ignores and does not store an exposure. `calcHash` is the lower-case
+        SHA-256 of the canonical normalized method, base rate (scale 6),
+        exposure (scale 4 or `~`), factor (scale 6), computed premium (scale 4),
+        and currency, so equivalent decimal spellings reproduce the hash.
+
+        Only a `DRAFT` or `QUOTED` policy is rateable; any other status is 409
+        `POLICY_NOT_RATEABLE` with `meta.policyId`, `meta.sourceStatus`, and
+        `meta.allowedStatuses` and writes nothing. A calculation-only request
+        (`apply` false or absent) persists the worksheet and leaves the policy
+        premium, version, and event stream untouched. An applied request
+        replaces the policy premium with the computed premium, bumps the
+        aggregate version, and writes `policy.policy.rated` in the same
+        transaction as the worksheet insert. A racing change that loses the
+        conditional premium update rolls the worksheet and event back and is
+        409 `CONCURRENT_MODIFICATION`.
+
+        Rejections: 400 `RATING_METHOD_REQUIRED`/`RATING_METHOD_INVALID`,
+        `RATING_BASE_RATE_REQUIRED`/`RATING_BASE_RATE_INVALID`,
+        `RATING_EXPOSURE_REQUIRED`/`RATING_EXPOSURE_INVALID`,
+        `RATING_FACTOR_INVALID`, `RATING_PREMIUM_OUT_OF_RANGE`, and the
+        request-shape `VALIDATION_ERROR`; 404 `POLICY_NOT_FOUND`; 409
+        `POLICY_NOT_RATEABLE` and `CONCURRENT_MODIFICATION`.
+
+        The 201 body is `{worksheet, policy?}`. `worksheet` is always present;
+        `policy` is present only when the calculation was applied and carries
+        the new premium and strong `ETag`, which the response also returns as
+        its own header. `Idempotent-Replayed` is always false: the domain
+        forwards an optional `Idempotency-Key` but the expert does not replay
+        it, so a retry calculates and persists a second worksheet and applies a
+        second premium replacement (MISMATCHES.md M-06, M-07, M-57).
+
+        `X-EIA-Tenant` is required and a supplied `X-EIA-Book` must be DIRECT;
+        an absent book is accepted for compatibility, and another book is
+        hidden as 404 `BOOK_SCOPE_VIOLATION`. An unknown policy or a policy in
+        another tenant is 404 `POLICY_NOT_FOUND`. Optional `If-Match` is
+        compared before any write; a stale tag is 409
+        `CONCURRENT_MODIFICATION` and a malformed tag is 400
+        `INVALID_IF_MATCH`. The `/internal/v1` alias the domain calls is an
+        implementation detail. SPEC 11.2.14 mounts rating under the submission
+        and SPEC 11.2.9 publishes `policy.rating.completed`; the implemented
+        policy-scoped route and `policy.policy.rated` name are recorded in
+        MISMATCHES.md M-01, M-22, and M-57.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirectOptional'
+        - $ref: './components.yaml#/components/parameters/IfMatch'
+        - $ref: './components.yaml#/components/parameters/IdempotencyKey'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RatePolicyRequest'
+      responses:
+        '201':
+          description: >
+            The worksheet was persisted; when the request applied it, the body
+            also carries the refreshed policy and the response carries its new
+            strong ETag.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyRatingResult'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            The policy status cannot be rated (`POLICY_NOT_RATEABLE`) or the
+            policy changed concurrently (`CONCURRENT_MODIFICATION`). A status
+            problem carries `meta.policyId`, `meta.sourceStatus`, and
+            `meta.allowedStatuses`; a concurrency problem carries
+            `meta.currentVersion` and `meta.expectedVersion`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    get:
+      operationId: getLatestPolicyRating
+      tags:
+        - Policy
+      summary: Get the newest rating worksheet for a policy.
+      description: >
+        Returns the newest `RatingWorksheet` for the policy, ordered by
+        `createdAt` descending and then id. A worksheet records the normalized
+        method and operands, the computed premium, the currency, and the
+        canonical `calcHash`, so a reader can reproduce the calculation. The
+        read returns no `ETag` and changes nothing. A policy with no worksheet
+        is 404 `RATING_WORKSHEET_NOT_FOUND`; an unknown or foreign policy is
+        404 `POLICY_NOT_FOUND`. `X-EIA-Tenant` is required and a supplied
+        `X-EIA-Book` must be DIRECT; another book is hidden as 404
+        `BOOK_SCOPE_VIOLATION`. The `/internal/v1` alias the domain calls is an
+        implementation detail.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirectOptional'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The newest rating worksheet for the policy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RatingWorksheet'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /internal/v1/policies:
@@ -5767,6 +5943,173 @@ components:
           description: >
             Approval reference. Required only for a pre-inception or
             regressing effective date.
+    RatePolicyRequest:
+      type: object
+      description: >
+        Rating inputs for one policy premium calculation. `ratingMethod` and
+        `baseRate` are required. `exposureAmount` is required and strictly
+        positive for `RATE_TIMES_EXPOSURE` and is ignored and not stored for
+        `FLAT`. `factor` defaults to 1 and `apply` defaults to false, so a
+        caller can calculate without touching the policy by sending only
+        `{ratingMethod, baseRate}` (plus the exposure for
+        `RATE_TIMES_EXPOSURE`). An invalid method, operand, or exposure
+        combination is 400 with the stable `RATING_*` codes.
+      required:
+        - ratingMethod
+        - baseRate
+      properties:
+        ratingMethod:
+          $ref: '#/components/schemas/RatingMethod'
+        baseRate:
+          type: string
+          description: >
+            Base rate for `RATE_TIMES_EXPOSURE`, or the flat premium for
+            `FLAT`, as a non-negative decimal string with at most 13 integer
+            digits and six fraction digits (numeric(19,6)). A negative value is
+            400 `RATING_BASE_RATE_INVALID`.
+          pattern: '^(?:0|[1-9][0-9]{0,12})(?:\.[0-9]{1,6})?$'
+          examples:
+            - '0.012500'
+        exposureAmount:
+          type: [string, 'null']
+          description: >
+            Rated exposure as a non-negative decimal string with at most 15
+            integer digits and four fraction digits (numeric(19,4)), rounded
+            HALF_UP. Required and strictly positive for `RATE_TIMES_EXPOSURE`
+            (400 `RATING_EXPOSURE_REQUIRED`/`RATING_EXPOSURE_INVALID`); `FLAT`
+            ignores it and stores no exposure, so an explicit null is accepted
+            and treated as absent.
+          pattern: '^(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,4})?$'
+          examples:
+            - '250000.0000'
+        factor:
+          type: string
+          description: >
+            Non-negative rating factor with at most six integer digits and six
+            fraction digits (numeric(12,6)); defaults to 1 when omitted. A
+            negative value is 400 `RATING_FACTOR_INVALID`.
+          pattern: '^(?:0|[1-9][0-9]{0,5})(?:\.[0-9]{1,6})?$'
+          default: '1'
+          examples:
+            - '1.250000'
+        apply:
+          type: boolean
+          description: >
+            Apply the computed premium to the policy. Defaults to false: a
+            calculation-only request persists the worksheet and leaves the
+            policy premium, version, and event stream unchanged. When true, the
+            premium replacement, the aggregate version bump, and
+            `policy.policy.rated` are written in the same transaction.
+          default: false
+    RatingMethod:
+      type: string
+      description: >
+        Implemented rating methods. SPEC 11.2.14 `rating_plan` also defines
+        `LOSS_COST`, `EXPERIENCE_MOD`, `SCHEDULE`, and `JUDGMENT`, which are not
+        implemented; MISMATCHES.md M-57 records the narrower set.
+      enum:
+        - RATE_TIMES_EXPOSURE
+        - FLAT
+    RatingWorksheetStatus:
+      type: string
+      description: >
+        Lifecycle state of a rating worksheet. The implementation writes only
+        `CALCULATED`: a calculation is always persisted, and whether it was
+        applied is observable through the policy premium, its bumped aggregate
+        version, and the `policy.policy.rated` fact, not through a worksheet
+        state. The SPEC 11.2.14 `DRAFT`, `APPROVED`, and `SUPERSEDED` states
+        are not modelled (MISMATCHES.md M-57).
+      enum:
+        - CALCULATED
+    RatingWorksheet:
+      type: object
+      description: >
+        Immutable evidence of one rating calculation. `baseRate` and `factor`
+        are decimal strings at scale 6, `exposureAmount` is a scale-4 string
+        and is null for `FLAT`, and `computedPremium` is a scale-4 string
+        rounded once HALF_UP (SPEC 10.3). `calcHash` is the canonical
+        lower-case SHA-256 over the normalized method and operands, so
+        equivalent decimal spellings reproduce it and a later read can
+        reproduce the premium that was written. `createdBy` is the system
+        actor because the command carries no user identity (MISMATCHES.md
+        M-20). The worksheet is policy-scoped and always `CALCULATED`; the SPEC
+        11.2.14 submission/product linkage, `exposure_lines`, `factor_trace`,
+        tax, and fee members are not modelled (M-57).
+      required:
+        - id
+        - tenantId
+        - policyId
+        - ratingMethod
+        - baseRate
+        - exposureAmount
+        - factor
+        - computedPremium
+        - currency
+        - calcHash
+        - status
+        - createdAt
+        - createdBy
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        policyId:
+          type: string
+          format: uuid
+        ratingMethod:
+          $ref: '#/components/schemas/RatingMethod'
+        baseRate:
+          type: string
+          description: Normalized base rate at scale 6, for example `0.012500`.
+        exposureAmount:
+          type: [string, 'null']
+          description: >
+            Normalized exposure at scale 4, for example `250000.0000`; null for
+            `FLAT`.
+          pattern: '^(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,4})?$'
+        factor:
+          type: string
+          description: Normalized factor at scale 6, `1.000000` when omitted.
+        computedPremium:
+          type: string
+          description: >
+            Computed written premium at scale 4, rounded once HALF_UP.
+          pattern: '^(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,4})?$'
+        currency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        calcHash:
+          type: string
+          description: >
+            Canonical lower-case SHA-256 of the normalized method, operands,
+            computed premium, and currency.
+          pattern: '^[a-f0-9]{64}$'
+        status:
+          $ref: '#/components/schemas/RatingWorksheetStatus'
+        createdAt:
+          type: string
+          format: date-time
+        createdBy:
+          type: string
+          format: uuid
+          description: System actor (`00000000-0000-0000-0000-000000000000`).
+    PolicyRatingResult:
+      type: object
+      description: >
+        Response of the rating command. `worksheet` is always present. `policy`
+        is present only when the request applied the calculation, in which case
+        it is the refreshed `Policy` with the new premium, the bumped version,
+        and its strong `ETag`; a calculation-only request omits the member and
+        the response has no `ETag`.
+      required:
+        - worksheet
+      properties:
+        worksheet:
+          $ref: '#/components/schemas/RatingWorksheet'
+        policy:
+          $ref: '#/components/schemas/Policy'
     MassTortProfile:
       type: object
       description: >
@@ -6715,6 +7058,25 @@ x-implementation:
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/BillingDunningControllerTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/BillingDunningServiceTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/BillingDunningRulesTest.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyRatingController.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyRatingService.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/RatingWorksheetDto.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/RatePolicyCommand.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyRatingResult.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyRatingController.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyRatingService.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyRatingWorksheet.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/RatingRequest.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/RatingRules.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/RatingWorksheetRepository.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/RatingResult.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/PolicyRatingControllerTest.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/PolicyRatingServiceTest.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/PolicyRatingClientTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/PolicyRatingControllerTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/PolicyRatingServiceTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/RatingRulesTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/PolicyRatingIntegrationTest.java
   errorEnvelope: >
     Canonical RFC 9457 Problem with content type application/problem+json, from
     both the Policy domain and the Policy expert. The vertical keeps its legacy
@@ -6874,25 +7236,46 @@ x-implementation:
     expert emits `policy.policy.premium-audited`; the SPEC 11.2.10 surface names
     no premium-audit route. The command shape, the event name, and the missing
     worksheet and quarterly batch job are recorded in M-22 and M-50.
+
+    Rating is a policy command, not a submission worksheet. The domain proxies
+    the expert's `/internal/v1` alias with the tenant, DIRECT book, optional
+    `If-Match`, and optional `Idempotency-Key`; the expert owns the
+    DRAFT/QUOTED gate, the method and operand rules, the one-rounding
+    computation, the canonical SHA-256, the append-only worksheet, the
+    conditional premium replacement, and the `policy.policy.rated` fact. A
+    calculation-only request returns the worksheet without a policy and writes
+    no event; an applied request returns `{worksheet, policy}` and the advanced
+    `ETag`. The expert compares the optional `If-Match` before any write but
+    does not replay `Idempotency-Key`. The worksheet is always CALCULATED,
+    policy-scoped, and does not store the SPEC exposure lines, factor trace,
+    tax, or fee. SPEC 11.2.14 mounts rating under the submission and SPEC
+    11.2.9 publishes `policy.rating.completed`; the implemented route and event
+    name are recorded in M-01, M-22, and M-57.
 x-compatibility:
-  contractVersion: 2.16.0
-  previousContractVersion: 2.15.0
+  contractVersion: 2.17.0
+  previousContractVersion: 2.16.0
   breaking: []
   compatible:
-    - Adds POST /api/v1/policies/{policyId}/billing/adjustment with the BillingAdjustmentRequest body and the BillingAdjustmentResult envelope.
-    - Documents the derived positive premium delta (policy premium less the plan total net of applied credits), the 400 NO_PREMIUM_ADJUSTMENT guard, and the INVALID_ADJUSTMENT_DUE_DATE and INVALID_ADJUSTMENT_REASON validations.
-    - Documents the 404 BILLING_PLAN_NOT_FOUND and 409 BILLING_PLAN_NOT_ACTIVE, MAX_INSTALLMENTS_REACHED, and CONCURRENT_MODIFICATION conflicts.
-    - Adds the policy.billing-plan.adjusted event.
+    - Adds POST /api/v1/policies/{policyId}/rating with the RatePolicyRequest body and the {worksheet, policy?} PolicyRatingResult envelope.
+    - Adds GET /api/v1/policies/{policyId}/rating returning the newest RatingWorksheet.
+    - Adds the RatingWorksheet, RatingMethod, RatingWorksheetStatus, RatePolicyRequest, and PolicyRatingResult schemas.
+    - Documents the RATE_TIMES_EXPOSURE and FLAT methods, the DRAFT/QUOTED rateable-status gate, the HALF_UP premium rounding, and the canonical calcHash.
+    - Documents the 400 RATING_* validations, the 404 POLICY_NOT_FOUND/RATING_WORKSHEET_NOT_FOUND, and the 409 POLICY_NOT_RATEABLE/CONCURRENT_MODIFICATION conflicts.
+    - Adds the policy.policy.rated event.
     - Removes no path or field and changes no existing field meaning.
   note: >
-    The billing-adjustment slice is additive over 2.15.0: one public command, one
-    request schema, one result envelope, and one implemented event name. The
-    command leaves every existing billing route and schema unchanged. The event
-    name is new: SPEC 11.2.13 names no positive premium adjustment fact, so the
-    catalog grows to 217 published and 97 implemented names, with Policy at 35
-    published and 23 implemented. The SPEC-less route, the derived-delta rule,
-    the unhonoured optional concurrency and idempotency headers, and the new
-    event name are recorded in MISMATCHES.md M-22, M-27, and M-51.
+    The rating slice is additive over 2.16.0: two public operations on one new
+    path, five schemas, and one implemented event name. A calculation-only
+    request persists the worksheet without touching the policy; an applied
+    request replaces the policy premium, bumps the aggregate version, and
+    returns the refreshed Policy with its ETag. The worksheet is policy-scoped
+    and always CALCULATED, so the SPEC 11.2.14 submission-scoped route and
+    DRAFT/CALCULATED/APPROVED/SUPERSEDED lifecycle are narrower than the
+    specification, and the SPEC 11.2.9 policy.rating.completed name is not
+    published. The catalog grows to 221 published and 102 implemented names,
+    with Policy at 36 published and 24 implemented. The route, worksheet, and
+    event-name differences and the unhonoured optional idempotency header are
+    recorded in MISMATCHES.md M-01, M-06, M-07, M-22, and M-57.
 x-planned-operations:
   - method: POST
     path: /api/v1/policies/{policyId}/bind

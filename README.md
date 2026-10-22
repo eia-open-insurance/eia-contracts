@@ -2577,6 +2577,82 @@ Semantics:
   sent-payload members and rejects them on the created payload. The full run
   passes 15,608 checks.
 
+### Policy rating worksheets (2026-10-22)
+
+Policy 2.17.0 adds the rating worksheet and premium calculation surface. The
+change is additive: two public operations on one new path, five schemas, two
+enums, and one implemented event name; no existing path, field, or event name
+changes.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/policy.yaml` | 2.17.0 | Additive | `POST /api/v1/policies/{policyId}/rating` with `RatePolicyRequest` `{ratingMethod, baseRate, exposureAmount?, factor?, apply?}`, the 201 `PolicyRatingResult` `{worksheet, policy?}` envelope with the `ETag` only when applied, `GET .../rating` returning the newest `RatingWorksheet`, the 400/404/409 responses, and the `RatingMethod`/`RatingWorksheetStatus` enums. |
+| `asyncapi/policy.yaml` | 1.14.0 | Additive | The implemented `policy.policy.rated` channel and `send` operation with the seven-member `PolicyPolicyRatedData` payload. |
+| `asyncapi/event-catalog.yaml` | 1.36.0 | Additive | `policy.policy.rated` is published and implemented (221 published and 102 implemented in total; Policy 36 published and 24 implemented). |
+
+Semantics:
+
+- The body is `{ratingMethod, baseRate, exposureAmount?, factor?, apply?}`.
+  `ratingMethod` is `RATE_TIMES_EXPOSURE` (`baseRate * exposureAmount *
+  factor`) or `FLAT` (`baseRate * factor`). `baseRate` is non-negative with at
+  most 13 integer and six fraction digits; `exposureAmount` is a non-negative
+  scale-4 amount and is required and strictly positive for
+  `RATE_TIMES_EXPOSURE`; `factor` is non-negative scale-6 and defaults to 1;
+  `apply` defaults to false.
+- The computed premium is rounded once to four fraction digits HALF_UP. The
+  worksheet records the normalized method, operands, premium, currency, and
+  `calcHash`, the lower-case SHA-256 of the canonical `ratingMethod`,
+  `baseRate`, `exposureAmount` (or `~` for FLAT), `factor`, `computedPremium`,
+  and `currency` lines; equivalent decimal spellings therefore reproduce the
+  same hash and can reproduce an earlier premium.
+- Only a `DRAFT` or `QUOTED` policy is rateable. Any other status is 409
+  `POLICY_NOT_RATEABLE` with `meta.policyId`, `meta.sourceStatus`, and
+  `meta.allowedStatuses`, and nothing is written. Validation failures are 400
+  `RATING_METHOD_REQUIRED`/`RATING_METHOD_INVALID`,
+  `RATING_BASE_RATE_REQUIRED`/`RATING_BASE_RATE_INVALID`,
+  `RATING_EXPOSURE_REQUIRED`/`RATING_EXPOSURE_INVALID`,
+  `RATING_FACTOR_INVALID`, or `RATING_PREMIUM_OUT_OF_RANGE`; a malformed body is
+  400 `VALIDATION_ERROR`, and an unknown or foreign policy is 404
+  `POLICY_NOT_FOUND`.
+- A calculation-only request (`apply` false or absent) persists the worksheet
+  and leaves the policy premium, version, and event stream untouched; the 201
+  body is `{worksheet}` with no `policy` and no `ETag`. An applied request
+  replaces the policy premium with the computed premium, bumps the aggregate
+  version, returns `{worksheet, policy}` with the policy's new strong `ETag`,
+  and writes `policy.policy.rated` in the same transaction as the worksheet
+  insert. A lost conditional premium update rolls both back and is 409
+  `CONCURRENT_MODIFICATION`.
+- `GET /api/v1/policies/{policyId}/rating` returns the newest worksheet by
+  `createdAt` descending then id, with no `ETag`. A policy with no worksheet is
+  404 `RATING_WORKSHEET_NOT_FOUND`; an unknown or foreign policy is 404
+  `POLICY_NOT_FOUND`.
+- `X-EIA-Tenant` is required and a supplied `X-EIA-Book` must be DIRECT; an
+  absent book is accepted for compatibility and another book is hidden as 404
+  `BOOK_SCOPE_VIOLATION`. Optional `If-Match` is compared before any write; a
+  stale tag is 409 `CONCURRENT_MODIFICATION` and a malformed tag is 400
+  `INVALID_IF_MATCH`. The domain forwards an optional `Idempotency-Key`, but
+  the expert does not replay it, so a retry persists a second worksheet and
+  applies a second premium replacement (M-06, M-07).
+- `PolicyPolicyRatedData` requires `policyId`, `policyNumber`, `premiumAmount`,
+  `currency`, `ratingMethod`, `calcHash`, and `worksheetId`, and keeps
+  `eventVersion` 1. The event is keyed by the policy at the bumped aggregate
+  version and is written only when the rating is applied.
+- The worksheet is policy-scoped and always `CALCULATED`; the SPEC 11.2.14
+  submission/product linkage, `exposure_lines` and `factor_trace` documents,
+  tax and fee members, and the DRAFT/CALCULATED/APPROVED/SUPERSEDED lifecycle
+  are not modelled. SPEC 11.2.14 mounts rating at
+  `/api/v1/policy/submissions/{submissionId}/rating` and SPEC 11.2.9 publishes
+  no rating fact. The route, worksheet, and event-name differences are recorded
+  in M-01, M-22, and M-57.
+- The validator requires the two operations with the shared tenant, optional
+  DIRECT book, `IfMatch`, and `IdempotencyKey` parameters, the required request
+  body and its bounds, the 201 result envelope with the shared `ETag` and
+  `Idempotent-Replayed` headers, the 200 `RatingWorksheet`, the 400/404/409
+  responses and their codes, the two-value method and single-value status
+  enums, the absence of the path from `x-planned-operations`, the implemented
+  channel and its seven-member payload, the `IMPLEMENTED_EVENTS` entry, and the
+  catalog entry. The full run passes 15,814 checks.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -3644,6 +3720,55 @@ Rules:
   reduced entity-type/status vocabulary, and the nullable clear are recorded in
   M-01, M-12, M-13, and M-43.
 
+### Policy rating worksheets
+
+Policy rating is a domain proxy over the Policy expert. The public surface is
+`POST/GET /api/v1/policies/{policyId}/rating`; the expert's
+`/internal/v1/policies/{policyId}/rating` alias is an implementation detail.
+
+| Operation | Path | Success | Errors |
+|---|---|---|---|
+| Calculate (and optionally apply) | `POST /api/v1/policies/{policyId}/rating` | 201 `PolicyRatingResult` | 400, 404, 409 |
+| Latest worksheet | `GET /api/v1/policies/{policyId}/rating` | 200 `RatingWorksheet` | 400, 404 |
+
+The worksheet is `{id, tenantId, policyId, ratingMethod, baseRate,
+exposureAmount, factor, computedPremium, currency, calcHash, status, createdAt,
+createdBy}`. `baseRate` and `factor` are scale-6 decimal strings,
+`exposureAmount` is a scale-4 decimal string and is null for `FLAT`,
+`computedPremium` is a scale-4 string, and `status` is always `CALCULATED`.
+`createdBy` is the system actor because the command carries no user identity
+(M-20). The result envelope is `{worksheet, policy?}`; `policy` appears only
+when the calculation was applied.
+
+Rules:
+
+- `RATE_TIMES_EXPOSURE` requires a strictly positive `exposureAmount` and
+  computes `baseRate * exposureAmount * factor`; `FLAT` computes `baseRate *
+  factor` and stores no exposure. `baseRate` and `factor` must be non-negative
+  and `factor` defaults to 1. The premium is rounded once at scale 4 HALF_UP; a
+  premium above numeric(19,4) is 400 `RATING_PREMIUM_OUT_OF_RANGE`.
+- `calcHash` is the lower-case SHA-256 of `ratingMethod=...`, `baseRate=` at
+  scale 6, `exposureAmount=` at scale 4 or `~`, `factor=` at scale 6,
+  `computedPremium=` at scale 4, and `currency=`, one `key=value` per line. It
+  is independent of the request decimal scale, so `100` and `100.000000`
+  reproduce the same hash.
+- Only a `DRAFT` or `QUOTED` policy is rateable; every other status is 409
+  `POLICY_NOT_RATEABLE` with the policy id, the current status, and the allowed
+  statuses. Rating never changes the policy status.
+- A calculation-only request writes no event. An applied request replaces the
+  policy premium, bumps the policy row version, returns the refreshed `Policy`
+  with the new `ETag`, and writes `policy.policy.rated` with the worksheet id
+  and canonical hash in the same transaction as the worksheet insert.
+- `X-EIA-Tenant` is required. A supplied `X-EIA-Book` must be DIRECT; an absent
+  header is accepted and another book is hidden as 404 `BOOK_SCOPE_VIOLATION`.
+  The optional `If-Match` is compared, but the optional `Idempotency-Key` is
+  only forwarded: a retry is not replayed and persists a second worksheet
+  (M-06, M-07).
+- The SPEC 11.2.14 submission-scoped route and the
+  DRAFT/CALCULATED/APPROVED/SUPERSEDED worksheet lifecycle are not implemented;
+  the worksheet is a policy-scoped, always-CALCULATED record, and the new
+  `policy.policy.rated` name has no SPEC 11.2.9 equivalent (M-01, M-22, M-57).
+
 ### Global search
 
 The shell's `/search` page fans out to one search operation per vertical. Every
@@ -3995,7 +4120,15 @@ missing directory.
    rules, and the `INVALID_SOURCE_TYPE`/`INVALID_SOURCE_LINKAGE`/
    `INVALID_SOURCE_REFERENCE` documentation on both create operations. It also
    requires the new `CESSION`, `RETROCESSION`, `DOCUMENT`, and `PARTY` members on
-   both notification payload enums.
+   both notification payload enums. It also requires the policy rating command
+   and read with the shared tenant and optional DIRECT book headers, the
+   `RatePolicyRequest` required/optional split and money patterns, the
+   `RatingMethod` two-value enum, the `RatingWorksheetStatus` single-value
+   enum, the thirteen-member `RatingWorksheet` with its nullable exposure and
+   64-character hash, the `PolicyRatingResult` envelope with its optional
+   applied `policy`, the 201 `ETag`/`Idempotent-Replayed` headers, the 200
+   worksheet read, and the 400/404/409 responses with the `RATING_*`,
+   `POLICY_NOT_RATEABLE`, and `RATING_WORKSHEET_NOT_FOUND` codes.
 4. **AsyncAPI structure.** `asyncapi: 3.0.0`, channel addresses, `x-event-type`,
    `x-status: planned|implemented`, `x-implemented-by` on every implemented
    channel, one `send` operation per channel, a `DomainEvent` message on
@@ -4067,7 +4200,9 @@ missing directory.
    implemented `party.party.updated` channel, keeps the SPEC
    `party.party.status-changed` channel planned, and rejects a
    `party.party.status-updated` channel because the expert does not emit that
-   name.
+   name. It also requires the implemented `policy.policy.rated` channel and
+   `send` operation with the seven-member `PolicyPolicyRatedData` payload and
+   its two-value method enum.
 5. **Event catalog cross-check.** The published set in `event-catalog.yaml`
    must equal the channel addresses in the matching vertical document, event
    names must be unique across the platform and must match
@@ -4090,6 +4225,7 @@ missing directory.
    `document.document.disposed`,
    `policy.policy.renewed`,
    `policy.policy.premium-audited`,
+   `policy.policy.rated`,
    `policy.billing-plan.created`, `policy.billing-plan.adjusted`,
    `policy.installment.paid`,
    `policy.installment.waived`, `policy.dunning.sent`,
@@ -4157,7 +4293,8 @@ missing directory.
 - `ETag`/`If-Match` are complete in Policy, and the Party status command returns
   an `ETag` and accepts `If-Match` but the expert does not compare it; the
   Policy billing plan, installment, and renewal commands do not accept the
-  headers. `Idempotency-Key` covers Policy plus
+  headers, and Policy rating compares `If-Match` but does not replay
+  `Idempotency-Key`. `Idempotency-Key` covers Policy plus
   the Direct Claims and Assumed Claims task/note creates; the remaining vertical
   creates do not accept it, the claim task/note responses spell the marker
   `Idempotent-Replay`, and the Direct Claims reservation has a narrow concurrent
@@ -4301,6 +4438,16 @@ missing directory.
   `policy.billing.plan-created`; the installment paid and waived facts have no
   SPEC name. Billing accounts, instructions, disputes, and commission
   statements remain unimplemented (M-12, M-22, M-27);
+- policy rating is implemented at `POST/GET
+  /api/v1/policies/{policyId}/rating` and persists a policy-scoped,
+  always-`CALCULATED` `RatingWorksheet`, while SPEC 11.2.14 models the
+  worksheet under a submission and product version with `exposure_lines`,
+  `factor_trace`, tax, fee, and DRAFT/CALCULATED/APPROVED/SUPERSEDED states. The
+  applied command publishes the new `policy.policy.rated` name and SPEC 11.2.9
+  publishes no rating fact. The optional `If-Match` is compared but an
+  `Idempotency-Key` retry is not replayed, so a retry calculates and applies a
+  second worksheet; only `RATE_TIMES_EXPOSURE` and `FLAT` are implemented out
+  of the SPEC method list (M-01, M-06, M-07, M-22, M-57);
 - policy credit notes are implemented at
   `GET/POST /api/v1/policies/{policyId}/credit-notes` and
   `PATCH .../{creditNoteId}/status` with the

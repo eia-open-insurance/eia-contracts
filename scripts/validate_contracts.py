@@ -1781,6 +1781,71 @@ POLICY_PREMIUM_AUDIT_EVENT_MESSAGE = "PolicyPremiumAuditedData"
 POLICY_PREMIUM_AUDIT_EVENT_IMPLEMENTED_BY = "PolicyEvents.java"
 
 
+# Policy rating worksheets (SPEC 11.2.14 rating reproducibility / RATE-02). The
+# public command persists one immutable worksheet and optionally applies the
+# computed premium; only a DRAFT or QUOTED policy is rateable, and the worksheet
+# status is always CALCULATED. Applying replaces the policy premium, bumps the
+# aggregate version, and writes policy.policy.rated. The event is new: SPEC
+# 11.2.14 models rating under a submission and SPEC 11.2.9 publishes no rating
+# fact (MISMATCHES.md M-22, M-57).
+POLICY_RATING_PATH = "/api/v1/policies/{policyId}/rating"
+POLICY_RATING_REQUEST = "RatePolicyRequest"
+POLICY_RATING_RESULT = "PolicyRatingResult"
+POLICY_RATING_WORKSHEET = "RatingWorksheet"
+POLICY_RATING_METHOD_SCHEMA = "RatingMethod"
+POLICY_RATING_STATUS_SCHEMA = "RatingWorksheetStatus"
+POLICY_RATING_METHODS = ("RATE_TIMES_EXPOSURE", "FLAT")
+POLICY_RATING_STATUSES = ("CALCULATED",)
+POLICY_RATING_REQUEST_REQUIRED_FIELDS = ("ratingMethod", "baseRate")
+POLICY_RATING_REQUEST_OPTIONAL_FIELDS = ("exposureAmount", "factor", "apply")
+POLICY_RATING_WORKSHEET_FIELDS = (
+    "id",
+    "tenantId",
+    "policyId",
+    "ratingMethod",
+    "baseRate",
+    "exposureAmount",
+    "factor",
+    "computedPremium",
+    "currency",
+    "calcHash",
+    "status",
+    "createdAt",
+    "createdBy",
+)
+POLICY_RATING_RESULT_REQUIRED_FIELDS = ("worksheet",)
+POLICY_RATING_BASE_RATE_PATTERN = r"^(?:0|[1-9][0-9]{0,12})(?:\.[0-9]{1,6})?$"
+POLICY_RATING_EXPOSURE_PATTERN = r"^(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,4})?$"
+POLICY_RATING_FACTOR_PATTERN = r"^(?:0|[1-9][0-9]{0,5})(?:\.[0-9]{1,6})?$"
+POLICY_RATING_HASH_PATTERN = "^[a-f0-9]{64}$"
+POLICY_RATING_ERROR_CODES = (
+    "RATING_METHOD_REQUIRED",
+    "RATING_METHOD_INVALID",
+    "RATING_BASE_RATE_REQUIRED",
+    "RATING_BASE_RATE_INVALID",
+    "RATING_EXPOSURE_REQUIRED",
+    "RATING_EXPOSURE_INVALID",
+    "RATING_FACTOR_INVALID",
+    "RATING_PREMIUM_OUT_OF_RANGE",
+    "POLICY_NOT_RATEABLE",
+    "CONCURRENT_MODIFICATION",
+    "POLICY_NOT_FOUND",
+    "RATING_WORKSHEET_NOT_FOUND",
+)
+POLICY_RATING_EVENT = "policy.policy.rated"
+POLICY_RATING_EVENT_MESSAGE = "PolicyPolicyRatedData"
+POLICY_RATING_EVENT_FIELDS = (
+    "policyId",
+    "policyNumber",
+    "premiumAmount",
+    "currency",
+    "ratingMethod",
+    "calcHash",
+    "worksheetId",
+)
+POLICY_RATING_EVENT_IMPLEMENTED_BY = "PolicyEvents.java"
+
+
 # Event names the transactional-outbox rollout actually emits. The catalog must
 # list each one as published and implemented, and the vertical document must
 # expose a channel for it. Round 5 covered the first six verticals; the rollout
@@ -1802,6 +1867,7 @@ IMPLEMENTED_EVENTS = {
         "policy.policy.reinstated",
         "policy.policy.renewed",
         "policy.policy.premium-audited",
+        "policy.policy.rated",
         "policy.billing-plan.created",
         "policy.billing-plan.adjusted",
         "policy.installment.paid",
@@ -8820,6 +8886,468 @@ def check_policy_premium_audit_openapi(contracts: ContractSet, document, relativ
     )
 
 
+# ---------------------------------------------------------------------------
+# Policy rating checks
+# ---------------------------------------------------------------------------
+
+
+def check_policy_rating_openapi(contracts: ContractSet, document, relative: str):
+    """Require the rating command/read, their schemas, and their error rules."""
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    path_item = paths.get(POLICY_RATING_PATH) if isinstance(paths, dict) else None
+    post = path_item.get("post") if isinstance(path_item, dict) else None
+    get = path_item.get("get") if isinstance(path_item, dict) else None
+    where_post = f"{relative}: POST {POLICY_RATING_PATH}"
+    where_get = f"{relative}: GET {POLICY_RATING_PATH}"
+    contracts.check(
+        isinstance(post, dict),
+        f"{where_post}: required rating operation is missing",
+    )
+    contracts.check(
+        isinstance(get, dict),
+        f"{where_get}: required latest-worksheet operation is missing",
+    )
+
+    if isinstance(post, dict):
+        parameter_refs, inline_names = _parameter_names(post)
+        for parameter in (
+            "TenantHeader",
+            "BookHeaderDirectOptional",
+            "IfMatch",
+            "IdempotencyKey",
+        ):
+            contracts.check(
+                parameter in parameter_refs,
+                f"{where_post}: must document the shared {parameter} parameter",
+            )
+        contracts.check(
+            "policyId" in inline_names,
+            f"{where_post}: must declare the policyId path parameter",
+        )
+
+        request_body = post.get("requestBody") or {}
+        contracts.check(
+            request_body.get("required") is True,
+            f"{where_post}: request body must be required",
+        )
+        request_schema = None
+        if isinstance(request_body, dict):
+            request_schema = (
+                ((request_body.get("content") or {}).get("application/json") or {})
+                .get("schema")
+            )
+        contracts.check(
+            isinstance(request_schema, dict)
+            and str(request_schema.get("$ref", "")).endswith(
+                f"/schemas/{POLICY_RATING_REQUEST}"
+            ),
+            f"{where_post}: request body must use the {POLICY_RATING_REQUEST} schema",
+        )
+
+        created = (post.get("responses") or {}).get("201")
+        created_headers = created.get("headers") if isinstance(created, dict) else None
+        tag = created_headers.get("ETag") if isinstance(created_headers, dict) else None
+        contracts.check(
+            isinstance(tag, dict)
+            and str(tag.get("$ref", "")).endswith("/headers/ETag"),
+            f"{where_post}: 201 must declare the shared ETag header",
+        )
+        replay = (
+            created_headers.get("Idempotent-Replayed")
+            if isinstance(created_headers, dict)
+            else None
+        )
+        contracts.check(
+            isinstance(replay, dict)
+            and str(replay.get("$ref", "")).endswith("/headers/IdempotentReplayed"),
+            f"{where_post}: 201 must declare the shared Idempotent-Replayed header",
+        )
+        created_schema = _response_schema(post, "201")
+        contracts.check(
+            isinstance(created_schema, dict)
+            and str(created_schema.get("$ref", "")).endswith(
+                f"/schemas/{POLICY_RATING_RESULT}"
+            ),
+            f"{where_post}: 201 must return the {POLICY_RATING_RESULT} schema",
+        )
+
+        responses = post.get("responses") or {}
+        for code, suffix in (("400", "BadRequest"), ("404", "NotFound")):
+            response = responses.get(code) if isinstance(responses, dict) else None
+            contracts.check(
+                isinstance(response, dict)
+                and str(response.get("$ref", "")).endswith(f"/responses/{suffix}"),
+                f"{where_post}: {code} must reference the shared {suffix} response",
+            )
+        conflict = responses.get("409") if isinstance(responses, dict) else None
+        conflict_text = (
+            str(conflict.get("description") or "")
+            if isinstance(conflict, dict)
+            else ""
+        )
+        for code in ("POLICY_NOT_RATEABLE", "CONCURRENT_MODIFICATION"):
+            contracts.check(
+                code in conflict_text,
+                f"{where_post}: 409 must document {code}",
+            )
+        conflict_schema = _response_schema(post, "409", "application/problem+json")
+        contracts.check(
+            isinstance(conflict_schema, dict)
+            and str(conflict_schema.get("$ref", "")).endswith("/schemas/Problem"),
+            f"{where_post}: 409 must document the shared Problem schema",
+        )
+
+        description = str(post.get("description") or "")
+        for term in (
+            "RATE_TIMES_EXPOSURE",
+            "FLAT",
+            "DRAFT",
+            "QUOTED",
+            "POLICY_NOT_RATEABLE",
+            "CONCURRENT_MODIFICATION",
+            "RATING_EXPOSURE_REQUIRED",
+            "RATING_BASE_RATE_INVALID",
+            "RATING_FACTOR_INVALID",
+            "calcHash",
+            POLICY_RATING_EVENT,
+            "same transaction",
+            "ETag",
+        ):
+            contracts.check(
+                term in description,
+                f"{where_post}: description must document {term}",
+            )
+
+    if isinstance(get, dict):
+        parameter_refs, inline_names = _parameter_names(get)
+        for parameter in ("TenantHeader", "BookHeaderDirectOptional"):
+            contracts.check(
+                parameter in parameter_refs,
+                f"{where_get}: must document the shared {parameter} parameter",
+            )
+        contracts.check(
+            "policyId" in inline_names,
+            f"{where_get}: must declare the policyId path parameter",
+        )
+        ok_schema = _response_schema(get, "200")
+        contracts.check(
+            isinstance(ok_schema, dict)
+            and str(ok_schema.get("$ref", "")).endswith(
+                f"/schemas/{POLICY_RATING_WORKSHEET}"
+            ),
+            f"{where_get}: 200 must return the {POLICY_RATING_WORKSHEET} schema",
+        )
+        responses = get.get("responses") or {}
+        for code, suffix in (("400", "BadRequest"), ("404", "NotFound")):
+            response = responses.get(code) if isinstance(responses, dict) else None
+            contracts.check(
+                isinstance(response, dict)
+                and str(response.get("$ref", "")).endswith(f"/responses/{suffix}"),
+                f"{where_get}: {code} must reference the shared {suffix} response",
+            )
+        description = str(get.get("description") or "")
+        for term in ("RATING_WORKSHEET_NOT_FOUND", "POLICY_NOT_FOUND", "newest"):
+            contracts.check(
+                term in description,
+                f"{where_get}: description must document {term}",
+            )
+
+    planned_operations = document.get("x-planned-operations") or []
+    planned_pairs = {
+        (str(entry.get("method", "")).lower(), entry.get("path"))
+        for entry in planned_operations
+        if isinstance(entry, dict)
+    }
+    for method in ("post", "get"):
+        contracts.check(
+            (method, POLICY_RATING_PATH) not in planned_pairs,
+            f"{relative}: implemented rating operation {method.upper()} must not "
+            "reappear under x-planned-operations",
+        )
+
+    methods = schemas.get(POLICY_RATING_METHOD_SCHEMA) or {}
+    contracts.check(
+        isinstance(methods, dict)
+        and tuple(methods.get("enum") or []) == POLICY_RATING_METHODS,
+        f"{relative}: {POLICY_RATING_METHOD_SCHEMA} must enumerate "
+        f"{list(POLICY_RATING_METHODS)}",
+    )
+    statuses = schemas.get(POLICY_RATING_STATUS_SCHEMA) or {}
+    contracts.check(
+        isinstance(statuses, dict)
+        and tuple(statuses.get("enum") or []) == POLICY_RATING_STATUSES,
+        f"{relative}: {POLICY_RATING_STATUS_SCHEMA} must enumerate "
+        f"{list(POLICY_RATING_STATUSES)}",
+    )
+
+    request = schemas.get(POLICY_RATING_REQUEST) or {}
+    request_properties = request.get("properties") or {}
+    request_required = set(request.get("required") or [])
+    contracts.check(
+        isinstance(request, dict) and request.get("type") == "object",
+        f"{relative}: {POLICY_RATING_REQUEST} must be an object schema",
+    )
+    contracts.check(
+        request_required == set(POLICY_RATING_REQUEST_REQUIRED_FIELDS),
+        f"{relative}: {POLICY_RATING_REQUEST} must require exactly "
+        f"{list(POLICY_RATING_REQUEST_REQUIRED_FIELDS)}",
+    )
+    for field in POLICY_RATING_REQUEST_REQUIRED_FIELDS:
+        contracts.check(
+            field in request_properties,
+            f"{relative}: {POLICY_RATING_REQUEST}.properties.{field} is required",
+        )
+    for field in POLICY_RATING_REQUEST_OPTIONAL_FIELDS:
+        contracts.check(
+            field in request_properties,
+            f"{relative}: {POLICY_RATING_REQUEST}.properties.{field} is required "
+            "as an optional member",
+        )
+        contracts.check(
+            field not in request_required,
+            f"{relative}: {POLICY_RATING_REQUEST}.{field} must stay optional",
+        )
+    contracts.check(
+        (request_properties.get("ratingMethod") or {}).get("$ref")
+        == f"#/components/schemas/{POLICY_RATING_METHOD_SCHEMA}",
+        f"{relative}: {POLICY_RATING_REQUEST}.ratingMethod must reference "
+        f"{POLICY_RATING_METHOD_SCHEMA}",
+    )
+    base_rate = request_properties.get("baseRate") or {}
+    contracts.check(
+        base_rate.get("type") == "string"
+        and base_rate.get("pattern") == POLICY_RATING_BASE_RATE_PATTERN,
+        f"{relative}: {POLICY_RATING_REQUEST}.baseRate must be a non-negative "
+        "decimal string",
+    )
+    exposure = request_properties.get("exposureAmount") or {}
+    contracts.check(
+        _schema_types(exposure) == {"string", "null"}
+        and exposure.get("pattern") == POLICY_RATING_EXPOSURE_PATTERN,
+        f"{relative}: {POLICY_RATING_REQUEST}.exposureAmount must be a nullable "
+        "decimal string",
+    )
+    factor = request_properties.get("factor") or {}
+    contracts.check(
+        factor.get("type") == "string"
+        and factor.get("pattern") == POLICY_RATING_FACTOR_PATTERN,
+        f"{relative}: {POLICY_RATING_REQUEST}.factor must be a non-negative "
+        "decimal string",
+    )
+    apply_flag = request_properties.get("apply") or {}
+    contracts.check(
+        apply_flag.get("type") == "boolean" and apply_flag.get("default") is False,
+        f"{relative}: {POLICY_RATING_REQUEST}.apply must be a boolean defaulting "
+        "to false",
+    )
+
+    result = schemas.get(POLICY_RATING_RESULT) or {}
+    result_properties = result.get("properties") or {}
+    contracts.check(
+        isinstance(result, dict) and result.get("type") == "object",
+        f"{relative}: {POLICY_RATING_RESULT} must be an object schema",
+    )
+    contracts.check(
+        set(result.get("required") or [])
+        == set(POLICY_RATING_RESULT_REQUIRED_FIELDS),
+        f"{relative}: {POLICY_RATING_RESULT} must require exactly "
+        f"{list(POLICY_RATING_RESULT_REQUIRED_FIELDS)}",
+    )
+    contracts.check(
+        (result_properties.get("worksheet") or {}).get("$ref")
+        == f"#/components/schemas/{POLICY_RATING_WORKSHEET}",
+        f"{relative}: {POLICY_RATING_RESULT}.worksheet must reference "
+        f"{POLICY_RATING_WORKSHEET}",
+    )
+    contracts.check(
+        (result_properties.get("policy") or {}).get("$ref")
+        == "#/components/schemas/Policy",
+        f"{relative}: {POLICY_RATING_RESULT}.policy must reference Policy",
+    )
+    contracts.check(
+        "policy" not in set(result.get("required") or []),
+        f"{relative}: {POLICY_RATING_RESULT}.policy must stay optional",
+    )
+
+    worksheet = schemas.get(POLICY_RATING_WORKSHEET) or {}
+    worksheet_properties = worksheet.get("properties") or {}
+    worksheet_required = set(worksheet.get("required") or [])
+    contracts.check(
+        isinstance(worksheet, dict) and worksheet.get("type") == "object",
+        f"{relative}: {POLICY_RATING_WORKSHEET} must be an object schema",
+    )
+    contracts.check(
+        worksheet_required == set(POLICY_RATING_WORKSHEET_FIELDS),
+        f"{relative}: {POLICY_RATING_WORKSHEET} must require exactly "
+        f"{list(POLICY_RATING_WORKSHEET_FIELDS)}",
+    )
+    for field in POLICY_RATING_WORKSHEET_FIELDS:
+        contracts.check(
+            field in worksheet_properties,
+            f"{relative}: {POLICY_RATING_WORKSHEET}.properties.{field} is required",
+        )
+    for field in ("id", "tenantId", "policyId", "createdBy"):
+        contracts.check(
+            (worksheet_properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: {POLICY_RATING_WORKSHEET}.{field} must be a uuid",
+        )
+    contracts.check(
+        (worksheet_properties.get("ratingMethod") or {}).get("$ref")
+        == f"#/components/schemas/{POLICY_RATING_METHOD_SCHEMA}",
+        f"{relative}: {POLICY_RATING_WORKSHEET}.ratingMethod must reference "
+        f"{POLICY_RATING_METHOD_SCHEMA}",
+    )
+    for field in ("baseRate", "factor", "computedPremium"):
+        contracts.check(
+            (worksheet_properties.get(field) or {}).get("type") == "string",
+            f"{relative}: {POLICY_RATING_WORKSHEET}.{field} must be a decimal "
+            "string",
+        )
+    contracts.check(
+        _schema_types(worksheet_properties.get("exposureAmount"))
+        == {"string", "null"},
+        f"{relative}: {POLICY_RATING_WORKSHEET}.exposureAmount must be a nullable "
+        "decimal string",
+    )
+    contracts.check(
+        str((worksheet_properties.get("currency") or {}).get("$ref", "")).endswith(
+            "/schemas/CurrencyCode"
+        ),
+        f"{relative}: {POLICY_RATING_WORKSHEET}.currency must reference "
+        "CurrencyCode",
+    )
+    contracts.check(
+        (worksheet_properties.get("calcHash") or {}).get("pattern")
+        == POLICY_RATING_HASH_PATTERN,
+        f"{relative}: {POLICY_RATING_WORKSHEET}.calcHash must be a lower-case "
+        "64-character digest",
+    )
+    contracts.check(
+        (worksheet_properties.get("status") or {}).get("$ref")
+        == f"#/components/schemas/{POLICY_RATING_STATUS_SCHEMA}",
+        f"{relative}: {POLICY_RATING_WORKSHEET}.status must reference "
+        f"{POLICY_RATING_STATUS_SCHEMA}",
+    )
+    contracts.check(
+        (worksheet_properties.get("createdAt") or {}).get("format") == "date-time",
+        f"{relative}: {POLICY_RATING_WORKSHEET}.createdAt must be a date-time",
+    )
+
+    documented = str((post if isinstance(post, dict) else {}).get("description") or "")
+    documented += str(
+        (get if isinstance(get, dict) else {}).get("description") or ""
+    )
+    for code in POLICY_RATING_ERROR_CODES:
+        contracts.check(
+            code in documented,
+            f"{relative}: rating descriptions must document {code}",
+        )
+
+
+def check_policy_rating_asyncapi(contracts: ContractSet, document, relative: str):
+    """Require the implemented rated channel and its seven-member payload."""
+    channels = document.get("channels") or {}
+    operations = document.get("operations") or {}
+    messages = (document.get("components") or {}).get("messages") or {}
+    send_events = {
+        operation.get("x-event-type")
+        for operation in operations.values()
+        if isinstance(operation, dict) and operation.get("action") == "send"
+    }
+
+    channel = next(
+        (
+            candidate
+            for candidate in channels.values()
+            if isinstance(candidate, dict)
+            and candidate.get("address") == POLICY_RATING_EVENT
+        ),
+        None,
+    )
+    contracts.check(
+        isinstance(channel, dict),
+        f"{relative}: required rated channel '{POLICY_RATING_EVENT}' is missing",
+    )
+    if not isinstance(channel, dict):
+        return
+    contracts.check(
+        channel.get("x-status") == "implemented",
+        f"{relative}: {POLICY_RATING_EVENT} channel must be implemented",
+    )
+    contracts.check(
+        channel.get("x-event-version") == 1,
+        f"{relative}: {POLICY_RATING_EVENT} channel must stay at x-event-version 1",
+    )
+    contracts.check(
+        str(channel.get("x-implemented-by", "")).endswith(
+            POLICY_RATING_EVENT_IMPLEMENTED_BY
+        ),
+        f"{relative}: {POLICY_RATING_EVENT} must name "
+        f"{POLICY_RATING_EVENT_IMPLEMENTED_BY} in x-implemented-by",
+    )
+    contracts.check(
+        POLICY_RATING_EVENT in send_events,
+        f"{relative}: {POLICY_RATING_EVENT} must have a send operation",
+    )
+    channel_messages = channel.get("messages") or {}
+    contracts.check(
+        (channel_messages.get(POLICY_RATING_EVENT_MESSAGE) or {}).get("$ref")
+        == f"#/components/messages/{POLICY_RATING_EVENT_MESSAGE}",
+        f"{relative}: {POLICY_RATING_EVENT} must reference "
+        f"{POLICY_RATING_EVENT_MESSAGE}",
+    )
+
+    message = messages.get(POLICY_RATING_EVENT_MESSAGE) or {}
+    payload = message.get("payload") or {}
+    properties = payload.get("properties") or {}
+    required = tuple(payload.get("required") or [])
+    contracts.check(
+        set(required) == set(POLICY_RATING_EVENT_FIELDS),
+        f"{relative}: {POLICY_RATING_EVENT_MESSAGE} must require exactly "
+        f"{list(POLICY_RATING_EVENT_FIELDS)}",
+    )
+    contracts.check(
+        required == POLICY_RATING_EVENT_FIELDS,
+        f"{relative}: {POLICY_RATING_EVENT_MESSAGE}.required must keep the "
+        "documented member order",
+    )
+    for field in POLICY_RATING_EVENT_FIELDS:
+        contracts.check(
+            field in properties,
+            f"{relative}: {POLICY_RATING_EVENT_MESSAGE}.properties.{field} is "
+            "required",
+        )
+    for field in ("policyId", "worksheetId"):
+        contracts.check(
+            (properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: {POLICY_RATING_EVENT_MESSAGE}.{field} must be a uuid",
+        )
+    contracts.check(
+        (properties.get("premiumAmount") or {}).get("type") == "string",
+        f"{relative}: {POLICY_RATING_EVENT_MESSAGE}.premiumAmount must be a "
+        "decimal string",
+    )
+    contracts.check(
+        (properties.get("currency") or {}).get("pattern") == "^[A-Z]{3}$",
+        f"{relative}: {POLICY_RATING_EVENT_MESSAGE}.currency must be an uppercase "
+        "ISO code",
+    )
+    contracts.check(
+        tuple((properties.get("ratingMethod") or {}).get("enum") or [])
+        == POLICY_RATING_METHODS,
+        f"{relative}: {POLICY_RATING_EVENT_MESSAGE}.ratingMethod must enumerate "
+        f"{list(POLICY_RATING_METHODS)}",
+    )
+    contracts.check(
+        (properties.get("calcHash") or {}).get("pattern")
+        == POLICY_RATING_HASH_PATTERN,
+        f"{relative}: {POLICY_RATING_EVENT_MESSAGE}.calcHash must be a lower-case "
+        "64-character digest",
+    )
+
+
 def check_policy_premium_audit_asyncapi(contracts: ContractSet, document, relative: str):
     """Require the implemented premium-audited channel and its eight-member payload."""
     channels = document.get("channels") or {}
@@ -14418,6 +14946,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_policy_credit_notes_openapi(contracts, document, relative)
             check_policy_legal_entities_openapi(contracts, document, relative)
             check_policy_premium_audit_openapi(contracts, document, relative)
+            check_policy_rating_openapi(contracts, document, relative)
         if vertical == "contract":
             check_contract_security(contracts, document, relative)
             check_contract_security_status(contracts, document, relative)
@@ -15014,6 +15543,7 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
             check_policy_credit_notes_asyncapi(contracts, document, relative)
             check_policy_legal_entities_asyncapi(contracts, document, relative)
             check_policy_premium_audit_asyncapi(contracts, document, relative)
+            check_policy_rating_asyncapi(contracts, document, relative)
             check_policy_billing_adjustment_asyncapi(contracts, document, relative)
 
         if vertical == "contract":

@@ -1943,6 +1943,44 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   provider, and the absent retry.
 - `python scripts/validate_contracts.py` passes 15,608 checks with 0 failures.
 
+### Added in the Policy rating contract (2026-10-22)
+
+- `openapi/policy.yaml` is 2.17.0: adds
+  `POST /api/v1/policies/{policyId}/rating` and
+  `GET /api/v1/policies/{policyId}/rating`, the `RatePolicyRequest` body
+  (`ratingMethod` and `baseRate` required; optional `exposureAmount`, `factor`,
+  and `apply`), the `RatingWorksheet`, `RatingMethod`,
+  `RatingWorksheetStatus`, and `PolicyRatingResult` schemas, and the
+  `RATE_TIMES_EXPOSURE`/`FLAT` method rules, the DRAFT/QUOTED rateable-status
+  gate, the HALF_UP premium rounding, and the canonical `calcHash`. A
+  calculation-only 201 returns `{worksheet}` without `policy` or `ETag`; an
+  applied 201 returns `{worksheet, policy}` with the refreshed policy's strong
+  `ETag`. The operations document the 400 `RATING_*` codes, 404
+  `POLICY_NOT_FOUND`/`RATING_WORKSHEET_NOT_FOUND`, and 409
+  `POLICY_NOT_RATEABLE`/`CONCURRENT_MODIFICATION`.
+- `asyncapi/policy.yaml` is 1.14.0: the implemented `policy.policy.rated`
+  channel and `send` operation with the seven-member `PolicyPolicyRatedData`
+  payload (`policyId`, `policyNumber`, `premiumAmount`, `currency`,
+  `ratingMethod`, `calcHash`, `worksheetId`). A calculation-only request writes
+  no event; `eventVersion` stays 1.
+- `asyncapi/event-catalog.yaml` is 1.36.0: `policy.policy.rated` is published
+  and implemented, for 221 published and 102 implemented names (Policy 36
+  published and 24 implemented).
+- `scripts/validate_contracts.py` requires the two rating operations with the
+  shared tenant, optional DIRECT book, `IfMatch`, and `IdempotencyKey`
+  parameters, the `RatePolicyRequest` split and money patterns, the two-value
+  method and single-value status enums, the thirteen-member `RatingWorksheet`,
+  the `PolicyRatingResult` envelope with its optional applied `policy`, the
+  201 headers, the 200 read, the 400/404/409 responses and codes, the
+  implemented channel and payload, the `IMPLEMENTED_EVENTS` entry, and the
+  catalog entry.
+- `README.md` records the additive versions, the routes, the calculation and
+  hash rules, the rateable-status gate, the applied-policy and event semantics,
+  the SPEC route/worksheet/event deviations, and the validation count;
+  `MISMATCHES.md` adds M-57, updates M-01, M-06, M-07, and M-22, and refreshes
+  the scope and validation evidence.
+- `python scripts/validate_contracts.py` passes 15,814 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

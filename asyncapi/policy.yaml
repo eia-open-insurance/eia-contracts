@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:policy
 info:
   title: EIA Policy events
-  version: 1.13.0
+  version: 1.14.0
   summary: Published domain event names for the Policy vertical.
   description: >
     Event contract for the Policy vertical. The authoritative event names are
@@ -17,7 +17,8 @@ info:
     The Policy expert now publishes `policy.policy.created`,
     `policy.policy.updated`, `policy.policy.version-issued`,
     `policy.policy.endorsed`, `policy.policy.cancelled`,
-    `policy.policy.reinstated`, `policy.policy.renewed`, the billing facts
+    `policy.policy.reinstated`, `policy.policy.renewed`, `policy.policy.rated`,
+    the billing facts
     `policy.billing-plan.created`, `policy.billing-plan.adjusted`,
     `policy.installment.paid`, `policy.installment.waived`, and
     `policy.dunning.sent`,
@@ -82,6 +83,15 @@ info:
     `PREMIUM_AUDIT` endorsement, version, and premium replacement. The event
     keeps `eventVersion` 1, and the name difference and the missing
     `policy_premium_audit` worksheet are recorded in M-22 and M-50.
+    The rating slice adds the implemented `policy.policy.rated` fact. Its
+    `PolicyPolicyRatedData` payload requires the policy identity and number, the
+    written `premiumAmount`, the `currency`, the `ratingMethod`, the canonical
+    `calcHash`, and the `worksheetId`. It is emitted only when the rating is
+    applied, in the same transaction as the premium replacement, the aggregate
+    version bump, and the worksheet insert; a calculation-only request writes no
+    event. The name is new: SPEC 11.2.9 publishes no rating fact and SPEC
+    11.2.14 models rating under a submission, so the implemented policy-scoped
+    fact is recorded as `policy.policy.rated` (M-22, M-57).
     The remaining SPEC
     11.2.9 and 11.2.13 names are planned.
   contact:
@@ -559,6 +569,29 @@ channels:
         $ref: '#/components/messages/DomainEvent'
       PolicyPremiumAuditedData:
         $ref: '#/components/messages/PolicyPremiumAuditedData'
+  PolicyPolicyRated:
+    address: policy.policy.rated
+    title: policy.policy.rated
+    description: >
+      Emitted when a rating worksheet is applied to the policy premium, in the
+      same transaction as the conditional premium replacement, the aggregate
+      version bump, and the worksheet insert. The payload is the rating
+      contract: the policy identity and number, the written premium, the
+      policy currency, the method, the canonical calculation hash, and the
+      worksheet that evidences the calculation. A calculation-only rating
+      (`apply` false or absent) persists the worksheet and writes no event. The
+      name is new: SPEC 11.2.14 models a submission-scoped rating worksheet and
+      SPEC 11.2.9 publishes no rating fact (M-22, M-57).
+    x-event-type: policy.policy.rated
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.2.14
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      PolicyPolicyRatedData:
+        $ref: '#/components/messages/PolicyPolicyRatedData'
   PolicyOccurrenceRecorded:
     address: policy.occurrence.recorded
     title: policy.occurrence.recorded
@@ -988,6 +1021,17 @@ operations:
       policy.policy.version-issued.
     x-event-type: policy.policy.premium-audited
     x-status: implemented
+  publishPolicyPolicyRated:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyPolicyRated'
+    summary: Publish policy.policy.rated
+    description: >
+      Publishes policy.policy.rated when a rating worksheet is applied, in the
+      same transaction as the premium replacement, the policy version bump, and
+      the worksheet insert. A calculation-only rating writes no event.
+    x-event-type: policy.policy.rated
+    x-status: implemented
   publishPolicyOccurrenceRecorded:
     action: send
     channel:
@@ -1318,6 +1362,50 @@ components:
           reason:
             type: string
             maxLength: 500
+    PolicyPolicyRatedData:
+      name: PolicyPolicyRatedData
+      title: policy.policy.rated data
+      summary: One applied rating worksheet that replaced the policy premium.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - policyId
+          - policyNumber
+          - premiumAmount
+          - currency
+          - ratingMethod
+          - calcHash
+          - worksheetId
+        properties:
+          policyId:
+            type: string
+            format: uuid
+          policyNumber:
+            type: string
+          premiumAmount:
+            type: string
+            description: >
+              Decimal-string computed premium applied to the policy, at money
+              scale (four fraction digits).
+          currency:
+            type: string
+            pattern: '^[A-Z]{3}$'
+          ratingMethod:
+            type: string
+            enum:
+              - RATE_TIMES_EXPOSURE
+              - FLAT
+          calcHash:
+            type: string
+            description: >
+              Canonical lower-case SHA-256 over the normalized rating method,
+              operands, computed premium, and currency.
+            pattern: '^[a-f0-9]{64}$'
+          worksheetId:
+            type: string
+            format: uuid
     PolicyBillingPlanAdjustedData:
       name: PolicyBillingPlanAdjustedData
       title: policy.billing-plan.adjusted data
@@ -1881,11 +1969,11 @@ x-implementation:
   publisher: eia-policy-expert
   subscriber: none
   notes: >
-    Twenty-three Policy events are written to the transactional outbox in the same
+    Twenty-four Policy events are written to the transactional outbox in the same
     transaction as the aggregate write and dispatched by the platform outbox
     dispatcher when `eia.outbox.enabled=true`: `created`, `updated`,
     `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`,
-    `premium-audited`, `billing-plan.created`, `billing-plan.adjusted`,
+    `premium-audited`, `rated`, `billing-plan.created`, `billing-plan.adjusted`,
     `installment.paid`, `installment.waived`,
     `dunning.sent`, `mass-tort-profile.updated`, the program facts
     `policy.program.created` and `policy.policy.program-assigned`, the
@@ -1915,7 +2003,11 @@ x-implementation:
     bumps the policy version. The legal-entity created fact is keyed by the `LegalEntity`
     aggregate at version 1 and carries the catalog row; the assignment fact is
     keyed by the policy aggregate at the new version and carries the nullable
-    new and previous entity ids and `changedFields`. The other
+    new and previous entity ids and `changedFields`. The rating fact is keyed by
+    the policy aggregate at the bumped version and is emitted only when the
+    worksheet is applied; a calculation-only rating writes no event. It carries
+    the worksheet identity and the canonical hash so a consumer can reproduce
+    the applied premium. The other
     SPEC 11.2.9 and 11.2.13 names remain planned. There is no
     business subscriber or subscription registry yet.
 

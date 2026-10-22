@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-22 (Notification delivery attempts).
+Status: open, reviewed 2026-10-22 (Policy rating worksheets).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -175,6 +175,13 @@ where the running code does not meet it yet.
   the delivery-provider abstraction and simulator, the notification repository
   send transition, `NotificationEvents`, `schema.sql`, and the domain and expert
   delivery and controller tests.
+  The Policy rating-worksheet pass reads the domain rating controller, service,
+  `RatePolicyCommand`, `RatingWorksheetDto`, `PolicyRatingResult`, `PolicyClient`,
+  book scope, ETag, and idempotency helpers plus the expert rating controller,
+  service, `RatingRequest`, `RatingRules`, `PolicyRatingWorksheet`,
+  `RatingWorksheetRepository`, `RatingResult`, `PolicyEvents`, `MutationGuard`,
+  `schema.sql`, and the domain and expert controller, service, rules, client,
+  and integration tests.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -256,6 +263,7 @@ removed per the resolution policy.
 | M-54 | Party identifiers and addresses are SPEC-less append-only child routes with wider type sets, a plaintext value, and no implemented address duplicate guard | M |
 | M-55 | Party status transitions are a SPEC-less command with no transition graph, no status history, event-only reason, and unenforced concurrency/idempotency headers | M |
 | M-56 | Notification delivery attempts use a SPEC-less per-notification route, a narrower delivery row than SPEC 11.8.4, notification-level evidence, and a simulator-only provider with no retry | L |
+| M-57 | Policy rating worksheets are a SPEC-less policy-scoped route and event with only two rating methods, a CALCULATED-only worksheet, and no submission/product, exposure-line, factor-trace, tax, or fee model | L |
 
 ## M-01 Public base paths
 
@@ -293,7 +301,10 @@ the SPEC 6.12 transaction inventory names the transaction `policy.premium-audit`
 (M-50). The notification delivery-attempt history adds
 `GET /api/v1/notifications/{notificationId}/attempts`, which SPEC 11.8.10 does
 not list; its tenant-wide delivery diagnostics and retry command remain planned
-(M-56).
+(M-56). Policy rating adds a command and read row: the implemented
+`POST/GET /api/v1/policies/{policyId}/rating` has no SPEC 11.2.10 route; SPEC
+11.2.14 mounts rating under `/api/v1/policy/submissions/{submissionId}/rating`
+and names no standalone worksheet read (M-57).
 
 The ten global-search routes follow the same shorter form
 (`/api/v1/{resource}/search`); their SPEC naming gap and validation differences
@@ -478,6 +489,7 @@ Policy now implements the SPEC 12.6 concurrency mechanism:
 | Policy public billing | No `ETag`/`If-Match`; the expert still version-checks the policy row and a concurrent change is 409 `CONCURRENT_MODIFICATION` |
 | Policy public renewal | No `If-Match`; the 201 successor carries its own `ETag` and a replay path does not exist |
 | Policy public premium audit | Accepts optional `If-Match` and returns the updated policy `ETag`; a stale tag is 409 `CONCURRENT_MODIFICATION` |
+| Policy public rating | Accepts optional `If-Match` and compares it before any write; the applied 201 returns the refreshed policy `ETag`, while a calculation-only 201 has no `ETag`; a stale tag is 409 `CONCURRENT_MODIFICATION` |
 | Policy public mass tort profile | No `ETag`/`If-Match`; a concurrent profile or policy change is 409 `CONCURRENT_MODIFICATION` |
 | Party public PATCH status | Returns `ETag: "<version>"`; accepts optional `If-Match` and `Idempotency-Key`, forwards both, but the expert compares neither, so a stale tag is not a 409 and a retry is not replayed |
 | Policy expert GET/create/PATCH | Same ETag and If-Match behaviour as the public service |
@@ -609,7 +621,10 @@ Residual differences:
   renewal command, the Policy mass tort profile upsert, and the Policy premium
   audit are also outside the Policy idempotency mechanism. The premium-audit
   command accepts and forwards an optional key, but the expert does not replay
-  on it, so a retry applies a second audit (M-50). The Party status command also
+  on it, so a retry applies a second audit (M-50). The Policy rating command
+  accepts and forwards an optional key, but the expert rating service does not
+  replay on it, so a retry persists a second worksheet and applies a second
+  premium replacement (M-57). The Party status command also
   accepts and forwards an optional key, but the expert status route does not
   read it; a repeated non-no-op request applies the transition again (M-55). The
   domain's shared mutation
@@ -1130,7 +1145,7 @@ tables. The differences are:
 planned name |
 |---|---|---|
 | Party | `party.party.identifier-added` / `party.party.address-added`; `party.party.updated` for a status change | No SPEC 11.1.9 name for the reference-data facts: SPEC publishes the party lifecycle, role, screening, and consent facts but no fact for an appended identifier or address, so both names are new (M-54). `created` and `updated` match SPEC. A status change reuses the generic `party.party.updated` name with `changedFields: [status]` instead of publishing SPEC 11.1.9's dedicated `party.party.status-changed`, which remains planned; `party.party.status-updated` is not an emitted name (M-55). |
-| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created` / `.adjusted`; `policy.installment.paid` / `.waived`; `policy.dunning.sent`; `policy.program.created` / `policy.policy.program-assigned`; `policy.credit-note.created` / `.issued` / `.applied` / `.cancelled` / `.reversed`; `policy.legal-entity.created` / `policy.policy.legal-entity-assigned`; `policy.policy.premium-audited` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name; the positive premium adjustment fact has no SPEC 11.2.13 name either (M-51); the dunning fact differs from SPEC 11.2.13 `policy.billing.dunning-changed`; the two program facts have no SPEC name because SPEC defines no program create or policy-assignment event. SPEC 11.2.13 publishes only `policy.billing.credit-note-issued` and defines no created, applied, cancelled, or reversed fact, so all five credit-note names are new (M-41). The two legal-entity facts are new because SPEC 10.11.2/11.2.16 define the model and link but SPEC 11.2.9 names no catalog-create or assignment event (M-43). The premium-audit fact differs from SPEC 11.2.9 `policy.premium.audited`, which remains planned (M-50). `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
+| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created` / `.adjusted`; `policy.installment.paid` / `.waived`; `policy.dunning.sent`; `policy.program.created` / `policy.policy.program-assigned`; `policy.credit-note.created` / `.issued` / `.applied` / `.cancelled` / `.reversed`; `policy.legal-entity.created` / `policy.policy.legal-entity-assigned`; `policy.policy.premium-audited`; `policy.policy.rated` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name; the positive premium adjustment fact has no SPEC 11.2.13 name either (M-51); the dunning fact differs from SPEC 11.2.13 `policy.billing.dunning-changed`; the two program facts have no SPEC name because SPEC defines no program create or policy-assignment event. SPEC 11.2.13 publishes only `policy.billing.credit-note-issued` and defines no created, applied, cancelled, or reversed fact, so all five credit-note names are new (M-41). The two legal-entity facts are new because SPEC 10.11.2/11.2.16 define the model and link but SPEC 11.2.9 names no catalog-create or assignment event (M-43). The premium-audit fact differs from SPEC 11.2.9 `policy.premium.audited`, which remains planned (M-50). The rating fact has no SPEC 11.2.9 or 11.2.14 equivalent: SPEC models rating under a submission-scoped worksheet and publishes no rating event, so the policy-scoped name is new (M-57). `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
 | Contract | `contract.contract.updated`; `contract.technical-account.created` / `.issued` / `.settled`; `contract.bordereau.processed` / `.failed`; `contract.security.status-changed` | No SPEC name for updated, the technical-account facts, the two terminal bordereau facts, or the security status fact: SPEC 11.3.9 lists lifecycle verbs, the contract-level `contract.account.issued` / `.agreed` facts, `contract.bordereau.posted` / `.rejected`, and only the `contract.security.recorded` / `.breached` security facts. `created`, `bound`, `commuted`, `cession.recorded`, `contract.bordereau.received`, and `contract.security.recorded` match SPEC. |
 | Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned`; `direct.claim.allocation-created`; `direct.claim.settlement-payment-linked`; `direct.claim.litigation-created` | No SPEC names: SPEC 11.4.9 defines no assignment, task, note, allocation-created, settlement-payment-link, or matter-creation event; it names the allocation fact `direct.claim.allocated`, which remains planned, and models the settlement `payment_id` only as a Payment projection (M-45). SPEC 11.4.4 also defines no litigation damages pair (M-52). `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `litigation-updated`, `settlement-authorized`, and `closed` match SPEC. |
 | Assumed Claims | `assumed.claim.updated`; `assumed.claim.assigned`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no assignment, task, or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
@@ -1151,8 +1166,8 @@ Evidence:
 - `repos/eia-party-expert/.../PartyEvents.java:27-28,66-112` (reference-data
   names, payloads, and aggregate version)
 - `repos/eia-policy-expert/.../PolicyEvents.java:37-56,98-169` (policy, billing,
-  dunning, mass tort, program, credit-note creation, credit-note-transition, and
-  premium-audit names)
+  dunning, mass tort, program, credit-note creation, credit-note-transition,
+  premium-audit, and rating names)
 - `repos/eia-contract-expert/.../ContractEvents.java:41-56`
 - `repos/eia-direct-claims-expert/.../ClaimEvents.java:62-74`
 - `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java:52-65`
@@ -4008,10 +4023,112 @@ The per-notification history and the notification evidence are canonical for
 this release; the simulator is a local provider and the admin/retry surface
 remains planned.
 
+## M-57 Policy rating worksheets are a SPEC-less policy-scoped route and event
+
+SPEC 11.2.14 models rating under the underwriting submission: a
+`rating_worksheet` row references `submission_id` and `product_version_id`,
+stores `exposure_lines` and `factor_trace` JSON, `premium_amount`,
+`tax_amount`, `fee_amount`, `currency`, and `calc_hash`, and moves through
+`DRAFT`, `CALCULATED`, `APPROVED`, and `SUPERSEDED`. `rating_plan` defines six
+methods (`RATE_TIMES_EXPOSURE`, `LOSS_COST`, `EXPERIENCE_MOD`, `SCHEDULE`,
+`JUDGMENT`, `FLAT`), `rating_factor` rows supply the typed factors, and
+`rating_plan.minimum_premium_amount` and `deposit_premium_flag` gate the
+premium. SPEC 11.2.14 posts `POST /api/v1/policy/submissions/{submissionId}/rating`
+and publishes `policy.rating.completed`; `UWR-01` and `UWR-02` require an
+approved rating worksheet before bind and a reproducible one before quote
+issue. The 2026-10-22 slice instead rates an existing policy directly:
+
+| Aspect | Implemented | SPEC 11.2.14 / gap |
+|---|---|---|
+| Route | `POST/GET /api/v1/policies/{policyId}/rating` (and the expert's `/internal/v1` alias) | No policy-scoped rating route; the SPEC command is `POST /api/v1/policy/submissions/{submissionId}/rating` (M-01) |
+| Subject | The policy: the worksheet references `policyId` and the policy premium currency; there is no submission, product version, plan, or factor row | `rating_worksheet` references `submission_id` and `product_version_id`; `rating_plan` and `rating_factor` drive the calculation |
+| Body | `{ratingMethod, baseRate, exposureAmount?, factor?, apply?}` | The SPEC record is derived from a plan and factor rows; there is no caller-supplied base rate or single factor |
+| Methods | `RATE_TIMES_EXPOSURE` and `FLAT` only | `RATE_TIMES_EXPOSURE`, `LOSS_COST`, `EXPERIENCE_MOD`, `SCHEDULE`, `JUDGMENT`, `FLAT` |
+| Computation | `baseRate * exposureAmount * factor` or `baseRate * factor`, rounded once to scale 4 HALF_UP; no minimum-premium, deposit, tax, or fee | Plan minimum premium, deposit flag, typed factors, tax and fee amounts |
+| Worksheet | `{id, tenantId, policyId, ratingMethod, baseRate, exposureAmount, factor, computedPremium, currency, calcHash, status, createdAt, createdBy}`; exposure is a single scale-4 amount and is null for FLAT | Submission and product version, `exposure_lines` (class/territory/basis/amount), `factor_trace`, separate premium/tax/fee amounts |
+| Status | Always `CALCULATED`; applying is observable only through the policy premium, its version, and the event | `DRAFT`, `CALCULATED`, `APPROVED`, `SUPERSEDED`; UWR-01 requires an approved worksheet before bind |
+| Rateable state | Only a `DRAFT` or `QUOTED` policy; another status is 409 `POLICY_NOT_RATEABLE` with the current and allowed statuses | Tied to submission status and underwriting referral/authority, not to the policy lifecycle |
+| Apply | `apply` false (default) persists the worksheet and leaves the policy untouched; `apply` true replaces `policy.premium_amount`, bumps the aggregate version, and writes the event in the same transaction | A worksheet is underwriting evidence; SPEC defines no policy-premium re-rate command |
+| Read | `GET .../rating` returns the newest worksheet for the policy, no `ETag`; a policy with no worksheet is 404 `RATING_WORKSHEET_NOT_FOUND` | No standalone worksheet read; a worksheet is addressed by submission |
+| Event | `policy.policy.rated`, payload `{policyId, policyNumber, premiumAmount, currency, ratingMethod, calcHash, worksheetId}`, emitted only on apply | `policy.rating.completed` for the submission-scoped worksheet; the implemented name is new (M-22) |
+| Concurrency | Optional `If-Match` is compared before any write; a stale tag is 409 `CONCURRENT_MODIFICATION` and a lost conditional premium update rolls the worksheet back | SPEC 12.6 requires the header on transaction submission |
+| Idempotency | Optional `Idempotency-Key` is validated and forwarded but not replayed; a retry persists a second worksheet and applies a second premium replacement | SPEC 12.6 requires the header on transaction submission |
+| Version | `openapi/policy.yaml` 2.17.0, `asyncapi/policy.yaml` 1.14.0, `asyncapi/event-catalog.yaml` 1.36.0 (additive) | No SPEC version has this route, worksheet, or event |
+
+Consequences:
+
+- A client generated from SPEC 11.2.14 has no policy rating route and no
+  `GET .../rating`; the implemented surface is a new, additive policy command.
+  The SPEC submission-scoped command, the rating plan and factor catalog, and
+  the approval/referral workflow remain unimplemented.
+- The worksheet is not underwriting evidence in the SPEC sense: it carries no
+  submission or product version, no exposure-line or factor-trace document, no
+  tax or fee, and only the `CALCULATED` state. `calcHash` proves that the
+  method, operands, result, and currency are reproducible; it does not prove
+  that an approved plan produced them.
+- Applying a rating is an immediate premium replacement on a DRAFT or QUOTED
+  policy, not a quote or bind gate. `UWR-01` and `UWR-02` are therefore not
+  enforced by this command, and an issued policy must use the endorsement or
+  premium-audit commands instead because it is not rateable.
+- `calcHash` is deliberately independent of the request decimal scale and of
+  the worksheet identity, so two identical calculations on different policies
+  produce the same hash. The hash identifies the calculation, not the
+  worksheet; `worksheetId` is the row identity.
+- A retry without replay protection appends another worksheet and, when
+  `apply` is true, replaces the premium again at a new version. The pool of
+  worksheets is append-only, so the retry is visible in `GET .../rating` but
+  the previous premium is not.
+- Adding the SPEC submission/product/factor/approval fields later is additive;
+  removing the policy-scoped route or renaming the event is breaking under SPEC
+  10.4 and needs a major contract version or the EV-05 dual-publish window.
+
+Evidence:
+
+- `repos/eia-policy-domain/.../PolicyRatingController.java:29-74` (public path,
+  tenant, optional DIRECT book, `If-Match`, `Idempotency-Key`, 201 and 200
+  publication, `ETag` fallback, `Idempotent-Replayed`),
+  `PolicyRatingService.java:27-38` (`If-Match` parse, key normalization,
+  delegation), `RatePolicyCommand.java:26-44` (fields, defaults, and bounds),
+  `RatingWorksheetDto.java:21-35`, `PolicyRatingResult.java:12-15` (nullable
+  `policy` omitted from JSON), and `PolicyClient.java:423-465`
+  (`/internal/v1` alias, tenant and DIRECT headers, header forwarding, envelope,
+  latest read).
+- `repos/eia-policy-expert/.../PolicyRatingController.java:27-69` (public and
+  internal paths, tenant query/header, DIRECT book, 201, `ETag`),
+  `PolicyRatingService.java:51-97` (guard, rateable gate, validation, worksheet
+  insert, conditional premium update, conflict, version bump, event),
+  `RatingRules.java:35-217` (two methods, DRAFT/QUOTED, default factor, HALF_UP
+  rounding, numeric(19,4) cap, canonical hash, error codes),
+  `PolicyRatingWorksheet.java:23-38`, `RatingWorksheetRepository.java:46-70`,
+  `RatingResult.java`, and `PolicyRepository.updatePremium` (conditional
+  `version = version + 1`).
+- `repos/eia-policy-expert/.../PolicyEvents.java:527-545` (`RATED` name and the
+  seven-member `rated` payload).
+- `repos/eia-policy-expert/src/main/resources/schema.sql:761-796`
+  (`policy_rating_worksheet` columns, the method/base-rate/factor/exposure/
+  premium/currency/hash/status checks, and the newest-first index).
+- Tests: `PolicyRatingControllerTest`, `PolicyRatingServiceTest`,
+  `RatingRulesTest`, and `PolicyRatingIntegrationTest` in the expert;
+  `PolicyRatingControllerTest`, `PolicyRatingServiceTest`, and
+  `PolicyRatingClientTest` in the domain.
+- SPEC 11.2.14 `rating_plan`, `rating_factor`, and `rating_worksheet` tables,
+  RATE-02, UWR-01, and UWR-02; SPEC 11.2.9 published names.
+- `openapi/policy.yaml` 2.17.0, `asyncapi/policy.yaml` 1.14.0, and
+  `asyncapi/event-catalog.yaml` 1.36.0 record the implemented shape.
+
+Resolution: the policy rating command is canonical for now. Closing the gap
+means implementing the submission-scoped `rating_plan`/`rating_factor` model,
+the `rating_worksheet` `exposure_lines`/`factor_trace`/tax/fee members and
+DRAFT..SUPERSEDED lifecycle, the non-implemented methods, and the
+`policy.rating.completed` fact, then deciding whether policy re-rating is a
+separate command or a consequence of an approved worksheet. Renaming
+`policy.policy.rated` to a SPEC name or adding the submission route is additive;
+removing the implemented route is breaking.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-22
-Notifications delivery-attempt contract:
+Policy rating-worksheet contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -4021,7 +4138,7 @@ python: 3.12.8 (standard library only)
 
 OpenAPI 3.1 documents
   OK openapi/party.yaml  11 paths, 17 operations
-  OK openapi/policy.yaml  53 paths, 69 operations
+  OK openapi/policy.yaml  54 paths, 71 operations
   OK openapi/contract.yaml  43 paths, 62 operations
   OK openapi/direct-claims.yaml  51 paths, 74 operations
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
@@ -4033,7 +4150,7 @@ OpenAPI 3.1 documents
 
 AsyncAPI 3 documents
   OK asyncapi/party.yaml  11 event channels
-  OK asyncapi/policy.yaml  35 event channels
+  OK asyncapi/policy.yaml  36 event channels
   OK asyncapi/contract.yaml  32 event channels
   OK asyncapi/direct-claims.yaml  28 event channels
   OK asyncapi/assumed-claims.yaml  21 event channels
@@ -4042,7 +4159,7 @@ AsyncAPI 3 documents
   OK asyncapi/document.yaml  24 event channels
   OK asyncapi/payment.yaml  20 event channels
   OK asyncapi/notifications.yaml  15 event channels
-  OK catalog: 220 unique published events across 10 verticals
+  OK catalog: 221 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -4050,7 +4167,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 15608 checks, 0 failures
+  PASS 15814 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -4406,7 +4523,17 @@ Additional checks and limits:
   required-member message; and renaming `deliveredAt` in the
   `NotificationSentData` payload fails with the missing-property and
   nullable-date-time messages. All three were run on a throwaway copy, exited
-  non-zero (exit 1), and the working copy was left unchanged.
+  non-zero (exit 1), and the working copy was left unchanged. The Policy
+  rating-worksheet pass added five more: renaming the
+  `/api/v1/policies/{policyId}/rating` path fails with the missing
+  rating-operation and latest-worksheet messages; removing `baseRate` from
+  `RatePolicyRequest.required` fails with the exact-required-list message;
+  adding `LOSS_COST` to `RatingMethod` fails with the exact-enum message;
+  marking the `policy.policy.rated` channel planned fails with the
+  must-be-implemented message; and dropping `policy.policy.rated` from the
+  Policy catalog `implemented` list fails with the channel/catalog-set message.
+  All five were run on a throwaway copy, exited non-zero (exit 1), and the
+  working copy was left unchanged.
 
 ## Resolution policy
 
