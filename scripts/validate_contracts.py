@@ -402,6 +402,7 @@ CONTRACT_TECHNICAL_ACCOUNT_FIELDS = (
     "otherCharges",
     "balance",
     "status",
+    "settlementReference",
     "createdAt",
 )
 
@@ -425,6 +426,27 @@ CONTRACT_TECHNICAL_ACCOUNT_CREATE_FIELDS = (
 
 CONTRACT_TECHNICAL_ACCOUNT_STATUSES = ("DRAFT", "ISSUED", "SETTLED")
 CONTRACT_TECHNICAL_ACCOUNT_REQUEST_STATUSES = ("ISSUED", "SETTLED")
+CONTRACT_TECHNICAL_ACCOUNT_SETTLEMENT_REFERENCE_MAX_LENGTH = 120
+CONTRACT_TECHNICAL_ACCOUNT_SETTLEMENT_REFERENCE_FIELD = "settlementReference"
+CONTRACT_TECHNICAL_ACCOUNT_STATUS_REFERENCE_FIELD = "reference"
+CONTRACT_TECHNICAL_ACCOUNT_INVALID_REFERENCE = "INVALID_REFERENCE"
+CONTRACT_TECHNICAL_ACCOUNT_EVENTS = (
+    "contract.technical-account.created",
+    "contract.technical-account.issued",
+    "contract.technical-account.settled",
+)
+CONTRACT_TECHNICAL_ACCOUNT_EVENT_FIELDS = (
+    "contractId",
+    "accountId",
+    "accountNumber",
+    "periodStart",
+    "periodEnd",
+    "currency",
+    "balance",
+    "status",
+)
+CONTRACT_TECHNICAL_ACCOUNT_EVENT_MESSAGE = "ContractTechnicalAccountData"
+CONTRACT_TECHNICAL_ACCOUNT_EVENT_IMPLEMENTED_BY = "ContractEvents.java"
 
 # Contract technical-account lines (SPEC 11.3.4 technical_account_line). Each
 # tuple is (method, path, success status, success schema, request schema or
@@ -7237,6 +7259,26 @@ def check_contract_technical_accounts(contracts: ContractSet, document, relative
                 "409" in responses,
                 f"{where}: must document the 409 response",
             )
+        if method == "patch":
+            description = str(operation.get("description") or "")
+            contracts.check(
+                CONTRACT_TECHNICAL_ACCOUNT_STATUS_REFERENCE_FIELD in description
+                and CONTRACT_TECHNICAL_ACCOUNT_INVALID_REFERENCE in description,
+                f"{where}: must document the settlement reference and "
+                f"{CONTRACT_TECHNICAL_ACCOUNT_INVALID_REFERENCE}",
+            )
+            bad_request = responses.get("400") or {}
+            bad_request_description = (
+                bad_request.get("description")
+                if isinstance(bad_request, dict)
+                else ""
+            ) or ""
+            contracts.check(
+                CONTRACT_TECHNICAL_ACCOUNT_INVALID_REFERENCE
+                in str(bad_request_description),
+                f"{where}: 400 must document "
+                f"{CONTRACT_TECHNICAL_ACCOUNT_INVALID_REFERENCE}",
+            )
 
         if method == "get":
             ok_schema = _response_schema(operation, "200")
@@ -7325,6 +7367,18 @@ def check_contract_technical_accounts(contracts: ContractSet, document, relative
         (account_properties.get("createdAt") or {}).get("format") == "date-time",
         f"{relative}: TechnicalAccount.createdAt must be a date-time",
     )
+    settlement_reference = (
+        account_properties.get(CONTRACT_TECHNICAL_ACCOUNT_SETTLEMENT_REFERENCE_FIELD)
+        or {}
+    )
+    contracts.check(
+        _schema_types(settlement_reference) == {"string", "null"}
+        and settlement_reference.get("maxLength")
+        == CONTRACT_TECHNICAL_ACCOUNT_SETTLEMENT_REFERENCE_MAX_LENGTH,
+        f"{relative}: TechnicalAccount.settlementReference must be a nullable "
+        f"string of at most "
+        f"{CONTRACT_TECHNICAL_ACCOUNT_SETTLEMENT_REFERENCE_MAX_LENGTH} characters",
+    )
 
     account_status = schemas.get("TechnicalAccountStatus") or {}
     contracts.check(
@@ -7384,6 +7438,62 @@ def check_contract_technical_accounts(contracts: ContractSet, document, relative
         == set(CONTRACT_TECHNICAL_ACCOUNT_REQUEST_STATUSES),
         f"{relative}: UpdateTechnicalAccountStatusRequest.status must enumerate "
         f"{list(CONTRACT_TECHNICAL_ACCOUNT_REQUEST_STATUSES)}",
+    )
+    status_reference = update_properties.get(
+        CONTRACT_TECHNICAL_ACCOUNT_STATUS_REFERENCE_FIELD
+    ) or {}
+    contracts.check(
+        CONTRACT_TECHNICAL_ACCOUNT_STATUS_REFERENCE_FIELD in update_properties
+        and CONTRACT_TECHNICAL_ACCOUNT_STATUS_REFERENCE_FIELD not in update_required,
+        f"{relative}: UpdateTechnicalAccountStatusRequest.reference must be "
+        "optional",
+    )
+    contracts.check(
+        _schema_types(status_reference) == {"string", "null"}
+        and status_reference.get("maxLength")
+        == CONTRACT_TECHNICAL_ACCOUNT_SETTLEMENT_REFERENCE_MAX_LENGTH,
+        f"{relative}: UpdateTechnicalAccountStatusRequest.reference must be a "
+        f"nullable string of at most "
+        f"{CONTRACT_TECHNICAL_ACCOUNT_SETTLEMENT_REFERENCE_MAX_LENGTH} characters",
+    )
+    settled_condition = next(
+        (
+            entry
+            for entry in update.get("allOf") or []
+            if isinstance(entry, dict)
+            and ((entry.get("if") or {}).get("properties") or {})
+            .get("status", {})
+            .get("const")
+            == "SETTLED"
+        ),
+        None,
+    )
+    contracts.check(
+        isinstance(settled_condition, dict),
+        f"{relative}: UpdateTechnicalAccountStatusRequest must conditionally "
+        "require reference for SETTLED",
+    )
+    settled_then = (settled_condition or {}).get("then") or {}
+    contracts.check(
+        set(settled_then.get("required") or [])
+        == {CONTRACT_TECHNICAL_ACCOUNT_STATUS_REFERENCE_FIELD},
+        f"{relative}: UpdateTechnicalAccountStatusRequest must require reference "
+        "when status is SETTLED",
+    )
+    settled_reference = (
+        (settled_then.get("properties") or {}).get(
+            CONTRACT_TECHNICAL_ACCOUNT_STATUS_REFERENCE_FIELD
+        )
+        or {}
+    )
+    contracts.check(
+        settled_reference.get("type") == "string"
+        and settled_reference.get("minLength") == 1
+        and settled_reference.get("maxLength")
+        == CONTRACT_TECHNICAL_ACCOUNT_SETTLEMENT_REFERENCE_MAX_LENGTH
+        and "\\S" in str(settled_reference.get("pattern") or ""),
+        f"{relative}: a SETTLED reference must be a non-blank string of at most "
+        f"{CONTRACT_TECHNICAL_ACCOUNT_SETTLEMENT_REFERENCE_MAX_LENGTH} characters",
     )
 
 
@@ -7823,6 +7933,127 @@ def check_contract_technical_account_lines(
             f"{relative}: implemented line operation {method.upper()} "
             f"{line_path} must not reappear under x-planned-operations",
         )
+
+
+def check_contract_technical_accounts_asyncapi(
+    contracts: ContractSet, document, relative: str
+):
+    """Require the three implemented account channels and their shared payload."""
+    channels = document.get("channels") or {}
+    operations = document.get("operations") or {}
+    messages = (document.get("components") or {}).get("messages") or {}
+    send_events = {
+        operation.get("x-event-type")
+        for operation in operations.values()
+        if isinstance(operation, dict) and operation.get("action") == "send"
+    }
+
+    for event in CONTRACT_TECHNICAL_ACCOUNT_EVENTS:
+        channel = next(
+            (
+                candidate
+                for candidate in channels.values()
+                if isinstance(candidate, dict)
+                and candidate.get("address") == event
+            ),
+            None,
+        )
+        contracts.check(
+            isinstance(channel, dict),
+            f"{relative}: required technical-account event channel '{event}' is "
+            "missing",
+        )
+        if not isinstance(channel, dict):
+            continue
+        contracts.check(
+            channel.get("x-status") == "implemented",
+            f"{relative}: technical-account event channel '{event}' must be "
+            "implemented",
+        )
+        contracts.check(
+            str(channel.get("x-implemented-by", "")).endswith(
+                CONTRACT_TECHNICAL_ACCOUNT_EVENT_IMPLEMENTED_BY
+            ),
+            f"{relative}: technical-account event channel '{event}' must name "
+            f"{CONTRACT_TECHNICAL_ACCOUNT_EVENT_IMPLEMENTED_BY} in "
+            "x-implemented-by",
+        )
+        contracts.check(
+            event in send_events,
+            f"{relative}: technical-account event '{event}' must have a send "
+            "operation",
+        )
+        channel_messages = channel.get("messages") or {}
+        contracts.check(
+            (
+                channel_messages.get(CONTRACT_TECHNICAL_ACCOUNT_EVENT_MESSAGE)
+                or {}
+            ).get("$ref")
+            == f"#/components/messages/{CONTRACT_TECHNICAL_ACCOUNT_EVENT_MESSAGE}",
+            f"{relative}: {event} must reference "
+            f"{CONTRACT_TECHNICAL_ACCOUNT_EVENT_MESSAGE}",
+        )
+
+    message = messages.get(CONTRACT_TECHNICAL_ACCOUNT_EVENT_MESSAGE) or {}
+    payload = message.get("payload") or {}
+    payload_properties = payload.get("properties") or {}
+    payload_required = set(payload.get("required") or [])
+    contracts.check(
+        payload_required == set(CONTRACT_TECHNICAL_ACCOUNT_EVENT_FIELDS),
+        f"{relative}: {CONTRACT_TECHNICAL_ACCOUNT_EVENT_MESSAGE} must require "
+        f"exactly {list(CONTRACT_TECHNICAL_ACCOUNT_EVENT_FIELDS)}",
+    )
+    for field in CONTRACT_TECHNICAL_ACCOUNT_EVENT_FIELDS:
+        contracts.check(
+            field in payload_properties,
+            f"{relative}: {CONTRACT_TECHNICAL_ACCOUNT_EVENT_MESSAGE}."
+            f"properties.{field} is required",
+        )
+    contracts.check(
+        set((payload_properties.get("status") or {}).get("enum") or [])
+        == set(CONTRACT_TECHNICAL_ACCOUNT_STATUSES),
+        f"{relative}: {CONTRACT_TECHNICAL_ACCOUNT_EVENT_MESSAGE}.status must "
+        f"enumerate {list(CONTRACT_TECHNICAL_ACCOUNT_STATUSES)}",
+    )
+    settlement_reference = payload_properties.get(
+        CONTRACT_TECHNICAL_ACCOUNT_SETTLEMENT_REFERENCE_FIELD
+    ) or {}
+    contracts.check(
+        CONTRACT_TECHNICAL_ACCOUNT_SETTLEMENT_REFERENCE_FIELD
+        in payload_properties,
+        f"{relative}: {CONTRACT_TECHNICAL_ACCOUNT_EVENT_MESSAGE}.properties."
+        "settlementReference is required for the settled event",
+    )
+    contracts.check(
+        CONTRACT_TECHNICAL_ACCOUNT_SETTLEMENT_REFERENCE_FIELD
+        not in payload_required,
+        f"{relative}: {CONTRACT_TECHNICAL_ACCOUNT_EVENT_MESSAGE}."
+        "settlementReference must stay optional because created and issued omit "
+        "it",
+    )
+    contracts.check(
+        settlement_reference.get("type") == "string"
+        and settlement_reference.get("maxLength")
+        == CONTRACT_TECHNICAL_ACCOUNT_SETTLEMENT_REFERENCE_MAX_LENGTH,
+        f"{relative}: {CONTRACT_TECHNICAL_ACCOUNT_EVENT_MESSAGE}."
+        "settlementReference must be a string of at most "
+        f"{CONTRACT_TECHNICAL_ACCOUNT_SETTLEMENT_REFERENCE_MAX_LENGTH} characters",
+    )
+    settled_channel = next(
+        (
+            channel
+            for channel in channels.values()
+            if isinstance(channel, dict)
+            and channel.get("address") == "contract.technical-account.settled"
+        ),
+        None,
+    )
+    contracts.check(
+        CONTRACT_TECHNICAL_ACCOUNT_SETTLEMENT_REFERENCE_FIELD
+        in str((settled_channel or {}).get("description") or ""),
+        f"{relative}: contract.technical-account.settled must document "
+        "settlementReference",
+    )
 
 
 def check_contract_technical_account_lines_asyncapi(
@@ -10234,6 +10465,9 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
             check_policy_legal_entities_asyncapi(contracts, document, relative)
 
         if vertical == "contract":
+            check_contract_technical_accounts_asyncapi(
+                contracts, document, relative
+            )
             check_contract_technical_account_lines_asyncapi(
                 contracts, document, relative
             )

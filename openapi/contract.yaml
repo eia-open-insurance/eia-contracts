@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Contract API
-  version: 4.4.0
+  version: 4.5.0
   summary: Assumed-book reinsurance contract administration and the Contract expert API.
   description: >
     This document describes the implemented public Contract domain API and the
@@ -48,7 +48,11 @@ info:
     is editable only while the account is DRAFT. Every type rolls into one of
     four reconciliation buckets (premium, loss, commission, other), and issuing
     an account that has lines requires each bucket total to equal the matching
-    header amount (`ACCOUNT_LINES_DO_NOT_RECONCILE`, M-42). The SPEC 11.3.10
+    header amount (`ACCOUNT_LINES_DO_NOT_RECONCILE`, M-42). Settlement records
+    the payment reference that closed the account: the status PATCH takes an
+    optional `reference`, requires it for SETTLED, trims it, and caps it at 120
+    characters (400 `INVALID_REFERENCE` otherwise); the projection exposes it
+    as `settlementReference`, null until the account settles. The SPEC 11.3.10
     `/accounts` route is exposed as `/technical-accounts` (M-29).
 
     A cash call is an interim funding request on one contract period. The expert
@@ -1175,6 +1179,14 @@ paths:
         state and is 400 `INVALID_STATUS`. Skipping a step, repeating a terminal
         status, or a concurrent change is 409 `INVALID_STATUS_TRANSITION`.
 
+        Settlement records the payment reference that closed the account. The
+        request carries an optional `reference`; a `SETTLED` transition must
+        carry it, the expert trims it, requires at least one non-whitespace
+        character, and caps it at 120 characters, otherwise the request is 400
+        `INVALID_REFERENCE` and the account stays ISSUED. The `ISSUED`
+        transition ignores a supplied `reference` because it does not settle
+        the account.
+
         Issuing also reconciles the line detail (SPEC 11.3.4
         `technical_account_line`). When at least one line exists, the lines are
         summed into four buckets and each bucket total must equal its matching
@@ -1194,7 +1206,8 @@ paths:
 
         A successful transition appends `contract.technical-account.issued` or
         `contract.technical-account.settled` to the outbox in the same
-        transaction as the row update. The account lock makes the reconciliation
+        transaction as the row update; the settled event carries the recorded
+        reference. The account lock makes the reconciliation
         and the status write atomic with respect to concurrent line changes;
         after ISSUED the line detail is immutable and every add or delete is
         409 `ACCOUNT_NOT_EDITABLE`.
@@ -1227,7 +1240,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/TechnicalAccount'
         '400':
-          $ref: './components.yaml#/components/responses/BadRequest'
+          description: >
+            400. `INVALID_REFERENCE` when a SETTLED transition omits
+            `reference` or supplies a blank or longer-than-120-character
+            reference; `INVALID_STATUS` when `status` is missing or is not
+            ISSUED or SETTLED; a missing tenant is also 400.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
         '404':
           $ref: './components.yaml#/components/responses/NotFound'
         '409':
@@ -3597,7 +3618,8 @@ components:
         SPEC 11.3.4 `technical_account_line` detail is read from
         `.../{accountId}/lines` and is not embedded here. An account with lines
         can be issued only when every bucket total equals its matching header
-        component (M-42).
+        component (M-42). `settlementReference` is null until the account is
+        SETTLED and then carries the trimmed payment reference that closed it.
       required:
         - accountId
         - accountNumber
@@ -3611,6 +3633,7 @@ components:
         - otherCharges
         - balance
         - status
+        - settlementReference
         - createdAt
       properties:
         accountId:
@@ -3643,6 +3666,13 @@ components:
           $ref: './components.yaml#/components/schemas/MoneyAmount'
         status:
           $ref: '#/components/schemas/TechnicalAccountStatus'
+        settlementReference:
+          type: [string, 'null']
+          maxLength: 120
+          description: >
+            Payment reference that settled the account, trimmed by the expert.
+            Null until the account is SETTLED; the SETTLED status transition
+            requires a non-blank value.
         createdAt:
           type: string
           format: date-time
@@ -3695,7 +3725,10 @@ components:
         Lifecycle command for one technical account. Only `ISSUED` and
         `SETTLED` are accepted; `DRAFT` is the creation state and is rejected
         with 400 `INVALID_STATUS`. Skipping ISSUED or repeating a terminal
-        status is 409 `INVALID_STATUS_TRANSITION`.
+        status is 409 `INVALID_STATUS_TRANSITION`. `reference` is the
+        settlement reference: it is optional in the body, required and
+        non-blank when `status` is `SETTLED` (trimmed, at most 120 characters,
+        else 400 `INVALID_REFERENCE`), and ignored by the `ISSUED` transition.
       required:
         - status
       properties:
@@ -3704,6 +3737,30 @@ components:
           enum:
             - ISSUED
             - SETTLED
+        reference:
+          type: [string, 'null']
+          maxLength: 120
+          description: >
+            Settlement reference. Required for `SETTLED`, where the expert trims
+            it and requires at least one non-whitespace character; optional and
+            ignored for `ISSUED`.
+      allOf:
+        - description: SETTLED requires a non-blank settlement reference.
+          if:
+            required:
+              - status
+            properties:
+              status:
+                const: SETTLED
+          then:
+            required:
+              - reference
+            properties:
+              reference:
+                type: string
+                minLength: 1
+                maxLength: 120
+                pattern: '\S'
     TechnicalAccountLine:
       type: object
       description: >
@@ -4759,8 +4816,8 @@ x-implementation:
     domain accepts an absent X-EIA-Book on the security routes even though the
     canonical contract requires ASSUMED (M-37).
 x-compatibility:
-  contractVersion: 4.4.0
-  previousContractVersion: 4.3.0
+  contractVersion: 4.5.0
+  previousContractVersion: 4.4.0
   breaking:
     - The public GET/POST /api/v1/contracts/{contractId}/security operations now use the ten-field SecurityRecord response and the CreateContractSecurityRequest body. The wide Security and CreateSecurityRequest schemas are internal-expert only; a generated client of the old public Security shape must move to SecurityRecord.
     - PATCH /api/v1/contracts/{contractId}/status no longer accepts BOUND (since 2.0.0); it returns 409 BIND_REQUIRES_COMMAND and bind must use POST /bind.
@@ -4777,6 +4834,7 @@ x-compatibility:
     - Adds GET/POST /api/v1/contracts/{contractId}/technical-accounts/{accountId}/lines and DELETE .../lines/{lineId} with the TechnicalAccountLine, TechnicalAccountLineType, LineSummary, TechnicalAccountLineTotals, and CreateTechnicalAccountLineRequest schemas. The technical-account status description now documents issue-time line reconciliation.
     - Expands TechnicalAccountLineType to the 13 SPEC 11.3.4 detail types, adds the optional LineSummary totals.details per-line-type map, and documents that the expert's authoritative four-key bucketTotals map is normalized into the public premium/loss/commission/other buckets. The issue reconciliation now compares bucket sums with the header components. The retired aggregate LOSS is removed from the create enum: a client that posted LOSS must post PAID_LOSS, while a legacy LOSS total is still read into the loss bucket.
     - Adds the optional UpdateCashCallStatusRequest.reference and the nullable CashCall.settlementReference. A SETTLED transition requires a trimmed, non-blank reference of at most 120 characters and otherwise returns 400 INVALID_REFERENCE; ISSUED and CANCELLED ignore the member.
+    - Adds the optional UpdateTechnicalAccountStatusRequest.reference and the nullable TechnicalAccount.settlementReference. A SETTLED transition requires a trimmed, non-blank reference of at most 120 characters and otherwise returns 400 INVALID_REFERENCE; ISSUED ignores the member.
   note: >
     Search, technical accounts, and cash calls are additive. The
     period-bordereau slice replaces the previously documented public bordereau
@@ -4802,8 +4860,11 @@ x-compatibility:
     projection is still read into loss. The 4.4.0 settlement-reference addition
     is additive: it adds one optional request field and one nullable response
     field, and the SETTLED transition now documents the non-blank 120-character
-    requirement that the expert already enforces. The HTTP base path stays
-    /api/v1/contracts.
+    requirement that the expert already enforces. The 4.5.0 technical-account
+    settlement-reference addition is also additive: it adds one optional
+    request field and one nullable response field, and the SETTLED transition
+    now documents the same non-blank 120-character requirement. The HTTP base
+    path stays /api/v1/contracts.
 x-planned-operations:
   - method: PATCH
     path: /api/v1/contracts/{contractId}

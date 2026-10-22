@@ -874,7 +874,10 @@ Technical-account semantics:
   non-identical periods are not rejected in this slice (M-29).
 - `PATCH .../{accountId}/status` applies only `DRAFT -> ISSUED -> SETTLED`. The
   request enum is `ISSUED` or `SETTLED`; `DRAFT` is 400 `INVALID_STATUS` and a
-  skipped or repeated edge is 409 `INVALID_STATUS_TRANSITION`. Each accepted
+  skipped or repeated edge is 409 `INVALID_STATUS_TRANSITION`. A `SETTLED`
+  transition requires a settlement `reference`; the expert trims it, requires a
+  non-whitespace character, and caps it at 120 characters (400
+  `INVALID_REFERENCE`), while `ISSUED` ignores it. Each accepted
   transition writes `contract.technical-account.issued` or `.settled` in the
   same transaction as the row update.
 - `X-EIA-Tenant` is required. The canonical contract requires
@@ -883,14 +886,20 @@ Technical-account semantics:
   compatibility with the other Contract proxy routes, which M-29 records.
 - The projection is `{accountId, accountNumber, contractId, periodStart,
   periodEnd, currency, cededPremium, cededLosses, commission, otherCharges,
-  balance, status, createdAt}`. `tenantId` is not part of the public projection.
-  The SPEC 11.3.4 `technical_account_line` breakdown is implemented from 4.2.0
-  and expanded to the 13 detail types in 4.3.0 (see the next section); the
-  `AGREED`, `DISPUTED`, and `SUPERSEDED` statuses and the SPEC 11.3.10
+  balance, status, settlementReference, createdAt}`. `settlementReference` is
+  null until the account is SETTLED and then holds the trimmed payment
+  reference. `tenantId` is not part of the public projection. Settlement
+  references extend this projection from 4.5.0; see Contract technical-account
+  settlement references. The SPEC 11.3.4 `technical_account_line` breakdown is
+  implemented from 4.2.0 and expanded to the 13 detail types in 4.3.0 (see the
+  next section); the `AGREED`, `DISPUTED`, and `SUPERSEDED` statuses and the
+  SPEC 11.3.10
   `/accounts` path remain gaps (M-29).
 - The three event names are child-aggregate facts with no SPEC 11.3.9
   equivalent (M-22, M-29). The envelope uses the account id and its lifecycle
-  version (1, 2, 3) while the outbox partition key stays the contract id.
+  version (1, 2, 3) while the outbox partition key stays the contract id. The
+  settled payload carries `settlementReference`; `created` and `issued` omit
+  it.
 
 ### Contract technical-account lines (2026-10-21)
 
@@ -971,6 +980,43 @@ Line semantics:
   300-character description but the expert caps it at 255, so the effective
   bound is 255. M-42 records these gaps.
 - `python scripts/validate_contracts.py` passes 13,190 checks with 0 failures.
+
+### Contract technical-account settlement references (2026-10-21)
+
+Contract 4.5.0 documents the settlement reference that closes a technical
+account. The change is additive: the status PATCH body gains an optional
+`reference`, the `TechnicalAccount` projection gains a nullable
+`settlementReference`, and the settled event payload gains the recorded
+reference. No route, schema name, response status, or event name changes.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/contract.yaml` | 4.5.0 | Additive | `UpdateTechnicalAccountStatusRequest` adds optional nullable `reference`; `TechnicalAccount` adds the required-but-nullable `settlementReference`; the status PATCH documents the SETTLED reference gate and 400 `INVALID_REFERENCE`. |
+| `asyncapi/contract.yaml` | 1.10.0 | Additive | `ContractTechnicalAccountData` adds the optional `settlementReference` property, present only on `contract.technical-account.settled`; `eventVersion` stays 1. |
+| `asyncapi/event-catalog.yaml` | 1.26.0 | No change | No event name, channel, or count changes. |
+
+Settlement-reference semantics:
+
+- `PATCH .../{accountId}/status` takes `{status, reference?}`. `reference` is
+  meaningful only for `SETTLED`: the expert trims it, requires at least one
+  non-whitespace character, and caps it at 120 characters. A missing, blank, or
+  over-long reference is 400 `INVALID_REFERENCE`; the account stays ISSUED and
+  no settled event is written. `ISSUED` ignores a supplied reference, and the
+  domain drops it before forwarding that transition.
+- `TechnicalAccount.settlementReference` is always present but null until the
+  account settles; it then holds the trimmed reference. The public projection
+  still omits `tenantId`, and the expert row id is still remapped to
+  `accountId`.
+- `contract.technical-account.settled` carries `settlementReference` in its
+  payload. `contract.technical-account.created` and `.issued` omit the member,
+  and the settled fact keeps `eventVersion` 1. The reference is evidence
+  recorded by the Contract expert; Payment and FS-RI still own execution and
+  the actual payment record (SPEC 11.3.11, M-29).
+- The validator requires the nullable 120-character projection member, the
+  optional nullable 120-character status `reference`, its conditional
+  non-blank SETTLED requirement, the 400 `INVALID_REFERENCE` documentation,
+  the optional settled-event payload member, and the channel description that
+  says the created and issued facts omit it. The full run passes 13,688 checks.
 
 ### Contract period bordereaux (2026-10-20)
 
@@ -2674,6 +2720,13 @@ missing directory.
    `CreateBordereauRequest`, and `UpdateBordereauStatusRequest` schemas and
    their field types, the nullability of `notes`/`technicalAccountId`, the
    `PROCESSED`/`FAILED` request enum, the 201/200 successes, and the
+   400/404/409 responses, the three public technical-account operations with
+   their required `TenantHeader` and `BookHeaderAssumed` parameters, the
+   `TechnicalAccount` projection and its nullable 120-character
+   `settlementReference`, the optional nullable 120-character
+   `UpdateTechnicalAccountStatusRequest.reference` with its conditional
+   non-blank SETTLED requirement, the `ISSUED`/`SETTLED` request enum, the 400
+   `INVALID_REFERENCE` documentation, the 201/200 successes, and the
    400/404/409 responses, the three public cash-call operations with their
    required `TenantHeader` and `BookHeaderAssumed` parameters, the `CashCall`,
    `CashCallStatus`, `CreateCashCallRequest`, and
@@ -2753,6 +2806,9 @@ missing directory.
    `ContractCashCallData` payload with its contract and cash-call identity,
    period, amount, currency, due date, status, and optional settlement
    reference members, the
+   `ContractTechnicalAccountData` payload with its contract/account identity,
+   period, currency, balance, status, and optional settlement reference
+   members, the
    `ContractTechnicalAccountLineData` payload with its contract, account, line,
    13-value detail type enum, and amount members, the
    `PolicyCreditNoteData` payload with its policy and note identity, note

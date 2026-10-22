@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-21 (cancellation-linked credit notes).
+Status: open, reviewed 2026-10-21 (technical-account settlement references).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -26,8 +26,11 @@ where the running code does not meet it yet.
   repository, line-type enum, list read model, request, reconciliation
   exception, event factory, `schema.sql`, and the domain and expert line tests;
   the 2026-10-21 expansion pass re-read the same sources for the 13-type
-  vocabulary, the bucket roll-up, and the `bucketTotals` read model. The Contract
-  period-bordereau pass reads the
+  vocabulary, the bucket roll-up, and the `bucketTotals` read model. The
+  2026-10-21 technical-account settlement-reference pass re-reads the domain
+  status command, client, and projection and the expert status request, rules,
+  repository, event factory, and `schema.sql` for the reference field. The
+  Contract period-bordereau pass reads the
   domain controller, service, client, projection, and command rules plus the
   expert period controller, legacy header controller, rules, repositories,
   status enum, event factory, and `schema.sql`. The Direct Claims allocation
@@ -674,9 +677,10 @@ unimplemented fields and list the missing operations under
   staging, duplicate-line detection, reconciliation to a declared total, the
   exception report, and the SPEC single-bordereau `GET` remain gaps (M-30). The
   technical-account slice adds the periodic statement (`accountNumber`, period,
-  the four financial components, derived balance, and DRAFT/ISSUED/SETTLED);
-  the SPEC `technical_account_line` breakdown, the AGREED/DISPUTED/SUPERSEDED
-  statuses, and the `/accounts` path remain gaps (M-29).
+  the four financial components, derived balance, DRAFT/ISSUED/SETTLED, the
+  13-type line detail with bucket reconciliation, and the settled reference);
+  the AGREED/DISPUTED/SUPERSEDED statuses and the `/accounts` path remain gaps
+  (M-29).
 - Direct Claims: no `tortCode` (the implemented name is `causeCode`),
   `claimant` object, financial summary, reopen, documents, lineage, or work
   queues. Round 5 adds injuries, exposures, reserve history, the coverage
@@ -1474,32 +1478,49 @@ ASSUMED treaty, but narrower than SPEC 11.3.4, 11.3.9, and 11.3.10.
 |---|---|---|
 | Path and mount | `GET/POST /api/v1/contracts/{contractId}/technical-accounts`, `PATCH /api/v1/contracts/{contractId}/technical-accounts/{accountId}/status` | SPEC 11.3.10 names `GET /api/v1/contracts/{contractId}/accounts`; the implemented controller uses `/technical-accounts`. The public path is documented; the expert also mounts the same controller under `/internal/v1`. |
 | Statuses | `DRAFT`, `ISSUED`, `SETTLED`; only DRAFT -> ISSUED -> SETTLED | SPEC 11.3.4 also names `AGREED`, `DISPUTED`, and `SUPERSEDED`. A request with `DRAFT` is 400 `INVALID_STATUS`; a skipped or repeated edge is 409 `INVALID_STATUS_TRANSITION`. |
+| Settlement | A `SETTLED` status PATCH requires a `reference` that the expert trims, requires non-blank, and caps at 120 characters (400 `INVALID_REFERENCE`); the account projection carries the required-but-nullable `settlementReference`, null until SETTLED | The reference is free text only: there is no Payment link, cash-call link, or settlement amount/date evidence. `ISSUED` silently ignores a supplied reference rather than rejecting it. |
 | Lines | `GET/POST .../{accountId}/lines` and `DELETE .../lines/{lineId}` expose the SPEC `technical_account_line` detail with the 13-type vocabulary (`PREMIUM`, `COMMISSION`, `BROKERAGE`, `PAID_LOSS`, `OUTSTANDING_LOSS`, `IBNR`, `ALAE`, `REINSTATEMENT`, `CASH_CALL`, `FUNDS_WITHHELD`, `TAX`, `ADJUSTMENT`, `OTHER`); lines are editable only in DRAFT and must reconcile by the four buckets before issue (M-42) | A line update, a per-line currency, a source-document link, and per-line approval remain gaps (M-42). The account header is still one row with `cededPremium`, `cededLosses`, `commission`, `otherCharges`, and a derived `balance`, and the cash-call/settlement linkage is absent. |
 | Period | `periodStart < periodEnd`; unique exact `(tenant, contract, periodStart, periodEnd)` | There is no overlap rejection (CTR-07) and no contract-window or contract-currency equality check (CTR-08). The unique key catches only an identical period, so two overlapping but non-identical periods are accepted. |
 | Book | `X-EIA-Book: ASSUMED` when present; another book is 404 `BOOK_SCOPE_VIOLATION` | The canonical contract requires the header, but the domain accepts an absent header for compatibility with the other Contract proxy routes (`requireAssumedBookWhenPresent`). The expert internal alias does not check the book at all. |
-| Events | `contract.technical-account.created`, `.issued`, `.settled`, `.line-added`, `.line-removed` | SPEC 11.3.9 defines `contract.account.issued` and `contract.account.agreed`; the implemented names have no SPEC equivalent (M-22). The account envelope uses the account id and lifecycle version 1/2/3, and each line event uses the line id at version 1, while the outbox partition key stays the contract id (M-42). |
-| Balance | Derived at create as `cededPremium - commission - cededLosses + otherCharges`; positive means due from the cedent to the reinsurer | The balance is not reconciled against paid losses, cash calls, or settlement evidence, and there is no accounting line or payment link. |
+| Events | `contract.technical-account.created`, `.issued`, `.settled`, `.line-added`, `.line-removed` | SPEC 11.3.9 defines `contract.account.issued` and `contract.account.agreed`; the implemented names have no SPEC equivalent (M-22). The account envelope uses the account id and lifecycle version 1/2/3, and each line event uses the line id at version 1, while the outbox partition key stays the contract id (M-42). The settled account payload carries `settlementReference`; `created` and `issued` omit it. |
+| Balance | Derived at create as `cededPremium - commission - cededLosses + otherCharges`; positive means due from the cedent to the reinsurer | The balance is not reconciled against paid losses, cash calls, or the recorded settlement reference, and there is no accounting line or payment link. |
+
+The 2026-10-21 settlement-reference slice documents an already implemented
+extension: the expert requires a trimmed, non-blank reference of at most 120
+characters on SETTLED, persists it on the account, returns it as
+`settlementReference`, and adds it to the settled event only. It adds no
+Payment or cash-call linkage and no settlement amount or date evidence.
 
 Evidence:
 
-- `repos/eia-contract-domain/.../TechnicalAccountController.java:68-77`
-  (the book wall runs only when the header is present) and
-  `TechnicalAccountClient.java:28-36` (forwards ASSUMED to the expert).
-- `repos/eia-contract-expert/.../technicalaccount/TechnicalAccountController.java:45-49,69-131`
-  (public and internal prefixes, tenant resolution, create and status flow).
-- `repos/eia-contract-expert/.../technicalaccount/TechnicalAccountRules.java:30-87`
-  (period order, ISO currency, non-negative amounts, derived balance, status
-  parsing, and the transition table; no contract-window, currency-equality, or
-  overlap check).
+- `repos/eia-contract-domain/.../TechnicalAccountController.java:56-77`
+  (the status route and the book wall, which runs only when the header is
+  present) and `TechnicalAccountClient.java:84-121` (tenant and ASSUMED
+  forwarding, and dropping a reference on a non-settled transition),
+  `TechnicalAccount.java:12-38` (`@JsonAlias("id")` remap, the flat projection,
+  and `settlementReference`), and
+  `UpdateTechnicalAccountStatusCommand.java:5-22` (the optional `reference`);
+  `ContractCommandRules.java:248-250` validates only the status, so the
+  reference bounds stay in the expert.
+- `repos/eia-contract-expert/.../technicalaccount/TechnicalAccountController.java:123-171`
+  (public and internal prefixes, tenant resolution, create and status flow,
+  the reference gate, and the transactional outbox).
+- `repos/eia-contract-expert/.../technicalaccount/TechnicalAccountRules.java:15,83-96`
+  (the 120-character settlement reference and its SETTLED-only requirement),
+  `UpdateTechnicalAccountStatusRequest.java:3-18` (the settlement-reference
+  contract), and `TechnicalAccountRepository.java:126-145` (compare-and-set
+  status with the reference written only on SETTLED).
 - `repos/eia-contract-expert/.../technicalaccount/TechnicalAccountStatus.java:11-22`
   (DRAFT/ISSUED/SETTLED only).
 - `repos/eia-contract-expert/.../technicalaccount/TechnicalAccountRepository.java:49-114`
-  (newest-first list, unique-period conflict, compare-and-set status update).
-- `repos/eia-contract-expert/src/main/resources/schema.sql:354-381`
-  (unique exact period, non-negative amounts, currency pattern, status check).
-- `repos/eia-contract-expert/.../ContractEvents.java:69-71,225-238,474-510`
-  (account fact names, child-aggregate id/version, contract partition key) and
-  `:72-73,247-259,512-544` (the line fact names, the add/remove factories, the
+  (newest-first list and unique-period conflict).
+- `repos/eia-contract-expert/src/main/resources/schema.sql:441-475`
+  (unique exact period, non-negative amounts, currency pattern, status check,
+  the `settlement_reference VARCHAR(120)` column, and its forward ALTER).
+- `repos/eia-contract-expert/.../ContractEvents.java:69-71,225-239,480-519`
+  (account fact names, child-aggregate id/version, contract partition key, and
+  the settled-only `settlementReference` payload member) and
+  `:72-73,247-260,521-544` (the line fact names, the add/remove factories, the
   aggregate type, version 1, and the shared line payload).
 - `repos/eia-contract-expert/.../technicalaccount/TechnicalAccountLineController.java:44-129`
   (list/add/remove, tenant and book context, DRAFT guard, per-mutation outbox),
@@ -1518,13 +1539,20 @@ Evidence:
   `TechnicalAccountLineTypes.java:19-85` (13 types and bucket mapping),
   `TechnicalAccountLine.java:23-31` (`id` -> `lineId` alias), and
   `LineSummary.java:31-92`.
-- `repos/eia-contract-expert/src/main/resources/schema.sql:440-467`
-  (unique exact period, non-negative amounts, currency pattern, status check)
-  and `:477-515` (`contract_technical_account_line`, the 13-type check, the
-  `LOSS` migration, the positive amount, and the account cascade).
-- `openapi/contract.yaml` (introduced in 2.2.0, now 4.3.0) and the README
-  technical-account and technical-account-line sections record the implemented
-  shape.
+- `repos/eia-contract-expert/src/main/resources/schema.sql:477-521`
+  (`contract_technical_account_line`, the 13-type check, the `LOSS` migration,
+  the positive amount, the account cascade, and the read index).
+- Tests: `TechnicalAccountControllerTest` (settled with and without a
+  reference, trimming, the 120-character boundary, and the ignored issue
+  reference), `TechnicalAccountOutboxIntegrationTest`
+  (`settlementReferenceIsRequiredTrimmedAndLengthChecked`),
+  `TechnicalAccountClientTest` (reference forwarding and the dropped
+  non-settled reference), and the domain `TechnicalAccountControllerTest`
+  (the settlement projection).
+- `openapi/contract.yaml` (introduced in 2.2.0, now 4.5.0),
+  `asyncapi/contract.yaml` (now 1.10.0), and the README technical-account,
+  technical-account-line, and settlement-reference sections record the
+  implemented shape.
 
 Resolution: the implemented slice is documented as canonical for now. Closing
 the gap means adding the SPEC `/accounts` alias (or amending SPEC 11.3.10),
@@ -1532,6 +1560,8 @@ implementing the AGREED/DISPUTED/SUPERSEDED transitions, and enforcing period
 overlap plus the contract window and currency equality. The line slice now
 implements the 13-type SPEC 11.3.4 detail vocabulary and bucket reconciliation;
 M-42 records the remaining correction, per-line metadata, and approval gaps. The
+settlement reference is free-text evidence; linking it to a Payment record and
+adding settlement amount and date evidence remains part of the gap. The
 event names follow EV-05:
 keep publishing the implemented names and add a SPEC name only through a
 dual-publish window. Renaming the path or statuses is breaking and needs an ADR
@@ -1843,7 +1873,8 @@ Evidence:
 - `repos/eia-contract-expert/.../ContractEvents.java:77-80,283-309,400-402`
   (event names, child-aggregate factories, id/version, contract partition key,
   and the settled-only `settlementReference` payload member).
-- `openapi/contract.yaml` 4.4.0, `asyncapi/contract.yaml` 1.9.0, and the README
+- `openapi/contract.yaml` (4.4.0 for this slice; now 4.5.0),
+  `asyncapi/contract.yaml` (1.9.0 for this slice; now 1.10.0), and the README
   cash-call and settlement-reference sections record the implemented shape.
 
 Resolution: the implemented slice is documented as canonical for now. Closing

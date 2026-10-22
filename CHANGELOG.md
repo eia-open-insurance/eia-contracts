@@ -1348,6 +1348,35 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   evidence.
 - `python scripts/validate_contracts.py` passes 13,645 checks with 0 failures.
 
+### Added in the Contract technical-account settlement-reference contract (2026-10-21)
+
+- `openapi/contract.yaml` is 4.5.0: `UpdateTechnicalAccountStatusRequest` adds
+  the optional nullable `reference` (at most 120 characters) and conditionally
+  requires it, non-blank, when `status` is `SETTLED`; `TechnicalAccount` adds
+  the required-but-nullable `settlementReference`. The status operation and its
+  `400` response document the settlement-reference semantics:
+  `INVALID_REFERENCE` for a missing, blank, or over-long settled reference, and
+  `ISSUED` ignores the member. `x-compatibility` moves to 4.5.0 over 4.4.0.
+- `asyncapi/contract.yaml` is 1.10.0: the shared
+  `ContractTechnicalAccountData` payload adds the optional
+  `settlementReference` property, emitted only by the
+  `contract.technical-account.settled` channel and documented on that channel;
+  the `created` and `issued` facts omit it and `eventVersion` stays 1.
+- `asyncapi/event-catalog.yaml` stays 1.26.0: no event name, channel, or count
+  changes.
+- `scripts/validate_contracts.py` requires the required-but-nullable
+  120-character `TechnicalAccount.settlementReference`, the optional nullable
+  120-character `UpdateTechnicalAccountStatusRequest.reference`, the
+  conditional non-blank SETTLED requirement, the 400 `INVALID_REFERENCE`
+  documentation, the optional `ContractTechnicalAccountData.settlementReference`
+  property, and the settled-channel description that the created and issued
+  facts omit it.
+- `README.md` records the new slice, the reference semantics, the settled
+  payload, and the validation count; `MISMATCHES.md` updates M-29 for the
+  projection member, the settlement gate, the settled payload, and the current
+  contract versions.
+- `python scripts/validate_contracts.py` passes 13,688 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

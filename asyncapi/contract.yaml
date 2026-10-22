@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:contract
 info:
   title: EIA Contract events
-  version: 1.9.0
+  version: 1.10.0
   summary: Published domain event names for the Contract vertical.
   description: >
     Event contract for the Contract vertical. The authoritative event names are
@@ -20,13 +20,15 @@ info:
     technical-account facts `contract.technical-account.created`, `.issued`,
     `.settled`, `.line-added`, and `.line-removed` (whose payload `lineType`
     enum carries the 13 SPEC 11.3.4 detail types and excludes the retired
-    aggregate `LOSS`), the three period-bordereau
-    facts `contract.bordereau.received`, `.processed`, and `.failed`, and the
+    aggregate `LOSS`). The `settled` technical-account payload also carries the
+    recorded `settlementReference`; `created` and `issued` omit it. The three
+    period-bordereau facts `contract.bordereau.received`, `.processed`, and
+    `.failed`, and the
     four cash-call facts `contract.cash-call.requested`, `.issued`, `.settled`,
     and `.cancelled` through the transactional outbox; those channels and
-    operations are marked `x-status: implemented`. The `settled` payload also
-    carries the recorded `settlementReference`; `requested`, `issued`, and
-    `cancelled` omit it. The security/collateral fact
+    operations are marked `x-status: implemented`. The cash-call `settled`
+    payload also carries the recorded `settlementReference`; `requested`,
+    `issued`, and `cancelled` omit it. The security/collateral fact
     `contract.security.recorded` is also implemented: it is a child
     aggregate keyed by the security id at version 1, while the outbox
     partition key stays the contract id. The security status action adds
@@ -261,8 +263,10 @@ channels:
     description: >
       Emitted when an ISSUED technical account is settled. The account
       aggregate version is 3 and the payload carries the SETTLED status, the
-      period, currency, and the derived balance. The row update and the event
-      share one transaction.
+      period, currency, and the derived balance. The payload additionally
+      carries `settlementReference`, the trimmed payment reference that closed
+      the account; it is non-blank and at most 120 characters. The row update
+      and the event share one transaction.
     x-event-type: contract.technical-account.settled
     x-event-version: 1
     x-status: implemented
@@ -1067,6 +1071,14 @@ components:
               - DRAFT
               - ISSUED
               - SETTLED
+          settlementReference:
+            type: string
+            maxLength: 120
+            description: >
+              Payment reference that settled the account, trimmed by the expert.
+              Present only on `contract.technical-account.settled`, where it is
+              non-blank and at most 120 characters; `created` and `issued` omit
+              it.
     ContractTechnicalAccountLineData:
       name: ContractTechnicalAccountLineData
       title: contract.technical-account.line-* data
@@ -1384,7 +1396,8 @@ x-implementation:
     `cash-call.cancelled`, `security.recorded`, and
     `security.status-changed`. The three technical-account lifecycle
     facts are child-aggregate events that use the account id and its lifecycle
-    version while the outbox partition key stays the contract id. The two line
+    version while the outbox partition key stays the contract id; the settled
+    payload also carries the settlement reference. The two line
     facts are grandchild events that use the line id and aggregate version 1
     while the partition key stays the contract id; their payload carries the
     contract, account, and line identity, the line type, and the amount, and
