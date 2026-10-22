@@ -2286,6 +2286,43 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   evidence, and the validation evidence.
 - `python scripts/validate_contracts.py` passes 17,367 checks with 0 failures.
 
+### Added in the Policy active-product enforcement contract (2026-10-22)
+
+- `openapi/policy.yaml` is 2.23.0: `POST /api/v1/policies`,
+  `POST /internal/v1/policies`, and `POST /api/v1/policies/submissions` add the
+  422 `UNKNOWN_PRODUCT`/`PRODUCT_NOT_ACTIVE` response and document the tenant
+  product-catalog lookup. The request `productCode` is trimmed and upper-cased;
+  an unknown code is `UNKNOWN_PRODUCT` and a known but RETIRED code is
+  `PRODUCT_NOT_ACTIVE`, both with category `BUSINESS_RULE`,
+  `errors[0].field` = `productCode`, `errors[0].code` equal to the top-level
+  code, and `meta.productCode`/`meta.tenantId` plus `meta.productId`,
+  `meta.productStatus`, and `meta.currentStatus` when the product exists. A
+  rejected policy create writes no policy, initial version, or event; a
+  rejected submission create runs before the number is allocated, consumes no
+  number, and writes no row or event. The policy-create idempotency lookup runs
+  before the guard, so a stored-key replay still returns the original policy
+  after retirement. The public and expert conversion operations and renewal
+  document the exemption: conversion reuses the submission product, renewal
+  copies the source product, and existing policies and submissions are never
+  re-validated. `x-compatibility` moves to 2.23.0 over 2.22.0.
+- `openapi/components.yaml` is 1.9.0: the shared 422 `UnprocessableContent`
+  description adds the two product codes and their `errors`/`meta` members
+  (`productCode`, `tenantId`, `productId`, `productStatus`, `currentStatus`).
+  The change is compatible: the response and `Problem` schema are unchanged and
+  only the documented code catalog grows.
+- `scripts/validate_contracts.py` requires the shared 422 response on the
+  public and expert policy creates and the public submission create, the two
+  codes and their `errors`/`meta` shape in each create description, in the
+  three create request `productCode` descriptions, and in the shared 422
+  description, the trim/upper-case and no-write wording, the conversion and
+  renewal exemption, the info-description rule, and the `x-compatibility`
+  previous version and notes.
+- `README.md` records the additive 2.23.0/1.9.0 versions, the lookup and error
+  shape, the replay and exemption rules, the narrower status-only check, and
+  the validator requirements; `MISMATCHES.md` adds M-62 and updates M-59 and
+  M-61 for the new-business guard.
+- `python scripts/validate_contracts.py` passes 17,479 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

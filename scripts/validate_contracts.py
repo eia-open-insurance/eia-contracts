@@ -1684,6 +1684,38 @@ PRODUCT_ERROR_CODES = (
 )
 
 
+# Active-product enforcement (2026-10-22). The public policy create, its expert
+# alias, and the public submission create resolve the request product code in
+# the tenant catalog and require status ACTIVE. An unknown code is 422
+# UNKNOWN_PRODUCT; a RETIRED code is 422 PRODUCT_NOT_ACTIVE. Both reference the
+# shared UnprocessableContent response and carry errors[0].field = productCode,
+# errors[0].code equal to the top-level code, and meta.productCode/tenantId plus
+# productId, productStatus, and currentStatus for a known product. Conversion
+# and renewal are exempt because they reuse an already-accepted product.
+# Existing records are never re-validated (MISMATCHES.md M-59, M-61, and M-62).
+POLICY_ACTIVE_PRODUCT_CREATE_OPERATIONS = (
+    ("post", "/api/v1/policies", "createPolicy"),
+    ("post", "/internal/v1/policies", "expertCreatePolicy"),
+    ("post", "/api/v1/policies/submissions", "createPolicySubmission"),
+)
+POLICY_ACTIVE_PRODUCT_EXEMPT_OPERATIONS = (
+    ("post", "/api/v1/policies/{policyId}/renew", "renewPolicy"),
+    ("post", "/api/v1/policies/submissions/{submissionId}/convert",
+     "convertPolicySubmission"),
+    ("post", "/internal/v1/policies/submissions/{submissionId}/convert",
+     "expertConvertPolicySubmission"),
+)
+POLICY_ACTIVE_PRODUCT_CODES = ("UNKNOWN_PRODUCT", "PRODUCT_NOT_ACTIVE")
+POLICY_ACTIVE_PRODUCT_CODE_FIELD = "productCode"
+POLICY_ACTIVE_PRODUCT_META_FIELDS = (
+    "productCode",
+    "tenantId",
+    "productId",
+    "productStatus",
+    "currentStatus",
+)
+
+
 # Policy credit notes (SPEC 11.2.13 billing adjustments). The public domain
 # exposes the short /api/v1/policies/{policyId}/credit-notes resource; the
 # expert's /internal/v1 alias is an implementation detail. Every operation
@@ -7653,6 +7685,185 @@ def check_policy_products_openapi(contracts: ContractSet, document, relative: st
                 for entry in planned
             ),
             f"{relative}: {product_path} must not remain in x-planned-operations",
+        )
+
+
+def check_policy_active_product_enforcement(
+    contracts: ContractSet, document, relative: str
+):
+    """Require the ACTIVE-catalog guard on the new-business creates.
+
+    The public and expert policy creates and the public submission create must
+    document the shared 422 ``UnprocessableContent`` response and the two
+    product problems. ``UNKNOWN_PRODUCT`` means the normalized code has no row
+    in the tenant catalog; ``PRODUCT_NOT_ACTIVE`` means the row exists but is
+    RETIRED. Both identify ``productCode`` through ``errors[0].field`` and
+    repeat the top-level code, and carry the product and tenant in ``meta``. A
+    rejected create writes nothing. Conversion and renewal reuse an
+    already-accepted product and must document the exemption, and the info
+    description and ``x-compatibility`` block record that existing records are
+    never re-validated (MISMATCHES.md M-59, M-61, and M-62).
+    """
+    paths = document.get("paths") or {}
+    info = document.get("info") or {}
+    info_description = str(info.get("description") or "")
+
+    for method, path, operation_id in POLICY_ACTIVE_PRODUCT_CREATE_OPERATIONS:
+        path_item = paths.get(path) if isinstance(paths, dict) else None
+        operation = path_item.get(method) if isinstance(path_item, dict) else None
+        where = f"{relative}: {method.upper()} {path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required active-product create operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+        contracts.check(
+            operation.get("operationId") == operation_id,
+            f"{where}: operationId must be {operation_id}",
+        )
+
+        responses = operation.get("responses") or {}
+        response = responses.get("422") if isinstance(responses, dict) else None
+        contracts.check(
+            isinstance(response, dict)
+            and str(response.get("$ref", "")).endswith(
+                "/responses/UnprocessableContent"
+            ),
+            f"{where}: 422 must reference the shared UnprocessableContent response",
+        )
+
+        description = str(operation.get("description") or "")
+        for code in POLICY_ACTIVE_PRODUCT_CODES:
+            contracts.check(
+                code in description,
+                f"{where}: description must document 422 {code}",
+            )
+        for term in (
+            "errors[0].field",
+            POLICY_ACTIVE_PRODUCT_CODE_FIELD,
+            "ACTIVE",
+            "RETIRED",
+            "trims",
+            "upper-cases",
+        ):
+            contracts.check(
+                term in description,
+                f"{where}: description must document {term}",
+            )
+        for field in POLICY_ACTIVE_PRODUCT_META_FIELDS:
+            term = f"meta.{field}"
+            contracts.check(
+                term in description,
+                f"{where}: description must document {term}",
+            )
+
+        if path == "/api/v1/policies/submissions":
+            for term in ("before", "number", "no row", "event"):
+                contracts.check(
+                    term in description,
+                    f"{where}: description must document {term}",
+                )
+        else:
+            for term in ("no policy", "event"):
+                contracts.check(
+                    term in description,
+                    f"{where}: description must document {term}",
+                )
+            contracts.check(
+                "replay" in description,
+                f"{where}: description must document the replay-before-guard rule",
+            )
+
+    for method, path, operation_id in POLICY_ACTIVE_PRODUCT_EXEMPT_OPERATIONS:
+        path_item = paths.get(path) if isinstance(paths, dict) else None
+        operation = path_item.get(method) if isinstance(path_item, dict) else None
+        where = f"{relative}: {method.upper()} {path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required exempt operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+        contracts.check(
+            operation.get("operationId") == operation_id,
+            f"{where}: operationId must be {operation_id}",
+        )
+        description = str(operation.get("description") or "")
+        for term in (POLICY_ACTIVE_PRODUCT_CODE_FIELD, "guard", "RETIRED"):
+            contracts.check(
+                term in description,
+                f"{where}: description must document the catalog exemption "
+                f"({term})",
+            )
+        contracts.check(
+            "reuses" in description or "copies" in description,
+            f"{where}: description must name the reused source product",
+        )
+
+    for term in (
+        "active-product-enforcement",
+        "UNKNOWN_PRODUCT",
+        "PRODUCT_NOT_ACTIVE",
+        "never re-validated",
+        "conversion",
+        "renewal",
+        "ACTIVE",
+        "trims",
+        "upper-cases",
+        "errors",
+        "meta",
+    ):
+        contracts.check(
+            term in info_description,
+            f"{relative}: info.description must document {term}",
+        )
+
+    schemas = (document.get("components") or {}).get("schemas") or {}
+    for schema_name in (
+        "CreatePolicyRequest",
+        "CreatePolicyRequestInternal",
+        "CreatePolicySubmissionRequest",
+    ):
+        schema = schemas.get(schema_name) or {}
+        code_property = ((schema.get("properties") or {}).get(
+            POLICY_ACTIVE_PRODUCT_CODE_FIELD
+        ) or {})
+        description = str(code_property.get("description") or "")
+        for product_code in POLICY_ACTIVE_PRODUCT_CODES:
+            contracts.check(
+                product_code in description,
+                f"{relative}: {schema_name}.{POLICY_ACTIVE_PRODUCT_CODE_FIELD} "
+                f"description must document {product_code}",
+            )
+        contracts.check(
+            "ACTIVE" in description,
+            f"{relative}: {schema_name}.{POLICY_ACTIVE_PRODUCT_CODE_FIELD} "
+            "description must document the ACTIVE requirement",
+        )
+
+    compatibility = document.get("x-compatibility") or {}
+    contracts.check(
+        compatibility.get("previousContractVersion") == "2.22.0",
+        f"{relative}: x-compatibility.previousContractVersion must be 2.22.0",
+    )
+    compatible = " ".join(
+        str(entry) for entry in compatibility.get("compatible") or []
+    )
+    for code in POLICY_ACTIVE_PRODUCT_CODES:
+        contracts.check(
+            code in compatible,
+            f"{relative}: x-compatibility.compatible must name {code}",
+        )
+    contracts.check(
+        "422" in compatible,
+        f"{relative}: x-compatibility.compatible must name the 422 response",
+    )
+    note = str(compatibility.get("note") or "")
+    for code in POLICY_ACTIVE_PRODUCT_CODES:
+        contracts.check(
+            code in note,
+            f"{relative}: x-compatibility.note must document {code}",
         )
 
 
@@ -17342,6 +17553,31 @@ def check_openapi(contracts: ContractSet, verbose: bool):
         for name in names:
             contracts.check(name in actual, f"components.yaml: missing components.{section}.{name}")
 
+    # Active-product enforcement (Policy 2.23.0): the shared 422 response names
+    # the two product problems and their errors/meta shape, so the policy and
+    # submission creates reference one canonical description.
+    unprocessable = (component_sections.get("responses") or {}).get(
+        "UnprocessableContent"
+    ) or {}
+    unprocessable_description = str(unprocessable.get("description") or "")
+    for term in (
+        "UNKNOWN_PRODUCT",
+        "PRODUCT_NOT_ACTIVE",
+        "productCode",
+        "errors[0].field",
+        "meta",
+        "productId",
+        "productStatus",
+        "currentStatus",
+        "tenantId",
+        "RETIRED",
+    ):
+        contracts.check(
+            term in unprocessable_description,
+            "components.yaml: UnprocessableContent must document the "
+            f"active-product rule ({term})",
+        )
+
     # Shared global-search contract: every search operation references these
     # schemas, so their keys and parameter bounds are checked once here.
     search_schemas = component_sections.get("schemas") or {}
@@ -18000,6 +18236,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_policy_rating_openapi(contracts, document, relative)
             check_policy_submissions_openapi(contracts, document, relative)
             check_policy_products_openapi(contracts, document, relative)
+            check_policy_active_product_enforcement(contracts, document, relative)
         if vertical == "contract":
             check_contract_security(contracts, document, relative)
             check_contract_security_status(contracts, document, relative)

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Policy API
-  version: 2.22.0
+  version: 2.23.0
   summary: Direct-book policy administration and the Policy expert API.
   description: >
     This document describes the implemented public Policy domain API and the
@@ -553,6 +553,31 @@ info:
       `CONCURRENT_MODIFICATION`. The implemented catalog is narrower than the
       SPEC 11.2.14 product table and SPEC 11.2.9 names no product event, so
       MISMATCHES.md M-01, M-22, and M-61 record the deviation.
+
+    The 2026-10-22 active-product-enforcement slice gates new business on that
+    catalog:
+
+    - `POST /api/v1/policies` and `POST /api/v1/policies/submissions` resolve
+      their `productCode` in the caller's tenant product catalog and require
+      status `ACTIVE`. The lookup trims and upper-cases the request value, so
+      `" cgl "` addresses `CGL`. An unknown code is 422 `UNKNOWN_PRODUCT`; a
+      known but `RETIRED` code is 422 `PRODUCT_NOT_ACTIVE`. Both are
+      `application/problem+json` with `category` `BUSINESS_RULE`, an `errors`
+      entry whose `field` is `productCode` and whose `code` repeats the
+      top-level code, and `meta` carrying `productCode` and `tenantId` plus
+      `productId`, `productStatus`, and `currentStatus` when the product row
+      exists. A rejected create writes no policy, submission, version, number,
+      coverage, or event.
+    - The guard covers new business only. Existing policies and submissions are
+      never re-validated, so reads and later mutations keep working after their
+      product is retired. A stored-key policy-create replay is resolved before
+      the catalog check and still returns the original policy. Submission
+      conversion reuses the product accepted at intake, and renewal copies the
+      source product; neither command calls the guard.
+    - The implemented check is a status check on the flat catalog row. It does
+      not store a `product_id` foreign key and verifies no product version,
+      form filing, or rate approval, so SPEC 11.2.14 UWR-03 remains only
+      partially enforced (MISMATCHES.md M-59, M-61, and M-62).
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -620,6 +645,20 @@ paths:
         clients SHOULD send it.
 
         A duplicate policy number is 409 `DUPLICATE_POLICY_NUMBER`.
+
+        The `productCode` must resolve to an `ACTIVE` product in the caller's
+        tenant catalog. The lookup trims and upper-cases the value, so `" cgl "`
+        addresses `CGL`; a blank value is treated as an unknown code rather than
+        a validation error. An unknown code is 422 `UNKNOWN_PRODUCT` and a known
+        but `RETIRED` product is 422 `PRODUCT_NOT_ACTIVE`, each with
+        `errors[0].field` = `productCode`, `errors[0].code` equal to the
+        top-level code, and `meta.productCode`/`meta.tenantId` (plus
+        `meta.productId`, `meta.productStatus`, and `meta.currentStatus` when the
+        product exists). A rejected create writes no policy, initial version, or
+        event. The idempotency lookup runs before the catalog check, so a
+        stored-key replay of an already-accepted create still returns the
+        original policy after its product is retired. Existing policies are
+        never re-validated.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - $ref: './components.yaml#/components/parameters/IdempotencyKey'
@@ -658,6 +697,8 @@ paths:
           $ref: './components.yaml#/components/responses/BadRequest'
         '409':
           $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /api/v1/policies/search:
@@ -762,6 +803,17 @@ paths:
         `VALIDATION_ERROR`. A duplicate generated number is 409
         `DUPLICATE_SUBMISSION_NUMBER`.
 
+        The `productCode` must resolve to an ACTIVE product in the caller's
+        tenant catalog. The lookup trims and upper-cases the value; an unknown
+        code is 422 `UNKNOWN_PRODUCT` and a known but RETIRED product is 422
+        `PRODUCT_NOT_ACTIVE`, each with `errors[0].field` = `productCode`,
+        `errors[0].code` equal to the top-level code, and
+        `meta.productCode`/`meta.tenantId` (plus `meta.productId`,
+        `meta.productStatus`, and `meta.currentStatus` when the product exists).
+        The check runs before the per-tenant number is allocated, so a rejected
+        create consumes no `SUB-{YYYY}-` sequence value and writes no row or
+        event. Existing submissions are never re-validated.
+
         The accepted create returns 201 with the stored projection, the strong
         `ETag` of `version` 0, `Idempotent-Replayed: false`, and a `Location`
         for the new submission, and writes `policy.submission.created` in the
@@ -812,6 +864,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: './components.yaml#/components/schemas/Problem'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /api/v1/policies/submissions/{submissionId}:
@@ -969,6 +1023,10 @@ paths:
         the source in `submissionId`. When the requested limit is positive the
         command also creates one base coverage and its limit schedule with the
         same coverage rules as the coverage command.
+
+        The conversion reuses the submission's accepted `productCode` and
+        skips the catalog guard, so a submission accepted while its product was
+        ACTIVE still converts after that product is RETIRED.
 
         A fresh conversion is 201 with the `{submission, policy}` envelope and
         `Idempotent-Replayed: false`. The converted submission is `BOUND` (a
@@ -2067,6 +2125,11 @@ paths:
         409 `RENEWAL_NOT_ALLOWED` and writes nothing. The successor inherits the
         source product, insured party, coverages, limit schedules, insureds, and
         locations, and each copied limit gets a fresh zeroed erosion state.
+
+        The renewal reuses the source policy's `productCode` and skips the
+        catalog guard, so a source whose product is now RETIRED still renews.
+        Only the new-business creates, `POST /api/v1/policies` and
+        `POST /api/v1/policies/submissions`, enforce the ACTIVE-product rule.
 
         `effectiveDate` and `expirationDate` are required. `effectiveDate` must
         be on or after the source expiration date and `expirationDate` must be
@@ -3987,6 +4050,16 @@ paths:
         same-key replay returns the original policy with 200 and
         `Idempotent-Replayed: true`; a different request under the same key is
         409 `IDEMPOTENCY_CONFLICT` with `meta.existingPolicyId`.
+
+        The `productCode` must resolve to an ACTIVE product in the tenant
+        catalog. The lookup trims and upper-cases the value; an unknown code is
+        422 `UNKNOWN_PRODUCT` and a known but RETIRED product is 422
+        `PRODUCT_NOT_ACTIVE`, with `errors[0].field` = `productCode`,
+        `errors[0].code` equal to the top-level code, and
+        `meta.productCode`/`meta.tenantId` (plus `meta.productId`,
+        `meta.productStatus`, and `meta.currentStatus` when the product exists).
+        A rejected create writes no policy or event, and the idempotency lookup
+        runs before the catalog check so a replay is not re-validated.
       security: []
       x-internal-api: true
       parameters:
@@ -4024,6 +4097,8 @@ paths:
           $ref: './components.yaml#/components/responses/BadRequest'
         '409':
           $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /internal/v1/policies/{policyId}:
@@ -4924,6 +4999,10 @@ paths:
         effective date plus one year and must be after it. A submission
         `productCode` longer than the 32-character policy column is 422
         `PRODUCT_CODE_TOO_LONG_FOR_POLICY`.
+
+        The conversion reuses the submission's accepted `productCode` and
+        skips the catalog guard, so a submission accepted while its product was
+        ACTIVE still converts after that product is RETIRED.
 
         The response is the **bare** created `Policy` (this expert route does
         not compose the public `{submission, policy}` envelope): 201 on a fresh
@@ -6487,6 +6566,11 @@ components:
           type: string
           maxLength: 32
           minLength: 1
+          description: >
+            Product code resolved against the tenant catalog. The lookup trims
+            and upper-cases the value and requires an ACTIVE product; an
+            unknown code is 422 `UNKNOWN_PRODUCT` and a RETIRED product is 422
+            `PRODUCT_NOT_ACTIVE`.
         insuredPartyId:
           type: string
           format: uuid
@@ -6528,6 +6612,11 @@ components:
           type: string
           maxLength: 32
           minLength: 1
+          description: >
+            Product code resolved against the tenant catalog. The lookup trims
+            and upper-cases the value and requires an ACTIVE product; an
+            unknown code is 422 `UNKNOWN_PRODUCT` and a RETIRED product is 422
+            `PRODUCT_NOT_ACTIVE`.
         insuredPartyId:
           type: string
           format: uuid
@@ -7281,6 +7370,12 @@ components:
           type: string
           minLength: 1
           maxLength: 64
+          description: >
+            Product code resolved against the tenant catalog before the
+            submission number is allocated. The lookup trims and upper-cases
+            the value and requires an ACTIVE product; an unknown code is 422
+            `UNKNOWN_PRODUCT` and a RETIRED product is 422
+            `PRODUCT_NOT_ACTIVE`.
         requestedEffectiveDate:
           type: string
           format: date
@@ -8574,6 +8669,13 @@ x-implementation:
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/ProductRulesTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/ProductSeedTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/ProductIntegrationTest.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/ProductCatalogGuard.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyService.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/ProductCatalogGuardTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/ProductCatalogTestSupport.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/ProductEnforcementIntegrationTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/PolicyServiceTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/PolicyControllerTest.java
   errorEnvelope: >
     Canonical RFC 9457 Problem with content type application/problem+json, from
     both the Policy domain and the Policy expert. The vertical keeps its legacy
@@ -8836,35 +8938,32 @@ x-implementation:
     SPEC 11.2.14, and the short path replaces `/api/v1/policy/products` (M-01,
     M-61).
 x-compatibility:
-  contractVersion: 2.22.0
-  previousContractVersion: 2.21.0
+  contractVersion: 2.23.0
+  previousContractVersion: 2.22.0
   breaking: []
   compatible:
-    - Adds the DIRECT-book product catalog at GET/POST /api/v1/products, GET /api/v1/products/search, GET /api/v1/products/{productId}, and PATCH /api/v1/products/{productId}/status.
-    - Adds the Product, ProductLine, ProductStatus, CreateProductRequest, and UpdateProductStatusRequest schemas and the strong ETag on the detail and mutation responses.
-    - Adds the product.product.created and product.product.status-changed facts of the new product event vertical; the facts are documented in asyncapi/product.yaml and the event catalog.
-    - Adds no path, request field, response field, or enum value to an existing Policy route and removes nothing.
+    - Adds the 422 UNKNOWN_PRODUCT and PRODUCT_NOT_ACTIVE problems to POST /api/v1/policies, POST /internal/v1/policies, and POST /api/v1/policies/submissions.
+    - Documents the tenant-catalog lookup, the errors/meta problem members, the rejected-create no-write rule, and the conversion and renewal exemption.
+    - Adds no path, request field, response body member, or event and removes nothing; accepted creates and every existing policy and submission keep their current shape.
   note: >
-    The product catalog is additive. It exposes the tenant's products as a bare
-    product-code-ordered array with the optional `q` code/name substring and
-    exact `status` filters, creates ACTIVE products with a server identity and
-    version 0, and toggles ACTIVE/RETIRED with an optimistic version check. A
-    same-status replay is a 200 no-op that keeps the ETag and writes no event.
-    A duplicate code is 409 `DUPLICATE_PRODUCT_CODE`, an unknown or foreign
-    product is 404 `PRODUCT_NOT_FOUND`, and a concurrent status change is 409
-    `CONCURRENT_MODIFICATION`; a missing or malformed tenant is 400
-    `MISSING_TENANT_HEADER`/`INVALID_TENANT_HEADER`, an invalid status is 400
-    `INVALID_PRODUCT_STATUS`, and another book is hidden as 404
-    `BOOK_SCOPE_VIOLATION`. The create writes `product.product.created` and an
-    accepted status change writes `product.product.status-changed` in the same
-    transaction as the row. The two facts are the first names of the `product`
-    event vertical, which the Policy expert publishes directly as outbox rows;
-    the platform event-vertical registry admits `product`, so the canonical
-    envelope is reconstructible. asyncapi/product.yaml, the event catalog, and
-    MISMATCHES.md M-14 and M-61 record the vertical. The implemented product line, two-state status,
-    two-letter jurisdiction, and missing form-family/effective-date/owner/
-    product-version members are narrower than SPEC 11.2.14, and the short path
-    replaces the SPEC `/api/v1/policy/products` mount (M-01, M-61).
+    New policy and underwriting-submission creates now resolve `productCode`
+    in the caller's tenant product catalog and require status ACTIVE. The lookup
+    trims and upper-cases the request value; an unknown code is 422
+    `UNKNOWN_PRODUCT`, and a known but RETIRED code is 422 `PRODUCT_NOT_ACTIVE`
+    with category `BUSINESS_RULE`, `errors[0].field` = `productCode`,
+    `errors[0].code` equal to the top-level code, and `meta.productCode` and
+    `meta.tenantId` (plus `meta.productId`, `meta.productStatus`, and
+    `meta.currentStatus` when the product exists). A rejected policy create
+    writes no policy, initial version, or event; a rejected submission create
+    runs before the per-tenant number is allocated, so it consumes no number and
+    writes no row or event. The guard covers new business only: existing
+    policies and submissions are never re-validated, a stored-key policy-create
+    replay is resolved before the check, submission conversion reuses the
+    product accepted at intake, and renewal copies the source product, so
+    retiring a product never invalidates accepted records. The check is a
+    status check on the flat catalog row: it stores no product id and verifies
+    no product version, form filing, or rate approval, so SPEC 11.2.14 UWR-03
+    remains partially enforced (M-59, M-61, M-62).
 x-planned-operations:
   - method: POST
     path: /api/v1/policies/{policyId}/bind

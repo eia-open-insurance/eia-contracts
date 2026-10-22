@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA canonical shared API components
-  version: 1.8.0
+  version: 1.9.0
   summary: Shared error, money, paging, global-search, concurrency, idempotency, actor, audit, and tenant/book components for every EIA API.
   description: >
     Shared OpenAPI 3.1 components referenced by the per-vertical contract
@@ -74,6 +74,17 @@ info:
     `IdempotentReplayed` header, and the `Conflict` response describe it, and
     Policy 2.21.0 carries the operation details (MISMATCHES.md M-06, M-07, M-57,
     M-60).
+
+    The 2026-10-22 Policy active-product-enforcement contract (1.9.0) records the
+    product rule codes on the shared 422 `UnprocessableContent` response. The
+    policy and underwriting-submission creates return `UNKNOWN_PRODUCT` or
+    `PRODUCT_NOT_ACTIVE` with `errors[0].field` = `productCode`, `errors[0].code`
+    equal to the top-level code, and `meta.productCode`/`meta.tenantId` (plus
+    `meta.productId`, `meta.productStatus`, and `meta.currentStatus` when the
+    product exists). The change is compatible: the 422 response and the `Problem`
+    body are unchanged components, and only the documented code catalog and
+    per-code member guidance grows. Policy 2.23.0 carries the operation details
+    (MISMATCHES.md M-59, M-61, and M-62).
 
     Authority is SPEC.md sections 6.11, 7.6, 7.18-7.23, 10.3, 12.2, and 12.6.
     Where an implemented service deviates from a component, the deviation is
@@ -784,6 +795,13 @@ components:
         `INSUFFICIENT_CANCELLATION_NOTICE`), and reinstatement rules
         (`REINSTATEMENT_OUTSIDE_POLICY_TERM`,
         `REINSTATEMENT_BEFORE_CANCELLATION`, `PREMIUM_EVIDENCE_REQUIRED`).
+        Product rules are `UNKNOWN_PRODUCT` and `PRODUCT_NOT_ACTIVE`, emitted by
+        the policy and underwriting-submission creates: the trimmed, upper-cased
+        `productCode` has no row in the tenant catalog, or the row is
+        `RETIRED`. Both carry `errors[0].field` = `productCode` and
+        `errors[0].code` equal to the top-level code; `meta` carries
+        `productCode` and `tenantId` and, when the product exists, `productId`,
+        `productStatus`, and `currentStatus`.
         Assumed Claims emits it with category BUSINESS_RULE for
         `EIA-RNS-7102`, `EIA-RNS-7204`, `EIA-RNS-7301`, `EIA-RNS-7401`,
         `EIA-RNS-7502`, `EIA-RNS-7603`, and `EIA-RNS-7701`.

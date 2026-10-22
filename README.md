@@ -3120,6 +3120,60 @@ Semantics:
   event wording, the new envelope vertical, and the absence of the implemented
   paths from `x-planned-operations`. The full run passes 17,367 checks.
 
+### Policy active-product enforcement (2026-10-22)
+
+Policy 2.23.0 gates the two new-business creates on the DIRECT-book product
+catalog, and Components 1.9.0 records the two problem codes on the shared 422
+response. The change is compatible: the creates add one error response, the
+request and success bodies are unchanged, and no path, request field, response
+body field, or event is added or removed.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/policy.yaml` | 2.23.0 | Additive | `POST /api/v1/policies`, `POST /internal/v1/policies`, and `POST /api/v1/policies/submissions` add the 422 `UNKNOWN_PRODUCT`/`PRODUCT_NOT_ACTIVE` problem and document the tenant-catalog lookup; the two conversion operations and the renewal operation document the exemption. |
+| `openapi/components.yaml` | 1.9.0 | Additive and documentation | The shared `UnprocessableContent` (422) description adds the two product codes and their `errors`/`meta` members. |
+
+Semantics:
+
+- Both new-business creates resolve `productCode` in the caller's tenant product
+  catalog and require status `ACTIVE`. The lookup trims and upper-cases the
+  request value, so `" cgl "` addresses `CGL`. An unknown code is 422
+  `UNKNOWN_PRODUCT`; a known but `RETIRED` code is 422 `PRODUCT_NOT_ACTIVE`.
+  Both use `application/problem+json` with category `BUSINESS_RULE`, one
+  `errors` entry whose `field` is `productCode` and whose `code` repeats the
+  top-level code, and `meta.productCode` and `meta.tenantId` plus
+  `meta.productId`, `meta.productStatus`, and `meta.currentStatus` when the
+  product row exists.
+- The public policy create and its `/internal/v1` expert operation share the
+  guard. The public submission create runs the check before the per-tenant
+  `SUB-{YYYY}-` number is allocated, so a rejected create consumes no number and
+  writes no row or event; a rejected policy create writes no policy, initial
+  version, or event. A blank policy `productCode` is an unknown code because the
+  policy create schema does not reject whitespace; a submission create already
+  rejects a blank code as 400 `VALIDATION_ERROR` before the guard.
+- The guard covers new business only. Existing policies and submissions are
+  never re-validated, so their reads and later mutations keep working after the
+  product is retired. The policy-create idempotency lookup runs before the
+  catalog check: a stored-key replay of an already-accepted create returns the
+  original policy with 200 and `Idempotent-Replayed: true`, while the same key
+  with a changed request is still 409 `IDEMPOTENCY_CONFLICT`.
+- Conversion and renewal are exempt. Submission conversion reuses the
+  `productCode` accepted at intake and renewal copies the source policy's
+  `productCode`; both skip the catalog guard, so a submission accepted before a
+  product was retired still converts and a source policy still renews. Both
+  conversion operations and the renewal operation document the exemption.
+- The implemented rule is a status check on the flat catalog row. No
+  `product_id` foreign key is stored, and no product version, form filing, or
+  rate approval is verified, so SPEC 11.2.14 UWR-03 remains only partially
+  enforced. `MISMATCHES.md` M-59 and M-61 record the narrower check, and M-62
+  records the enforcement slice itself.
+- The validator requires the 422 response on the three creates; the two codes
+  and their `errors`/`meta` shape in each operation description, in the three
+  create request `productCode` descriptions, and in the shared
+  `UnprocessableContent` description; the trim/upper-case and no-write rules;
+  the conversion and renewal exemption on all three operations; and the
+  `x-compatibility` version and notes. The full run passes 17,479 checks.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -4268,6 +4322,14 @@ Rules:
   `CONCURRENT_MODIFICATION` with the current and expected versions. The
   version-and-status predicate is the conflict guard, because the command
   accepts neither `If-Match` nor `Idempotency-Key` (M-06, M-07).
+- The catalog gates new business. `POST /api/v1/policies` and
+  `POST /api/v1/policies/submissions` require their `productCode` to resolve to
+  an ACTIVE product for the tenant: the lookup trims and upper-cases the code,
+  an unknown code is 422 `UNKNOWN_PRODUCT`, and a RETIRED product is 422
+  `PRODUCT_NOT_ACTIVE`. The check is new-business only; conversion and renewal
+  reuse an accepted product and skip it, and existing records are never
+  re-validated. See
+  [Policy active-product enforcement](#policy-active-product-enforcement-2026-10-22).
 - `X-EIA-Tenant` is required. A supplied `X-EIA-Book` must be DIRECT and another
   book is hidden as 404 `BOOK_SCOPE_VIOLATION`; an absent book is accepted for
   compatibility with the other Policy proxy routes. A missing or malformed
@@ -4355,7 +4417,7 @@ implementation detail.
 | Operation | Path | Success | Errors |
 |---|---|---|---|
 | List | `GET /api/v1/policies/submissions` | 200 bare `PolicySubmission` array | 400, 404 |
-| Create | `POST /api/v1/policies/submissions` | 201 `PolicySubmission` | 400, 404, 409 |
+| Create | `POST /api/v1/policies/submissions` | 201 `PolicySubmission` | 400, 404, 409, 422 |
 | Read | `GET /api/v1/policies/submissions/{submissionId}` | 200 `PolicySubmission` | 400, 404 |
 | Transition | `PATCH /api/v1/policies/submissions/{submissionId}/status` | 200 `PolicySubmission` | 400, 404, 409 |
 | Convert | `POST /api/v1/policies/submissions/{submissionId}/convert` | 201 `{submission, policy}` | 400, 404, 409, 422 |
@@ -4382,6 +4444,17 @@ Rules:
   codes are capped at 20 entries of 32 characters, and notes at 2000
   characters. Field failures are 400 `INVALID_SUBMISSION_*` at the expert and
   `VALIDATION_ERROR` at the domain.
+- Create also requires the `productCode` to resolve to an ACTIVE product in the
+  tenant catalog. The lookup trims and upper-cases the code; an unknown code is
+  422 `UNKNOWN_PRODUCT` and a RETIRED product is 422 `PRODUCT_NOT_ACTIVE`, with
+  `errors[0].field` = `productCode`, `errors[0].code` equal to the top-level
+  code, and `meta.productCode`/`meta.tenantId` (plus `meta.productId`,
+  `meta.productStatus`, and `meta.currentStatus` when the product exists). The
+  check runs before the per-tenant number is allocated, so a rejected create
+  consumes no number and writes no row or event. A blank code is already 400
+  `VALIDATION_ERROR`. Existing submissions are never re-validated, and
+  conversion reuses the product accepted at intake (see
+  [Policy active-product enforcement](#policy-active-product-enforcement-2026-10-22)).
 - A new submission is `RECEIVED` at `version` 0. The one-way graph is
   `RECEIVED -> REFERRED/QUOTED/DECLINED/WITHDRAWN`,
   `REFERRED -> QUOTED/DECLINED/WITHDRAWN`, and
@@ -4423,7 +4496,9 @@ Rules:
   `QUOTED` to `BOUND` (a `BOUND` submission just advances its version), and
   writes `policy.submission.converted` and the normal `policy.policy.created`
   in the same transaction. A repeat is 200 with `Idempotent-Replayed: true`,
-  returns the linked policy, and writes nothing.
+  returns the linked policy, and writes nothing. The conversion reuses the
+  submission's accepted `productCode` and skips the create guard, so a
+  submission accepted before its product was retired still converts.
 - A non-convertible status is 409 `SUBMISSION_NOT_CONVERTIBLE` with
   `meta.submissionId` and `meta.currentStatus`; a lost optimistic write is 409
   `CONCURRENT_MODIFICATION`. An unknown or foreign submission is 404
@@ -4846,7 +4921,13 @@ missing directory.
    `ETag`, the 400/404/409 responses and the `DUPLICATE_PRODUCT_CODE`/
    `PRODUCT_NOT_FOUND`/`CONCURRENT_MODIFICATION`/`INVALID_PRODUCT_*` wording,
    and the absence of the implemented product paths from
-   `x-planned-operations`.
+   `x-planned-operations`. It also requires the shared 422 response on the
+   public and expert policy creates and the public submission create, the
+   `UNKNOWN_PRODUCT`/`PRODUCT_NOT_ACTIVE` codes and their `errors`/`meta`
+   members in each create description, in the three create request
+   `productCode` descriptions, and in the shared `UnprocessableContent`
+   description, the trim/upper-case and no-write wording, and the conversion
+   and renewal exemption.
 4. **AsyncAPI structure.** `asyncapi: 3.0.0`, channel addresses, `x-event-type`,
    `x-status: planned|implemented`, `x-implemented-by` on every implemented
    channel, one `send` operation per channel, a `DomainEvent` message on
@@ -5289,8 +5370,9 @@ missing directory.
   admits `product`, so the envelope is reconstructible. The domain and expert
   accept an absent
   `X-EIA-Book` although the canonical contract documents DIRECT, and no product
-  command accepts `Idempotency-Key` or `If-Match` (M-01, M-06, M-07, M-14,
-  M-22, M-61);
+  command accepts `Idempotency-Key` or `If-Match`; the new-business creates
+  require an ACTIVE catalog product but check no product version, form filing,
+  or rate approval (M-01, M-06, M-07, M-14, M-22, M-61, M-62);
 - the premium-receivables queue is a tenant-wide read at
   `GET /api/v1/billing/installments`, outside `/api/v1/policies`, and returns the
   flat `Receivable`/`ReceivableSummary` projection. SPEC 11.2.13 describes the

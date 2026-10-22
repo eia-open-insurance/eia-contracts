@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-22 (Product catalog and Product event vertical).
+Status: open, reviewed 2026-10-22 (Active-product enforcement).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -236,6 +236,12 @@ where the running code does not meet it yet.
   and its H2 mirror, and the domain and expert product controller, service,
   rules, client, seed, and integration tests. It also reads the platform
   `EventVerticals` registry, which now admits `product`.
+  The Policy active-product enforcement pass reads the expert
+  `ProductCatalogGuard`, `PolicyService` create and converted-policy paths,
+  `UnderwritingSubmissionService.create`, `PolicyRenewalService`, and
+  `PolicyErrors`/`Problems` plus the domain `PolicyClient` 4xx translation, and
+  the `ProductCatalogGuardTest`, `PolicyServiceTest`, `PolicyControllerTest`,
+  `UnderwritingSubmissionServiceTest`, and `ProductEnforcementIntegrationTest`.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -322,6 +328,7 @@ removed per the resolution policy.
 | M-59 | Policy underwriting submissions are a SPEC-less pre-policy collection with a narrower six-state graph, no clearance/rating/referral/quote/producer slices, two new event names, unhonoured concurrency/idempotency headers, and a JSON-number limit amount | M |
 | M-60 | Submission conversion is a SPEC-less command with a bare-policy expert shape, a stored-key 200 replay with a canonical request hash since 2.21.0 and a linked-policy 200 replay without one, a new event name, an unprojected public `Policy.submissionId`, and no SPEC clearance/rating gate | M |
 | M-61 | Product catalog uses short paths, a five-value line taxonomy, a two-state ACTIVE/RETIRED lifecycle, a two-letter jurisdiction, no form family/effective dates/owner/product version, and two SPEC-less `product` event-vertical names | L |
+| M-62 | Active-product enforcement is a status-only catalog check with SPEC-less problem codes and no product-version, form-filing, or rate-approval evidence | M |
 
 ## M-01 Public base paths
 
@@ -4592,8 +4599,10 @@ Additional differences:
   the expert's own non-DIRECT guard returns 404 `NOT_FOUND`.
 - `applicantPartyId` is a plain UUID reference: the expert does not call the
   Party vertical, so an unknown applicant is accepted. `productCode` is a free
-  text code with a 64-character cap, not a `product_id` foreign key, and no
-  product/version or filed-form check runs.
+  text code with a 64-character cap, not a `product_id` foreign key. The create
+  resolves the code in the tenant catalog and requires an ACTIVE product (422
+  `UNKNOWN_PRODUCT`/`PRODUCT_NOT_ACTIVE`, M-62), but no product version,
+  filed-form, or rate check runs.
 
 Consequences:
 
@@ -4845,10 +4854,12 @@ Additional differences:
   owner, rate plan, or underwriting guideline is implemented, and the create
   body has no filed/approved gate. A product is ACTIVE immediately, so SPEC
   11.2.14 UWR-03 (a product version must not be used before its forms and rates
-  are filed or approved) is not enforced.
+  are filed or approved) is only partially enforced by the new-business ACTIVE
+  status check (M-62); the form and rate evidence itself is still absent.
 - A policy and an underwriting submission reference the product by a free-text
-  `productCode`; neither stores a `product_id` foreign key, and no product or
-  version existence check runs.
+  `productCode`; neither stores a `product_id` foreign key. The new-business
+  creates resolve the code and require an ACTIVE product (M-62), but no product
+  version, form filing, or rate approval is checked.
 - The demo seed writes Commercial General Liability, Products Liability, and
   Umbrella for the demo tenant idempotently by `(tenant_id, product_code)`,
   writes no events, and is disabled in the test profile.
@@ -4923,10 +4934,66 @@ resource, the sixteen-value line set, and the filed/approved gate, and align the
 event names with the SPEC catalog. No `/v2` is needed while the product surface
 is additive and no consumer outside the co-released Policy web remote uses it.
 
+## M-62 Active-product enforcement is a status-only catalog check with SPEC-less problem codes
+
+Policy 2.23.0 makes the two new-business creates resolve `productCode` in the
+tenant product catalog and require status `ACTIVE`. An unknown code is 422
+`UNKNOWN_PRODUCT`; a known but `RETIRED` code is 422 `PRODUCT_NOT_ACTIVE`, with
+`errors[0].field` = `productCode`, `errors[0].code` repeating the top-level
+code, and `meta.productCode`/`meta.tenantId` plus `meta.productId`,
+`meta.productStatus`, and `meta.currentStatus` when the row exists. The guard is
+new-business only: conversion and renewal reuse an accepted product and skip
+it, and existing policies and submissions are never re-validated.
+
+| Aspect | Implemented | SPEC 11.2.14 / 6.11 |
+|---|---|---|
+| Check | One ACTIVE/RETIRED status test on the flat `product` row; no `product_id` foreign key, product version, form family, effective date, filing/approval evidence, rate plan, or underwriting guideline | UWR-03 says a product version must not be used before its forms and rates are filed or approved; the SPEC `product_version` carries `rate_plan_id` and `underwriting_guideline_id` |
+| Codes | Legacy strings `UNKNOWN_PRODUCT` and `PRODUCT_NOT_ACTIVE`, category `BUSINESS_RULE` | SPEC 6.11 code scheme `EIA-<VERT>-<NNNN>`; no product-create business-rule code is defined |
+| Scope | Public and expert policy creates plus the public submission create (the expert's undocumented `/internal/v1` submission alias shares the controller); conversion, renewal, and every existing record are exempt | No SPEC rule defines a create-time status gate or the conversion/renewal exemption; UWR-03 is version- and filing-oriented |
+| Blank code | Policy create treats a whitespace-only code as unknown (422); submission create's `@NotBlank` makes it 400 `VALIDATION_ERROR` first | No SPEC rule |
+| Write behaviour | A rejected create writes no policy, submission, initial version, number, coverage, or event; the submission check runs before number allocation | Matches the no-side-effect expectation but is not specified |
+
+Consequences:
+
+- A client generated from SPEC 6.11 expects `EIA-*` codes; the implemented
+  problem keeps the legacy Policy strings that the web remote branches on.
+- The guard cannot prove that a product's forms and rates were filed or
+  approved, because the implemented catalog has no version, form, or rate row
+  (M-61). An ACTIVE product can be used for new business immediately after
+  creation.
+- Retiring a product never invalidates accepted work. That is the intended
+  migration-safety property, but the SPEC lifecycle does not state it.
+
+Evidence:
+
+- `repos/eia-policy-expert/.../ProductCatalogGuard.java` (trim/upper-case
+  normalization, ACTIVE check, both 422 factories, `meta` members)
+- `repos/eia-policy-expert/.../PolicyService.java` (the guard runs after the
+  idempotency lookup for a keyed create; `createConvertedPolicy` skips it for
+  submission conversion)
+- `repos/eia-policy-expert/.../UnderwritingSubmissionService.java` (the guard
+  runs after body validation and before `allocateNumber`)
+- `repos/eia-policy-expert/.../PolicyRenewalService.java` (direct repository
+  create; no guard)
+- `repos/eia-policy-expert/.../PolicyErrors.java` and `Problems.java` (422
+  `BUSINESS_RULE` mapping and the two titles)
+- `repos/eia-policy-expert/src/test/java/com/eia/policy/expert/ProductEnforcementIntegrationTest.java`,
+  `ProductCatalogGuardTest.java`, `PolicyServiceTest.java`, `PolicyControllerTest.java`,
+  and `UnderwritingSubmissionServiceTest.java`
+- `repos/eia-policy-domain/.../PolicyClient.java:1644-1677` (any 4xx status,
+  code, `errors`, and `meta` are preserved from the expert)
+- `repos/eia-contracts/scripts/validate_contracts.py` (the active-product
+  requirements; the run passes 17,479 checks)
+
+Resolution: amend SPEC 11.2.14 to the implemented create-time ACTIVE check and
+the conversion/renewal exemptions, and either map the two codes into the SPEC
+6.11 scheme or accept the legacy Policy strings. If UWR-03 must be enforceable,
+add the `product_version`/form/rate aggregate first (M-61).
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-22
-Product catalog and Product event vertical contract:
+Policy active-product enforcement contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -4966,7 +5033,7 @@ JSON Reference resolution
   OK walked 23 YAML documents
 
 Result
-  PASS 17367 checks, 0 failures
+  PASS 17479 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -5398,7 +5465,16 @@ Additional checks and limits:
   and channel/catalog-set messages; and removing both product names from the
   catalog lists fails with the non-empty-published and channel-set messages.
   Removing `product` from the envelope `vertical` enum fails the exact
-  event-vertical message. The working copy was left unchanged.
+  event-vertical message. The Policy active-product enforcement pass added five
+  more, each run on a throwaway copy and exited non-zero (exit 1): removing the
+  422 response from the public policy create fails the shared-response message;
+  removing `UNKNOWN_PRODUCT` from the submission create description fails the
+  documented-code message; rolling
+  `x-compatibility.previousContractVersion` back to 2.21.0 fails the version
+  message; removing the renewal exemption sentence fails the
+  catalog-exemption message; and removing `PRODUCT_NOT_ACTIVE` from the shared
+  422 description fails the shared component-term message. The working copy was
+  left unchanged.
 
 ## Resolution policy
 
