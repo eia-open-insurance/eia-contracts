@@ -2084,6 +2084,21 @@ DOCUMENT_DISPOSAL_CODES = (
     "RETENTION_DATE_REQUIRED",
     "RETENTION_NOT_EXPIRED",
 )
+# A successful disposition tombstones live content in the same transaction and
+# emits document.content.deleted alongside document.document.disposed. Its
+# description must name both facts and state that a document with no stored
+# content or already-tombstoned content still disposes normally.
+DOCUMENT_DISPOSAL_DESCRIPTION_TERMS = (
+    "document.document.disposed",
+    "document.content.deleted",
+    "no stored content",
+    "already tombstoned",
+    "same transaction",
+)
+# The two content reads and the explicit tombstone must point at a disposition
+# as the other producer of a content tombstone, so the shared 410 and deletedAt
+# behaviour is not documented as a DELETE-only effect.
+DOCUMENT_CONTENT_DISPOSITION_TERMS = ("disposition",)
 DOCUMENT_LIFECYCLE_CODES = (
     DOCUMENT_HOLD_CODES
     + DOCUMENT_HOLD_RELEASE_CODES
@@ -4010,6 +4025,12 @@ def check_document_content_openapi(contracts: ContractSet, document, relative: s
                     term in description,
                     f"{where}: description must document {term}",
                 )
+            for term in DOCUMENT_CONTENT_DISPOSITION_TERMS:
+                contracts.check(
+                    term in description,
+                    f"{where}: description must document the shared disposition "
+                    f"tombstone ({term})",
+                )
         elif content_path == DOCUMENT_CONTENT_PATH:
             ok_response = responses.get("200")
             ok_content = (
@@ -4069,6 +4090,13 @@ def check_document_content_openapi(contracts: ContractSet, document, relative: s
                 and str(gone_schema.get("$ref", "")).endswith("/schemas/Problem"),
                 f"{where}: 410 must use the shared Problem schema",
             )
+            description = str(operation.get("description") or "")
+            for term in DOCUMENT_CONTENT_DISPOSITION_TERMS:
+                contracts.check(
+                    term in description,
+                    f"{where}: description must document a disposition tombstone "
+                    "as a 410 source",
+                )
         elif content_path == DOCUMENT_CONTENT_VERSIONS_PATH:
             ok_schema = _response_schema(operation, "200")
             contracts.check(
@@ -4160,6 +4188,12 @@ def check_document_content_openapi(contracts: ContractSet, document, relative: s
                 f"{where}: description must document 400 INVALID_PARAMETER for a "
                 "non-numeric version",
             )
+            for term in DOCUMENT_CONTENT_DISPOSITION_TERMS:
+                contracts.check(
+                    term in description,
+                    f"{where}: description must document a disposition tombstone "
+                    "as a 410 source",
+                )
         else:
             ok_schema = _response_schema(operation, "200")
             contracts.check(
@@ -4169,6 +4203,12 @@ def check_document_content_openapi(contracts: ContractSet, document, relative: s
                 ),
                 f"{where}: 200 must return the DocumentContent schema",
             )
+            description = str(operation.get("description") or "")
+            for term in DOCUMENT_CONTENT_DISPOSITION_TERMS:
+                contracts.check(
+                    term in description,
+                    f"{where}: description must document the disposition tombstone",
+                )
 
     content_schema = schemas.get("DocumentContent") or {}
     content_properties = content_schema.get("properties") or {}
@@ -4239,6 +4279,13 @@ def check_document_content_openapi(contracts: ContractSet, document, relative: s
         and deleted_at.get("format") == "date-time",
         f"{relative}: DocumentContent.deletedAt must be a nullable date-time",
     )
+    deleted_at_description = str(deleted_at.get("description") or "")
+    for term in DOCUMENT_CONTENT_DISPOSITION_TERMS:
+        contracts.check(
+            term in deleted_at_description,
+            f"{relative}: DocumentContent.deletedAt description must document "
+            "the disposition tombstone",
+        )
     deleted = content_properties.get("deleted") or {}
     contracts.check(
         deleted.get("type") == "boolean",
@@ -4331,6 +4378,13 @@ def check_document_holds_openapi(contracts: ContractSet, document, relative: str
     paths = document.get("paths") or {}
     schemas = (document.get("components") or {}).get("schemas") or {}
 
+    info_description = str((document.get("info") or {}).get("description") or "")
+    for term in ("disposition-content slice", "document.content.deleted"):
+        contracts.check(
+            term in info_description,
+            f"{relative}: info.description must document {term}",
+        )
+
     lifecycle_operations = (
         (DOCUMENT_HOLD_PATH, "placeDocumentHold", DOCUMENT_HOLD_CODES),
         (DOCUMENT_HOLD_RELEASE_PATH, "releaseDocumentHold", DOCUMENT_HOLD_RELEASE_CODES),
@@ -4409,6 +4463,23 @@ def check_document_holds_openapi(contracts: ContractSet, document, relative: str
             contracts.check(
                 "requestBody" not in operation,
                 f"{where}: the command must not declare a request body",
+            )
+
+        if lifecycle_path == DOCUMENT_DISPOSAL_PATH:
+            description = str(operation.get("description") or "")
+            for term in DOCUMENT_DISPOSAL_DESCRIPTION_TERMS:
+                contracts.check(
+                    term in description,
+                    f"{where}: description must document {term}",
+                )
+            # A document with no content or already-tombstoned content still
+            # disposes; the explicit delete's 404/409 vocabulary must not leak
+            # into the disposition conflicts.
+            contracts.check(
+                "CONTENT_NOT_FOUND" not in conflict_text
+                and "CONTENT_ALREADY_DELETED" not in conflict_text,
+                f"{where}: absent or already-tombstoned content must not be a "
+                "disposition 404/409 conflict",
             )
 
     # Every conflict code of the slice must be documented somewhere, and no
@@ -4549,6 +4620,22 @@ def check_document_holds_asyncapi(contracts: ContractSet, document, relative: st
             DOCUMENT_LIFECYCLE_DATA in channel_messages,
             f"{relative}: {event} must reference {DOCUMENT_LIFECYCLE_DATA}",
         )
+        if event == "document.document.disposed":
+            description = (
+                str(channel.get("description") or "")
+                if isinstance(channel, dict)
+                else ""
+            )
+            for term in (
+                "document.content.deleted",
+                "live stored content",
+                "no content",
+                "already-tombstoned",
+            ):
+                contracts.check(
+                    term in description,
+                    f"{relative}: {event} description must document {term}",
+                )
 
     # The SPEC 11.6.9 held/hold-released names stay planned; the implemented
     # names are the two legal-hold facts above.
@@ -11697,6 +11784,17 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
                 f"{relative}: {DOCUMENT_CONTENT_DELETED_EVENT} must reference "
                 "DocumentContentDeletedData",
             )
+            deleted_description = (
+                str(deleted_channel.get("description") or "")
+                if isinstance(deleted_channel, dict)
+                else ""
+            )
+            for term in ("dispose", "document.document.disposed"):
+                contracts.check(
+                    term in deleted_description,
+                    f"{relative}: {DOCUMENT_CONTENT_DELETED_EVENT} description "
+                    f"must document the {term} trigger",
+                )
             deleted_message = (
                 ((document.get("components") or {}).get("messages") or {}).get(
                     "DocumentContentDeletedData"

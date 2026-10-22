@@ -737,9 +737,10 @@ Tombstone semantics:
   timestamps and remain 410 on download.
 - SPEC 11.6.8 deletes content as a step of the approved disposition job, and
   SPEC 11.6.9 names no content-tombstone event. The implemented standalone
-  command carries no approval or disposition certificate and is not invoked by
-  `POST .../dispose`; M-40, M-44, and M-47 record the deviation. M-22 records
-  the new name.
+  command carries no approval or disposition certificate. The 1.7.0
+  disposition-content slice later makes a disposition apply the same tombstone
+  (see the next section); M-40, M-44, and M-47 record the deviation. M-22
+  records the new name.
 - The validator requires the delete operation with the shared `TenantHeader`,
   the `documentId` parameter, the 204 response and no request body, the 404
   `CONTENT_NOT_FOUND` and 409 `DOCUMENT_ON_LEGAL_HOLD`/
@@ -747,6 +748,62 @@ Tombstone semantics:
   `deleted` members, the 410 responses on both downloads, the implemented
   `document.content.deleted` channel and its exact six-member payload, and the
   catalog published and implemented entries. The full run passes 14,058 checks.
+
+### Document disposition content tombstone (2026-10-22)
+
+Document 1.7.0 couples content tombstoning to retention disposition. The change
+is additive on the wire: `POST /api/v1/documents/{documentId}/dispose` keeps its
+200 `Document` response and its request and response schemas, but a successful
+disposition of a document with live content now also clears the content bytes
+and emits `document.content.deleted` in the same transaction as
+`document.document.disposed`. No path, request field, response field, or event
+name is removed or changes meaning.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/document.yaml` | 1.7.0 | Additive | `POST .../dispose` now tombstones live content and emits `document.content.deleted` beside `document.document.disposed`; the dispose, download, metadata, and `deletedAt` descriptions record the shared tombstone. |
+| `asyncapi/document.yaml` | 1.7.0 | Additive | The `document.document.disposed` and `document.content.deleted` channel descriptions record that one disposition may emit both facts; no event name or payload changes. |
+| `asyncapi/event-catalog.yaml` | 1.29.0 | Additive | No new name: the already-published `document.content.deleted` is now also emitted by a disposition (211 published and 91 implemented in total; Document 24 published and 10 implemented). |
+
+Disposition coupling semantics:
+
+- A disposition first applies the existing gates: an expired retention date, no
+  active legal hold, and a status in `ACTIVE`, `ARCHIVED`, or `SUPERSEDED`.
+  `ON_HOLD` is checked before the retention clock, so a held document is 409
+  `DOCUMENT_ON_LEGAL_HOLD` and its bytes remain downloadable.
+- If the document still has live stored content, the same transaction clears the
+  bytes of the current pointer and of every not-yet-tombstoned revision, records
+  `deletedAt`, and appends `document.content.deleted` with the same payload as an
+  explicit content delete: `{documentId, documentNumber, fileName, sizeBytes,
+  sha256, deletedAt}`, aggregate `DocumentContent` at the tombstoned revision,
+  `eventVersion` 1. It also appends `document.document.disposed` at the Document
+  aggregate, row version + 1.
+- A document with no stored content, or whose content is already tombstoned, is
+  disposed normally with only `document.document.disposed`. Disposition does not
+  answer 404 `CONTENT_NOT_FOUND` or 409 `CONTENT_ALREADY_DELETED`; those remain
+  specific to the explicit `DELETE .../content` command. The disposition
+  response stays 200 with the DISPOSED document.
+- The transaction is atomic: a rejected disposition writes no document row, no
+  content change, and no event, and a tombstone or outbox failure rolls back the
+  disposition as well.
+- The standalone `DELETE .../content` command is unchanged, including its 204,
+  the `CONTENT_NOT_FOUND`/`CONTENT_ALREADY_DELETED` conflicts, and the legal-hold
+  block. A later upload still clears the pointer tombstone and appends a fresh
+  downloadable revision.
+- Downloads of the current bytes and of any revision are 410 `CONTENT_DELETED`
+  after a disposition, and `GET .../content/metadata` still answers 200 with the
+  retained metadata, `deleted: true`, and `deletedAt`.
+- SPEC 11.6.8 deletes content inside an approved asynchronous disposition job
+  with a disposition certificate. The implemented disposition is synchronous and
+  has neither approval nor certificate; the deletion step and the event are now
+  implemented, but the workflow deviation remains M-44/M-47. M-40 records the
+  content-store shape.
+- The validator requires the dispose description to name both events and the
+  no-content/already-tombstoned no-op, forbids the explicit delete's
+  404/409 vocabulary on the disposition conflicts, requires the disposition
+  reference on both content downloads, the metadata description, and
+  `DocumentContent.deletedAt`, and requires the disposed and content-deleted
+  channel descriptions. The full run passes 14,088 checks.
 
 ### Policy billing contract (2026-10-20)
 
@@ -2896,7 +2953,12 @@ missing directory.
    `DOCUMENT_NOT_ON_HOLD`, `RETENTION_DATE_REQUIRED`, `RETENTION_NOT_EXPIRED`,
    `DOCUMENT_ON_LEGAL_HOLD`, and `DISPOSAL_STATUS_NOT_ALLOWED`), the nullable
    `Document.holdReason`, `heldAt`, `statusBeforeHold`, and `disposedAt`
-   members, the absence of a request body on release and dispose, and the
+   members, the absence of a request body on release and dispose, the
+   disposition's automatic content-tombstone wording (`document.content.deleted`
+   beside `document.document.disposed`, plus the no-content and
+   already-tombstoned no-ops), the disposition reference on both content
+   downloads, the metadata and `deletedAt` descriptions, the disposed and
+   content-deleted channel descriptions, and the
    removal of the disposition, content, and version paths from
    `x-planned-operations`, the ten search
    operations' shared parameters and `SearchResponse`/400/404 responses, the
@@ -3176,12 +3238,12 @@ missing directory.
   `GET .../content/metadata`,
   and `GET .../content/versions` plus `GET .../content/versions/{version}`) with
   a 10 MiB cap, SHA-256 verification, the new
-  `document.content.uploaded` event, and the new standalone
+  `document.content.uploaded` event, and the new
   `document.content.deleted` tombstone. The tombstone clears the bytes of the
   current and every not-yet-deleted revision, answers 204, keeps the metadata
   with `deletedAt`/`deleted`, hides both downloads as 410 `CONTENT_DELETED`,
-  refuses a document under legal hold, and is not the SPEC 11.6.8 disposition
-  step. SPEC 11.6.10 mounts the history at
+  refuses a document under legal hold, and is also applied automatically by a
+  disposition that finds live content. SPEC 11.6.10 mounts the history at
   `/versions` and the version-creating command at `POST /versions`, while the
   implemented history is under `/content/versions` and the upload creates the
   revision; the slice has no presigned download, `Range` support, rendition,
@@ -3201,8 +3263,9 @@ missing directory.
   collection with scope, approval, and release by hold id, and SPEC 11.6.8
   requires an approved disposition job plus a certificate and content deletion;
   the implemented hold is per-document and synchronous, disposition is an
-  immediate tombstone with no certificate, and disposition does not invoke the
-  separate content tombstone. `statusBeforeHold` also admits
+  immediate tombstone with no certificate, and it applies the same content
+  tombstone when live content exists (a content-free or already-tombstoned
+  disposition emits only the disposed fact). `statusBeforeHold` also admits
   CLASSIFIED and SUPERSEDED, wider than the SPEC ACTIVE/ARCHIVED hold states
   (M-22, M-44, M-47);
 - claim assignment is implemented on both claim verticals but has no SPEC 11.4.10

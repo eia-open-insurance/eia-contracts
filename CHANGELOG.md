@@ -1494,6 +1494,37 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   SPEC-less type and refreshes the validation evidence.
 - `python scripts/validate_contracts.py` passes 14,069 checks with 0 failures.
 
+### Added in the Document disposition content tombstone contract (2026-10-22)
+
+- `openapi/document.yaml` is 1.7.0: `POST
+  /api/v1/documents/{documentId}/dispose` now tombstones live stored content in
+  the disposition transaction, clearing the current pointer and every
+  not-yet-tombstoned revision, recording `deletedAt`, and emitting
+  `document.content.deleted` with the explicit delete's payload in addition to
+  `document.document.disposed`. A document with no stored content or
+  already-tombstoned content disposes with only the disposed fact and never
+  answers `CONTENT_NOT_FOUND` or `CONTENT_ALREADY_DELETED`. The dispose,
+  download, metadata, and `deletedAt` descriptions record the shared tombstone;
+  `x-compatibility` moves to 1.7.0 over 1.6.0.
+- `asyncapi/document.yaml` is 1.7.0: the `document.document.disposed` and
+  `document.content.deleted` channels and send operations describe a disposition
+  that emits both facts when live content is tombstoned, and only the disposed
+  fact otherwise. No event name or payload changes.
+- `asyncapi/event-catalog.yaml` is 1.29.0: no event name is added; the
+  already-published `document.content.deleted` is now also emitted by a
+  disposition, so the totals stay 211 published and 91 implemented (Document 24
+  published and 10 implemented).
+- `scripts/validate_contracts.py` requires the disposition's automatic
+  content-tombstone wording, both event names, the no-content and
+  already-tombstoned no-ops, the disposition reference on both content downloads,
+  the metadata and `deletedAt` descriptions, and the disposed and
+  content-deleted channel descriptions.
+- `README.md` records the coupled semantics, the unchanged explicit delete and
+  response shape, the SPEC workflow gap, and the validation count;
+  `MISMATCHES.md` updates M-40, M-44, and M-47, the M-22 event table, and the
+  validation evidence.
+- `python scripts/validate_contracts.py` passes 14,088 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was
