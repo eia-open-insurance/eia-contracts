@@ -2224,6 +2224,72 @@ Command semantics:
   channel and its eight-member payload, the `IMPLEMENTED_EVENTS` entry, and the
   catalog entry. The full run passes 14,576 checks.
 
+### Policy billing adjustment (2026-10-22)
+
+Policy 2.16.0 adds the positive premium adjustment command. The change is
+additive: one public operation, one request schema, one result envelope, and one
+implemented event name; no existing path, field, or event name changes.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/policy.yaml` | 2.16.0 | Additive | `POST /api/v1/policies/{policyId}/billing/adjustment` with `BillingAdjustmentRequest` `{dueDate, reason}`, the derived positive-delta rule, the 201 `BillingAdjustmentResult` `{plan, installment, adjustmentAmount, newTotalPremium}` with `ETag`, the 400/404/409 responses, and the `policy.billing-plan.adjusted` fact. |
+| `asyncapi/policy.yaml` | 1.13.0 | Additive | The implemented `policy.billing-plan.adjusted` channel and `send` operation with the dedicated nine-member `PolicyBillingPlanAdjustedData` payload. |
+| `asyncapi/event-catalog.yaml` | 1.33.0 | Additive | `policy.billing-plan.adjusted` is published and implemented (217 published and 97 implemented in total; Policy 35 published and 23 implemented). |
+
+Command semantics:
+
+- The body is `{dueDate, reason}`. Both are required. `dueDate` must not
+  precede the policy effective date (the effective date itself is accepted);
+  `reason` is trimmed, non-blank, and capped at 500 characters. A missing,
+  blank, or over-long member is 400 `VALIDATION_ERROR`; a pre-inception date is
+  400 `INVALID_ADJUSTMENT_DUE_DATE`. The expert's service guard reports
+  `INVALID_ADJUSTMENT_REASON` for a reason that bypasses request validation.
+- The amount is derived, not supplied: `adjustmentAmount = policy premium -
+  (plan totalPremium - creditedAmount)`, where `creditedAmount` is the sum of
+  the credit notes already applied to the plan's installments and the plan's net
+  premium is floored at zero. Only a positive remainder is billable; zero or
+  negative is 400 `NO_PREMIUM_ADJUSTMENT` with `meta.delta`,
+  `meta.policyPremiumAmount`, `meta.planTotalPremium`, `meta.creditedAmount`,
+  and `meta.netPlanPremium`, and writes nothing. A premium decrease is a
+  credit-note concern.
+- The command requires an existing plan (404 `BILLING_PLAN_NOT_FOUND`), an
+  ACTIVE plan (409 `BILLING_PLAN_NOT_ACTIVE` with `meta.planId` and
+  `meta.currentStatus`), and fewer than 24 installments (409
+  `MAX_INSTALLMENTS_REACHED`). A concurrent plan change, including a racing
+  adjustment, is 409 `CONCURRENT_MODIFICATION` and rolls back the append.
+- The accepted command appends one DUE installment numbered
+  `plan.installmentCount + 1` at the requested `dueDate` for the derived amount,
+  grows the plan total by that amount and the plan count by one, bumps the policy
+  version, and writes `policy.billing-plan.adjusted` in the same transaction.
+- The 201 body is `{plan, installment, adjustmentAmount, newTotalPremium}` with
+  the new policy `ETag`. The `plan` member carries the updated flat plan identity
+  and totals but no schedule: `plan.installments` is empty and the derived
+  `plan.summary` is computed from that empty list, so `summary.installmentCount`
+  and `summary.outstandingAmount` are zero while `plan.installmentCount` and
+  `plan.totalPremium` are authoritative. The appended row travels separately as
+  `installment`.
+- `X-EIA-Tenant` is required and a supplied `X-EIA-Book` must be DIRECT; another
+  book is hidden as 404 `BOOK_SCOPE_VIOLATION`. An unknown or foreign policy is
+  404 `POLICY_NOT_FOUND`.
+- The optional `If-Match` and `Idempotency-Key` headers are validated by the
+  domain and forwarded to the expert. A malformed or blank tag is 400
+  `INVALID_IF_MATCH`; a blank key is treated as absent and an over-long key is
+  400 `INVALID_IDEMPOTENCY_KEY`. The expert neither compares the tag nor replays
+  the key in this slice, so a retry appends a second installment (M-06, M-07).
+- SPEC 11.2.10 names no billing-adjustment route and SPEC 11.2.13 names no
+  positive premium adjustment event. The route, the derived-delta rule, and the
+  new `policy.billing-plan.adjusted` name are recorded in M-22, M-27, and M-51.
+  The event payload requires `policyId`, `policyNumber`, `planId`,
+  `adjustmentAmount`, `newTotalPremium`, `installmentId`, `installmentNumber`,
+  `dueDate`, and `reason`, and keeps `eventVersion` 1.
+- The validator requires the operation with the shared tenant, optional DIRECT
+  book, `IfMatch`, and `IdempotencyKey` parameters, the required request body
+  and its field bounds, the 201 envelope and its `ETag`/`Idempotent-Replayed`
+  headers, the 400/404/409 responses and their codes, the transaction and event
+  wording, the absence of the path from `x-planned-operations`, the implemented
+  channel and its nine-member payload, the `IMPLEMENTED_EVENTS` entry, and the
+  catalog entry. The full run passes 14,694 checks.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -2257,7 +2323,7 @@ Every request carries a resolved tenant; no request body may override it.
 |---|---|---|
 | `X-EIA-Tenant` | All public routes and some internal routes | Required, UUID. Missing or malformed is a 400. |
 | `X-EIA-Book` | Direct Claims, Assumed Claims, Cession, Retrocession | Required and fixed to the vertical's book. A different book is hidden as 404 `BOOK_SCOPE_VIOLATION` in all four, so the response cannot confirm existence (SPEC 3.6.2, WALL-06). A missing header is still a 400 `BOOK_REQUIRED` in Cession and Retrocession; that is a validation error, not a book mismatch. |
-| `X-EIA-Book` | Policy billing and receivables | Optional for compatibility with the other Policy proxy routes, but a supplied value must be DIRECT; another book is hidden as 404 `BOOK_SCOPE_VIOLATION`. An absent header is accepted. The guard runs before the expert call. |
+| `X-EIA-Book` | Policy billing, billing adjustment, and receivables | Optional for compatibility with the other Policy proxy routes, but a supplied value must be DIRECT; another book is hidden as 404 `BOOK_SCOPE_VIOLATION`. An absent header is accepted. The guard runs before the expert call. |
 | `X-EIA-Book` | Policy installment dunning | Required and fixed to `DIRECT`. A missing header is a 400 and another book is hidden as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header, which M-38 records. |
 | `X-EIA-Book` | Policy renewal | Required and fixed to `DIRECT`. The contract makes a missing header a 400 and hides another book as 404 `BOOK_SCOPE_VIOLATION`; the domain currently accepts an absent header, which M-28 records. |
 | `X-EIA-Book` | Policy programs | Required and fixed to `DIRECT`. The contract makes a missing header a 400 and hides another book as 404 `BOOK_SCOPE_VIOLATION`; the domain and expert currently accept an absent header, which M-39 records. |
@@ -2688,6 +2754,7 @@ adapter, but that internal route is not part of the public contract.
 |---|---|---|---|
 | Read plan | `GET /api/v1/policies/{policyId}/billing` | 200 `BillingPlan` | 400, 404 |
 | Create plan | `POST /api/v1/policies/{policyId}/billing` | 201 `BillingPlan` | 400, 404, 409 |
+| Adjust plan | `POST /api/v1/policies/{policyId}/billing/adjustment` | 201 `BillingAdjustmentResult` | 400, 404, 409 |
 | Settle installment | `PATCH /api/v1/policies/{policyId}/billing/installments/{installmentId}` | 200 `Installment` | 400, 404, 409 |
 
 The plan projection is flat and uses the domain DTO names: `planId`,
@@ -2726,15 +2793,28 @@ Rules:
   `outstandingAmount`, and a full credit sets `CREDITED` with a zero
   outstanding amount. CREDITED rows are excluded from the receivables queue and
   reject dunning with 409 `INSTALLMENT_NOT_DUNNABLE`.
+- The adjustment command appends one DUE installment for the positive remainder
+  between the policy written premium and the plan's net premium (its total less
+  applied credits). The amount is derived, so the body is only
+  `{dueDate, reason}`; zero or negative is 400 `NO_PREMIUM_ADJUSTMENT`. An
+  absent plan is 404 `BILLING_PLAN_NOT_FOUND`, a non-ACTIVE plan is 409
+  `BILLING_PLAN_NOT_ACTIVE`, the 24-installment ceiling is 409
+  `MAX_INSTALLMENTS_REACHED`, and a concurrent plan change is 409
+  `CONCURRENT_MODIFICATION`. The 201 envelope is
+  `{plan, installment, adjustmentAmount, newTotalPremium}`; the plan member
+  omits the schedule (`installments` is empty and `summary` is derived from that
+  empty list), and the appended row is published separately as `installment`.
 - `X-EIA-Tenant` is required. `X-EIA-Book` is optional on the public routes for
   compatibility, but a supplied value must be DIRECT and any other book is
   hidden as 404 `BOOK_SCOPE_VIOLATION` (SPEC 3.6.2, WALL-06). The domain always
   sends DIRECT to the expert.
-- The plan create and each settlement bump the policy row version and write
-  `policy.billing-plan.created`, `policy.installment.paid`, or
-  `policy.installment.waived` in the same transaction. The billing commands do
-  not accept `Idempotency-Key` or `If-Match`; a repeated terminal settlement is
-  the retry-safe path (M-06, M-07).
+- The plan create, the adjustment, and each settlement bump the policy row
+  version and write `policy.billing-plan.created`,
+  `policy.billing-plan.adjusted`, `policy.installment.paid`, or
+  `policy.installment.waived` in the same transaction. `Idempotency-Key` and
+  `If-Match` are accepted and forwarded by the adjustment route but not
+  compared or replayed by the expert, so a retry appends a second installment;
+  the other billing commands do not accept them (M-06, M-07).
 - The SPEC 11.2.13 `/installments` route and `policy.billing.plan-created`
   event name differ from the implemented `/billing` route and
   `policy.billing-plan.created` name; the two installment facts have no SPEC
@@ -3306,7 +3386,19 @@ missing directory.
    pattern, the 201 `Policy` with the shared `ETag`, the 400/404/409/422/428
    responses with `NO_PREMIUM_CHANGE`, `PREMIUM_AUDIT_NOT_ALLOWED`, and
    `CONCURRENT_MODIFICATION`, the auditable-status, version-timeline,
-   same-transaction, and event wording, and agreement between
+   same-transaction, and event wording, the billing-adjustment POST with the
+   shared `TenantHeader`, optional DIRECT book, `IfMatch`, and
+   `IdempotencyKey` parameters, the required `BillingAdjustmentRequest`
+   `{dueDate, reason}` split and its field bounds, the 201
+   `BillingAdjustmentResult` `{plan, installment, adjustmentAmount,
+   newTotalPremium}` envelope with the shared `ETag` and
+   `Idempotent-Replayed` headers, the 400/404/409 responses with
+   `NO_PREMIUM_ADJUSTMENT`, `BILLING_PLAN_NOT_FOUND`,
+   `BILLING_PLAN_NOT_ACTIVE`, `MAX_INSTALLMENTS_REACHED`,
+   `INVALID_ADJUSTMENT_DUE_DATE`, and `INVALID_ADJUSTMENT_REASON`
+   documentation, the derived-delta, transaction, and event wording, and the
+   absence of the adjustment path from `x-planned-operations`, and agreement
+   between
    `info.version` and `x-compatibility.contractVersion`. It also requires the
    Notifications `NotificationType` member `DUNNING_NOTICE`, its position
    between `ESCHEATMENT_DUE` and `NEW_DOCUMENT_UPLOAD`, no repeated enum value,
@@ -3367,6 +3459,9 @@ missing directory.
    enum, nullable-link, changed-fields, and policy/money members, the
    `PolicyPremiumAuditedData` payload with its policy identity, previous and
    audited premium, signed delta, currency, effective date, and reason members,
+   the `PolicyBillingPlanAdjustedData` payload with its policy and plan
+   identity, derived adjustment amount, resulting gross plan total, appended
+   installment identity, number, and due date, and trimmed reason members,
    and the
    `NotificationTemplateData` payload with its template identity, code,
    template version, locale, status, and nullable approver members for the
@@ -3387,7 +3482,8 @@ missing directory.
    `document.document.disposed`,
    `policy.policy.renewed`,
    `policy.policy.premium-audited`,
-   `policy.billing-plan.created`, `policy.installment.paid`,
+   `policy.billing-plan.created`, `policy.billing-plan.adjusted`,
+   `policy.installment.paid`,
    `policy.installment.waived`, `policy.dunning.sent`,
    `policy.mass-tort-profile.updated`,
    `payment.allocation.created`,

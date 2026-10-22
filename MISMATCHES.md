@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-22 (Policy premium audit).
+Status: open, reviewed 2026-10-22 (Policy billing adjustment).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -135,6 +135,11 @@ where the running code does not meet it yet.
   premium-audit controller, service, rules, request, `VersionTimeline`,
   `PolicyEvents`, `schema.sql` endorsement-type migration, and the domain and
   expert controller, service, and integration tests.
+  The Policy billing-adjustment pass reads the domain billing controller,
+  service, `BillingAdjustmentCommand`, `BillingAdjustmentResult`, book scope,
+  `PolicyClient`, and tests plus the expert billing controller, adjustment
+  request and view, service, rules, repository, event factory, `schema.sql`,
+  and tests.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -210,6 +215,7 @@ removed per the resolution policy.
 | M-48 | Notifications adds a SPEC-less `DUNNING_NOTICE` type to the closed `NotificationType` enum | L |
 | M-49 | Notification template administration uses a short path, approve/retire commands, and SPEC-less events | L |
 | M-50 | Policy premium audit is a SPEC-less route/event that re-rates the policy premium without the SPEC `policy_premium_audit` worksheet or batch job | L |
+| M-51 | Policy billing adjustment is a SPEC-less derived-delta route and event and does not honour the optional concurrency/idempotency headers | L |
 
 ## M-01 Public base paths
 
@@ -1045,7 +1051,7 @@ tables. The differences are:
 | Vertical | Implemented | SPEC /
 planned name |
 |---|---|---|
-| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created`; `policy.installment.paid` / `.waived`; `policy.dunning.sent`; `policy.program.created` / `policy.policy.program-assigned`; `policy.credit-note.created` / `.issued` / `.applied` / `.cancelled` / `.reversed`; `policy.legal-entity.created` / `policy.policy.legal-entity-assigned`; `policy.policy.premium-audited` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name; the dunning fact differs from SPEC 11.2.13 `policy.billing.dunning-changed`; the two program facts have no SPEC name because SPEC defines no program create or policy-assignment event. SPEC 11.2.13 publishes only `policy.billing.credit-note-issued` and defines no created, applied, cancelled, or reversed fact, so all five credit-note names are new (M-41). The two legal-entity facts are new because SPEC 10.11.2/11.2.16 define the model and link but SPEC 11.2.9 names no catalog-create or assignment event (M-43). The premium-audit fact differs from SPEC 11.2.9 `policy.premium.audited`, which remains planned (M-50). `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
+| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created` / `.adjusted`; `policy.installment.paid` / `.waived`; `policy.dunning.sent`; `policy.program.created` / `policy.policy.program-assigned`; `policy.credit-note.created` / `.issued` / `.applied` / `.cancelled` / `.reversed`; `policy.legal-entity.created` / `policy.policy.legal-entity-assigned`; `policy.policy.premium-audited` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name; the positive premium adjustment fact has no SPEC 11.2.13 name either (M-51); the dunning fact differs from SPEC 11.2.13 `policy.billing.dunning-changed`; the two program facts have no SPEC name because SPEC defines no program create or policy-assignment event. SPEC 11.2.13 publishes only `policy.billing.credit-note-issued` and defines no created, applied, cancelled, or reversed fact, so all five credit-note names are new (M-41). The two legal-entity facts are new because SPEC 10.11.2/11.2.16 define the model and link but SPEC 11.2.9 names no catalog-create or assignment event (M-43). The premium-audit fact differs from SPEC 11.2.9 `policy.premium.audited`, which remains planned (M-50). `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
 | Contract | `contract.contract.updated`; `contract.technical-account.created` / `.issued` / `.settled`; `contract.bordereau.processed` / `.failed`; `contract.security.status-changed` | No SPEC name for updated, the technical-account facts, the two terminal bordereau facts, or the security status fact: SPEC 11.3.9 lists lifecycle verbs, the contract-level `contract.account.issued` / `.agreed` facts, `contract.bordereau.posted` / `.rejected`, and only the `contract.security.recorded` / `.breached` security facts. `created`, `bound`, `commuted`, `cession.recorded`, `contract.bordereau.received`, and `contract.security.recorded` match SPEC. |
 | Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned`; `direct.claim.allocation-created`; `direct.claim.settlement-payment-linked` | No SPEC names: SPEC 11.4.9 defines no assignment, task, note, allocation-created, or settlement-payment-link event; it names the allocation fact `direct.claim.allocated`, which remains planned, and models the settlement `payment_id` only as a Payment projection (M-45). `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and `closed` match SPEC. |
 | Assumed Claims | `assumed.claim.updated`; `assumed.claim.assigned`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no assignment, task, or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
@@ -1399,11 +1405,13 @@ per-installment dunning history:
 |---|---|---|
 | Read plan | `GET /api/v1/policies/{policyId}/billing` | `GET /api/v1/policy/.../installments` |
 | Create plan | `POST /api/v1/policies/{policyId}/billing` | `POST /api/v1/policy/.../installments` |
+| Adjust plan | `POST /api/v1/policies/{policyId}/billing/adjustment` | No API row; a premium change is a credit note or additional invoice (BIL-05) |
 | Settle installment | `PATCH /api/v1/policies/{policyId}/billing/installments/{installmentId}` | No API row; billing instructions carry the status |
 | Receivable queue | `GET /api/v1/billing/installments` (tenant-wide, outside `/api/v1/policies`) | No API row; SPEC 11.2.13 defines the per-policy plan, not a cross-policy receivable read |
 | Dunning | `GET/POST /api/v1/billing/installments/{installmentId}/dunning` (per installment, outside `/api/v1/policies`) | No public API row; the only dunning command is the internal `POST /internal/v1/policies/{id}/dunning-status` |
 | Plan event | `policy.billing-plan.created` | `policy.billing.plan-created` |
 | Installment events | `policy.installment.paid`, `policy.installment.waived` | No SPEC name |
+| Adjustment event | `policy.billing-plan.adjusted` | No SPEC name |
 | Dunning event | `policy.dunning.sent` | `policy.billing.dunning-changed` |
 | Plan status | `ACTIVE`, `COMPLETE`, `CANCELLED` | `DRAFT`, `ACTIVE`, `SUPERSEDED`, `CANCELLED` |
 | Installment status | `DUE`, `OVERDUE`, `PAID`, `WAIVED`, `CREDITED` | Billing-instruction status values |
@@ -1422,6 +1430,20 @@ billing routes accept an absent `X-EIA-Book` for compatibility with the other
 Policy proxy routes, while a supplied value must be DIRECT and another book is
 hidden as 404 `BOOK_SCOPE_VIOLATION`. The domain always sends DIRECT to the
 expert.
+
+The positive premium adjustment appends an installment for the remaining gap
+between the policy written premium and the plan's net premium (its total less
+applied credits, floored at zero). The amount is derived, so the command body is
+only `{dueDate, reason}`; a non-positive remainder is 400
+`NO_PREMIUM_ADJUSTMENT`, a missing plan is 404 `BILLING_PLAN_NOT_FOUND`, a
+non-ACTIVE plan and the 24-installment ceiling are 409
+`BILLING_PLAN_NOT_ACTIVE`/`MAX_INSTALLMENTS_REACHED`, and a concurrent plan
+change is 409 `CONCURRENT_MODIFICATION`. The domain accepts the optional
+`If-Match` and `Idempotency-Key` headers and forwards them, but the expert does
+not compare the tag or replay the key, so a retry appends a second installment.
+The 201 `plan` member omits the schedule, so its derived `summary` is computed
+from an empty list. The route, derived-delta rule, and event name are recorded
+in M-51.
 
 The receivable queue is a separate read over the same installment plan. It has
 no `policyId`, so it is mounted at `/api/v1/billing/installments`, outside
@@ -1476,6 +1498,13 @@ Evidence:
 - `repos/eia-policy-expert/.../CreditNoteRules.java:104-158`,
   `CreditNoteService.java:97-154`, and `BillingRepository.java:232-270`
   (installment credit application, CREDITED transition, conditional update).
+- `repos/eia-policy-domain/.../BillingAdjustmentCommand.java`,
+  `BillingAdjustmentResult.java`, and `PolicyBillingService.java:32-44`
+  (derived-delta command and optional header forwarding).
+- `repos/eia-policy-expert/.../BillingRules.java:76-174`,
+  `BillingService.java:151-211`, `BillingRepository.java:124-164`, and
+  `PolicyEvents.java:100-125` (ACTIVE and 24-installment gates, delta, plan
+  update, appended installment, and adjusted event).
 - `repos/eia-policy-expert/src/main/resources/schema.sql:388-435,503-537`
   (plan and installment status checks, `credited_amount` and its
   non-negative/bounded check).
@@ -1492,7 +1521,8 @@ targets an installment that is not a SPEC billing entity and defines a
 CREDITED terminal state the SPEC does not name; it is the part of the credit
 note slice that most closely follows BIL-06, because the persisted credited
 total can never exceed the gross amount and the net outstanding amount can
-never go negative.
+never go negative. The positive premium adjustment route, derived-delta rule,
+and event name are recorded in M-51.
 
 ## M-28 Policy renewal creates a successor instead of transitioning the source
 
@@ -3378,10 +3408,79 @@ dual-publish window; publishing both is additive. Adding the approval gate for
 a material in-term premium movement is a behaviour change and needs its own
 contract version.
 
+## M-51 Policy billing adjustment is a SPEC-less derived-delta route and event
+
+SPEC 11.2.13 defines the installment plan as the billing surface, and BIL-05
+requires a premium change to be a credit note or an additional invoice; it names
+no positive premium adjustment command and no adjustment event. The 2026-10-22
+slice implements the command on the billing resource:
+
+| Aspect | Implemented | SPEC / gap |
+|---|---|---|
+| Route | `POST /api/v1/policies/{policyId}/billing/adjustment` (and the expert's `/internal/v1` alias) | No SPEC 11.2.10 or 11.2.13 adjustment row (M-01, M-27) |
+| Body | `{dueDate, reason}` | No SPEC command; BIL-05 describes the ledger outcome, not an installment append |
+| Amount | Derived, not supplied: policy written premium less the plan's net premium (total less applied credits, floored at zero). A non-positive remainder is 400 `NO_PREMIUM_ADJUSTMENT` with `meta.delta`, `meta.policyPremiumAmount`, `meta.planTotalPremium`, `meta.creditedAmount`, and `meta.netPlanPremium` | No SPEC formula; BIL-02 requires installments to sum to premium and BIL-06 defines the outstanding rule |
+| Gates | Existing ACTIVE plan below the 24-installment ceiling. Missing plan 404 `BILLING_PLAN_NOT_FOUND`, non-ACTIVE 409 `BILLING_PLAN_NOT_ACTIVE`, full schedule 409 `MAX_INSTALLMENTS_REACHED` | No SPEC plan-status or installment-count gate |
+| Due date and reason | `dueDate` required and not before the policy effective date (the effective date itself is accepted); `reason` required, trimmed, 1-500 characters | No SPEC fields |
+| Concurrency | Optional `If-Match` and `Idempotency-Key` are validated by the domain and forwarded, but the expert neither compares the tag nor replays the key, so a retry appends a second installment | SPEC 7.6/12.6 require the headers on mutations |
+| Effect | Appends one DUE installment at `plan.installmentCount + 1`, grows the gross plan total by the adjustment amount and the count by one, bumps the policy version, and writes the event in one transaction | BIL-05 says the original SAP invoice is never edited; the implemented plan total is a platform projection, not a SAP invoice |
+| Event | `policy.billing-plan.adjusted`, payload `{policyId, policyNumber, planId, adjustmentAmount, newTotalPremium, installmentId, installmentNumber, dueDate, reason}`, emitted in the same transaction | No SPEC 11.2.13 name (M-22) |
+| Version | `openapi/policy.yaml` 2.16.0, `asyncapi/policy.yaml` 1.13.0, `asyncapi/event-catalog.yaml` 1.33.0 (additive) | no SPEC version has this command |
+
+Consequences:
+
+- A positive premium movement is billed by appending an installment, while a
+  negative movement remains a credit note. SPEC BIL-05 frames both directions as
+  a credit note or additional invoice, so a client cannot infer the adjustment
+  from the SPEC alone.
+- The command bills only the gap between the policy premium and the plan's net
+  premium, so it is not a generic "add installment" API: applying credits first
+  shrinks the derived amount, and a fully credited plan causes the whole policy
+  premium to be billed again on a gross plan total that exceeds the written
+  premium (the net total still matches).
+- Because the expert does not honour `If-Match` or `Idempotency-Key`, a retry
+  appends a duplicate installment. The command must be treated as
+  non-idempotent until M-06 and M-07 are closed for it.
+- The 201 `plan` member intentionally omits the schedule; its `summary` is
+  derived from an empty list, so `summary.installmentCount` and
+  `summary.outstandingAmount` are zero. `plan.installmentCount`,
+  `plan.totalPremium`, `adjustmentAmount`, and `newTotalPremium` are the
+  authoritative totals, and a full schedule requires
+  `GET /api/v1/policies/{policyId}/billing`.
+
+Evidence:
+
+- `repos/eia-policy-domain/.../PolicyBillingController.java:68-87` (public
+  path, tenant/book headers, optional `If-Match`/`Idempotency-Key`, 201/200
+  publication and `ETag`), `PolicyBillingService.java:32-44` (header
+  validation and forwarding), `BillingAdjustmentCommand.java`,
+  `BillingAdjustmentResult.java`, and `PolicyClient.java:460-495` and
+  `:988-1009` (`/internal/v1` call and envelope projection).
+- `repos/eia-policy-expert/.../BillingController.java:48-59` (POST
+  `/adjustment`), `BillingService.java:151-211` (delta, plan update, appended
+  installment, rollback, event), `BillingRules.java:76-174` (ACTIVE,
+  24-installment, due-date, reason, and non-positive-delta rules),
+  `BillingRepository.java:124-164` (conditional plan update and credited
+  total), `BillingAdjustmentRequest.java`, `BillingAdjustmentView.java`, and
+  `PolicyEvents.java:100-125` (adjusted payload).
+- Tests: `PolicyBillingControllerTest`, `PolicyBillingAdjustmentServiceTest`,
+  and `PolicyBillingAdjustmentClientTest` in the domain;
+  `BillingAdjustmentServiceTest` and `BillingRulesTest` in the expert.
+- `openapi/policy.yaml` 2.16.0, `asyncapi/policy.yaml` 1.13.0, and
+  `asyncapi/event-catalog.yaml` 1.33.0 record the implemented shape.
+
+Resolution: the positive adjustment command is canonical for now. Closing the
+gap means deciding whether SPEC BIL-05 should recognize an installment append
+for a positive premium movement, defining a SPEC event name (EV-05 dual publish
+if the implemented name stays), and honouring `If-Match` and replaying
+`Idempotency-Key` in the expert. The derived-delta rule and the 24-installment
+ceiling are implementation choices with no SPEC counterpart; changing either is
+a behaviour change and needs its own contract version.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-22
-Policy premium-audit contract:
+Policy billing-adjustment contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -3391,7 +3490,7 @@ python: 3.12.8 (standard library only)
 
 OpenAPI 3.1 documents
   OK openapi/party.yaml  5 paths, 7 operations
-  OK openapi/policy.yaml  52 paths, 68 operations
+  OK openapi/policy.yaml  53 paths, 69 operations
   OK openapi/contract.yaml  43 paths, 62 operations
   OK openapi/direct-claims.yaml  51 paths, 74 operations
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
@@ -3403,7 +3502,7 @@ OpenAPI 3.1 documents
 
 AsyncAPI 3 documents
   OK asyncapi/party.yaml  9 event channels
-  OK asyncapi/policy.yaml  34 event channels
+  OK asyncapi/policy.yaml  35 event channels
   OK asyncapi/contract.yaml  32 event channels
   OK asyncapi/direct-claims.yaml  27 event channels
   OK asyncapi/assumed-claims.yaml  21 event channels
@@ -3412,7 +3511,7 @@ AsyncAPI 3 documents
   OK asyncapi/document.yaml  24 event channels
   OK asyncapi/payment.yaml  20 event channels
   OK asyncapi/notifications.yaml  15 event channels
-  OK catalog: 216 unique published events across 10 verticals
+  OK catalog: 217 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -3420,7 +3519,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 14576 checks, 0 failures
+  PASS 14694 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -3709,7 +3808,14 @@ Additional checks and limits:
   each fail with the specific missing-operation, required-list,
   implemented-channel, or implemented-event message. All four were run on a
   throwaway copy and exited non-zero (exit 1); the working copy was left
-  unchanged.
+  unchanged. The Policy billing-adjustment pass added four more: renaming the
+  `/api/v1/policies/{policyId}/billing/adjustment` path, removing `reason` from
+  `BillingAdjustmentRequest.required`, dropping `NO_PREMIUM_ADJUSTMENT` from the
+  operation description, and dropping `policy.billing-plan.adjusted` from the
+  Policy catalog `implemented` list each fail with the specific
+  missing-operation, required-list, missing-code, or implemented-event message.
+  All four were run on a throwaway copy and exited non-zero (exit 1); the working
+  copy was left unchanged.
 
 ## Resolution policy
 

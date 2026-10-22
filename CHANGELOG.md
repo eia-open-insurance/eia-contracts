@@ -1661,6 +1661,42 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   validation evidence.
 - `python scripts/validate_contracts.py` passes 14,576 checks with 0 failures.
 
+### Added in the Policy billing-adjustment contract (2026-10-22)
+
+- `openapi/policy.yaml` is 2.16.0: adds
+  `POST /api/v1/policies/{policyId}/billing/adjustment` with the required
+  `BillingAdjustmentRequest` `{dueDate, reason}`, the derived positive-delta rule
+  (`policy premium - (plan total - applied credits)`), the 201
+  `BillingAdjustmentResult` `{plan, installment, adjustmentAmount,
+  newTotalPremium}` with the shared `ETag` and `Idempotent-Replayed` headers, the
+  400 `NO_PREMIUM_ADJUSTMENT`/`INVALID_ADJUSTMENT_DUE_DATE`/
+  `INVALID_ADJUSTMENT_REASON`, 404 `BILLING_PLAN_NOT_FOUND`/`POLICY_NOT_FOUND`,
+  and 409 `BILLING_PLAN_NOT_ACTIVE`/`MAX_INSTALLMENTS_REACHED`/
+  `CONCURRENT_MODIFICATION` responses, and the `policy.billing-plan.adjusted`
+  fact. `x-compatibility` moves to 2.16.0 over 2.15.0.
+- `asyncapi/policy.yaml` is 1.13.0: the implemented
+  `policy.billing-plan.adjusted` channel and `send` operation with the
+  nine-member `PolicyBillingPlanAdjustedData` payload (`policyId`,
+  `policyNumber`, `planId`, `adjustmentAmount`, `newTotalPremium`,
+  `installmentId`, `installmentNumber`, `dueDate`, `reason`). The aggregate is
+  the policy at the bumped version and `eventVersion` stays 1.
+- `asyncapi/event-catalog.yaml` is 1.33.0: `policy.billing-plan.adjusted` is
+  published and implemented, for 217 published and 97 implemented names (Policy
+  35 published and 23 implemented).
+- `scripts/validate_contracts.py` requires the adjustment operation with the
+  shared tenant, optional DIRECT book, `IfMatch`, and `IdempotencyKey`
+  parameters, the required request body and its field bounds, the 201 envelope
+  and its `ETag`/`Idempotent-Replayed` headers, the 400/404/409 responses with
+  their codes, the derived-delta, transactional, and event wording, the absence
+  of the path from `x-planned-operations`, the implemented channel and its
+  nine-member payload, and the catalog entry.
+- `README.md` records the additive version, the derived positive-delta rule, the
+  ACTIVE and 24-installment gates, the envelope and its schedule-less plan, the
+  optional but unhonoured concurrency/idempotency headers, the SPEC-less route
+  and event name, and the validation count; `MISMATCHES.md` adds M-51, updates
+  M-22 and M-27, and refreshes the validation evidence.
+- `python scripts/validate_contracts.py` passes 14,694 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

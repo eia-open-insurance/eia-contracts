@@ -1024,6 +1024,12 @@ BILLING_OPENAPI_PATHS = [
         "Installment",
         "UpdateInstallmentRequest",
     ),
+    (
+        "post",
+        "/api/v1/policies/{policyId}/billing/adjustment",
+        "BillingAdjustmentResult",
+        "BillingAdjustmentRequest",
+    ),
 ]
 
 BILLING_PLAN_FIELDS = (
@@ -1097,14 +1103,54 @@ BILLING_SETTLE_STATUSES = ("PAID", "WAIVED")
 BILLING_MIN_INSTALLMENTS = 1
 BILLING_MAX_INSTALLMENTS = 24
 
-# The three billing event names implemented by the Policy expert. The plan
-# name differs from the SPEC 11.2.13 `policy.billing.plan-created` spelling and
-# the installment facts have no SPEC name; MISMATCHES.md M-22 and M-27 record
-# the deviation.
+# The four billing event names implemented by the Policy expert. The plan
+# name differs from the SPEC 11.2.13 `policy.billing.plan-created` spelling, the
+# installment facts have no SPEC name, and the positive premium adjustment fact
+# has no SPEC 11.2.13 name either; MISMATCHES.md M-22, M-27, and M-51 record the
+# deviations.
 POLICY_BILLING_EVENTS = (
     "policy.billing-plan.created",
+    "policy.billing-plan.adjusted",
     "policy.installment.paid",
     "policy.installment.waived",
+)
+
+# Positive premium billing adjustment (SPEC 11.2.13). The amount is derived
+# from the policy written premium less the plan's net premium, so a zero or
+# negative remainder is a 400. The plan must exist, be ACTIVE, and be below the
+# 24-installment ceiling. The domain accepts the optional If-Match and
+# Idempotency-Key headers and forwards them, but the expert does not compare or
+# replay them in this slice (M-06, M-07).
+BILLING_ADJUSTMENT_PATH = "/api/v1/policies/{policyId}/billing/adjustment"
+BILLING_ADJUSTMENT_REQUEST = "BillingAdjustmentRequest"
+BILLING_ADJUSTMENT_RESULT = "BillingAdjustmentResult"
+BILLING_ADJUSTMENT_REQUEST_FIELDS = ("dueDate", "reason")
+BILLING_ADJUSTMENT_RESULT_FIELDS = (
+    "plan",
+    "installment",
+    "adjustmentAmount",
+    "newTotalPremium",
+)
+BILLING_ADJUSTMENT_REASON_MAX_LENGTH = 500
+BILLING_ADJUSTMENT_EVENT = "policy.billing-plan.adjusted"
+BILLING_ADJUSTMENT_EVENT_MESSAGE = "PolicyBillingPlanAdjustedData"
+BILLING_ADJUSTMENT_EVENT_FIELDS = (
+    "policyId",
+    "policyNumber",
+    "planId",
+    "adjustmentAmount",
+    "newTotalPremium",
+    "installmentId",
+    "installmentNumber",
+    "dueDate",
+    "reason",
+)
+BILLING_ADJUSTMENT_CODES = (
+    "NO_PREMIUM_ADJUSTMENT",
+    "BILLING_PLAN_NOT_FOUND",
+    "BILLING_PLAN_NOT_ACTIVE",
+    "MAX_INSTALLMENTS_REACHED",
+    "CONCURRENT_MODIFICATION",
 )
 
 
@@ -1679,6 +1725,7 @@ IMPLEMENTED_EVENTS = {
         "policy.policy.renewed",
         "policy.policy.premium-audited",
         "policy.billing-plan.created",
+        "policy.billing-plan.adjusted",
         "policy.installment.paid",
         "policy.installment.waived",
         "policy.dunning.sent",
@@ -5536,6 +5583,153 @@ def check_policy_billing_openapi(contracts: ContractSet, document, relative: str
         f"{relative}: UpdateInstallmentRequest.paymentId must be a nullable uuid",
     )
 
+    check_policy_billing_adjustment_openapi(contracts, document, relative)
+
+
+def check_policy_billing_adjustment_openapi(
+    contracts: ContractSet, document, relative: str
+):
+    """Require the positive premium adjustment operation, schemas, and errors."""
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    path_item = paths.get(BILLING_ADJUSTMENT_PATH) if isinstance(paths, dict) else None
+    operation = path_item.get("post") if isinstance(path_item, dict) else None
+    where = f"{relative}: POST {BILLING_ADJUSTMENT_PATH}"
+    contracts.check(
+        isinstance(operation, dict),
+        f"{where}: required billing-adjustment operation is missing",
+    )
+    if not isinstance(operation, dict):
+        return
+
+    parameter_refs, inline_names = _parameter_names(operation)
+    for parameter in (
+        "TenantHeader",
+        "BookHeaderDirectOptional",
+        "IfMatch",
+        "IdempotencyKey",
+    ):
+        contracts.check(
+            parameter in parameter_refs,
+            f"{where}: must document the shared {parameter} parameter",
+        )
+    contracts.check(
+        "policyId" in inline_names,
+        f"{where}: must declare the policyId path parameter",
+    )
+
+    created = (operation.get("responses") or {}).get("201")
+    created_headers = created.get("headers") if isinstance(created, dict) else None
+    for header, reference in (
+        ("ETag", "ETag"),
+        ("Idempotent-Replayed", "IdempotentReplayed"),
+    ):
+        entry = created_headers.get(header) if isinstance(created_headers, dict) else None
+        contracts.check(
+            isinstance(entry, dict)
+            and str(entry.get("$ref", "")).endswith(f"/headers/{reference}"),
+            f"{where}: 201 must declare the shared {header} header",
+        )
+
+    description = str(operation.get("description") or "")
+    for term in (
+        "adjustmentAmount",
+        "newTotalPremium",
+        "creditedAmount",
+        *BILLING_ADJUSTMENT_CODES,
+        "INVALID_ADJUSTMENT_DUE_DATE",
+        "INVALID_ADJUSTMENT_REASON",
+        BILLING_ADJUSTMENT_EVENT,
+        "same transaction",
+        "ETag",
+    ):
+        contracts.check(
+            term in description,
+            f"{where}: description must document {term}",
+        )
+
+    planned_operations = document.get("x-planned-operations") or []
+    planned_pairs = {
+        (str(entry.get("method", "")).lower(), entry.get("path"))
+        for entry in planned_operations
+        if isinstance(entry, dict)
+    }
+    contracts.check(
+        ("post", BILLING_ADJUSTMENT_PATH) not in planned_pairs,
+        f"{relative}: implemented billing-adjustment operation must not reappear "
+        "under x-planned-operations",
+    )
+
+    request = schemas.get(BILLING_ADJUSTMENT_REQUEST) or {}
+    request_properties = request.get("properties") or {}
+    request_required = set(request.get("required") or [])
+    contracts.check(
+        isinstance(request, dict) and request.get("type") == "object",
+        f"{relative}: {BILLING_ADJUSTMENT_REQUEST} must be an object schema",
+    )
+    contracts.check(
+        request_required == set(BILLING_ADJUSTMENT_REQUEST_FIELDS),
+        f"{relative}: {BILLING_ADJUSTMENT_REQUEST} must require exactly "
+        f"{list(BILLING_ADJUSTMENT_REQUEST_FIELDS)}",
+    )
+    for field in BILLING_ADJUSTMENT_REQUEST_FIELDS:
+        contracts.check(
+            field in request_properties,
+            f"{relative}: {BILLING_ADJUSTMENT_REQUEST}.properties.{field} is "
+            "required",
+        )
+    contracts.check(
+        (request_properties.get("dueDate") or {}).get("format") == "date",
+        f"{relative}: {BILLING_ADJUSTMENT_REQUEST}.dueDate must be a date",
+    )
+    reason = request_properties.get("reason") or {}
+    contracts.check(
+        reason.get("type") == "string"
+        and reason.get("minLength") == 1
+        and reason.get("maxLength") == BILLING_ADJUSTMENT_REASON_MAX_LENGTH,
+        f"{relative}: {BILLING_ADJUSTMENT_REQUEST}.reason must be a non-blank "
+        f"string of at most {BILLING_ADJUSTMENT_REASON_MAX_LENGTH} characters",
+    )
+
+    result = schemas.get(BILLING_ADJUSTMENT_RESULT) or {}
+    result_properties = result.get("properties") or {}
+    result_required = set(result.get("required") or [])
+    contracts.check(
+        isinstance(result, dict) and result.get("type") == "object",
+        f"{relative}: {BILLING_ADJUSTMENT_RESULT} must be an object schema",
+    )
+    contracts.check(
+        result_required == set(BILLING_ADJUSTMENT_RESULT_FIELDS),
+        f"{relative}: {BILLING_ADJUSTMENT_RESULT} must require exactly "
+        f"{list(BILLING_ADJUSTMENT_RESULT_FIELDS)}",
+    )
+    for field in BILLING_ADJUSTMENT_RESULT_FIELDS:
+        contracts.check(
+            field in result_properties,
+            f"{relative}: {BILLING_ADJUSTMENT_RESULT}.properties.{field} is "
+            "required",
+        )
+    for field, schema_name in (
+        ("plan", "BillingPlan"),
+        ("installment", "Installment"),
+    ):
+        contracts.check(
+            str((result_properties.get(field) or {}).get("$ref", "")).endswith(
+                f"/schemas/{schema_name}"
+            ),
+            f"{relative}: {BILLING_ADJUSTMENT_RESULT}.{field} must reference "
+            f"{schema_name}",
+        )
+    for field in ("adjustmentAmount", "newTotalPremium"):
+        contracts.check(
+            str((result_properties.get(field) or {}).get("$ref", "")).endswith(
+                "/schemas/MoneyAmount"
+            ),
+            f"{relative}: {BILLING_ADJUSTMENT_RESULT}.{field} must reference "
+            "MoneyAmount",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Policy premium-receivables checks
@@ -8528,6 +8722,112 @@ def check_policy_premium_audit_asyncapi(contracts: ContractSet, document, relati
         == POLICY_PREMIUM_AUDIT_REASON_MAX_LENGTH,
         f"{relative}: {POLICY_PREMIUM_AUDIT_EVENT_MESSAGE}.reason must be at most "
         f"{POLICY_PREMIUM_AUDIT_REASON_MAX_LENGTH} characters",
+    )
+
+
+def check_policy_billing_adjustment_asyncapi(
+    contracts: ContractSet, document, relative: str
+):
+    """Require the implemented positive-adjustment channel and nine-member payload."""
+    channels = document.get("channels") or {}
+    operations = document.get("operations") or {}
+    messages = (document.get("components") or {}).get("messages") or {}
+    send_events = {
+        operation.get("x-event-type")
+        for operation in operations.values()
+        if isinstance(operation, dict) and operation.get("action") == "send"
+    }
+
+    channel = next(
+        (
+            candidate
+            for candidate in channels.values()
+            if isinstance(candidate, dict)
+            and candidate.get("address") == BILLING_ADJUSTMENT_EVENT
+        ),
+        None,
+    )
+    contracts.check(
+        isinstance(channel, dict),
+        f"{relative}: required billing-adjustment channel "
+        f"'{BILLING_ADJUSTMENT_EVENT}' is missing",
+    )
+    if not isinstance(channel, dict):
+        return
+    contracts.check(
+        channel.get("x-status") == "implemented",
+        f"{relative}: {BILLING_ADJUSTMENT_EVENT} channel must be implemented",
+    )
+    contracts.check(
+        channel.get("x-event-version") == 1,
+        f"{relative}: {BILLING_ADJUSTMENT_EVENT} channel must stay at "
+        "x-event-version 1",
+    )
+    contracts.check(
+        str(channel.get("x-implemented-by", "")).endswith("PolicyEvents.java"),
+        f"{relative}: {BILLING_ADJUSTMENT_EVENT} must name PolicyEvents.java in "
+        "x-implemented-by",
+    )
+    contracts.check(
+        BILLING_ADJUSTMENT_EVENT in send_events,
+        f"{relative}: {BILLING_ADJUSTMENT_EVENT} must have a send operation",
+    )
+    channel_messages = channel.get("messages") or {}
+    contracts.check(
+        (
+            channel_messages.get(BILLING_ADJUSTMENT_EVENT_MESSAGE) or {}
+        ).get("$ref")
+        == f"#/components/messages/{BILLING_ADJUSTMENT_EVENT_MESSAGE}",
+        f"{relative}: {BILLING_ADJUSTMENT_EVENT} must reference "
+        f"{BILLING_ADJUSTMENT_EVENT_MESSAGE}",
+    )
+
+    message = messages.get(BILLING_ADJUSTMENT_EVENT_MESSAGE) or {}
+    payload = message.get("payload") or {}
+    properties = payload.get("properties") or {}
+    required = set(payload.get("required") or [])
+    contracts.check(
+        required == set(BILLING_ADJUSTMENT_EVENT_FIELDS),
+        f"{relative}: {BILLING_ADJUSTMENT_EVENT_MESSAGE} must require exactly "
+        f"{list(BILLING_ADJUSTMENT_EVENT_FIELDS)}",
+    )
+    for field in BILLING_ADJUSTMENT_EVENT_FIELDS:
+        contracts.check(
+            field in properties,
+            f"{relative}: {BILLING_ADJUSTMENT_EVENT_MESSAGE}.properties.{field} "
+            "is required",
+        )
+    for field in ("policyId", "planId", "installmentId"):
+        contracts.check(
+            (properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: {BILLING_ADJUSTMENT_EVENT_MESSAGE}.{field} must be a uuid",
+        )
+    for field in ("adjustmentAmount", "newTotalPremium"):
+        contracts.check(
+            (properties.get(field) or {}).get("type") == "string",
+            f"{relative}: {BILLING_ADJUSTMENT_EVENT_MESSAGE}.{field} must be a "
+            "decimal string",
+        )
+    installment_number = properties.get("installmentNumber") or {}
+    contracts.check(
+        (
+            installment_number.get("type"),
+            installment_number.get("minimum"),
+        )
+        == ("integer", 1),
+        f"{relative}: {BILLING_ADJUSTMENT_EVENT_MESSAGE}.installmentNumber must "
+        "be an integer >= 1",
+    )
+    contracts.check(
+        (properties.get("dueDate") or {}).get("format") == "date",
+        f"{relative}: {BILLING_ADJUSTMENT_EVENT_MESSAGE}.dueDate must be a date",
+    )
+    reason = properties.get("reason") or {}
+    contracts.check(
+        reason.get("type") == "string"
+        and reason.get("maxLength") == BILLING_ADJUSTMENT_REASON_MAX_LENGTH,
+        f"{relative}: {BILLING_ADJUSTMENT_EVENT_MESSAGE}.reason must be a string "
+        f"of at most {BILLING_ADJUSTMENT_REASON_MAX_LENGTH} characters",
     )
 
 
@@ -12590,6 +12890,7 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
             check_policy_credit_notes_asyncapi(contracts, document, relative)
             check_policy_legal_entities_asyncapi(contracts, document, relative)
             check_policy_premium_audit_asyncapi(contracts, document, relative)
+            check_policy_billing_adjustment_asyncapi(contracts, document, relative)
 
         if vertical == "contract":
             check_contract_technical_accounts_asyncapi(

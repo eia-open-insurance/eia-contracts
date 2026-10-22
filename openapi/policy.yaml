@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Policy API
-  version: 2.15.0
+  version: 2.16.0
   summary: Direct-book policy administration and the Policy expert API.
   description: >
     This document describes the implemented public Policy domain API and the
@@ -351,6 +351,34 @@ info:
       the first fact `policy.premium.audited`; the implemented name and the
       missing `policy_premium_audit` worksheet are recorded in MISMATCHES.md
       M-22 and M-50.
+
+    The 2026-10-22 billing-adjustment slice adds the positive premium
+    adjustment command:
+
+    - `POST /api/v1/policies/{policyId}/billing/adjustment` appends one DUE
+      installment to the ACTIVE billing plan and returns the
+      `{plan, installment, adjustmentAmount, newTotalPremium}` envelope with the
+      new policy `ETag`. The body is `{dueDate, reason}`; both are required.
+    - The amount is derived, not supplied:
+      `adjustmentAmount = policy premium - (plan totalPremium - creditedAmount)`,
+      where `creditedAmount` is the sum of the credit notes already applied to
+      the plan's installments. Only a positive remainder is billable; a zero or
+      negative remainder is 400 `NO_PREMIUM_ADJUSTMENT` with `meta.delta`,
+      `meta.policyPremiumAmount`, `meta.planTotalPremium`, `meta.creditedAmount`,
+      and `meta.netPlanPremium`. A premium decrease is a credit-note concern.
+    - A missing plan is 404 `BILLING_PLAN_NOT_FOUND`, a non-ACTIVE plan is 409
+      `BILLING_PLAN_NOT_ACTIVE`, the 24-installment ceiling is 409
+      `MAX_INSTALLMENTS_REACHED`, and a concurrent plan change is 409
+      `CONCURRENT_MODIFICATION`. A due date before the policy effective date is
+      400 `INVALID_ADJUSTMENT_DUE_DATE`; a blank or over-long reason is 400
+      `VALIDATION_ERROR` (or `INVALID_ADJUSTMENT_REASON` at the expert).
+    - The accepted command grows the plan total by the adjustment amount and the
+      plan count by one, bumps the policy version, and writes
+      `policy.billing-plan.adjusted` in the same transaction. `If-Match` and
+      `Idempotency-Key` are accepted and forwarded but the expert does not
+      compare or replay them in this slice (MISMATCHES.md M-06, M-07). The
+      SPEC-less route, the derived-delta rule, and the new event name are
+      recorded in M-22, M-27, and M-51.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -1595,6 +1623,100 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/BillingPlan'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/{policyId}/billing/adjustment:
+    post:
+      operationId: adjustPolicyBillingPlan
+      tags:
+        - Policy
+      summary: Append a positive premium adjustment installment.
+      description: >
+        Appends one DUE installment for the positive premium remainder between
+        the policy written premium and the ACTIVE plan's net premium. The amount
+        is derived, not supplied:
+        `adjustmentAmount = policy premium - (plan totalPremium - creditedAmount)`,
+        where `creditedAmount` is the sum of the credit notes already applied to
+        the plan's installments. A zero or negative remainder is 400
+        `NO_PREMIUM_ADJUSTMENT` with `meta.delta`,
+        `meta.policyPremiumAmount`, `meta.planTotalPremium`,
+        `meta.creditedAmount`, and `meta.netPlanPremium`; a premium decrease is
+        a credit-note concern, not an installment.
+
+        The body is `{dueDate, reason}`. Both are required. `dueDate` must not
+        precede the policy effective date (the effective date itself is
+        accepted) and `reason` is trimmed and capped at 500 characters. A
+        missing, blank, or over-long member is 400 `VALIDATION_ERROR`; a
+        pre-inception date is 400 `INVALID_ADJUSTMENT_DUE_DATE`. The expert's
+        service guard reports `INVALID_ADJUSTMENT_REASON` for a reason that
+        bypasses request validation.
+
+        The command requires an existing plan (404 `BILLING_PLAN_NOT_FOUND`),
+        an ACTIVE plan (409 `BILLING_PLAN_NOT_ACTIVE` with `meta.planId` and
+        `meta.currentStatus`), and fewer than 24 installments (409
+        `MAX_INSTALLMENTS_REACHED` with `meta.maxInstallments` and
+        `meta.installmentCount`). The appended installment takes
+        `plan.installmentCount + 1`, the body's `dueDate`, the derived amount,
+        and status DUE; the plan total grows by the same amount and the plan
+        count by one. A concurrent plan change, including a racing adjustment,
+        is 409 `CONCURRENT_MODIFICATION` and rolls the append back.
+
+        The 201 body is the `{plan, installment, adjustmentAmount,
+        newTotalPremium}` envelope with the new policy `ETag`. The `plan` member
+        carries the updated flat plan identity and totals but omits the full
+        schedule (`installments` is empty) and its derived `summary` is computed
+        from that empty schedule, so `summary.installmentCount` and
+        `summary.outstandingAmount` are zero while `plan.installmentCount` and
+        `plan.totalPremium` stay authoritative.
+
+        `X-EIA-Tenant` is required and a supplied `X-EIA-Book` must be DIRECT;
+        another book is hidden as 404 `BOOK_SCOPE_VIOLATION`. An unknown or
+        foreign policy is 404 `POLICY_NOT_FOUND`. The optional `If-Match` and
+        `Idempotency-Key` headers are validated by the domain and forwarded to
+        the expert; a malformed or blank `If-Match` is 400 `INVALID_IF_MATCH`, a
+        blank `Idempotency-Key` is treated as absent, and an over-long key is 400
+        `INVALID_IDEMPOTENCY_KEY`. The expert does not compare `If-Match` or
+        replay `Idempotency-Key` in this slice, so a retry appends a second
+        installment (MISMATCHES.md M-06, M-07).
+
+        The accepted command bumps the policy row version and writes
+        `policy.billing-plan.adjusted` in the same transaction as the plan
+        update and the appended installment.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirectOptional'
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: './components.yaml#/components/parameters/IfMatch'
+        - $ref: './components.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BillingAdjustmentRequest'
+      responses:
+        '201':
+          description: The adjustment installment was appended to the ACTIVE plan.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingAdjustmentResult'
         '400':
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
@@ -4900,6 +5022,61 @@ components:
         paymentId:
           type: [string, 'null']
           format: uuid
+    BillingAdjustmentRequest:
+      type: object
+      description: >
+        Append one positive premium adjustment installment to the policy's
+        ACTIVE billing plan. The amount is derived from the policy written
+        premium less the plan's net premium (its total less the credits already
+        applied to the schedule), so the caller supplies only the due date and
+        the audit reason; a zero or negative remainder is 400
+        `NO_PREMIUM_ADJUSTMENT`. `dueDate` is required and must not precede the
+        policy effective date (the effective date itself is accepted). `reason`
+        is required, trimmed, and capped at 500 characters; it is carried on the
+        emitted `policy.billing-plan.adjusted` event.
+      required:
+        - dueDate
+        - reason
+      properties:
+        dueDate:
+          type: string
+          format: date
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+    BillingAdjustmentResult:
+      type: object
+      description: >
+        Result of a positive premium adjustment: the updated flat `BillingPlan`,
+        the appended `Installment`, the derived `adjustmentAmount`, and the
+        resulting gross plan `newTotalPremium`. The plan member carries the plan
+        identity and totals after the adjustment and does not repeat the full
+        schedule: `installments` is empty and its derived `summary` is computed
+        from that empty schedule, so `summary.installmentCount` and
+        `summary.outstandingAmount` are zero while `plan.installmentCount` and
+        `plan.totalPremium` stay authoritative. The appended installment is
+        published separately under `installment` and is always DUE.
+      required:
+        - plan
+        - installment
+        - adjustmentAmount
+        - newTotalPremium
+      properties:
+        plan:
+          $ref: '#/components/schemas/BillingPlan'
+        installment:
+          $ref: '#/components/schemas/Installment'
+        adjustmentAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+          description: >
+            Positive premium remainder billed by the appended installment, at
+            money scale (four fraction digits).
+        newTotalPremium:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+          description: >
+            Gross plan total after the adjustment
+            (`plan totalPremium + adjustmentAmount`), at money scale.
     DunningAction:
       type: object
       description: >
@@ -6362,7 +6539,7 @@ components:
 x-vertical: policy
 x-implementation:
   status: implemented
-  verifiedAt: '2026-10-21'
+  verifiedAt: '2026-10-22'
   verifiedAgainst:
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyController.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicySearchController.java
@@ -6379,6 +6556,8 @@ x-implementation:
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/Installment.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/CreateBillingPlanCommand.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/UpdateInstallmentCommand.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/BillingAdjustmentCommand.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/BillingAdjustmentResult.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/ReceivableController.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/ReceivableService.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/Receivable.java
@@ -6423,6 +6602,8 @@ x-implementation:
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyInstallment.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/CreateBillingPlanRequest.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/UpdateInstallmentRequest.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/BillingAdjustmentRequest.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/BillingAdjustmentView.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/MassTortProfileController.java
     - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/MassTortProfileService.java
@@ -6517,12 +6698,15 @@ x-implementation:
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/MassTortProfileServiceTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/MassTortProfileRulesTest.java
     - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/PolicyBillingControllerTest.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/PolicyBillingAdjustmentServiceTest.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/PolicyBillingAdjustmentClientTest.java
     - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/PolicyReceivableControllerTest.java
     - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/ReceivableServiceTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/CoverageControllerTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/EndorsementControllerTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/CancellationControllerTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/BillingServiceTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/BillingAdjustmentServiceTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/BillingReceivablesControllerTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/BillingReceivablesServiceTest.java
     - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/DunningControllerTest.java
@@ -6555,6 +6739,21 @@ x-implementation:
     settlement each bump the policy row version and write their outbox event in
     the same transaction; the credit application is owned by the credit-note
     command and is recorded below.
+
+    The billing adjustment command appends one DUE installment for the positive
+    premium remainder between the policy written premium and the ACTIVE plan's
+    net premium (its total less applied credits, floored at zero). The domain
+    forwards the tenant, DIRECT book, and the optional `If-Match` and
+    `Idempotency-Key` headers to the expert's `/internal/v1` alias; the expert
+    owns the derived amount, the ACTIVE and 24-installment gates, the appended
+    installment number, the plan-total and count movement, and the
+    `policy.billing-plan.adjusted` fact. The public 201 is the domain
+    `{plan, installment, adjustmentAmount, newTotalPremium}` envelope with the
+    new policy `ETag`; the plan member omits the full schedule, so its derived
+    `summary` is computed from an empty list. The expert does not compare
+    `If-Match` or replay `Idempotency-Key` in this slice. The SPEC-less route,
+    the derived-delta rule, and the event name are recorded in M-22, M-27, and
+    M-51.
 
     The renewal operation creates a successor policy rather than mutating the
     source: the successor's `renewedFromPolicyId` is the only lineage field on
@@ -6676,26 +6875,24 @@ x-implementation:
     no premium-audit route. The command shape, the event name, and the missing
     worksheet and quarterly batch job are recorded in M-22 and M-50.
 x-compatibility:
-  contractVersion: 2.15.0
-  previousContractVersion: 2.14.0
+  contractVersion: 2.16.0
+  previousContractVersion: 2.15.0
   breaking: []
   compatible:
-    - Adds POST /api/v1/policies/{policyId}/premium-audit with the ApplyPremiumAuditRequest body.
-    - Adds the optional approvedBy/approvalRef approval members for a backdated or regressing audit.
-    - Documents the BOUND/ISSUED/IN_FORCE/ENDORSED/REINSTATED eligibility gate, the 400 NO_PREMIUM_CHANGE guard, the 409 PREMIUM_AUDIT_NOT_ALLOWED and CONCURRENT_MODIFICATION conflicts, and the 422/428 version-timeline responses.
-    - Adds the policy.policy.premium-audited event and keeps policy.premium.audited planned.
+    - Adds POST /api/v1/policies/{policyId}/billing/adjustment with the BillingAdjustmentRequest body and the BillingAdjustmentResult envelope.
+    - Documents the derived positive premium delta (policy premium less the plan total net of applied credits), the 400 NO_PREMIUM_ADJUSTMENT guard, and the INVALID_ADJUSTMENT_DUE_DATE and INVALID_ADJUSTMENT_REASON validations.
+    - Documents the 404 BILLING_PLAN_NOT_FOUND and 409 BILLING_PLAN_NOT_ACTIVE, MAX_INSTALLMENTS_REACHED, and CONCURRENT_MODIFICATION conflicts.
+    - Adds the policy.billing-plan.adjusted event.
     - Removes no path or field and changes no existing field meaning.
   note: >
-    The premium-audit slice is additive over 2.14.0: one public command, one
-    request schema, and one implemented event name. The command leaves the
-    policy schema and every existing route unchanged; the audit replaces only
-    the premium amount and advances the aggregate version. The SPEC 11.2.9
-    `policy.premium.audited` name stays published and planned, while the
-    implemented `policy.policy.premium-audited` name is added to the catalog and
-    marked implemented, bringing the catalog to 216 published and 96 implemented
-    names, with Policy at 34 published and 22 implemented. The command shape,
-    the missing `policy_premium_audit` worksheet, and the SPEC-less route are
-    recorded in MISMATCHES.md M-22 and M-50.
+    The billing-adjustment slice is additive over 2.15.0: one public command, one
+    request schema, one result envelope, and one implemented event name. The
+    command leaves every existing billing route and schema unchanged. The event
+    name is new: SPEC 11.2.13 names no positive premium adjustment fact, so the
+    catalog grows to 217 published and 97 implemented names, with Policy at 35
+    published and 23 implemented. The SPEC-less route, the derived-delta rule,
+    the unhonoured optional concurrency and idempotency headers, and the new
+    event name are recorded in MISMATCHES.md M-22, M-27, and M-51.
 x-planned-operations:
   - method: POST
     path: /api/v1/policies/{policyId}/bind

@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.32.0
+  version: 1.33.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -165,6 +165,14 @@ info:
     one published and one implemented name, bringing the platform totals to 216
     published and 96 implemented; Policy becomes 34 published and 22 implemented
     (M-22, M-50).
+    The 2026-10-22 Policy billing-adjustment slice adds one Policy name,
+    `policy.billing-plan.adjusted`, with no SPEC 11.2.13 equivalent: SPEC
+    publishes the plan-created fact and no positive premium adjustment fact. The
+    event appends one DUE installment for the positive premium remainder, moves
+    the plan total and count, and is keyed by the policy id at the bumped
+    aggregate version. It adds one published and one implemented name, bringing
+    the platform totals to 217 published and 97 implemented; Policy becomes 35
+    published and 23 implemented (M-22, M-27, M-51).
     The platform
     event-ingest service
     is the inbox:
@@ -283,6 +291,7 @@ x-event-catalog:
       - policy.policy.cancelled
       - policy.policy.reinstated
       - policy.billing-plan.created
+      - policy.billing-plan.adjusted
       - policy.installment.paid
       - policy.installment.waived
       - policy.dunning.sent
@@ -317,6 +326,7 @@ x-event-catalog:
       - policy.policy.renewed
       - policy.policy.premium-audited
       - policy.billing-plan.created
+      - policy.billing-plan.adjusted
       - policy.installment.paid
       - policy.installment.waived
       - policy.dunning.sent
