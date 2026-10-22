@@ -2044,20 +2044,33 @@ POLICY_RATING_EVENT_IMPLEMENTED_BY = "PolicyEvents.java"
 # Policy underwriting submissions (SPEC 11.2.14 intake). A submission is a
 # tenant-owned pre-policy aggregate with a per-tenant SUB-{YYYY}-{7 digits}
 # number and a six-state one-way graph. The SPEC CLEARANCE/RATING intermediate
-# states and the clearance, rating, referral, quote, authority, declination, and
-# producer slices are not modelled; the public domain also hides the expert's
-# q/status list filters. The two facts are new: SPEC 11.2.9 publishes
-# policy.submission.received and policy.submission.declined instead, so the
-# implemented names are recorded in MISMATCHES.md M-22 and M-59.
+# states and the clearance, rating, quote, authority, declination, and producer
+# slices are not modelled; the structured referral and decision are implemented
+# as one current referral in submission columns, and the public domain also
+# hides the expert's q/status list filters. The five implemented facts replace
+# the SPEC policy.submission.received/policy.submission.declined pair and the
+# SPEC policy.referral.opened/decided pair, so the implemented names are
+# recorded in MISMATCHES.md M-22, M-59, M-60, and M-63.
 POLICY_SUBMISSIONS_PATH = "/api/v1/policies/submissions"
 POLICY_SUBMISSION_PATH = "/api/v1/policies/submissions/{submissionId}"
 POLICY_SUBMISSION_STATUS_PATH = (
     "/api/v1/policies/submissions/{submissionId}/status"
 )
+POLICY_SUBMISSION_REFERRAL_PATH = (
+    "/api/v1/policies/submissions/{submissionId}/referral"
+)
+POLICY_SUBMISSION_REFERRAL_DECISION_PATH = (
+    "/api/v1/policies/submissions/{submissionId}/referral/decision"
+)
 POLICY_SUBMISSION_PROJECTION = "PolicySubmission"
 POLICY_SUBMISSION_CREATE_REQUEST = "CreatePolicySubmissionRequest"
 POLICY_SUBMISSION_STATUS_REQUEST = "UpdatePolicySubmissionStatusRequest"
+POLICY_SUBMISSION_REFERRAL_REQUEST = "ReferPolicySubmissionRequest"
+POLICY_SUBMISSION_REFERRAL_DECISION_REQUEST = (
+    "DecidePolicySubmissionReferralRequest"
+)
 POLICY_SUBMISSION_STATUS_SCHEMA = "PolicySubmissionStatus"
+POLICY_SUBMISSION_REFERRAL_DECISION_SCHEMA = "PolicySubmissionReferralDecision"
 POLICY_SUBMISSION_STATUSES = (
     "RECEIVED",
     "REFERRED",
@@ -2066,6 +2079,8 @@ POLICY_SUBMISSION_STATUSES = (
     "DECLINED",
     "WITHDRAWN",
 )
+POLICY_SUBMISSION_REFERRAL_DECISIONS = ("PENDING", "APPROVED", "DECLINED")
+POLICY_SUBMISSION_REFERRAL_DECISION_VALUES = ("APPROVED", "DECLINED")
 POLICY_SUBMISSION_TRANSITIONS = (
     ("RECEIVED", ("REFERRED", "QUOTED", "DECLINED", "WITHDRAWN")),
     ("REFERRED", ("QUOTED", "DECLINED", "WITHDRAWN")),
@@ -2088,6 +2103,29 @@ POLICY_SUBMISSION_PROJECTION_FIELDS = (
     "createdAt",
     "updatedAt",
 )
+POLICY_SUBMISSION_REFERRAL_PROJECTION_FIELDS = (
+    "referralReason",
+    "referralAuthority",
+    "referredTo",
+    "referralNotes",
+    "referralDecision",
+    "referralDecidedBy",
+    "referralDecidedAt",
+)
+POLICY_SUBMISSION_REFERRAL_REQUEST_REQUIRED_FIELDS = (
+    "reason",
+    "authority",
+    "referredTo",
+)
+POLICY_SUBMISSION_REFERRAL_DECISION_REQUEST_REQUIRED_FIELDS = (
+    "decision",
+    "decidedBy",
+)
+POLICY_SUBMISSION_REFERRAL_REASON_MAX_LENGTH = 64
+POLICY_SUBMISSION_REFERRAL_AUTHORITY_MAX_LENGTH = 64
+POLICY_SUBMISSION_REFERRED_TO_MAX_LENGTH = 128
+POLICY_SUBMISSION_REFERRAL_NOTES_MAX_LENGTH = 2000
+POLICY_SUBMISSION_REFERRAL_DECIDED_BY_MAX_LENGTH = 128
 POLICY_SUBMISSION_CREATE_REQUIRED_FIELDS = (
     "applicantPartyId",
     "productCode",
@@ -2108,6 +2146,15 @@ POLICY_SUBMISSION_ERROR_CODES = (
     "INVALID_SUBMISSION_STATUS",
     "INVALID_SUBMISSION_REASON",
     "INVALID_SUBMISSION_TRANSITION",
+    "INVALID_SUBMISSION_REFERRAL",
+    "INVALID_SUBMISSION_REFERRAL_REASON",
+    "INVALID_SUBMISSION_REFERRAL_AUTHORITY",
+    "INVALID_SUBMISSION_REFERRAL_PARTY",
+    "INVALID_SUBMISSION_REFERRAL_NOTES",
+    "INVALID_SUBMISSION_REFERRAL_DECISION",
+    "INVALID_SUBMISSION_REFERRAL_DECIDED_BY",
+    "SUBMISSION_NOT_REFERRABLE",
+    "REFERRAL_NOT_PENDING",
     "SUBMISSION_NOT_FOUND",
     "DUPLICATE_SUBMISSION_NUMBER",
     "CONCURRENT_MODIFICATION",
@@ -2116,10 +2163,19 @@ POLICY_SUBMISSION_ERROR_CODES = (
 POLICY_SUBMISSION_EVENT_CREATED = "policy.submission.created"
 POLICY_SUBMISSION_EVENT_STATUS_CHANGED = "policy.submission.status-changed"
 POLICY_SUBMISSION_EVENT_CONVERTED = "policy.submission.converted"
+POLICY_SUBMISSION_EVENT_REFERRED = "policy.submission.referred"
+POLICY_SUBMISSION_EVENT_REFERRAL_DECIDED = (
+    "policy.submission.referral-decided"
+)
 POLICY_SUBMISSION_EVENT_MESSAGES = (
     (POLICY_SUBMISSION_EVENT_CREATED, "PolicySubmissionCreatedData"),
     (POLICY_SUBMISSION_EVENT_STATUS_CHANGED, "PolicySubmissionStatusChangedData"),
     (POLICY_SUBMISSION_EVENT_CONVERTED, "PolicySubmissionConvertedData"),
+    (POLICY_SUBMISSION_EVENT_REFERRED, "PolicySubmissionReferredData"),
+    (
+        POLICY_SUBMISSION_EVENT_REFERRAL_DECIDED,
+        "PolicySubmissionReferralDecidedData",
+    ),
 )
 POLICY_SUBMISSION_CREATED_EVENT_FIELDS = (
     "submissionId",
@@ -2152,6 +2208,38 @@ POLICY_SUBMISSION_CONVERTED_EVENT_FIELDS = (
     "submissionNumber",
     "policyId",
     "policyNumber",
+)
+POLICY_SUBMISSION_REFERRED_EVENT_FIELDS = (
+    "submissionId",
+    "submissionNumber",
+    "applicantPartyId",
+    "productCode",
+    "previousStatus",
+    "status",
+    "referralReason",
+    "referralAuthority",
+    "referredTo",
+    "referralNotes",
+    "referralDecision",
+    "version",
+    "updatedAt",
+)
+POLICY_SUBMISSION_REFERRAL_DECIDED_EVENT_FIELDS = (
+    "submissionId",
+    "submissionNumber",
+    "applicantPartyId",
+    "productCode",
+    "previousStatus",
+    "status",
+    "decision",
+    "decidedBy",
+    "decidedAt",
+    "notes",
+    "referralReason",
+    "referralAuthority",
+    "referredTo",
+    "version",
+    "updatedAt",
 )
 POLICY_SUBMISSION_EVENT_IMPLEMENTED_BY = "PolicyEvents.java"
 
@@ -2232,6 +2320,8 @@ IMPLEMENTED_EVENTS = {
         "policy.submission.created",
         "policy.submission.status-changed",
         "policy.submission.converted",
+        "policy.submission.referred",
+        "policy.submission.referral-decided",
     ],
     "product": [
         "product.product.created",
@@ -7701,8 +7791,8 @@ def check_policy_active_product_enforcement(
     repeat the top-level code, and carry the product and tenant in ``meta``. A
     rejected create writes nothing. Conversion and renewal reuse an
     already-accepted product and must document the exemption, and the info
-    description and ``x-compatibility`` block record that existing records are
-    never re-validated (MISMATCHES.md M-59, M-61, and M-62).
+    description records that existing records are never re-validated
+    (MISMATCHES.md M-59, M-61, and M-62).
     """
     paths = document.get("paths") or {}
     info = document.get("info") or {}
@@ -7840,30 +7930,6 @@ def check_policy_active_product_enforcement(
             "ACTIVE" in description,
             f"{relative}: {schema_name}.{POLICY_ACTIVE_PRODUCT_CODE_FIELD} "
             "description must document the ACTIVE requirement",
-        )
-
-    compatibility = document.get("x-compatibility") or {}
-    contracts.check(
-        compatibility.get("previousContractVersion") == "2.22.0",
-        f"{relative}: x-compatibility.previousContractVersion must be 2.22.0",
-    )
-    compatible = " ".join(
-        str(entry) for entry in compatibility.get("compatible") or []
-    )
-    for code in POLICY_ACTIVE_PRODUCT_CODES:
-        contracts.check(
-            code in compatible,
-            f"{relative}: x-compatibility.compatible must name {code}",
-        )
-    contracts.check(
-        "422" in compatible,
-        f"{relative}: x-compatibility.compatible must name the 422 response",
-    )
-    note = str(compatibility.get("note") or "")
-    for code in POLICY_ACTIVE_PRODUCT_CODES:
-        contracts.check(
-            code in note,
-            f"{relative}: x-compatibility.note must document {code}",
         )
 
 
@@ -10487,11 +10553,29 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
         if isinstance(paths, dict)
         else None
     )
+    referral_path = (
+        paths.get(POLICY_SUBMISSION_REFERRAL_PATH)
+        if isinstance(paths, dict)
+        else None
+    )
+    referral_decision_path = (
+        paths.get(POLICY_SUBMISSION_REFERRAL_DECISION_PATH)
+        if isinstance(paths, dict)
+        else None
+    )
     list_operation = collection.get("get") if isinstance(collection, dict) else None
     create_operation = collection.get("post") if isinstance(collection, dict) else None
     get_operation = detail.get("get") if isinstance(detail, dict) else None
     status_operation = (
         status_path.get("patch") if isinstance(status_path, dict) else None
+    )
+    refer_operation = (
+        referral_path.get("post") if isinstance(referral_path, dict) else None
+    )
+    decision_operation = (
+        referral_decision_path.get("post")
+        if isinstance(referral_decision_path, dict)
+        else None
     )
     convert_operation = (
         convert_path.get("post") if isinstance(convert_path, dict) else None
@@ -10507,6 +10591,12 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
         ("POST", POLICY_SUBMISSIONS_PATH, create_operation),
         ("GET", POLICY_SUBMISSION_PATH, get_operation),
         ("PATCH", POLICY_SUBMISSION_STATUS_PATH, status_operation),
+        ("POST", POLICY_SUBMISSION_REFERRAL_PATH, refer_operation),
+        (
+            "POST",
+            POLICY_SUBMISSION_REFERRAL_DECISION_PATH,
+            decision_operation,
+        ),
         ("POST", POLICY_SUBMISSION_CONVERT_PATH, convert_operation),
         ("POST", POLICY_SUBMISSION_CONVERT_EXPERT_PATH, expert_convert_operation),
     ):
@@ -10515,12 +10605,15 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
             f"{relative}: required submission operation {label} {path} is missing",
         )
 
-    # The collection and detail surfaces are read/create/status/convert only;
-    # the implemented controllers declare no PUT or DELETE operation.
+    # The collection and detail surfaces are read/create/status/referral/
+    # decision/convert only; the implemented controllers declare no PUT or
+    # DELETE operation.
     for path, path_item in (
         (POLICY_SUBMISSIONS_PATH, collection),
         (POLICY_SUBMISSION_PATH, detail),
         (POLICY_SUBMISSION_STATUS_PATH, status_path),
+        (POLICY_SUBMISSION_REFERRAL_PATH, referral_path),
+        (POLICY_SUBMISSION_REFERRAL_DECISION_PATH, referral_decision_path),
         (POLICY_SUBMISSION_CONVERT_PATH, convert_path),
         (POLICY_SUBMISSION_CONVERT_EXPERT_PATH, expert_convert_path),
     ):
@@ -10845,6 +10938,264 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
             "policy.submission.status-changed",
             "same transaction",
             "not compared",
+        ):
+            contracts.check(
+                term in description,
+                f"{where}: description must document {term}",
+            )
+
+    if isinstance(refer_operation, dict):
+        where = f"{relative}: POST {POLICY_SUBMISSION_REFERRAL_PATH}"
+        contracts.check(
+            refer_operation.get("operationId") == "referPolicySubmission",
+            f"{where}: operationId must be referPolicySubmission",
+        )
+        parameter_refs, inline_names = _parameter_names(refer_operation)
+        for parameter in (
+            "TenantHeader",
+            "BookHeaderDirectOptional",
+            "IfMatch",
+            "IdempotencyKey",
+        ):
+            contracts.check(
+                parameter in parameter_refs,
+                f"{where}: must document the shared {parameter} parameter",
+            )
+        contracts.check(
+            "submissionId" in inline_names,
+            f"{where}: must declare the submissionId path parameter",
+        )
+        request_body = refer_operation.get("requestBody") or {}
+        contracts.check(
+            request_body.get("required") is True,
+            f"{where}: request body must be required",
+        )
+        request_schema = (
+            ((request_body.get("content") or {}).get("application/json") or {}).get(
+                "schema"
+            )
+            if isinstance(request_body, dict)
+            else None
+        )
+        contracts.check(
+            isinstance(request_schema, dict)
+            and str(request_schema.get("$ref", "")).endswith(
+                f"/schemas/{POLICY_SUBMISSION_REFERRAL_REQUEST}"
+            ),
+            f"{where}: request body must use {POLICY_SUBMISSION_REFERRAL_REQUEST}",
+        )
+        responses = refer_operation.get("responses") or {}
+        contracts.check(
+            "201" not in responses,
+            f"{where}: the referral command returns 200, not 201",
+        )
+        ok_response = responses.get("200") if isinstance(responses, dict) else None
+        ok_headers = (
+            ok_response.get("headers") if isinstance(ok_response, dict) else None
+        )
+        for header, suffix in (
+            ("ETag", "ETag"),
+            ("Idempotent-Replayed", "IdempotentReplayed"),
+        ):
+            value = (
+                ok_headers.get(header) if isinstance(ok_headers, dict) else None
+            )
+            contracts.check(
+                isinstance(value, dict)
+                and str(value.get("$ref", "")).endswith(f"/headers/{suffix}"),
+                f"{where}: 200 must declare the shared {header} header",
+            )
+        ok_schema = _response_schema(refer_operation, "200")
+        contracts.check(
+            isinstance(ok_schema, dict)
+            and str(ok_schema.get("$ref", "")).endswith(
+                f"/schemas/{POLICY_SUBMISSION_PROJECTION}"
+            ),
+            f"{where}: 200 must return {POLICY_SUBMISSION_PROJECTION}",
+        )
+        ok_description = (
+            str(ok_response.get("description") or "")
+            if isinstance(ok_response, dict)
+            else ""
+        )
+        contracts.check(
+            "Idempotent-Replayed: false" in ok_description,
+            f"{where}: 200 must document Idempotent-Replayed: false",
+        )
+        for code, suffix in (("400", "BadRequest"), ("404", "NotFound")):
+            response = responses.get(code) if isinstance(responses, dict) else None
+            contracts.check(
+                isinstance(response, dict)
+                and str(response.get("$ref", "")).endswith(f"/responses/{suffix}"),
+                f"{where}: {code} must reference the shared {suffix} response",
+            )
+        conflict = responses.get("409") if isinstance(responses, dict) else None
+        conflict_text = (
+            str(conflict.get("description") or "") if isinstance(conflict, dict) else ""
+        )
+        for term in (
+            "SUBMISSION_NOT_REFERRABLE",
+            "CONCURRENT_MODIFICATION",
+            "meta.submissionId",
+            "meta.currentStatus",
+            "meta.currentVersion",
+            "meta.expectedVersion",
+        ):
+            contracts.check(
+                term in conflict_text,
+                f"{where}: 409 must document {term}",
+            )
+        conflict_schema = _response_schema(
+            refer_operation, "409", "application/problem+json"
+        )
+        contracts.check(
+            isinstance(conflict_schema, dict)
+            and str(conflict_schema.get("$ref", "")).endswith("/schemas/Problem"),
+            f"{where}: 409 must document the shared Problem schema",
+        )
+        description = str(refer_operation.get("description") or "")
+        for term in (
+            "RECEIVED",
+            "PENDING",
+            "policy.submission.referred",
+            "same transaction",
+            "SUBMISSION_NOT_REFERRABLE",
+            "CONCURRENT_MODIFICATION",
+            "does not compare",
+            "does not replay",
+            "M-63",
+        ):
+            contracts.check(
+                term in description,
+                f"{where}: description must document {term}",
+            )
+
+    if isinstance(decision_operation, dict):
+        where = f"{relative}: POST {POLICY_SUBMISSION_REFERRAL_DECISION_PATH}"
+        contracts.check(
+            decision_operation.get("operationId")
+            == "decidePolicySubmissionReferral",
+            f"{where}: operationId must be decidePolicySubmissionReferral",
+        )
+        parameter_refs, inline_names = _parameter_names(decision_operation)
+        for parameter in (
+            "TenantHeader",
+            "BookHeaderDirectOptional",
+            "IfMatch",
+            "IdempotencyKey",
+        ):
+            contracts.check(
+                parameter in parameter_refs,
+                f"{where}: must document the shared {parameter} parameter",
+            )
+        contracts.check(
+            "submissionId" in inline_names,
+            f"{where}: must declare the submissionId path parameter",
+        )
+        request_body = decision_operation.get("requestBody") or {}
+        contracts.check(
+            request_body.get("required") is True,
+            f"{where}: request body must be required",
+        )
+        request_schema = (
+            ((request_body.get("content") or {}).get("application/json") or {}).get(
+                "schema"
+            )
+            if isinstance(request_body, dict)
+            else None
+        )
+        contracts.check(
+            isinstance(request_schema, dict)
+            and str(request_schema.get("$ref", "")).endswith(
+                f"/schemas/{POLICY_SUBMISSION_REFERRAL_DECISION_REQUEST}"
+            ),
+            f"{where}: request body must use "
+            f"{POLICY_SUBMISSION_REFERRAL_DECISION_REQUEST}",
+        )
+        responses = decision_operation.get("responses") or {}
+        contracts.check(
+            "201" not in responses,
+            f"{where}: the referral decision returns 200, not 201",
+        )
+        ok_response = responses.get("200") if isinstance(responses, dict) else None
+        ok_headers = (
+            ok_response.get("headers") if isinstance(ok_response, dict) else None
+        )
+        for header, suffix in (
+            ("ETag", "ETag"),
+            ("Idempotent-Replayed", "IdempotentReplayed"),
+        ):
+            value = (
+                ok_headers.get(header) if isinstance(ok_headers, dict) else None
+            )
+            contracts.check(
+                isinstance(value, dict)
+                and str(value.get("$ref", "")).endswith(f"/headers/{suffix}"),
+                f"{where}: 200 must declare the shared {header} header",
+            )
+        ok_schema = _response_schema(decision_operation, "200")
+        contracts.check(
+            isinstance(ok_schema, dict)
+            and str(ok_schema.get("$ref", "")).endswith(
+                f"/schemas/{POLICY_SUBMISSION_PROJECTION}"
+            ),
+            f"{where}: 200 must return {POLICY_SUBMISSION_PROJECTION}",
+        )
+        ok_description = (
+            str(ok_response.get("description") or "")
+            if isinstance(ok_response, dict)
+            else ""
+        )
+        contracts.check(
+            "Idempotent-Replayed: false" in ok_description,
+            f"{where}: 200 must document Idempotent-Replayed: false",
+        )
+        for code, suffix in (("400", "BadRequest"), ("404", "NotFound")):
+            response = responses.get(code) if isinstance(responses, dict) else None
+            contracts.check(
+                isinstance(response, dict)
+                and str(response.get("$ref", "")).endswith(f"/responses/{suffix}"),
+                f"{where}: {code} must reference the shared {suffix} response",
+            )
+        conflict = responses.get("409") if isinstance(responses, dict) else None
+        conflict_text = (
+            str(conflict.get("description") or "") if isinstance(conflict, dict) else ""
+        )
+        for term in (
+            "REFERRAL_NOT_PENDING",
+            "CONCURRENT_MODIFICATION",
+            "meta.submissionId",
+            "meta.currentStatus",
+            "meta.referralDecision",
+            "meta.currentVersion",
+            "meta.expectedVersion",
+        ):
+            contracts.check(
+                term in conflict_text,
+                f"{where}: 409 must document {term}",
+            )
+        conflict_schema = _response_schema(
+            decision_operation, "409", "application/problem+json"
+        )
+        contracts.check(
+            isinstance(conflict_schema, dict)
+            and str(conflict_schema.get("$ref", "")).endswith("/schemas/Problem"),
+            f"{where}: 409 must document the shared Problem schema",
+        )
+        description = str(decision_operation.get("description") or "")
+        for term in (
+            "APPROVED",
+            "keeps the submission `REFERRED`",
+            "DECLINED",
+            "moves the lifecycle to `DECLINED`",
+            "replaces `referralNotes`",
+            "policy.submission.referral-decided",
+            "same transaction",
+            "REFERRAL_NOT_PENDING",
+            "CONCURRENT_MODIFICATION",
+            "does not compare",
+            "does not replay",
+            "M-63",
         ):
             contracts.check(
                 term in description,
@@ -11201,6 +11552,8 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
         ("post", POLICY_SUBMISSIONS_PATH),
         ("get", POLICY_SUBMISSION_PATH),
         ("patch", POLICY_SUBMISSION_STATUS_PATH),
+        ("post", POLICY_SUBMISSION_REFERRAL_PATH),
+        ("post", POLICY_SUBMISSION_REFERRAL_DECISION_PATH),
         ("post", POLICY_SUBMISSION_CONVERT_PATH),
         ("post", POLICY_SUBMISSION_CONVERT_EXPERT_PATH),
     ):
@@ -11306,6 +11659,66 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
             "date-time",
         )
 
+    referral_decisions = schemas.get(POLICY_SUBMISSION_REFERRAL_DECISION_SCHEMA) or {}
+    contracts.check(
+        isinstance(referral_decisions, dict)
+        and tuple(referral_decisions.get("enum") or [])
+        == POLICY_SUBMISSION_REFERRAL_DECISIONS,
+        f"{relative}: {POLICY_SUBMISSION_REFERRAL_DECISION_SCHEMA} must enumerate "
+        f"{list(POLICY_SUBMISSION_REFERRAL_DECISIONS)}",
+    )
+    for field in POLICY_SUBMISSION_REFERRAL_PROJECTION_FIELDS:
+        contracts.check(
+            field in projection_properties,
+            f"{relative}: {POLICY_SUBMISSION_PROJECTION}.properties.{field} is "
+            "required as an optional referral member",
+        )
+        contracts.check(
+            field not in set(projection_required),
+            f"{relative}: {POLICY_SUBMISSION_PROJECTION}.{field} must stay optional "
+            "because the public domain omits it before a referral",
+        )
+    for field, maximum in (
+        ("referralReason", POLICY_SUBMISSION_REFERRAL_REASON_MAX_LENGTH),
+        ("referralAuthority", POLICY_SUBMISSION_REFERRAL_AUTHORITY_MAX_LENGTH),
+        ("referredTo", POLICY_SUBMISSION_REFERRED_TO_MAX_LENGTH),
+        ("referralDecidedBy", POLICY_SUBMISSION_REFERRAL_DECIDED_BY_MAX_LENGTH),
+    ):
+        schema = projection_properties.get(field) or {}
+        contracts.check(
+            _schema_types(schema) == {"string", "null"}
+            and schema.get("maxLength") == maximum,
+            f"{relative}: {POLICY_SUBMISSION_PROJECTION}.{field} must be a nullable "
+            f"{maximum}-character string",
+        )
+    referral_notes = projection_properties.get("referralNotes") or {}
+    contracts.check(
+        _schema_types(referral_notes) == {"string", "null"}
+        and referral_notes.get("maxLength")
+        == POLICY_SUBMISSION_REFERRAL_NOTES_MAX_LENGTH,
+        f"{relative}: {POLICY_SUBMISSION_PROJECTION}.referralNotes must be a "
+        f"nullable {POLICY_SUBMISSION_REFERRAL_NOTES_MAX_LENGTH}-character string",
+    )
+    referral_decision = projection_properties.get("referralDecision") or {}
+    decision_branches = referral_decision.get("oneOf") or []
+    contracts.check(
+        isinstance(decision_branches, list)
+        and len(decision_branches) == 2
+        and str((decision_branches[0] or {}).get("$ref", "")).endswith(
+            f"/schemas/{POLICY_SUBMISSION_REFERRAL_DECISION_SCHEMA}"
+        )
+        and (decision_branches[1] or {}).get("type") == "null",
+        f"{relative}: {POLICY_SUBMISSION_PROJECTION}.referralDecision must be a "
+        f"nullable reference to {POLICY_SUBMISSION_REFERRAL_DECISION_SCHEMA}",
+    )
+    referral_decided_at = projection_properties.get("referralDecidedAt") or {}
+    contracts.check(
+        _schema_types(referral_decided_at) == {"string", "null"}
+        and referral_decided_at.get("format") == "date-time",
+        f"{relative}: {POLICY_SUBMISSION_PROJECTION}.referralDecidedAt must be a "
+        "nullable date-time",
+    )
+
     request = schemas.get(POLICY_SUBMISSION_CREATE_REQUEST) or {}
     request_properties = request.get("properties") or {}
     request_required = set(request.get("required") or [])
@@ -11397,6 +11810,97 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
     contracts.check(
         "reason" not in set(status_request.get("required") or []),
         f"{relative}: {POLICY_SUBMISSION_STATUS_REQUEST}.reason must stay optional",
+    )
+
+    referral_request = schemas.get(POLICY_SUBMISSION_REFERRAL_REQUEST) or {}
+    referral_properties = referral_request.get("properties") or {}
+    referral_required = tuple(referral_request.get("required") or [])
+    contracts.check(
+        isinstance(referral_request, dict)
+        and referral_request.get("type") == "object",
+        f"{relative}: {POLICY_SUBMISSION_REFERRAL_REQUEST} must be an object "
+        "schema",
+    )
+    contracts.check(
+        referral_required == POLICY_SUBMISSION_REFERRAL_REQUEST_REQUIRED_FIELDS,
+        f"{relative}: {POLICY_SUBMISSION_REFERRAL_REQUEST} must require exactly "
+        f"{list(POLICY_SUBMISSION_REFERRAL_REQUEST_REQUIRED_FIELDS)}",
+    )
+    for field, maximum in (
+        ("reason", POLICY_SUBMISSION_REFERRAL_REASON_MAX_LENGTH),
+        ("authority", POLICY_SUBMISSION_REFERRAL_AUTHORITY_MAX_LENGTH),
+        ("referredTo", POLICY_SUBMISSION_REFERRED_TO_MAX_LENGTH),
+    ):
+        schema = referral_properties.get(field) or {}
+        contracts.check(
+            schema.get("type") == "string"
+            and schema.get("minLength") == 1
+            and schema.get("maxLength") == maximum,
+            f"{relative}: {POLICY_SUBMISSION_REFERRAL_REQUEST}.{field} must be a "
+            f"required 1-{maximum}-character string",
+        )
+    referral_notes_request = referral_properties.get("notes") or {}
+    contracts.check(
+        _schema_types(referral_notes_request) == {"string", "null"}
+        and referral_notes_request.get("maxLength")
+        == POLICY_SUBMISSION_REFERRAL_NOTES_MAX_LENGTH,
+        f"{relative}: {POLICY_SUBMISSION_REFERRAL_REQUEST}.notes must be a "
+        f"nullable {POLICY_SUBMISSION_REFERRAL_NOTES_MAX_LENGTH}-character string",
+    )
+    contracts.check(
+        "notes" not in referral_required,
+        f"{relative}: {POLICY_SUBMISSION_REFERRAL_REQUEST}.notes must stay optional",
+    )
+
+    decision_request = (
+        schemas.get(POLICY_SUBMISSION_REFERRAL_DECISION_REQUEST) or {}
+    )
+    decision_properties = decision_request.get("properties") or {}
+    decision_required = tuple(decision_request.get("required") or [])
+    contracts.check(
+        isinstance(decision_request, dict)
+        and decision_request.get("type") == "object",
+        f"{relative}: {POLICY_SUBMISSION_REFERRAL_DECISION_REQUEST} must be an "
+        "object schema",
+    )
+    contracts.check(
+        decision_required
+        == POLICY_SUBMISSION_REFERRAL_DECISION_REQUEST_REQUIRED_FIELDS,
+        f"{relative}: {POLICY_SUBMISSION_REFERRAL_DECISION_REQUEST} must require "
+        f"exactly "
+        f"{list(POLICY_SUBMISSION_REFERRAL_DECISION_REQUEST_REQUIRED_FIELDS)}",
+    )
+    decision_value = decision_properties.get("decision") or {}
+    contracts.check(
+        decision_value.get("type") == "string"
+        and tuple(decision_value.get("enum") or [])
+        == POLICY_SUBMISSION_REFERRAL_DECISION_VALUES,
+        f"{relative}: {POLICY_SUBMISSION_REFERRAL_DECISION_REQUEST}.decision must "
+        f"enumerate {list(POLICY_SUBMISSION_REFERRAL_DECISION_VALUES)}",
+    )
+    decided_by = decision_properties.get("decidedBy") or {}
+    contracts.check(
+        decided_by.get("type") == "string"
+        and decided_by.get("minLength") == 1
+        and decided_by.get("maxLength")
+        == POLICY_SUBMISSION_REFERRAL_DECIDED_BY_MAX_LENGTH,
+        f"{relative}: {POLICY_SUBMISSION_REFERRAL_DECISION_REQUEST}.decidedBy must "
+        f"be a required 1-{POLICY_SUBMISSION_REFERRAL_DECIDED_BY_MAX_LENGTH}"
+        "-character string",
+    )
+    decision_notes = decision_properties.get("notes") or {}
+    contracts.check(
+        _schema_types(decision_notes) == {"string", "null"}
+        and decision_notes.get("maxLength")
+        == POLICY_SUBMISSION_REFERRAL_NOTES_MAX_LENGTH,
+        f"{relative}: {POLICY_SUBMISSION_REFERRAL_DECISION_REQUEST}.notes must be "
+        f"a nullable {POLICY_SUBMISSION_REFERRAL_NOTES_MAX_LENGTH}-character "
+        "string",
+    )
+    contracts.check(
+        "notes" not in decision_required,
+        f"{relative}: {POLICY_SUBMISSION_REFERRAL_DECISION_REQUEST}.notes must "
+        "stay optional",
     )
 
     conversion_request = schemas.get(POLICY_SUBMISSION_CONVERT_REQUEST) or {}
@@ -11510,6 +12014,8 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
             create_operation,
             get_operation,
             status_operation,
+            refer_operation,
+            decision_operation,
             convert_operation,
             expert_convert_operation,
         )
@@ -11523,6 +12029,46 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
         contracts.check(
             code in documented,
             f"{relative}: submission conversion descriptions must document {code}",
+        )
+
+    compatibility = document.get("x-compatibility") or {}
+    contracts.check(
+        compatibility.get("contractVersion") == "2.24.0",
+        f"{relative}: x-compatibility.contractVersion must be 2.24.0",
+    )
+    contracts.check(
+        compatibility.get("previousContractVersion") == "2.23.0",
+        f"{relative}: x-compatibility.previousContractVersion must be 2.23.0",
+    )
+    compatible = " ".join(
+        str(entry) for entry in compatibility.get("compatible") or []
+    )
+    for term in (
+        POLICY_SUBMISSION_REFERRAL_PATH,
+        POLICY_SUBMISSION_REFERRAL_DECISION_PATH,
+        POLICY_SUBMISSION_REFERRAL_REQUEST,
+        POLICY_SUBMISSION_REFERRAL_DECISION_REQUEST,
+        POLICY_SUBMISSION_REFERRAL_DECISION_SCHEMA,
+    ):
+        contracts.check(
+            term in compatible,
+            f"{relative}: x-compatibility.compatible must name {term}",
+        )
+    note = str(compatibility.get("note") or "")
+    for term in (
+        "RECEIVED",
+        "REFERRED",
+        "APPROVED",
+        "DECLINED",
+        "PENDING",
+        "policy.submission.referred",
+        "policy.submission.referral-decided",
+        "Idempotent-Replayed",
+        "M-63",
+    ):
+        contracts.check(
+            term in note,
+            f"{relative}: x-compatibility.note must document {term}",
         )
 
 
@@ -11629,7 +12175,7 @@ def check_policy_rating_asyncapi(contracts: ContractSet, document, relative: str
 
 
 def check_policy_submissions_asyncapi(contracts: ContractSet, document, relative: str):
-    """Require the two implemented submission facts and their payloads."""
+    """Require the five implemented submission facts and their payloads."""
     channels = document.get("channels") or {}
     operations = document.get("operations") or {}
     messages = (document.get("components") or {}).get("messages") or {}
@@ -11703,8 +12249,12 @@ def check_policy_submissions_asyncapi(contracts: ContractSet, document, relative
             expected_fields = POLICY_SUBMISSION_CREATED_EVENT_FIELDS
         elif event == POLICY_SUBMISSION_EVENT_STATUS_CHANGED:
             expected_fields = POLICY_SUBMISSION_STATUS_EVENT_FIELDS
-        else:
+        elif event == POLICY_SUBMISSION_EVENT_CONVERTED:
             expected_fields = POLICY_SUBMISSION_CONVERTED_EVENT_FIELDS
+        elif event == POLICY_SUBMISSION_EVENT_REFERRED:
+            expected_fields = POLICY_SUBMISSION_REFERRED_EVENT_FIELDS
+        else:
+            expected_fields = POLICY_SUBMISSION_REFERRAL_DECIDED_EVENT_FIELDS
         contracts.check(
             set(required) == set(expected_fields),
             f"{relative}: {message_name} must require exactly {list(expected_fields)}",
@@ -11820,7 +12370,7 @@ def check_policy_submissions_asyncapi(contracts: ContractSet, document, relative
                 f"{relative}: {message_name}.reason must be a nullable "
                 "500-character string",
             )
-        else:
+        elif event == POLICY_SUBMISSION_EVENT_CONVERTED:
             contracts.check(
                 (properties.get("policyId") or {}).get("format") == "uuid",
                 f"{relative}: {message_name}.policyId must be a uuid",
@@ -11835,6 +12385,131 @@ def check_policy_submissions_asyncapi(contracts: ContractSet, document, relative
                 f"{relative}: {event} description must document the replay no-event "
                 "rule",
             )
+        elif event == POLICY_SUBMISSION_EVENT_REFERRED:
+            contracts.check(
+                tuple((properties.get("previousStatus") or {}).get("enum") or [])
+                == ("RECEIVED", "REFERRED"),
+                f"{relative}: {message_name}.previousStatus must enumerate the "
+                "referrable states ['RECEIVED', 'REFERRED']",
+            )
+            contracts.check(
+                tuple((properties.get("status") or {}).get("enum") or [])
+                == ("REFERRED",),
+                f"{relative}: {message_name}.status must be the single REFERRED "
+                "state",
+            )
+            contracts.check(
+                tuple((properties.get("referralDecision") or {}).get("enum") or [])
+                == ("PENDING",),
+                f"{relative}: {message_name}.referralDecision must be the single "
+                "PENDING state",
+            )
+            for field, maximum in (
+                ("referralReason", POLICY_SUBMISSION_REFERRAL_REASON_MAX_LENGTH),
+                (
+                    "referralAuthority",
+                    POLICY_SUBMISSION_REFERRAL_AUTHORITY_MAX_LENGTH,
+                ),
+                ("referredTo", POLICY_SUBMISSION_REFERRED_TO_MAX_LENGTH),
+            ):
+                contracts.check(
+                    (properties.get(field) or {}).get("maxLength") == maximum,
+                    f"{relative}: {message_name}.{field} must be capped at "
+                    f"{maximum} characters",
+                )
+            contracts.check(
+                _schema_types(properties.get("referralNotes")) == {"string", "null"}
+                and (properties.get("referralNotes") or {}).get("maxLength")
+                == POLICY_SUBMISSION_REFERRAL_NOTES_MAX_LENGTH,
+                f"{relative}: {message_name}.referralNotes must be a nullable "
+                f"{POLICY_SUBMISSION_REFERRAL_NOTES_MAX_LENGTH}-character string",
+            )
+            contracts.check(
+                (properties.get("version") or {}).get("minimum") == 1,
+                f"{relative}: {message_name}.version must be at least 1 after the "
+                "referral command",
+            )
+            contracts.check(
+                (properties.get("updatedAt") or {}).get("format") == "date-time",
+                f"{relative}: {message_name}.updatedAt must be a date-time",
+            )
+            for term in (
+                "REFERRED",
+                "PENDING",
+                "policy.referral.opened",
+            ):
+                contracts.check(
+                    term in channel_description,
+                    f"{relative}: {event} description must document {term}",
+                )
+        elif event == POLICY_SUBMISSION_EVENT_REFERRAL_DECIDED:
+            contracts.check(
+                tuple((properties.get("previousStatus") or {}).get("enum") or [])
+                == ("REFERRED",),
+                f"{relative}: {message_name}.previousStatus must be the single "
+                "REFERRED state",
+            )
+            contracts.check(
+                tuple((properties.get("status") or {}).get("enum") or [])
+                == ("REFERRED", "DECLINED"),
+                f"{relative}: {message_name}.status must enumerate the decision "
+                "outcomes ['REFERRED', 'DECLINED']",
+            )
+            contracts.check(
+                tuple((properties.get("decision") or {}).get("enum") or [])
+                == POLICY_SUBMISSION_REFERRAL_DECISION_VALUES,
+                f"{relative}: {message_name}.decision must enumerate "
+                f"{list(POLICY_SUBMISSION_REFERRAL_DECISION_VALUES)}",
+            )
+            contracts.check(
+                (properties.get("decidedBy") or {}).get("maxLength")
+                == POLICY_SUBMISSION_REFERRAL_DECIDED_BY_MAX_LENGTH,
+                f"{relative}: {message_name}.decidedBy must be capped at "
+                f"{POLICY_SUBMISSION_REFERRAL_DECIDED_BY_MAX_LENGTH} characters",
+            )
+            contracts.check(
+                (properties.get("decidedAt") or {}).get("format") == "date-time",
+                f"{relative}: {message_name}.decidedAt must be a date-time",
+            )
+            contracts.check(
+                _schema_types(properties.get("notes")) == {"string", "null"}
+                and (properties.get("notes") or {}).get("maxLength")
+                == POLICY_SUBMISSION_REFERRAL_NOTES_MAX_LENGTH,
+                f"{relative}: {message_name}.notes must be a nullable "
+                f"{POLICY_SUBMISSION_REFERRAL_NOTES_MAX_LENGTH}-character string",
+            )
+            for field, maximum in (
+                ("referralReason", POLICY_SUBMISSION_REFERRAL_REASON_MAX_LENGTH),
+                (
+                    "referralAuthority",
+                    POLICY_SUBMISSION_REFERRAL_AUTHORITY_MAX_LENGTH,
+                ),
+                ("referredTo", POLICY_SUBMISSION_REFERRED_TO_MAX_LENGTH),
+            ):
+                contracts.check(
+                    (properties.get(field) or {}).get("maxLength") == maximum,
+                    f"{relative}: {message_name}.{field} must be capped at "
+                    f"{maximum} characters",
+                )
+            contracts.check(
+                (properties.get("version") or {}).get("minimum") == 1,
+                f"{relative}: {message_name}.version must be at least 1 after the "
+                "decision command",
+            )
+            contracts.check(
+                (properties.get("updatedAt") or {}).get("format") == "date-time",
+                f"{relative}: {message_name}.updatedAt must be a date-time",
+            )
+            for term in (
+                "APPROVED",
+                "DECLINED",
+                "policy.referral.decided",
+                "REFERRAL_NOT_PENDING",
+            ):
+                contracts.check(
+                    term in channel_description,
+                    f"{relative}: {event} description must document {term}",
+                )
 
 
 def check_policy_premium_audit_asyncapi(contracts: ContractSet, document, relative: str):

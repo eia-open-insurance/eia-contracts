@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.40.0
+  version: 1.41.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -253,6 +253,20 @@ info:
     becomes 2 published and 2 implemented, and the catalog now spans eleven event
     verticals. Policy stays at 39 published and 27 implemented because the
     product facts belong to the Product vertical.
+    The 2026-10-22 Policy submission-referral slice adds two Policy names,
+    `policy.submission.referred` and
+    `policy.submission.referral-decided`, with no SPEC 11.2.9 equivalent: SPEC
+    publishes `policy.referral.opened` and `policy.referral.decided` instead and
+    models the referral as a separate repeatable resource. Both are facts of
+    the `UnderwritingSubmission` aggregate, keyed by the submission id at the
+    post-command version plus the outbox convention offset. The referred fact
+    carries the previous/new status, the reason, authority, assignee, optional
+    notes, and the PENDING decision; the decided fact carries the
+    APPROVED/DECLINED decision, decider, decision instant, decision notes, the
+    retained referral identity, and the resulting REFERRED or DECLINED status.
+    They add two published and two implemented names, bringing the platform
+    totals to 232 published and 113 implemented; Policy becomes 41 published
+    and 29 implemented (M-22, M-63).
     The platform event-ingest service is the inbox:
     it validates the canonical envelope, verifies the HMAC signature when
     configured, and stores each event idempotently. There is still no business
@@ -410,6 +424,8 @@ x-event-catalog:
       - policy.submission.created
       - policy.submission.status-changed
       - policy.submission.converted
+      - policy.submission.referred
+      - policy.submission.referral-decided
     implemented:
       - policy.policy.created
       - policy.policy.updated
@@ -438,6 +454,8 @@ x-event-catalog:
       - policy.submission.created
       - policy.submission.status-changed
       - policy.submission.converted
+      - policy.submission.referred
+      - policy.submission.referral-decided
     consumed:
       - direct.claim.registered
       - direct.claim.allocated

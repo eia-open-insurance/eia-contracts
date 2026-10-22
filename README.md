@@ -3171,8 +3171,99 @@ Semantics:
   and their `errors`/`meta` shape in each operation description, in the three
   create request `productCode` descriptions, and in the shared
   `UnprocessableContent` description; the trim/upper-case and no-write rules;
-  the conversion and renewal exemption on all three operations; and the
-  `x-compatibility` version and notes. The full run passes 17,479 checks.
+  the conversion and renewal exemption on all three operations; and the info
+  description wording. The full run passes 17,479 checks.
+
+### Policy submission referrals (2026-10-22)
+
+Policy 2.24.0 adds the structured underwriting-referral command pair. The change
+is additive: two operations, two request schemas, one decision enum, seven
+optional projection members, and two implemented event names; no existing path,
+request field, response field, or event name changes.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/policy.yaml` | 2.24.0 | Additive | `POST /api/v1/policies/submissions/{submissionId}/referral` and `POST .../{submissionId}/referral/decision`, the `ReferPolicySubmissionRequest` and `DecidePolicySubmissionReferralRequest` bodies, the `PolicySubmissionReferralDecision` enum, the seven optional `PolicySubmission` referral members, and the 400/404/409 responses. |
+| `asyncapi/policy.yaml` | 1.17.0 | Additive | The implemented `policy.submission.referred` and `policy.submission.referral-decided` channels, `send` operations, and `PolicySubmissionReferredData`/`PolicySubmissionReferralDecidedData` payloads. |
+| `asyncapi/event-catalog.yaml` | 1.41.0 | Additive | Both names are published and implemented (232 published and 113 implemented in total; Policy 41 published and 29 implemented). |
+
+Semantics:
+
+- `POST /api/v1/policies/submissions/{submissionId}/referral` accepts
+  `{reason, authority, referredTo, notes?}`. `reason` and `authority` are
+  required, trimmed free text capped at 64 characters; `referredTo` is a
+  required, trimmed person or desk name capped at 128 characters; `notes` is
+  optional, trimmed, blank-to-null, and capped at 2000 characters. Only a
+  `RECEIVED` or `REFERRED` submission is referrable. The command is an upsert:
+  it records the referral details, moves the submission to `REFERRED`, starts
+  `referralDecision` at `PENDING`, and clears any prior decider and decision
+  instant. Repeating it while `REFERRED` replaces the details and restarts the
+  pending decision. Any later status is 409 `SUBMISSION_NOT_REFERRABLE` with
+  `meta.submissionId` and `meta.currentStatus`.
+- `POST .../{submissionId}/referral/decision` accepts
+  `{decision, decidedBy, notes?}`. `decision` is trimmed, upper-cased, and must
+  be `APPROVED` or `DECLINED`; `PENDING` and unknown values are 400
+  `INVALID_SUBMISSION_REFERRAL_DECISION`. `decidedBy` is required and capped at
+  128 characters. `notes` is optional and capped at 2000 characters; a non-blank
+  value replaces `referralNotes`, while a missing or blank value keeps the
+  referral narrative. The command requires a `REFERRED` submission with a
+  `PENDING` decision; any other state is 409 `REFERRAL_NOT_PENDING` with
+  `meta.submissionId`, `meta.currentStatus`, and, when one exists,
+  `meta.referralDecision`.
+- `APPROVED` keeps the submission `REFERRED` and sets `referralDecision`
+  `APPROVED`. `DECLINED` sets both `referralDecision` and the lifecycle status
+  to `DECLINED`; a declined submission is terminal for the status command and
+  cannot be reopened because the referral command accepts only
+  `RECEIVED`/`REFERRED`. Both decisions record `referralDecidedBy` and the
+  server-assigned `referralDecidedAt`.
+- Each accepted command bumps `version`, returns the updated `PolicySubmission`
+  with the new strong `ETag`, and writes `policy.submission.referred` or
+  `policy.submission.referral-decided` in the same transaction as the
+  conditional row update. A concurrent winner is 409
+  `CONCURRENT_MODIFICATION` with `meta.currentVersion` and
+  `meta.expectedVersion`; neither conflict path writes a row or an event.
+- The projection gains the optional `referralReason`, `referralAuthority`,
+  `referredTo`, `referralNotes`, `referralDecision`, `referralDecidedBy`, and
+  `referralDecidedAt` members. The public domain omits them until a referral is
+  opened; the expert returns them as null before that point. The decision enum
+  is the closed `PENDING`/`APPROVED`/`DECLINED` set.
+- `X-EIA-Tenant` is required (400 `MISSING_TENANT_HEADER` or
+  `INVALID_TENANT_HEADER`), an absent `X-EIA-Book` is accepted, and another
+  book is hidden as 404 `BOOK_SCOPE_VIOLATION`. An unknown or foreign
+  submission is 404 `SUBMISSION_NOT_FOUND`. A missing or malformed body member
+  is 400 `VALIDATION_ERROR` at the public domain; the expert's service-level
+  backstops are `INVALID_SUBMISSION_REFERRAL`,
+  `INVALID_SUBMISSION_REFERRAL_REASON`,
+  `INVALID_SUBMISSION_REFERRAL_AUTHORITY`,
+  `INVALID_SUBMISSION_REFERRAL_PARTY`,
+  `INVALID_SUBMISSION_REFERRAL_NOTES`,
+  `INVALID_SUBMISSION_REFERRAL_DECISION`, and
+  `INVALID_SUBMISSION_REFERRAL_DECIDED_BY`.
+- `If-Match` and `Idempotency-Key` are accepted and forwarded on both commands,
+  but the expert compares neither the tag nor a body version and does not replay
+  the key. The 200 always carries `Idempotent-Replayed: false`; a repeated
+  decision is 409 `REFERRAL_NOT_PENDING`, not a replay (M-06, M-07).
+- The SPEC 11.2.14 `referral` resource is a separate, repeatable record with a
+  closed reason enum, an optional `required_authority`, a uuid `assigned_to`,
+  `PENDING`/`APPROVED`/`DECLINED`/`RETURNED` decisions, a uuid `decided_by`,
+  conditions, and expiry. The implementation keeps one current referral in the
+  submission row, uses free-text reason/authority/assignee/decider, drops
+  `RETURNED`, and records no condition or expiry. SPEC 11.2.9 publishes
+  `policy.referral.opened`/`policy.referral.decided`; the implemented names are
+  `policy.submission.referred`/`policy.submission.referral-decided`. The
+  command also records no authority-matrix evaluation, so UWR-04 and UW-02 are
+  only partially enforced. M-01, M-22, and M-63 record the deviations.
+
+The validator requires both operations with the shared tenant, optional-book,
+`If-Match`, `Idempotency-Key`, and `submissionId` parameters; the required
+request bodies and their field caps/decision enum; the 200 `PolicySubmission`
+response with `ETag` and `Idempotent-Replayed: false`; the 400/404/409 responses
+and their codes and `meta` members; the seven optional projection members and
+their nullability/caps; the approved-keeps-`REFERRED` and
+declined-moves-to-`DECLINED` wording; the two implemented channels and their
+ordered payload members; the `IMPLEMENTED_EVENTS` entries and catalog entries;
+the absence of the implemented paths from `x-planned-operations`; and the
+`x-compatibility` versions and note. The full run passes 17,784 checks.
 
 ### Compatibility matrix
 
@@ -4410,9 +4501,8 @@ Rules:
 
 Underwriting submissions are a top-level DIRECT-book collection rather than a
 policy child: they exist before a policy and are served at
-`/api/v1/policies/submissions`. The expert keeps the same four operations plus
-the conversion under `/internal/v1` for the domain adapter; that alias is an
-implementation detail.
+`/api/v1/policies/submissions`. The expert maps the same seven operations under
+`/internal/v1` for the domain adapter; that alias is an implementation detail.
 
 | Operation | Path | Success | Errors |
 |---|---|---|---|
@@ -4420,16 +4510,22 @@ implementation detail.
 | Create | `POST /api/v1/policies/submissions` | 201 `PolicySubmission` | 400, 404, 409, 422 |
 | Read | `GET /api/v1/policies/submissions/{submissionId}` | 200 `PolicySubmission` | 400, 404 |
 | Transition | `PATCH /api/v1/policies/submissions/{submissionId}/status` | 200 `PolicySubmission` | 400, 404, 409 |
+| Refer | `POST /api/v1/policies/submissions/{submissionId}/referral` | 200 `PolicySubmission` | 400, 404, 409 |
+| Decide | `POST /api/v1/policies/submissions/{submissionId}/referral/decision` | 200 `PolicySubmission` | 400, 404, 409 |
 | Convert | `POST /api/v1/policies/submissions/{submissionId}/convert` | 201 `{submission, policy}` | 400, 404, 409, 422 |
 
 The projection is `{submissionId, submissionNumber, tenantId, applicantPartyId,
 productCode, requestedEffectiveDate, requestedLimitAmount,
 requestedLimitCurrency, tortCodes, notes, status, version, createdAt,
-updatedAt, policyId?}`. `submissionNumber` is the immutable server-generated
+updatedAt, policyId?, referralReason?, referralAuthority?, referredTo?,
+referralNotes?, referralDecision?, referralDecidedBy?, referralDecidedAt?}`.
+`submissionNumber` is the immutable server-generated
 `SUB-{YYYY}-{7 digits}` business key, unique per tenant; `tenantId` is filled
 from the scoped request because the expert row does not expose it. `notes` is
 null when absent and `tortCodes` is an empty array when none were supplied.
-`policyId` appears once a conversion has linked a policy.
+`policyId` appears once a conversion has linked a policy. The referral members
+appear once a structured referral is opened and are omitted by the public
+domain before that.
 `requestedLimitAmount` is a JSON number with at most four fraction digits
 rather than the canonical money string, while the created event payload carries
 the same amount as a scale-4 decimal string (M-03).
@@ -4485,6 +4581,28 @@ Rules:
   second submission with a new number. `If-Match` is accepted and forwarded on
   the status command, but the expert compares neither the header nor an
   `expectedVersion` body field, so a stale tag is not itself a 409 (M-06, M-07).
+- The referral command accepts `{reason, authority, referredTo, notes?}` on a
+  `RECEIVED` or `REFERRED` submission. Reason and authority are free text capped
+  at 64 characters, `referredTo` is free text capped at 128, and notes are
+  capped at 2000. The command records the referral details, moves the
+  submission to `REFERRED`, starts `referralDecision` at `PENDING`, clears any
+  prior decider/instant, bumps `version`, returns the new `ETag`, and writes
+  `policy.submission.referred` in the same transaction. Repeating it while
+  `REFERRED` replaces the details and restarts the pending decision. A later
+  status is 409 `SUBMISSION_NOT_REFERRABLE` with `meta.submissionId` and
+  `meta.currentStatus`.
+- The decision command accepts `{decision, decidedBy, notes?}`. `decision` must
+  be `APPROVED` or `DECLINED`; `decidedBy` is capped at 128 characters and
+  decision notes at 2000, with a non-blank value replacing `referralNotes` and a
+  missing or blank value keeping it. `APPROVED` keeps the submission
+  `REFERRED`; `DECLINED` also moves it to `DECLINED`. Both set
+  `referralDecidedBy`/`referralDecidedAt`, bump `version`, return the new
+  `ETag`, and write `policy.submission.referral-decided` in the same
+  transaction. A decision without a pending referral is 409
+  `REFERRAL_NOT_PENDING` with `meta.submissionId`, `meta.currentStatus`, and
+  `meta.referralDecision` when one exists. Both referral commands accept and
+  forward `If-Match` and `Idempotency-Key` but the expert honours neither, so
+  the 200 always reports `Idempotent-Replayed: false` (M-06, M-07).
 - Conversion accepts `{premiumAmount, premiumCurrency, expirationDate?}` and
   turns a `QUOTED` submission or an unlinked `BOUND` submission into a `DRAFT`
   policy from the submission applicant, product, requested effective date, and
@@ -4522,15 +4640,19 @@ Rules:
   `INVALID_IDEMPOTENCY_KEY`.
   The public domain policy projection still drops `Policy.submissionId`, while
   `PolicySubmission.policyId` is omitted while null (M-06, M-07, M-60).
-- SPEC 11.2.14 mounts the collection at `/api/v1/policy/submissions`, adds the
-  clearance, rating, referral, quote, authority, declination, and producer
-  slices and the `CLEARANCE`/`RATING` intermediate states, models conversion as
-  a quote/bind command chain, and names the facts
-  `policy.submission.received` and `policy.submission.declined`. The implemented
-  short path, six-state graph, conversion command, and
+- SPEC 11.2.14 mounts the collection at `/api/v1/policy/submissions`, defines a
+  separate repeatable `referral` resource with a closed reason enum, a uuid
+  assignee, `RETURNED` decisions, conditions, and expiry, and adds the
+  clearance, rating, quote, authority, declination, and producer slices and the
+  `CLEARANCE`/`RATING` intermediate states. It models conversion as a quote/bind
+  command chain and names the facts `policy.submission.received` and
+  `policy.submission.declined`. The implemented short path, six-state graph,
+  one-current-referral columns, free-text authority/assignee/decider,
+  three-value decision, conversion command, and
   `policy.submission.created`/`policy.submission.status-changed`/
-  `policy.submission.converted` names are narrower and are recorded in M-01,
-  M-22, M-59, and M-60.
+  `policy.submission.converted`/`policy.submission.referred`/
+  `policy.submission.referral-decided` names are narrower and are recorded in
+  M-01, M-22, M-59, M-60, and M-63.
 
 ### Global search
 
@@ -4904,15 +5026,20 @@ missing directory.
    400/404/409 responses with the `RATING_*`, `POLICY_NOT_RATEABLE`, and
    `RATING_WORKSHEET_NOT_FOUND` codes, plus the key-scope, 128-character-cap,
    and `INVALID_IDEMPOTENCY_KEY` wording. It also
-   requires the four submission operations with the shared tenant and optional
+   requires the six submission operations with the shared tenant and optional
    DIRECT book parameters, the create `IdempotencyKey` header, the status
-   `IfMatch` and `IdempotencyKey` headers, the required create and status
-   bodies, the fourteen-member `PolicySubmission`, the six-value
-   `PolicySubmissionStatus`, the three transition bullets and the terminal
-   statement, the bare-array list, the 201
-   `ETag`/`Idempotent-Replayed`/`Location` headers, the 200 `ETag`, the
-   400/404/409 responses and their codes, and the absence of a replay 200 and of
-   a public `q`/`status` list parameter. It also requires the five product
+   `IfMatch` and `IdempotencyKey` headers, the referral `IfMatch` and
+   `IdempotencyKey` headers, the required create, status, referral, and decision
+   bodies, the fourteen required `PolicySubmission` members plus the seven
+   optional referral members and their nullability/caps, the six-value
+   `PolicySubmissionStatus` and three-value `PolicySubmissionReferralDecision`
+   enums, the three transition bullets and the terminal statement, the
+   bare-array list, the 201 `ETag`/`Idempotent-Replayed`/`Location` headers, the
+   200 `ETag` on the read and referral/decision commands, the 400/404/409
+   responses and their codes, the approved-keeps-`REFERRED` and
+   declined-moves-to-`DECLINED` wording, and the absence of a replay 200, of a
+   public `q`/`status` list parameter, and of the implemented referral paths
+   from `x-planned-operations`. It also requires the five product
    operations with the tenant and optional DIRECT book parameters, the bare
    product-code-ordered list and search arrays, the `Product`,
    `ProductLine`, `ProductStatus`, `CreateProductRequest`, and
@@ -5021,7 +5148,15 @@ missing directory.
    replay wording, the tenant + operation scope and 128-character key cap, the
    expert conversion operation with the bare `Policy` response and
    `IdempotencyKey`, and the nullable `Policy.submissionId` and
-   `PolicySubmission.policyId` links. For the product event vertical it requires
+   `PolicySubmission.policyId` links. It also requires the implemented
+   `policy.submission.referred` and
+   `policy.submission.referral-decided` channels and `send` operations with the
+   thirteen-member `PolicySubmissionReferredData` and fifteen-member
+   `PolicySubmissionReferralDecidedData` payloads, their ordered members, the
+   referrable `RECEIVED`/`REFERRED` previous-status enums, the single
+   `REFERRED`/`PENDING` referred states, the `REFERRED`/`DECLINED` decision
+   statuses, the `APPROVED`/`DECLINED` decision enum, the nullable notes, and
+   the decision-instant field. For the product event vertical it requires
    the exact two channels and `send` operations, both marked implemented and
    naming `ProductEvents.java`, the ordered `ProductProductCreatedData` and
    `ProductProductStatusChangedData` payloads, the five-value line enum, the
@@ -5057,6 +5192,8 @@ missing directory.
    `policy.submission.created`,
    `policy.submission.status-changed`,
    `policy.submission.converted`,
+   `policy.submission.referred`,
+   `policy.submission.referral-decided`,
    `product.product.created`,
    `product.product.status-changed`,
    `policy.billing-plan.created`, `policy.billing-plan.adjusted`,
@@ -5128,7 +5265,8 @@ missing directory.
   Policy billing plan, installment, and renewal commands do not accept the
   headers, Policy rating and submission conversion compare a canonical request
   hash and return 409 `IDEMPOTENCY_CONFLICT`, and the billing adjustment,
-  premium audit, submission create/status, and Party status command still
+  premium audit, submission create/status/referral/decision, and Party status
+  command still
   forward the key without replay. `Idempotency-Key` covers Policy plus
   the Direct Claims and Assumed Claims task/note creates; the remaining vertical
   creates do not accept it, the claim task/note responses spell the marker
@@ -5373,6 +5511,19 @@ missing directory.
   command accepts `Idempotency-Key` or `If-Match`; the new-business creates
   require an ACTIVE catalog product but check no product version, form filing,
   or rate approval (M-01, M-06, M-07, M-14, M-22, M-61, M-62);
+- the underwriting referral pair is implemented as
+  `POST /api/v1/policies/submissions/{submissionId}/referral` and
+  `.../referral/decision` with one current referral stored in submission
+  columns and published as `policy.submission.referred`/
+  `policy.submission.referral-decided`, while SPEC 11.2.14 defines a separate
+  repeatable `referral` resource with a closed reason enum, a uuid assignee, a
+  uuid decider, `RETURNED` decisions, conditions, and expiry, and SPEC 11.2.9
+  publishes `policy.referral.opened`/`policy.referral.decided`. The implemented
+  reason, authority, assignee, and decider are free text, no condition or
+  expiry is recorded, and no authority matrix or clearance/rating gate runs, so
+  UWR-04 and UW-02 remain only partially enforced; `If-Match` and
+  `Idempotency-Key` are accepted and forwarded but honoured by neither command
+  (M-01, M-06, M-07, M-22, M-63);
 - the premium-receivables queue is a tenant-wide read at
   `GET /api/v1/billing/installments`, outside `/api/v1/policies`, and returns the
   flat `Receivable`/`ReceivableSummary` projection. SPEC 11.2.13 describes the

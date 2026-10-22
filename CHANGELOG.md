@@ -2315,13 +2315,64 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   codes and their `errors`/`meta` shape in each create description, in the
   three create request `productCode` descriptions, and in the shared 422
   description, the trim/upper-case and no-write wording, the conversion and
-  renewal exemption, the info-description rule, and the `x-compatibility`
-  previous version and notes.
+  renewal exemption, and the info-description rule.
 - `README.md` records the additive 2.23.0/1.9.0 versions, the lookup and error
   shape, the replay and exemption rules, the narrower status-only check, and
   the validator requirements; `MISMATCHES.md` adds M-62 and updates M-59 and
   M-61 for the new-business guard.
 - `python scripts/validate_contracts.py` passes 17,479 checks with 0 failures.
+
+### Added in the Policy submission-referral contract (2026-10-22)
+
+- `openapi/policy.yaml` is 2.24.0: adds
+  `POST /api/v1/policies/submissions/{submissionId}/referral` and
+  `POST /api/v1/policies/submissions/{submissionId}/referral/decision`, the
+  `ReferPolicySubmissionRequest` (`reason`, `authority`, `referredTo`, optional
+  `notes`) and `DecidePolicySubmissionReferralRequest` (`decision`,
+  `decidedBy`, optional `notes`) bodies, and the
+  `PolicySubmissionReferralDecision` (`PENDING`, `APPROVED`, `DECLINED`) enum.
+  `PolicySubmission` gains the optional `referralReason`, `referralAuthority`,
+  `referredTo`, `referralNotes`, `referralDecision`, `referralDecidedBy`, and
+  `referralDecidedAt` members, which the public domain omits until a referral is
+  opened. The referral POST accepts only a `RECEIVED` or `REFERRED` submission,
+  moves it to `REFERRED` with a `PENDING` decision, and replaces the details on
+  a repeat; the decision POST requires the pending referral, keeps `REFERRED`
+  for `APPROVED`, and moves the lifecycle to `DECLINED` for `DECLINED`. Each
+  accepted command bumps the version, returns the updated projection with its
+  strong `ETag` and `Idempotent-Replayed: false`, and writes
+  `policy.submission.referred` or `policy.submission.referral-decided` in the
+  same transaction. The operations document 400 `VALIDATION_ERROR` and the
+  expert `INVALID_SUBMISSION_REFERRAL*` backstops, 404 `SUBMISSION_NOT_FOUND`
+  and `BOOK_SCOPE_VIOLATION`, and 409 `SUBMISSION_NOT_REFERRABLE` and
+  `REFERRAL_NOT_PENDING` plus `CONCURRENT_MODIFICATION`; the optional
+  `If-Match` and `Idempotency-Key` headers are accepted and forwarded but not
+  honoured. `x-compatibility` moves to 2.24.0 over 2.23.0.
+- `asyncapi/policy.yaml` is 1.17.0: the implemented
+  `policy.submission.referred` and `policy.submission.referral-decided`
+  channels and `send` operations with the thirteen-member
+  `PolicySubmissionReferredData` and fifteen-member
+  `PolicySubmissionReferralDecidedData` payloads. Both are keyed by the
+  `UnderwritingSubmission` aggregate at the post-command version plus the outbox
+  convention offset and keep `eventVersion` 1.
+- `asyncapi/event-catalog.yaml` is 1.41.0: both names are published and
+  implemented, for 232 published and 113 implemented names (Policy 41 published
+  and 29 implemented).
+- `scripts/validate_contracts.py` requires both operations with the shared
+  tenant, optional-book, `If-Match`, `Idempotency-Key`, and `submissionId`
+  parameters, the required request bodies and their field caps and decision
+  enum, the 200 `PolicySubmission` response with `ETag` and
+  `Idempotent-Replayed: false`, the 400/404/409 responses and their codes and
+  `meta` members, the seven optional projection members and their
+  nullability/caps, the approved-keeps-`REFERRED` and
+  declined-moves-to-`DECLINED` wording, the two implemented channels and their
+  ordered payload members, the `IMPLEMENTED_EVENTS` entries, the catalog
+  entries, and the `x-compatibility` versions and note.
+- `README.md` records the additive versions, the routes, request and response
+  shapes, the lifecycle and event semantics, the unhonoured headers, the SPEC
+  11.2.14/11.2.9 deviations, the validator requirements, and the validation
+  count; `MISMATCHES.md` adds M-63, updates M-01 and M-59, and refreshes the
+  validation evidence.
+- `python scripts/validate_contracts.py` passes 17,784 checks with 0 failures.
 
 ### Notes
 

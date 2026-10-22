@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-22 (Active-product enforcement).
+Status: open, reviewed 2026-10-22 (Policy submission referrals).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -242,6 +242,15 @@ where the running code does not meet it yet.
   `PolicyErrors`/`Problems` plus the domain `PolicyClient` 4xx translation, and
   the `ProductCatalogGuardTest`, `PolicyServiceTest`, `PolicyControllerTest`,
   `UnderwritingSubmissionServiceTest`, and `ProductEnforcementIntegrationTest`.
+  The Policy submission-referral pass reads the domain `SubmissionController`
+  referral and decision routes, `SubmissionService`, `ReferSubmissionCommand`,
+  `DecideReferralCommand`, `SubmissionDto`, `PolicyClient` referral calls, and
+  `Problems` plus the expert `UnderwritingSubmissionController` referral and
+  decision routes, `UnderwritingSubmissionService`, `UnderwritingSubmissionRules`,
+  `UnderwritingSubmissionRepository`, `UnderwritingSubmission`,
+  `UnderwritingSubmissionView`, `ReferSubmissionRequest`,
+  `DecideReferralRequest`, `PolicyEvents`, `schema.sql` and its H2 mirror, and
+  the domain and expert referral tests.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -329,6 +338,7 @@ removed per the resolution policy.
 | M-60 | Submission conversion is a SPEC-less command with a bare-policy expert shape, a stored-key 200 replay with a canonical request hash since 2.21.0 and a linked-policy 200 replay without one, a new event name, an unprojected public `Policy.submissionId`, and no SPEC clearance/rating gate | M |
 | M-61 | Product catalog uses short paths, a five-value line taxonomy, a two-state ACTIVE/RETIRED lifecycle, a two-letter jurisdiction, no form family/effective dates/owner/product version, and two SPEC-less `product` event-vertical names | L |
 | M-62 | Active-product enforcement is a status-only catalog check with SPEC-less problem codes and no product-version, form-filing, or rate-approval evidence | M |
+| M-63 | Submission referrals use one current referral in submission columns with free-text reason/authority/assignee/decider, no `RETURNED`/conditions/expiry, and two new event names instead of the SPEC `referral` resource | M |
 
 ## M-01 Public base paths
 
@@ -383,7 +393,12 @@ submission commands rather than status edges (M-59). Submission conversion adds
 a command row: the implemented
 `POST /api/v1/policies/submissions/{submissionId}/convert` (expert alias
 `/internal/v1`) has no SPEC 11.2.14 route; the SPEC models the step as the
-submission `quote`/`bind` commands and names no conversion event (M-60).
+submission `quote`/`bind` commands and names no conversion event (M-60). The
+structured referral extends the same submission collection:
+`POST /api/v1/policies/submissions/{submissionId}/referral` and
+`.../referral/decision` replace the SPEC 11.2.14
+`POST /api/v1/policy/submissions/{submissionId}/referral` shape; the SPEC names
+no separate decision route and models the referral as its own resource (M-63).
 
 The ten global-search routes follow the same shorter form
 (`/api/v1/{resource}/search`); their SPEC naming gap and validation differences
@@ -417,8 +432,12 @@ Evidence:
   `repos/eia-policy-expert/.../PremiumAuditController.java:22-25` -
   `/api/v1/policies/{policyId}/premium-audit` (the expert also maps the
   `/internal/v1` alias).
-- `repos/eia-policy-domain/.../SubmissionController.java:122-140` and
-  `repos/eia-policy-expert/.../UnderwritingSubmissionController.java:106-122` -
+- `repos/eia-policy-domain/.../SubmissionController.java:127-163` and
+  `repos/eia-policy-expert/.../UnderwritingSubmissionController.java:106-140` -
+  `POST /api/v1/policies/submissions/{submissionId}/referral` and
+  `.../referral/decision` (the expert also maps the same paths under
+  `/internal/v1`); `SubmissionController.java:189-207` and
+  `UnderwritingSubmissionController.java:150-166` -
   `POST /api/v1/policies/submissions/{submissionId}/convert` (the expert also
   maps the same path under `/internal/v1`).
 - `repos/eia-platform/gateway/src/main/resources/application.yml:18-48` - the
@@ -4544,22 +4563,24 @@ it models the workflow as separate clearance, rating, referral, quote, bind,
 and declination commands with the
 `RECEIVED`/`CLEARANCE`/`RATING`/`REFERRED`/`QUOTED`/`BOUND`/`DECLINED`/
 `WITHDRAWN` status set. The implemented slice is an intake record with a
-one-way six-state graph and two new event names; the follow-on conversion
-command and its third event are recorded in M-60.
+one-way six-state graph and five new event names across the intake, conversion,
+and referral slices; the follow-on conversion command and its event are
+recorded in M-60, and the structured referral and its two events are recorded
+in M-63.
 
 | Aspect | Implemented | SPEC 11.2.14 / 11.2.9 |
 |---|---|---|
-| Routes | `GET/POST /api/v1/policies/submissions`, `GET .../{submissionId}`, `PATCH .../{submissionId}/status`, and `POST .../{submissionId}/convert` (the expert also maps `/internal/v1`; conversion is M-60) | `POST /api/v1/policy/submissions` only; no list, read, status, or conversion route |
-| Projection | `PolicySubmission` `{submissionId, submissionNumber, tenantId, applicantPartyId, productCode, requestedEffectiveDate, requestedLimitAmount, requestedLimitCurrency, tortCodes, notes, status, version, createdAt, updatedAt, policyId?}` | `underwriting_submission` also carries `program_id`, `product_id` (the implementation stores a product code), `requested_limits`, `requested_coverages`, `exposures`, `owner`, and `received_at` |
+| Routes | `GET/POST /api/v1/policies/submissions`, `GET .../{submissionId}`, `PATCH .../{submissionId}/status`, `POST .../{submissionId}/referral`, `POST .../{submissionId}/referral/decision`, and `POST .../{submissionId}/convert` (the expert also maps `/internal/v1`; conversion is M-60 and referrals are M-63) | `POST /api/v1/policy/submissions` only; no list, read, status, referral-decision, or conversion route |
+| Projection | `PolicySubmission` `{submissionId, submissionNumber, tenantId, applicantPartyId, productCode, requestedEffectiveDate, requestedLimitAmount, requestedLimitCurrency, tortCodes, notes, status, version, createdAt, updatedAt, policyId?, referralReason?, referralAuthority?, referredTo?, referralNotes?, referralDecision?, referralDecidedBy?, referralDecidedAt?}` | `underwriting_submission` also carries `program_id`, `product_id` (the implementation stores a product code), `requested_limits`, `requested_coverages`, `exposures`, `owner`, and `received_at`; the SPEC `referral` is a separate table, not submission columns |
 | Identity | server-generated per-tenant `SUB-{YYYY}-{7 digits}` number from `underwriting_submission_number_seq`; `(tenant_id, submission_number)` unique | `submission_number varchar(32)` with no generator rule |
 | Statuses | `RECEIVED`, `REFERRED`, `QUOTED`, `BOUND`, `DECLINED`, `WITHDRAWN` | adds `CLEARANCE` and `RATING` |
 | Graph | `RECEIVED -> REFERRED/QUOTED/DECLINED/WITHDRAWN`, `REFERRED -> QUOTED/DECLINED/WITHDRAWN`, `QUOTED -> BOUND/DECLINED/WITHDRAWN`; `BOUND`/`DECLINED`/`WITHDRAWN` terminal | the graph is implied by the clearance, rating, referral, quote, bind, and declination commands, not a status command |
-| Workflow commands | the status command and the conversion command (M-60) | clearance, rating, referral, quote, bind, declination, producer licensing/appointment, and the product/form/rating-plan slices |
+| Workflow commands | the status command, the structured referral and decision commands (M-63), and the conversion command (M-60) | clearance, rating, referral, quote, bind, declination, producer licensing/appointment, and the product/form/rating-plan slices |
 | Amount | `requestedLimitAmount` is a JSON number with at most four fraction digits plus a separate currency in the HTTP projection and create body (`BigDecimal` without `@JsonFormat`), while the event payload converts the same value to a scale-4 decimal string | `requested_limits jsonb`; SPEC 10.3 requires a decimal string and never a JSON number (M-03) |
 | List | bare tenant-scoped array, newest update first; no public `q`/`status` filter (the expert implements both) | SPEC 7.6 cursor pagination and the submission-list filters by producer, tort, status, age, and premium |
-| Concurrency / idempotency | create, read, and transition return the submission `ETag`; `If-Match` and `Idempotency-Key` are accepted and forwarded but the expert compares neither the tag nor an `expectedVersion` body field and does not replay the key; a lost internal version race is 409 `CONCURRENT_MODIFICATION` | SPEC 12.6 requires `If-Match`/`Idempotency-Key` on transaction submission |
+| Concurrency / idempotency | create, read, status, referral, and decision return the submission `ETag`; `If-Match` and `Idempotency-Key` are accepted and forwarded on the status, referral, and decision commands but the expert compares neither the tag nor an `expectedVersion` body field and does not replay the key; a lost internal version race is 409 `CONCURRENT_MODIFICATION` | SPEC 12.6 requires `If-Match`/`Idempotency-Key` on transaction submission |
 | Duplicate | 409 `DUPLICATE_SUBMISSION_NUMBER` on the unique tenant number; the locked allocator should prevent the collision, so the code is a database backstop | no explicit duplicate rule |
-| Events | `policy.submission.created` and `policy.submission.status-changed`, keyed by the `UnderwritingSubmission` aggregate at version 1 and at version + 1 per transition; conversion adds `policy.submission.converted` (M-60) | `policy.submission.received` and `policy.submission.declined` (both planned); no status or conversion fact |
+| Events | `policy.submission.created`, `policy.submission.status-changed`, `policy.submission.converted` (M-60), `policy.submission.referred`, and `policy.submission.referral-decided` (M-63), keyed by the `UnderwritingSubmission` aggregate | `policy.submission.received` and `policy.submission.declined`; `policy.referral.opened` and `policy.referral.decided` for the referral (all planned) |
 | Error envelope | canonical Policy `Problem` with `application/problem+json` | canonical `Problem` (matches) |
 
 Additional differences:
@@ -4567,11 +4588,13 @@ Additional differences:
 - The public domain route does not expose the expert's list filters. The
   `q`/`status` parameters exist only on the expert's `/internal/v1` alias, while
   the public list is the bare array ordered by `updated_at DESC, id ASC`.
-- Apart from conversion (M-60), the status command is the only mutation: there
-  is no submission edit or delete, no clearance/rating/referral/quote/bind/
-  declination command, no underwriting-authority check, and no declination
-  record. A `BOUND` status edge alone does not create a policy; conversion is a
-  separate command that accepts a `QUOTED` or unlinked `BOUND` submission.
+- Apart from conversion (M-60) and the structured referral pair (M-63), the
+  status command is the only mutation: there is no submission edit or delete,
+  no clearance/rating/quote/bind/declination command, no underwriting-authority
+  matrix check, and no declination record. A `BOUND` status edge alone does not
+  create a policy; conversion is a separate command that accepts a `QUOTED` or
+  unlinked `BOUND` submission. A pending referral does not gate the status
+  command, so `REFERRED -> QUOTED` can bypass an unresolved referral (UWR-04).
 - The `reason` is carried only on the event; the row stores the resulting
   status, version, and `updated_at`. There is no status-history table, so a
   consumer must persist the event to explain a transition.
@@ -4608,63 +4631,88 @@ Consequences:
 
 - A consumer of the SPEC `policy.submission.received` name sees nothing; the
   catalog publishes and implements `policy.submission.created` instead, so a
-  subscriber must consume the implemented name to observe intake.
+  subscriber must consume the implemented name to observe intake. The same is
+  true for the referral: a consumer expecting `policy.referral.opened` or
+  `policy.referral.decided` must consume `policy.submission.referred` and
+  `policy.submission.referral-decided` (M-63).
 - Because the workflow edge is a plain status command and conversion does not
   require clearance or an approved rating, the implemented workflow cannot
   express SPEC 11.2.14's clearance, rating, referral, quote, authority, and
-  declination evidence. UWR-01 (no bind without clearance and rating) and
-  UW-01 through UW-05 are not enforced.
+  declination evidence. The structured referral records an authority and a
+  decision but evaluates no authority matrix, condition, or expiry and does not
+  block the later status edges, so UWR-01 (no bind without clearance and
+  rating), UWR-04 (a triggered referral must resolve before bind), and UW-01
+  through UW-05 are not enforced.
 - A retried create with an `Idempotency-Key` makes a second submission with a
   new number, and a retried transition applies again; clients must not treat
   the accepted key as a replay guarantee.
 
 Evidence:
 
-- `repos/eia-policy-domain/.../SubmissionController.java:33-113` (public
-  intake routes, header-only tenant, optional book, ETag, replay marker,
-  Location) and `:115-140` (the conversion route and envelope; M-60)
-- `repos/eia-policy-domain/.../SubmissionService.java:22-51`,
-  `SubmissionDto.java:22-51`, `CreateSubmissionCommand.java:25-34`, and
-  `UpdateSubmissionStatusCommand.java:12-16` (projection and body shapes)
+- `repos/eia-policy-domain/.../SubmissionController.java:53-116`
+  (public intake routes, header-only tenant, optional book, ETag, replay marker,
+  Location), `:127-163` (the referral and decision routes; M-63), and
+  `:189-207` (the conversion route and envelope; M-60)
+- `repos/eia-policy-domain/.../SubmissionService.java:22-86`,
+  `ReferSubmissionCommand.java:18-23`, `DecideReferralCommand.java:13-17`,
+  `SubmissionDto.java:24-53`, `CreateSubmissionCommand.java:25-34`, and
+  `UpdateSubmissionStatusCommand.java:12-16` (projection, referral, and body
+  shapes)
 - `repos/eia-policy-domain/.../PolicyClient.java:773-951` (list/read/create/
   status calls, `{submission}` envelope and array/`items` list acceptance,
-  tenant projection, and 400/404/409 preservation)
+  tenant projection, and 400/404/409 preservation) and `:1029-1100` (the
+  referral and decision calls, headers, and replay-marker mapping)
 - `repos/eia-policy-domain/.../Problems.java:117-121` (submission codes)
 - `repos/eia-policy-expert/.../UnderwritingSubmissionController.java:28-97`
-  (dual base, tenant query/header, DIRECT-book gate, 201/200 and ETags) and
-  `:99-122` (the bare-policy conversion response; M-60)
-- `repos/eia-policy-expert/.../UnderwritingSubmissionService.java:61-195`
-  (list filters, create, conditional transition, conflict and event insert)
-- `repos/eia-policy-expert/.../UnderwritingSubmissionRules.java:25-229`
-  (status set, transition graph, normalization and caps)
-- `repos/eia-policy-expert/.../UnderwritingSubmissionRepository.java:63-140`
-  (tenant reads, newest-first ordering, insert, conditional update)
+  (dual base, tenant query/header, DIRECT-book gate, 201/200 and ETags),
+  `:100-140` (the referral and decision routes; M-63), and `:150-166` (the
+  bare-policy conversion response; M-60)
+- `repos/eia-policy-expert/.../UnderwritingSubmissionService.java:61-246`
+  (list filters, create, conditional transition, referral upsert, decision,
+  conflict and event insert)
+- `repos/eia-policy-expert/.../UnderwritingSubmissionRules.java:25-390`
+  (status set, transition graph, referral validation and caps, decision
+  normalization, and the referrable/pending predicates)
+- `repos/eia-policy-expert/.../UnderwritingSubmissionRepository.java:63-227`
+  (tenant reads, newest-first ordering, insert, conditional status, referral,
+  and decision updates)
 - `repos/eia-policy-expert/.../UnderwritingSubmissionNumberAllocator.java`
   (locked per-tenant counter and `SUB-{YYYY}-{7 digits}` formatting)
 - `repos/eia-policy-expert/.../UnderwritingSubmission.java:19-38`,
-  `UnderwritingSubmissionView.java:13-44`,
-  `CreateUnderwritingSubmissionRequest.java:17-26`, and
+  `UnderwritingSubmissionView.java:13-41`,
+  `CreateUnderwritingSubmissionRequest.java:17-26`,
+  `ReferSubmissionRequest.java:12-17`,
+  `DecideReferralRequest.java:11-15`, and
   `UpdateUnderwritingSubmissionStatusRequest.java:11-15`
-- `repos/eia-policy-expert/.../PolicyEvents.java:62-64,317-400` (the three
-  submission facts including conversion, aggregate type/subject, payload
-  fields, and aggregate version)
+- `repos/eia-policy-expert/.../PolicyEvents.java:62-66,317-422` (the five
+  submission facts including referral and decision, aggregate type/subject,
+  payload fields, and aggregate version)
 - `repos/eia-policy-expert/src/main/resources/schema.sql` (`underwriting_submission`
-  and `underwriting_submission_number_seq`, unique number, limit/currency/status
-  checks)
+  and `underwriting_submission_number_seq`, unique number,
+  limit/currency/status/referral-decision checks, and the tenant-referral index)
 - `repos/eia-policy-expert/src/test/java/com/eia/policy/expert/UnderwritingSubmissionIntegrationTest.java:78-362`
   (create/list/read/transitions, per-tenant numbering, tenant wall, both events,
-  rollback, validation, and sequence gap)
+  rollback, validation, and sequence gap),
+  `SubmissionReferralIntegrationTest.java` (referral upsert and decision flow,
+  persistence, tenant wall, events, conflicts, validation, and caps), and
+  `UnderwritingSubmissionRulesTest.java:359-445` and
+  `UnderwritingSubmissionServiceTest.java:400-660` (referral normalization,
+  predicates, and service paths)
 - `repos/eia-policy-domain/src/test/java/com/eia/policy/domain/SubmissionControllerTest.java:71-361`
   and `SubmissionClientTest.java:44-530` (routes, headers, ETag, replay marker,
-  problem preservation, and wire shapes)
+  problem preservation, and wire shapes),
+  `SubmissionReferralControllerTest.java`, `SubmissionReferralClientTest.java`,
+  and `SubmissionReferralServiceTest.java` (both referral routes, request
+  bodies, headers, replay marker, problem propagation, and key normalization)
 
-Resolution: amend SPEC 11.2.14 to the implemented intake and conversion slices
-and the three event names, or implement the clearance, rating, referral, quote,
-bind, and producer chain with the full status set and align the amount
-serialization, pagination, concurrency, and idempotency. In either case decide
-whether conversion must become the SPEC quote/bind command with a required
-clearance and approved rating worksheet, and whether a `BOUND` edge must require
-the same (UWR-01, UW-01).
+Resolution: amend SPEC 11.2.14 to the implemented intake, referral, and
+conversion slices and the five event names, or implement the clearance, rating,
+referral resource, quote, bind, and producer chain with the full status set and
+align the amount serialization, pagination, concurrency, and idempotency. In
+either case decide whether conversion must become the SPEC quote/bind command
+with a required clearance and approved rating worksheet, and whether a `BOUND`
+edge or conversion must require a resolved referral and the same clearance and
+rating evidence (UWR-01, UWR-04, UW-01).
 
 ## M-60 Submission conversion is a SPEC-less command with a bare-policy expert shape
 
@@ -4755,7 +4803,7 @@ Consequences:
 
 Evidence:
 
-- `repos/eia-policy-domain/.../SubmissionController.java:115-140` (public
+- `repos/eia-policy-domain/.../SubmissionController.java:189-207` (public
   conversion route, 201/200, ETag fallback, replay marker)
 - `repos/eia-policy-domain/.../ConvertSubmissionCommand.java:20-26` (request
   members and the upper-case currency pattern)
@@ -4766,7 +4814,7 @@ Evidence:
 - `repos/eia-policy-domain/.../PolicyClient.java:875-897,967-1017` (expert
   conversion call, both accepted response shapes, scoped read-back, ETag/replay
   mapping)
-- `repos/eia-policy-domain/.../SubmissionDto.java:25-41` (optional `policyId`)
+- `repos/eia-policy-domain/.../SubmissionDto.java:46-53` (optional `policyId`)
 - `repos/eia-policy-domain/.../PolicyDto.java:12-31` (no `submissionId`, the
   public projection gap)
 - `repos/eia-policy-domain/.../PolicyClient.java:1474-1502` (400/404/409/422
@@ -4990,10 +5038,138 @@ the conversion/renewal exemptions, and either map the two codes into the SPEC
 6.11 scheme or accept the legacy Policy strings. If UWR-03 must be enforceable,
 add the `product_version`/form/rate aggregate first (M-61).
 
+## M-63 Submission referrals use one current row and free-text authority/assignee instead of the SPEC referral resource
+
+Policy 2.24.0 adds the structured referral pair on the underwriting
+submission. `POST /api/v1/policies/submissions/{submissionId}/referral` accepts
+`{reason, authority, referredTo, notes?}` and moves a `RECEIVED`/`REFERRED`
+submission to `REFERRED` with a `PENDING` decision;
+`POST .../referral/decision` accepts `{decision, decidedBy, notes?}`, keeps
+`REFERRED` for `APPROVED`, and moves the lifecycle to `DECLINED` for `DECLINED`.
+SPEC 11.2.14 defines a separate repeatable `referral` table with a closed reason
+enum, an optional `required_authority`, a uuid `assigned_to`, a
+`PENDING`/`APPROVED`/`DECLINED`/`RETURNED` decision, a uuid `decided_by`,
+conditions, and expiry, and SPEC 11.2.9 publishes
+`policy.referral.opened`/`policy.referral.decided`. The implementation stores
+one current referral in the submission row with free-text values and publishes
+two new `policy.submission.*` names.
+
+| Aspect | Implemented | SPEC 11.2.14 / 11.2.9 / UW |
+|---|---|---|
+| Routes | `POST /api/v1/policies/submissions/{submissionId}/referral` and `.../referral/decision` (the expert also maps `/internal/v1`) | `POST /api/v1/policy/submissions/{submissionId}/referral` only; no separate decision route |
+| Storage | Seven nullable columns on `underwriting_submission`: `referral_reason`, `referral_authority`, `referred_to`, `referral_notes`, `referral_decision`, `referral_decided_by`, `referral_decided_at`; a decision check allows `PENDING`/`APPROVED`/`DECLINED` or null | A `referral` table with its own `id` and `submission_id`; multiple referral records can exist per submission |
+| Cardinality | One current referral per submission. Opening or replacing it overwrites the details, resets the decision to `PENDING`, and clears the previous decider and instant; no referral history is kept | Repeatable referral rows; the workflow can preserve each review round |
+| Reason | Required trimmed free text, 1-64 characters | Closed enum `LIMIT`, `PREMIUM`, `TORT`, `APPETITE`, `MANUSCRIPT`, `SANCTIONS`, `CONFLICT`, `OTHER` |
+| Authority | Required trimmed free text, 1-64 characters; no authority matrix or level resolution | `required_authority varchar(64)` nullable; authority is linked to `underwriting_authority` |
+| Assignee | `referredTo` is a required trimmed person or desk name, 1-128 characters | `assigned_to` is a nullable uuid reference |
+| Decision | `PENDING`, `APPROVED`, or `DECLINED`; the request accepts only `APPROVED`/`DECLINED`, normalized upper-case | `PENDING`, `APPROVED`, `DECLINED`, `RETURNED`; `RETURNED` is not modelled |
+| Decider / instant | `decidedBy` is a required trimmed free-text name, 1-128 characters; `referralDecidedAt` is server-assigned | `decided_by` is a nullable uuid; `decided_at` is a nullable timestamptz |
+| Notes | `notes` is optional, trimmed, blank-to-null, and capped at 2000. A non-blank decision note replaces `referralNotes`; a missing or blank note keeps the referral narrative | `comments text` on the referral; a decision has no separate comments column contract |
+| Lifecycle | Opening moves `RECEIVED` to `REFERRED`; opening again while `REFERRED` replaces the details. `APPROVED` keeps the submission `REFERRED`; `DECLINED` also moves it to `DECLINED`. Any later status is 409 `SUBMISSION_NOT_REFERRABLE` | The workflow moves through the referral step; the SPEC does not define a submission status side effect for an approval or declination |
+| Events | `policy.submission.referred` and `policy.submission.referral-decided`, keyed by `UnderwritingSubmission` at the post-command version plus the outbox convention offset, `eventVersion` 1 | `policy.referral.opened` and `policy.referral.decided` (both planned) |
+| Concurrency / idempotency | The conditional update includes the read version and status; `If-Match` and `Idempotency-Key` are accepted and forwarded on both commands but the expert compares neither and never replays the key, so the 200 always reports `Idempotent-Replayed: false`; a concurrent winner or duplicate decision is 409 | SPEC 12.6 requires `If-Match`/`Idempotency-Key` on transaction submission |
+| Gates / evidence | No authority-matrix evaluation, condition, expiry, clearance, rating, or declination record. A pending referral does not block `REFERRED -> QUOTED` or conversion | UWR-04 requires a triggered referral to resolve before bind; UW-01 requires clearance and a rating worksheet; UW-02 requires the decision to record authority, conditions, and expiry |
+| Errors | 400 `VALIDATION_ERROR` and the expert backstops `INVALID_SUBMISSION_REFERRAL`, `INVALID_SUBMISSION_REFERRAL_REASON`, `.AUTHORITY`, `.PARTY`, `.NOTES`, `.DECISION`, `.DECIDED_BY`; 404 `SUBMISSION_NOT_FOUND`/`BOOK_SCOPE_VIOLATION`; 409 `SUBMISSION_NOT_REFERRABLE`/`REFERRAL_NOT_PENDING`/`CONCURRENT_MODIFICATION` | Canonical `Problem` envelope (matches); SPEC 6.11 code scheme differs (M-02) |
+
+Additional differences:
+
+- `reason` is free text, so a client written against the SPEC enum cannot rely
+  on a closed trigger vocabulary. `authority` is required even though the SPEC
+  column is nullable, and `referredTo`/`decidedBy` are names or desks rather
+  than uuid references. Neither name is resolved against Party, a directory, or
+  an underwriting-authority record.
+- A referral decision has no `RETURNED` outcome, no conditions, and no expiry.
+  The decision note is stored in the same `referral_notes` column as the
+  referral narrative, so a non-blank decision note overwrites the original
+  narrative; the event retains the post-decision note only.
+- Opening a referral while already `REFERRED` is an upsert that clears the
+  previous `APPROVED`/`DECLINED` decision and its decider/instant. There is no
+  history table, so a consumer cannot reconstruct earlier rounds from the
+  submission row; only the outbox events retain them.
+- `APPROVED` does not advance the submission to `QUOTED`; the caller still has
+  to apply the normal status command. `DECLINED` is terminal for the status
+  command and the declined submission cannot be re-referred.
+- The public domain omits the seven referral members while null, while the
+  expert returns them as null before a referral. The public domain also accepts
+  an absent `X-EIA-Book`; the expert's own DIRECT-book guard returns 404
+  `NOT_FOUND`, and the domain hides another book as 404
+  `BOOK_SCOPE_VIOLATION`.
+- The domain validates the request shape with Bean Validation and forwards the
+  values untrimmed; the expert trims and applies the same caps. A blank required
+  value is 400 `VALIDATION_ERROR` at the domain and an expert
+  `INVALID_SUBMISSION_REFERRAL*` code on the expert alias. The idempotency key
+  is normalized by trimming and a blank key is absent, but no replay reservation
+  is written for either referral command.
+- A pending referral does not gate the generic status graph, so a caller can
+  move `REFERRED -> QUOTED` and convert the submission while the referral is
+  still `PENDING`. UWR-04 and UW-02 remain unenforced beyond the recorded facts.
+
+Consequences:
+
+- A consumer subscribed to SPEC `policy.referral.opened`/`policy.referral.decided`
+  sees nothing; it must consume `policy.submission.referred` and
+  `policy.submission.referral-decided`.
+- The implementation cannot show multiple referral rounds, a returned referral,
+  conditions, or an expiry. An auditor must replay the outbox stream.
+- Because a pending referral does not block the later edges, a bind can proceed
+  without a resolved referral even when a trigger would require one (UWR-04),
+  and the decision evidence does not meet UW-02's authority/conditions/expiry
+  requirement.
+
+Evidence:
+
+- `repos/eia-policy-domain/.../SubmissionController.java:127-163` (the public
+  referral and decision routes, `If-Match`/`Idempotency-Key`, ETag and replay
+  marker), `SubmissionService.java:53-86` (key normalization and delegation),
+  `ReferSubmissionCommand.java:18-23`, and `DecideReferralCommand.java:13-17`
+- `repos/eia-policy-domain/.../PolicyClient.java:1029-1100` (the internal
+  referral/decision calls, tenant/DIRECT headers, payloads, replay-marker
+  mapping, and problem preservation), `SubmissionDto.java:24-53`, and
+  `Problems.java:122-136` (optional referral projection and the referral codes)
+- `repos/eia-policy-expert/.../UnderwritingSubmissionController.java:100-140`
+  (the dual referral routes, tenant query/header, DIRECT-book gate, 200 ETags)
+- `repos/eia-policy-expert/.../UnderwritingSubmissionService.java:183-246`
+  (referral upsert, decision, state checks, conditional updates, and event
+  inserts), `UnderwritingSubmissionRules.java:287-390` (free-text caps, decision
+  vocabulary, referrable and pending predicates), and
+  `UnderwritingSubmissionRepository.java:173-227` (the referral and decision
+  updates, `COALESCE` notes, and version/status predicates)
+- `repos/eia-policy-expert/.../UnderwritingSubmission.java` (the seven referral
+  columns), `UnderwritingSubmissionView.java:15-41`,
+  `ReferSubmissionRequest.java:12-17`, and `DecideReferralRequest.java:11-15`
+- `repos/eia-policy-expert/.../PolicyEvents.java:62-66,362-422` (the two event
+  names, ordered payloads, aggregate type/subject, and post-command aggregate
+  version)
+- `repos/eia-policy-expert/src/main/resources/schema.sql` (the seven nullable
+  columns, the `PENDING`/`APPROVED`/`DECLINED` check, and the tenant-scoped
+  referral index)
+- `repos/eia-policy-expert/src/test/java/com/eia/policy/expert/SubmissionReferralIntegrationTest.java`
+  (referral and decision flows, persistence, version movement, events,
+  conflicts, tenant wall, and validation),
+  `UnderwritingSubmissionServiceTest.java:400-660`,
+  `UnderwritingSubmissionControllerTest.java:100-370`, and
+  `UnderwritingSubmissionRulesTest.java:359-445`
+- `repos/eia-policy-domain/src/test/java/com/eia/policy/domain/SubmissionReferralControllerTest.java`,
+  `SubmissionReferralClientTest.java`, and `SubmissionReferralServiceTest.java`
+  (routes, headers, payloads, replay marker, problem preservation, and key
+  normalization)
+- `repos/eia-contracts/scripts/validate_contracts.py` (the referral OpenAPI,
+  AsyncAPI, catalog, and compatibility requirements; the run passes 17,784
+  checks)
+
+Resolution: amend SPEC 11.2.14 to the implemented one-current-referral columns,
+free-text authority/assignee/decider, three-value decision, and the two
+`policy.submission.*` event names, or implement the SPEC `referral` table with
+repeatable rows, the closed reason enum, uuid references, `RETURNED`, authority
+matrix, conditions, and expiry, and publish `policy.referral.opened`/
+`policy.referral.decided`. In either case decide whether a pending referral must
+gate `REFERRED -> QUOTED`, conversion, and bind (UWR-04), and whether the
+decision must record an authority, condition, and expiry (UW-02).
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-22
-Policy active-product enforcement contract:
+Policy submission-referral contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -5003,7 +5179,7 @@ python: 3.12.8 (standard library only)
 
 OpenAPI 3.1 documents
   OK openapi/party.yaml  15 paths, 25 operations
-  OK openapi/policy.yaml  63 paths, 82 operations
+  OK openapi/policy.yaml  65 paths, 84 operations
   OK openapi/contract.yaml  43 paths, 62 operations
   OK openapi/direct-claims.yaml  51 paths, 74 operations
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
@@ -5015,7 +5191,7 @@ OpenAPI 3.1 documents
 
 AsyncAPI 3 documents
   OK asyncapi/party.yaml  15 event channels
-  OK asyncapi/policy.yaml  39 event channels
+  OK asyncapi/policy.yaml  41 event channels
   OK asyncapi/contract.yaml  32 event channels
   OK asyncapi/direct-claims.yaml  28 event channels
   OK asyncapi/assumed-claims.yaml  21 event channels
@@ -5025,7 +5201,7 @@ AsyncAPI 3 documents
   OK asyncapi/payment.yaml  20 event channels
   OK asyncapi/notifications.yaml  15 event channels
   OK asyncapi/product.yaml  2 event channels
-  OK catalog: 230 unique published events across 11 verticals
+  OK catalog: 232 unique published events across 11 verticals
 
 JSON Schema 2020-12 documents
 
@@ -5033,7 +5209,7 @@ JSON Reference resolution
   OK walked 23 YAML documents
 
 Result
-  PASS 17479 checks, 0 failures
+  PASS 17784 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -5465,16 +5641,25 @@ Additional checks and limits:
   and channel/catalog-set messages; and removing both product names from the
   catalog lists fails with the non-empty-published and channel-set messages.
   Removing `product` from the envelope `vertical` enum fails the exact
-  event-vertical message. The Policy active-product enforcement pass added five
+  event-vertical message. The Policy active-product enforcement pass added four
   more, each run on a throwaway copy and exited non-zero (exit 1): removing the
   422 response from the public policy create fails the shared-response message;
   removing `UNKNOWN_PRODUCT` from the submission create description fails the
-  documented-code message; rolling
-  `x-compatibility.previousContractVersion` back to 2.21.0 fails the version
-  message; removing the renewal exemption sentence fails the
+  documented-code message; removing the renewal exemption sentence fails the
   catalog-exemption message; and removing `PRODUCT_NOT_ACTIVE` from the shared
-  422 description fails the shared component-term message. The working copy was
-  left unchanged.
+  422 description fails the shared component-term message. The Policy
+  submission-referral pass added five more, each run on a throwaway copy and
+  exited non-zero (exit 1): renaming the public referral path fails the missing
+  required-path and missing referral-operation messages; removing `authority`
+  from `ReferPolicySubmissionRequest.required` fails the exact-required-list
+  message; adding `PENDING` to
+  `DecidePolicySubmissionReferralRequest.decision.enum` fails the exact-enum
+  message; removing `referralDecision` from the `PolicySubmission` properties
+  fails the optional-referral-member and nullable-reference messages; and
+  dropping `policy.submission.referred` from both catalog lists fails the
+  published and implemented set messages. Reducing
+  `x-compatibility.contractVersion` to 2.23.0 fails the version message. The
+  working copy was left unchanged.
 
 ## Resolution policy
 
