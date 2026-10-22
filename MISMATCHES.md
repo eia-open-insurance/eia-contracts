@@ -144,6 +144,12 @@ where the running code does not meet it yet.
   service, command, projection, client, and tests plus the expert litigation
   controller, request, matter, service, repository, event factory, `schema.sql`,
   and the domain and expert litigation tests.
+  The Notifications source-linkage pass reads the domain notification
+  controller, service, create command, projection, expert client, and exception
+  mapping plus the expert controller, service, create request, notification
+  record, `NotificationSourceType`, repository, `schema.sql` source columns,
+  `NotificationEvents`, error codes, and the domain and expert source-linkage
+  tests.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -220,6 +226,8 @@ removed per the resolution policy.
 | M-49 | Notification template administration uses a short path, approve/retire commands, and SPEC-less events | L |
 | M-50 | Policy premium audit is a SPEC-less route/event that re-rates the policy premium without the SPEC `policy_premium_audit` worksheet or batch job | L |
 | M-51 | Policy billing adjustment is a SPEC-less derived-delta route and event and does not honour the optional concurrency/idempotency headers | L |
+| M-52 | Direct Claims litigation damages are a SPEC-less pair and the created event has no SPEC name | L |
+| M-53 | Notification source linkage is a flat SPEC-less triple rather than the SPEC subject reference | L |
 
 ## M-01 Public base paths
 
@@ -769,9 +777,12 @@ unimplemented fields and list the missing operations under
   `PATCH /api/v1/payments/{paymentId}/status` (M-46); the projection returns
   the latest `statusReason`, but there is no status history and the `/history`
   read remains planned.
-- Notifications: no `category`, `severity`, `subject` reference,
+- Notifications: no `category`, `severity`, typed `subject` reference,
   `requiresAction`, `dueAt`, `actions[]`, inbox, read/acknowledge, stream,
-  subscriptions, preferences, or admin surfaces.
+  subscriptions, preferences, or admin surfaces. The implemented flat source
+  link (`sourceType`/`sourceId`/`sourceReference`) carries the subject
+  correlation, but it is not the SPEC 11.8.4 `subject_*` projection and has no
+  existence check against the source vertical (M-13, M-53).
 - Cession / Retrocession: no contracts, layers, participants, terms, rules,
   confirmations, recoverables, statements, or reconciliations. The case itself
   is implemented; the FS-RI hand-off fields were added in Round 2 and the
@@ -799,6 +810,7 @@ unimplemented fields and list the missing operations under
 | Policy legal entity `jurisdiction` | `legal_entity.domicile_country` (ISO 3166-1 char 3) |
 | Contract `sharePct`, `signedLinePct`, `cessionPct` | percentages of 100 (`15.000000`), not the SPEC 12.2 fraction |
 | Payment `sourceType` + `sourceId` + `sourceReference` | Payment `claim_vertical` + `claim_id` + `claim_number` (or the contract link) |
+| Notification `sourceType` + `sourceId` + `sourceReference` | Notification `subject_vertical` + `subject_type` + `subject_id` + `subject_business_key` / `subject` EntityRef |
 
 The contracts use the implemented names. Renaming any of these is a breaking
 change and needs a major version.
@@ -829,6 +841,13 @@ The Payment `payment.payment.created` payload now also carries the optional
 They are additive: `eventVersion` stays 1, the fields are absent or null on an
 unlinked payment, and `payment.payment.updated` and `.status-changed` keep their
 existing identity-only payloads.
+
+The two implemented notification facts
+`notifications.notification.created` and `notifications.notification.sent` now
+carry the optional notification source link (`sourceType`, `sourceId`,
+`sourceReference`) in their `data` object. The expert emits each present member
+and omits all three for an unlinked notification, so the payload change is
+additive and `eventVersion` stays 1 (M-53).
 
 The two allocation facts are child-aggregate events.
 `PaymentEvents.allocationCreated` writes `payment.allocation.created` against
@@ -3561,10 +3580,80 @@ domain's own validation to `> 0` and the both-or-neither rule would move the
 version. Clearing recorded damages or accepting a null pair as a clear is a new
 command and needs its own contract version.
 
+## M-53 Notification source linkage is a flat SPEC-less triple rather than the SPEC subject reference
+
+SPEC 11.8.4 `notification` defines `subject_vertical`, `subject_type`,
+`subject_id`, and the optional `subject_business_key` and `subject_display`
+columns; SPEC 12.5.5 renders the subject as an `EntityRef`. The 2026-10-22
+Notifications source-linkage slice instead adds a flat optional
+`sourceType`/`sourceId`/`sourceReference` link to the projection and both create
+commands, and the two implemented notification facts carry each present member.
+
+| Aspect | Implemented | SPEC / gap |
+|---|---|---|
+| Fields | Optional nullable `sourceType`, `sourceId`, and `sourceReference` on `Notification`, `CreateNotificationRequest`, and `CreateNotificationRequestInternal` | `subject_vertical`, `subject_type`, and `subject_id` are required; the business key and display label are separate members |
+| Enum | `DIRECT_CLAIM`, `ASSUMED_CLAIM`, `POLICY`, `CONTRACT`, `PAYMENT`, `OTHER` | `subject_vertical` is the vertical slug (`policy`, `contract`, `direct`, `assumed`, `document`, `payment`, `notifications`, ...); there is no `OTHER` and no business-object type such as a claim |
+| Pair rule | `sourceType` and `sourceId` are both-or-neither; every one of the six types requires an id; a reference-only link needs neither | SPEC requires all three subject identity members, with only the business key and display label optional |
+| Reference | `sourceReference` is a trimmed, 64-character human label; a blank value is absent | `subject_business_key` is `varchar(64)` and `subject_display` is `varchar(300)`; neither is a substitute for the id |
+| Validation | The expert trims/upper-cases the type and rejects an unknown type with 400 `EIA-NTF-9409` `INVALID_SOURCE_TYPE`, half a pair with 400 `EIA-NTF-9410` `INVALID_SOURCE_LINKAGE`, and an over-long reference with 400 `EIA-NTF-9411` `INVALID_SOURCE_REFERENCE`; the domain forwards the link and preserves the expert problem | No SPEC error-code assignment and no SPEC source field |
+| Existence check | None: `sourceId` is a plain UUID with no foreign key and is not resolved against the claim, policy, contract, payment, or other source vertical | SPEC 8.3.7 models notification-subject links with typed endpoints and records `NOTIFICATION_ABOUT` |
+| Events | `notifications.notification.created` and `.sent` carry each present member in `data` and omit all three when unlinked; `eventVersion` stays 1 | SPEC 11.8.9 names `issued`/`delivered` and the remaining lifecycle verbs, not these implemented names, and defines no payload schema |
+| Version | `openapi/notifications.yaml` 1.4.0 and `asyncapi/notifications.yaml` 1.3.0 (additive) | No SPEC version defines the flat link |
+
+Consequences:
+
+- A client generated from SPEC 11.8.4/12.5.5 expects a typed `subject` object;
+  the implemented contract returns `sourceType`/`sourceId`/`sourceReference`.
+  Both the create commands and the projection use the flat form, so a client
+  that omits the link sees no required-field break and a consumer that ignores
+  the event members keeps working.
+- The flat type is a business-object classification, not a SPEC vertical slug:
+  there is no `PARTY` or `DOCUMENT` member, `DIRECT_CLAIM` and `ASSUMED_CLAIM`
+  replace the single `direct`/`assumed` vertical slugs, and `OTHER` is the
+  unclassified escape hatch that still requires an id.
+- `sourceReference` may stand alone, which has no direct SPEC counterpart: it
+  records a human label without a typed subject. It never replaces `sourceId`
+  for a typed source.
+- Because there is no existence check, a notification can point at a missing or
+  cross-tenant source id. The tenant-scoped notification row remains the
+  authority; the link is correlation metadata, not a referential constraint.
+- Adding the SPEC columns later would be additive and could coexist with the
+  flat link. Removing or renaming the implemented members is breaking under
+  SPEC 10.4 and needs a major contract version.
+
+Evidence:
+
+- `repos/eia-notifications-expert/.../NotificationSourceType.java:15-41`
+  (closed enum and trim/upper-case `normalize`),
+  `NotificationService.java:63-93` (both-or-neither, blank-to-null, 64-character
+  reference), `Notification.java:28-30`, `CreateNotificationRequest.java:25-27`,
+  `NotificationEvents.java:63,80,85-100` (each present member in the created and
+  sent `data` object), `ErrorCode.java:29-31`, and `schema.sql:66-80` (the three
+  nullable columns, pair comment, and 64-character reference).
+- `repos/eia-notifications-domain/.../CreateNotificationCommand.java:18-30`,
+  `NotificationDto.java:10-30`, and `NotificationExpertClient.java:63-81,214-227`
+  (the flat command/response members and the forwarded internal request).
+- Tests: `repos/eia-notifications-expert/src/test/java/com/eia/notifications/expert/NotificationServiceTest.java:221-284`,
+  `NotificationControllerTest.java:170-260`, and
+  `NotificationOutboxIntegrationTest.java:100-190` (create, null fields, unknown
+  type, half pair, reference cap, and the created/sent payloads);
+  `repos/eia-notifications-domain/src/test/java/com/eia/notifications/domain/NotificationControllerTest.java:60-145`
+  and `NotificationExpertClientTest.java:60-180` (forwarding, preserve-null, and
+  the translated 400).
+- `openapi/notifications.yaml` 1.4.0 and `asyncapi/notifications.yaml` 1.3.0
+  record the implemented shape; `asyncapi/event-catalog.yaml` stays 1.34.0
+  because no event name changes.
+
+Resolution: either model the SPEC `subject_*` columns (or the typed `subject`
+EntityRef) on the notification and reconcile them with the flat link, or amend
+SPEC 11.8.4/12.5.5 to add the optional flat source triple and the six-value
+enum. Adding the subject columns is additive; the flat link is canonical for
+this release.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-22
-Direct Claims litigation-damages contract:
+Notifications source-linkage contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -3603,7 +3692,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 14825 checks, 0 failures
+  PASS 14914 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -3906,7 +3995,15 @@ Additional checks and limits:
   catalog `implemented` list each fail with the specific schema, pair,
   implemented-channel, or implemented-event message. All four were run on a
   throwaway copy and exited non-zero (exit 1); the working copy was left
-  unchanged.
+  unchanged. The Notifications source-linkage pass added five more: removing
+  `sourceId` from the `Notification` projection, removing `CONTRACT` from the
+  `NotificationSourceType` enum, deleting the sourceType-requires-sourceId
+  `allOf` branch from `CreateNotificationRequest`, removing the
+  `NotificationCreatedData` message reference from the created channel, and
+  dropping `INVALID_SOURCE_REFERENCE` from the public create description each
+  fail with the specific missing-field, enum, pairing-rule, payload-message, or
+  error-documentation message. All five were run on a throwaway copy and exited
+  non-zero (exit 1); the working copy was left unchanged.
 
 ## Resolution policy
 

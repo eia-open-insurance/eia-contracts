@@ -2345,6 +2345,53 @@ Semantics:
   members and both-or-neither wording, the `IMPLEMENTED_EVENTS` entries, and the
   catalog entries. The full run passes 14,825 checks.
 
+### Notifications source linkage (2026-10-22)
+
+Notifications 1.4.0 adds the optional flat source link that identifies the
+business record a notification is about. The change is additive: three optional
+nullable members on the projection and both create commands, one new enum, and
+two enriched event payloads; no path, required field, or event name changes.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/notifications.yaml` | 1.4.0 | Additive | `Notification`, `CreateNotificationRequest`, and `CreateNotificationRequestInternal` add the optional nullable `sourceType`, `sourceId`, and `sourceReference`; the `NotificationSourceType` enum (`DIRECT_CLAIM`, `ASSUMED_CLAIM`, `POLICY`, `CONTRACT`, `PAYMENT`, `OTHER`); the both-or-neither type/id rule; and the 64-character reference cap. |
+| `asyncapi/notifications.yaml` | 1.3.0 | Additive | The implemented `notifications.notification.created` and `.sent` channels gain the `NotificationCreatedData` and `NotificationSentData` payload schemas, each with the optional source members. `eventVersion` stays 1. |
+| `asyncapi/event-catalog.yaml` | 1.34.0 | Unchanged | No event name changes; the catalog stays at 218 published and 99 implemented names (Notifications 15 published and 5 implemented). |
+
+Semantics:
+
+- `sourceType` is a closed six-value enum. An unknown value is 400
+  `INVALID_SOURCE_TYPE` (`EIA-NTF-9409`); the value is trimmed and upper-cased,
+  so `direct_claim` selects `DIRECT_CLAIM`. Adding a value is additive and
+  removing one is breaking.
+- `sourceType` and `sourceId` are supplied together or not at all. A type
+  without an id, or an id without a type, is 400 `INVALID_SOURCE_LINKAGE`
+  (`EIA-NTF-9410`). All six types require an id when the type is present;
+  unlike Payment, `OTHER` has no reference-only escape.
+- `sourceReference` is optional metadata of at most 64 characters (example
+  `CLM-2026-0000001`). A longer value is 400 `INVALID_SOURCE_REFERENCE`
+  (`EIA-NTF-9411`); the expert trims it and treats a blank value as absent. It
+  never replaces `sourceId`, and a reference-only link with no type or id is
+  accepted.
+- The link is denormalized and has no referential-integrity check: `sourceId`
+  is not resolved against the claim, policy, contract, payment, or other source
+  vertical. The SPEC 11.8.4 `subject_vertical`/`subject_type`/`subject_id`/
+  `subject_business_key` columns and the SPEC 12.5.5 `subject` EntityRef are
+  still planned. `MISMATCHES.md` M-53 records the deviation.
+- The created and sent facts carry each present field in their `data` object,
+  so a consumer can correlate the notification without a second lookup. An
+  unlinked notification omits all three members and both facts stay at
+  `eventVersion` 1.
+- The public create operation forwards the link to the expert, which owns the
+  enum, pairing, and length rules; the domain's translated problem keeps the
+  expert status and `EIA-NTF-94xx` code. A direct `/internal/v1` caller sees the
+  same 400 codes.
+- The validator requires the three members on the projection and both create
+  requests, their optional/nullable status, the ordered six-value enum, the
+  UUID id, the 64-character reference, both conditional rules, the two payload
+  messages with optional source members, and the three documented 400 codes.
+  The full run passes 14,914 checks.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -2797,6 +2844,42 @@ escape edges, `SUBMITTED`/`ACCEPTED` -> `FAILED`, `PROCESSING` ->
 named actions and no generic status route, and the status write publishes the
 generic `payment.payment.updated`/`.status-changed` names rather than the SPEC
 per-verb facts; M-22 and M-46 record the differences.
+
+### Notification source linkage
+
+A notification may carry a flat, optional source link to the business record
+that caused it:
+
+| Field | Type | Rule |
+|---|---|---|
+| `sourceType` | enum | `DIRECT_CLAIM`, `ASSUMED_CLAIM`, `POLICY`, `CONTRACT`, `PAYMENT`, or `OTHER`. Required whenever `sourceId` is supplied. |
+| `sourceId` | UUID | UUID of the source record. Required for every `sourceType`; null when there is no source link. |
+| `sourceReference` | string, max 64 | Human-readable reference, for example `CLM-2026-0000001`. Optional metadata; it never replaces `sourceId`. |
+
+Rules and semantics:
+
+- Both or neither. A supplied `sourceType` without `sourceId` is 400
+  `INVALID_SOURCE_LINKAGE` (`EIA-NTF-9410`), and a supplied `sourceId` without
+  `sourceType` is the same 400. All six types require an id; `OTHER` is the
+  unclassified type but still needs one.
+- `sourceType` is trimmed and upper-cased before validation, so
+  `direct_claim` selects `DIRECT_CLAIM`. An unknown value is 400
+  `INVALID_SOURCE_TYPE` (`EIA-NTF-9409`).
+- `sourceReference` is optional. A supplied value is trimmed; a blank value is
+  treated as absent, and a value longer than 64 characters is 400
+  `INVALID_SOURCE_REFERENCE` (`EIA-NTF-9411`). It may accompany the pair or
+  stand alone, but it never substitutes for `sourceId`.
+- The link is deliberately denormalized. It lets a notification list or record
+  render and cross-link the source without an N+1 lookup, but it is not a
+  foreign key: there is no existence check against the source vertical and
+  `sourceId` is not resolved before create.
+- The SPEC 11.8.4 `subject_vertical`/`subject_type`/`subject_id`/
+  `subject_business_key` columns and the SPEC 12.5.5 `subject` EntityRef remain
+  planned. The implemented flat link covers the correlation need without the
+  typed subject object; `MISMATCHES.md` M-53 records the difference.
+- The `notifications.notification.created` and `.sent` payloads carry the
+  optional link in their `data` object. Each present member is emitted and all
+  three are omitted when the notification is unlinked; `eventVersion` stays 1.
 
 ### Policy billing
 
@@ -3471,7 +3554,13 @@ missing directory.
    DRAFT-on-create rule, the 201/200/400/404/409 responses, the
    `TEMPLATE_ALREADY_EXISTS`/`TEMPLATE_ALREADY_ACTIVE`/`TEMPLATE_STATUS_CONFLICT`
    documentation, and the absence of the implemented routes from
-   `x-planned-operations`.
+   `x-planned-operations`. It also requires the optional nullable notification
+   source fields on `Notification`, `CreateNotificationRequest`, and
+   `CreateNotificationRequestInternal`, the ordered six-value
+   `NotificationSourceType` enum, the nullable UUID `sourceId`, the
+   nullable 64-character `sourceReference`, the both-or-neither conditional
+   rules, and the `INVALID_SOURCE_TYPE`/`INVALID_SOURCE_LINKAGE`/
+   `INVALID_SOURCE_REFERENCE` documentation on both create operations.
 4. **AsyncAPI structure.** `asyncapi: 3.0.0`, channel addresses, `x-event-type`,
    `x-status: planned|implemented`, `x-implemented-by` on every implemented
    channel, one `send` operation per channel, a `DomainEvent` message on
@@ -3525,7 +3614,9 @@ missing directory.
    and the
    `NotificationTemplateData` payload with its template identity, code,
    template version, locale, status, and nullable approver members for the
-   created, approved, and retired facts.
+   created, approved, and retired facts, and the `NotificationCreatedData` and
+   `NotificationSentData` payloads with their optional `sourceType`,
+   `sourceId`, and `sourceReference` members on the two notification facts.
 5. **Event catalog cross-check.** The published set in `event-catalog.yaml`
    must equal the channel addresses in the matching vertical document, event
    names must be unique across the platform and must match
@@ -3680,6 +3771,12 @@ missing directory.
   and names a publish command. The three lifecycle facts
   `notifications.template.created`/`.approved`/`.retired` have no SPEC 11.8.9
   name, and a template is channel-neutral when `channel` is null (M-22, M-49);
+- a notification carries a flat `sourceType`/`sourceId`/`sourceReference` link
+  rather than the SPEC 11.8.4 `subject_vertical`/`subject_type`/`subject_id`/
+  `subject_business_key` columns and the SPEC 12.5.5 `subject` EntityRef. The
+  link has no referential-integrity check against the source vertical. All six
+  source types require a `sourceId`, while a reference-only link is accepted;
+  the created and sent facts carry the optional members (M-12, M-13, M-53);
 - document legal holds and disposition are implemented per document at
   `POST /api/v1/documents/{documentId}/hold`, `.../hold/release`, and
   `.../dispose`, with the new `document.legal-hold.placed`/`.released` events

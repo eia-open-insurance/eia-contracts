@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Notifications API
-  version: 1.3.0
+  version: 1.4.0
   summary: Notification drafting, delivery, and template administration and the Notifications expert API.
   description: >
     This document describes the implemented public Notifications domain API and
@@ -25,6 +25,13 @@ info:
 
     Notifications already emits the canonical RFC 9457 Problem envelope with
     stable EIA-NTF-9xxx codes and `application/problem+json`.
+
+    A notification may also carry an optional flat source link identifying the
+    business record that caused it: `sourceType` classifies the source,
+    `sourceId` is its UUID, and `sourceReference` is a human-readable label.
+    The type and id are supplied together or not at all, and `sourceReference`
+    is optional metadata capped at 64 characters. See MISMATCHES.md M-53 for
+    the difference from the SPEC 12.5.5 subject EntityRef.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -79,7 +86,14 @@ paths:
       description: >
         Creates a notification in CREATED. When `templateCode` is supplied it
         must reference an approved template for the tenant and channel; a
-        template version defaults to 1.
+        template version defaults to 1. The optional source link is a complete
+        `sourceType` + `sourceId` pair, or neither: an unknown type is 400
+        `INVALID_SOURCE_TYPE` (`EIA-NTF-9409`), half a pair is 400
+        `INVALID_SOURCE_LINKAGE` (`EIA-NTF-9410`), and a `sourceReference`
+        longer than 64 characters is 400 `INVALID_SOURCE_REFERENCE`
+        (`EIA-NTF-9411`). The type is trimmed and upper-cased before validation.
+        `sourceReference` is optional metadata and never replaces `sourceId`;
+        the expert accepts a reference-only link when no type or id is supplied.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
       requestBody:
@@ -418,6 +432,15 @@ paths:
       tags:
         - Notifications internal
       summary: Draft a notification (expert).
+      description: >
+        Drafts a notification for the tenant in the body. The optional source
+        link follows the public rule: `sourceType` and `sourceId` are supplied
+        together or not at all, and `sourceReference` is optional metadata of at
+        most 64 characters. The expert normalizes the type, rejects an unknown
+        value with 400 `INVALID_SOURCE_TYPE` (`EIA-NTF-9409`), rejects half a
+        pair with 400 `INVALID_SOURCE_LINKAGE` (`EIA-NTF-9410`), and rejects an
+        over-long reference with 400 `INVALID_SOURCE_REFERENCE`
+        (`EIA-NTF-9411`).
       security: []
       x-internal-api: true
       requestBody:
@@ -507,7 +530,10 @@ components:
       description: >
         Notification projection. The SPEC 12.5.5 representation carries
         category, severity, subject EntityRef, body, requiresAction, dueAt,
-        actions[], and _links; those are planned.
+        actions[], and _links; those are planned. The implemented projection
+        also carries an optional flat source link (`sourceType`, `sourceId`,
+        `sourceReference`) to the business record that caused the notification;
+        all three are null when there is no link. See MISMATCHES.md M-53.
       required:
         - id
         - tenantId
@@ -559,6 +585,42 @@ components:
         sentAt:
           type: [string, 'null']
           format: date-time
+        sourceType:
+          oneOf:
+            - $ref: '#/components/schemas/NotificationSourceType'
+            - type: 'null'
+          description: >
+            Source classification, or null when the notification has no source
+            link.
+        sourceId:
+          type: [string, 'null']
+          format: uuid
+          description: >
+            UUID of the source direct claim, assumed claim, policy, contract, or
+            payment when `sourceType` is present; null when there is no link.
+        sourceReference:
+          type: [string, 'null']
+          maxLength: 64
+          description: >
+            Human-readable source reference (for example `CLM-2026-0000001`).
+            Optional metadata; it never replaces `sourceId` for a classified
+            source.
+    NotificationSourceType:
+      type: string
+      description: >
+        Source record type for the optional notification source link. Every
+        non-null type requires a `sourceId`; the whole link is optional, so a
+        notification can exist with no source at all. The type is trimmed and
+        upper-cased before validation, and an unknown value is 400
+        `INVALID_SOURCE_TYPE` (`EIA-NTF-9409`). `OTHER` is the unclassified
+        escape hatch but still requires a `sourceId` when it is supplied.
+      enum:
+        - DIRECT_CLAIM
+        - ASSUMED_CLAIM
+        - POLICY
+        - CONTRACT
+        - PAYMENT
+        - OTHER
     NotificationType:
       type: string
       description: >
@@ -799,7 +861,15 @@ components:
           format: uuid
     CreateNotificationRequest:
       type: object
-      description: Public create command. The tenant comes from X-EIA-Tenant.
+      description: >
+        Public create command. The tenant comes from X-EIA-Tenant. Source
+        linkage is optional. `sourceType` and `sourceId` are supplied together
+        or not at all; a type without an id or an id without a type is 400
+        `INVALID_SOURCE_LINKAGE` (`EIA-NTF-9410`). `sourceReference` is
+        optional metadata of at most 64 characters and never replaces
+        `sourceId`; a reference-only link is accepted. An unknown type is 400
+        `INVALID_SOURCE_TYPE` (`EIA-NTF-9409`) and an over-long reference is
+        400 `INVALID_SOURCE_REFERENCE` (`EIA-NTF-9411`).
       required:
         - notificationType
         - channel
@@ -831,9 +901,59 @@ components:
         scheduledAt:
           type: string
           format: date-time
+        sourceType:
+          oneOf:
+            - $ref: '#/components/schemas/NotificationSourceType'
+            - type: 'null'
+          description: Optional source classification.
+        sourceId:
+          type: [string, 'null']
+          format: uuid
+          description: >
+            UUID of the source record. Required when `sourceType` is supplied;
+            null when there is no source link.
+        sourceReference:
+          type: [string, 'null']
+          maxLength: 64
+          description: >
+            Human-readable source reference (for example
+            `CLM-2026-0000001`). Optional metadata; never replaces `sourceId`.
+      allOf:
+        - description: A sourceType requires a sourceId.
+          if:
+            required:
+              - sourceType
+            properties:
+              sourceType:
+                type: string
+          then:
+            required:
+              - sourceId
+            properties:
+              sourceId:
+                type: string
+                format: uuid
+        - description: A sourceId requires a non-null sourceType.
+          if:
+            required:
+              - sourceId
+            properties:
+              sourceId:
+                type: string
+          then:
+            required:
+              - sourceType
+            properties:
+              sourceType:
+                $ref: '#/components/schemas/NotificationSourceType'
     CreateNotificationRequestInternal:
       type: object
-      description: Internal create command accepted by the Notifications expert.
+      description: >
+        Internal create command accepted by the Notifications expert. Source
+        linkage follows the public rule: `sourceType` and `sourceId` are
+        supplied together or not at all, `sourceReference` is optional metadata
+        of at most 64 characters, and the expert normalizes the type before
+        validation.
       required:
         - tenantId
         - notificationType
@@ -868,6 +988,51 @@ components:
         scheduledAt:
           type: string
           format: date-time
+        sourceType:
+          oneOf:
+            - $ref: '#/components/schemas/NotificationSourceType'
+            - type: 'null'
+          description: Optional source classification.
+        sourceId:
+          type: [string, 'null']
+          format: uuid
+          description: >
+            UUID of the source record. Required when `sourceType` is supplied;
+            null when there is no source link.
+        sourceReference:
+          type: [string, 'null']
+          maxLength: 64
+          description: >
+            Human-readable source reference. Optional metadata; never replaces
+            `sourceId`.
+      allOf:
+        - description: A sourceType requires a sourceId.
+          if:
+            required:
+              - sourceType
+            properties:
+              sourceType:
+                type: string
+          then:
+            required:
+              - sourceId
+            properties:
+              sourceId:
+                type: string
+                format: uuid
+        - description: A sourceId requires a non-null sourceType.
+          if:
+            required:
+              - sourceId
+            properties:
+              sourceId:
+                type: string
+          then:
+            required:
+              - sourceType
+            properties:
+              sourceType:
+                $ref: '#/components/schemas/NotificationSourceType'
 x-vertical: notifications
 x-implementation:
   status: implemented
@@ -877,6 +1042,8 @@ x-implementation:
     - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationSearchResponse.java
     - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationSearchItem.java
     - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationService.java
+    - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/CreateNotificationCommand.java
+    - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationDto.java
     - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationExpertClient.java
     - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/ApiExceptionHandler.java
     - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationTemplateController.java
@@ -885,6 +1052,9 @@ x-implementation:
     - repos/eia-notifications-domain/src/main/java/com/eia/notifications/domain/NotificationTemplateStatus.java
     - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationController.java
     - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationService.java
+    - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/Notification.java
+    - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationSourceType.java
+    - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationEvents.java
     - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationTemplateController.java
     - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationTemplateService.java
     - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationTemplateRepository.java
@@ -894,8 +1064,10 @@ x-implementation:
   errorEnvelope: Canonical RFC 9457 Problem envelope with EIA-NTF-9xxx codes.
   notes: >
     The expert returns application/problem+json and the domain translates expert
-    failures into the same envelope. Template and channel rules are enforced in
-    NotificationService. The expert also serves the template routes under
+    failures into the same envelope. Template, channel, and source-linkage rules
+    are enforced in NotificationService; the expert normalizes and validates
+    NotificationSourceType and owns the both-or-neither pair rule. The expert
+    also serves the template routes under
     `/internal/v1/notifications/templates` for direct internal callers; the
     domain uses the public path, so the internal alias is an implementation
     detail and is not documented as a separate public contract.
@@ -957,20 +1129,20 @@ x-planned-operations:
     spec: SPEC 11.8.10
     note: Issue a notification from an event or a direct call.
 x-compatibility:
-  contractVersion: 1.3.0
-  previousContractVersion: 1.2.0
+  contractVersion: 1.4.0
+  previousContractVersion: 1.3.0
   breaking: []
   compatible:
-    - Adds GET and POST /api/v1/notifications/templates for tenant-scoped template listing and DRAFT creation.
-    - Adds POST /api/v1/notifications/templates/{id}/approve and POST /api/v1/notifications/templates/{id}/retire.
-    - Adds the NotificationTemplate, NotificationTemplateStatus, CreateNotificationTemplateRequest, and ApproveNotificationTemplateRequest schemas.
-    - Documents the notifications.template.created, notifications.template.approved, and notifications.template.retired events.
+    - Adds optional nullable sourceType, sourceId, and sourceReference to Notification, CreateNotificationRequest, and CreateNotificationRequestInternal.
+    - Adds the NotificationSourceType schema with DIRECT_CLAIM, ASSUMED_CLAIM, POLICY, CONTRACT, PAYMENT, and OTHER, and the both-or-neither type/id rule with a 64-character sourceReference cap.
+    - Documents the optional source fields on the notifications.notification.created and notifications.notification.sent event payloads; eventVersion stays 1.
   note: >
-    Template administration is additive over 1.2.0: four new operations, four
-    new schemas, and three new event names. No existing path, request field,
-    response field, or event changes, so a client that never calls the template
-    routes is unaffected. The HTTP API version stays /api/v1. The three new
-    facts bring the catalog to 215 published and 95 implemented names, with
-    Notifications at 15 published and 5 implemented. The SPEC 11.8.10 admin
-    path and publish command are replaced by the implemented short route and
-    approve/retire commands, recorded in MISMATCHES.md M-49.
+    Source linkage is additive over 1.3.0: three optional nullable fields on the
+    projection and both create commands, one new enum schema, and two enriched
+    event payloads. No path, required field, existing field meaning, or event
+    name changes, so a client that omits the source link is unaffected and a
+    consumer that ignores the new event members keeps working. The HTTP API
+    version stays /api/v1 and the event catalog stays at 215 published and 95
+    implemented names, with Notifications at 15 published and 5 implemented,
+    because no event name changes. MISMATCHES.md M-53 records the flat link
+    against the SPEC 12.5.5 subject EntityRef.

@@ -2320,6 +2320,49 @@ NOTIFICATION_TYPE_REFERENCES = (
     ("CreateNotificationRequestInternal", "notificationType"),
 )
 
+# Notification source linkage. The optional flat link names the business record
+# that caused the notification. Unlike Payment, there is no reference-only
+# classified escape: every supplied sourceType requires a sourceId, and a
+# sourceReference may accompany the pair or stand alone. The three fields are
+# optional on the projection and both create commands, and the two implemented
+# notification facts carry each present field. See MISMATCHES.md M-53.
+NOTIFICATION_SOURCE_SCHEMA = "NotificationSourceType"
+NOTIFICATION_SOURCE_FIELDS = ("sourceType", "sourceId", "sourceReference")
+NOTIFICATION_SOURCE_TYPES = (
+    "DIRECT_CLAIM",
+    "ASSUMED_CLAIM",
+    "POLICY",
+    "CONTRACT",
+    "PAYMENT",
+    "OTHER",
+)
+NOTIFICATION_SOURCE_REFERENCE_MAX_LENGTH = 64
+NOTIFICATION_SOURCE_REQUEST_SCHEMAS = (
+    "CreateNotificationRequest",
+    "CreateNotificationRequestInternal",
+)
+NOTIFICATION_SOURCE_ERROR_CODES = (
+    "INVALID_SOURCE_TYPE",
+    "INVALID_SOURCE_LINKAGE",
+    "INVALID_SOURCE_REFERENCE",
+)
+NOTIFICATION_CREATED_EVENT = "notifications.notification.created"
+NOTIFICATION_SENT_EVENT = "notifications.notification.sent"
+NOTIFICATION_CREATED_MESSAGE = "NotificationCreatedData"
+NOTIFICATION_SENT_MESSAGE = "NotificationSentData"
+NOTIFICATION_SOURCE_EVENT_MESSAGES = (
+    (
+        NOTIFICATION_CREATED_EVENT,
+        "NotificationsNotificationCreated",
+        NOTIFICATION_CREATED_MESSAGE,
+    ),
+    (
+        NOTIFICATION_SENT_EVENT,
+        "NotificationsNotificationSent",
+        NOTIFICATION_SENT_MESSAGE,
+    ),
+)
+
 # Notification template administration (SPEC 11.8.10, NTF-14). The implemented
 # public surface is the short /api/v1/notifications/templates resource rather
 # than the SPEC admin path: list with optional status/code filters, create DRAFT,
@@ -3032,7 +3075,7 @@ class ContractSet:
 # ---------------------------------------------------------------------------
 
 
-def _payment_source_type_values(property_schema, document):
+def _source_type_values(property_schema, document):
     """Return the sourceType enum values from a plain, oneOf, or $ref property."""
     if not isinstance(property_schema, dict):
         return set()
@@ -3093,7 +3136,7 @@ def check_payment_openapi_sources(contracts: ContractSet, document, relative: st
             f"{relative}: Payment.properties.{field} is required",
         )
     contracts.check(
-        _payment_source_type_values(payment_properties.get("sourceType"), document)
+        _source_type_values(payment_properties.get("sourceType"), document)
         == set(PAYMENT_SOURCE_TYPES),
         f"{relative}: Payment.sourceType must enumerate {list(PAYMENT_SOURCE_TYPES)}",
     )
@@ -3121,7 +3164,7 @@ def check_payment_openapi_sources(contracts: ContractSet, document, relative: st
                 f"{relative}: {schema_name}.{field} must stay optional",
             )
         contracts.check(
-            _payment_source_type_values(properties.get("sourceType"), document)
+            _source_type_values(properties.get("sourceType"), document)
             == set(PAYMENT_SOURCE_TYPES),
             f"{relative}: {schema_name}.sourceType must enumerate {list(PAYMENT_SOURCE_TYPES)}",
         )
@@ -3267,7 +3310,7 @@ def check_payment_asyncapi_sources(contracts: ContractSet, document, relative: s
             f"{relative}: PaymentPaymentCreatedData.payload.{field} must stay optional",
         )
     contracts.check(
-        _payment_source_type_values(properties.get("sourceType"), document)
+        _source_type_values(properties.get("sourceType"), document)
         == set(PAYMENT_SOURCE_TYPES),
         f"{relative}: PaymentPaymentCreatedData.sourceType must enumerate "
         f"{list(PAYMENT_SOURCE_TYPES)}",
@@ -11828,6 +11871,178 @@ def check_notifications_openapi(contracts: ContractSet, document, relative: str)
         )
 
 
+def _notification_source_allows_null(property_schema) -> bool:
+    """A notification source type may be null as well as a known enum value."""
+    return any(
+        isinstance(option, dict) and option.get("type") == "null"
+        for option in (property_schema.get("oneOf") or [])
+    )
+
+
+def _notification_source_rules(schema):
+    """Return (sourceType requires sourceId, sourceId requires sourceType)."""
+    type_rule = False
+    pairing_rule = False
+    for branch in schema.get("allOf") or []:
+        if not isinstance(branch, dict):
+            continue
+        condition = branch.get("if") or {}
+        consequence = branch.get("then") or {}
+        if not isinstance(condition, dict) or not isinstance(consequence, dict):
+            continue
+        condition_required = set(condition.get("required") or [])
+        then_required = set(consequence.get("required") or [])
+        condition_properties = condition.get("properties") or {}
+        source_type = condition_properties.get("sourceType") or {}
+        source_id = condition_properties.get("sourceId") or {}
+        if (
+            "sourceType" in condition_required
+            and source_type.get("type") == "string"
+            and "sourceId" in then_required
+        ):
+            type_rule = True
+        if (
+            "sourceId" in condition_required
+            and source_id.get("type") == "string"
+            and "sourceType" in then_required
+        ):
+            pairing_rule = True
+    return type_rule, pairing_rule
+
+
+def check_notification_sources_openapi(contracts: ContractSet, document, relative: str):
+    """Require the optional notification source link and its pairing rule.
+
+    The projection and both create commands carry the optional, nullable
+    ``sourceType``/``sourceId``/``sourceReference`` triple. There is no
+    classified/reference-only split: every supplied type requires an id and
+    every supplied id requires a type, while ``sourceReference`` may stand
+    alone. The public and expert create descriptions name the three stable
+    400 codes.
+    """
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    source_type = schemas.get(NOTIFICATION_SOURCE_SCHEMA) or {}
+    contracts.check(
+        source_type.get("type") == "string",
+        f"{relative}: {NOTIFICATION_SOURCE_SCHEMA} must be a string enum",
+    )
+    contracts.check(
+        tuple(source_type.get("enum") or []) == NOTIFICATION_SOURCE_TYPES,
+        f"{relative}: {NOTIFICATION_SOURCE_SCHEMA} must enumerate "
+        f"{list(NOTIFICATION_SOURCE_TYPES)}",
+    )
+
+    notification = schemas.get("Notification") or {}
+    notification_properties = notification.get("properties") or {}
+    notification_required = set(notification.get("required") or [])
+    for field in NOTIFICATION_SOURCE_FIELDS:
+        contracts.check(
+            field in notification_properties,
+            f"{relative}: Notification.properties.{field} is required",
+        )
+        contracts.check(
+            field not in notification_required,
+            f"{relative}: Notification.{field} must stay optional",
+        )
+    contracts.check(
+        _source_type_values(notification_properties.get("sourceType"), document)
+        == set(NOTIFICATION_SOURCE_TYPES),
+        f"{relative}: Notification.sourceType must enumerate "
+        f"{list(NOTIFICATION_SOURCE_TYPES)}",
+    )
+    contracts.check(
+        _notification_source_allows_null(notification_properties.get("sourceType")),
+        f"{relative}: Notification.sourceType must stay nullable",
+    )
+    notification_id = notification_properties.get("sourceId") or {}
+    contracts.check(
+        _schema_types(notification_id) == {"string", "null"}
+        and notification_id.get("format") == "uuid",
+        f"{relative}: Notification.sourceId must be a nullable uuid",
+    )
+    notification_reference = notification_properties.get("sourceReference") or {}
+    contracts.check(
+        _schema_types(notification_reference) == {"string", "null"}
+        and notification_reference.get("maxLength")
+        == NOTIFICATION_SOURCE_REFERENCE_MAX_LENGTH,
+        f"{relative}: Notification.sourceReference must be a nullable string of "
+        f"at most {NOTIFICATION_SOURCE_REFERENCE_MAX_LENGTH} characters",
+    )
+
+    for schema_name in NOTIFICATION_SOURCE_REQUEST_SCHEMAS:
+        schema = schemas.get(schema_name) or {}
+        properties = schema.get("properties") or {}
+        required = set(schema.get("required") or [])
+        for field in NOTIFICATION_SOURCE_FIELDS:
+            contracts.check(
+                field in properties,
+                f"{relative}: {schema_name}.properties.{field} is required",
+            )
+            contracts.check(
+                field not in required,
+                f"{relative}: {schema_name}.{field} must stay optional",
+            )
+        contracts.check(
+            _source_type_values(properties.get("sourceType"), document)
+            == set(NOTIFICATION_SOURCE_TYPES),
+            f"{relative}: {schema_name}.sourceType must enumerate "
+            f"{list(NOTIFICATION_SOURCE_TYPES)}",
+        )
+        contracts.check(
+            _notification_source_allows_null(properties.get("sourceType")),
+            f"{relative}: {schema_name}.sourceType must stay nullable",
+        )
+        source_id = properties.get("sourceId") or {}
+        contracts.check(
+            _schema_types(source_id) == {"string", "null"}
+            and source_id.get("format") == "uuid",
+            f"{relative}: {schema_name}.sourceId must be a nullable uuid",
+        )
+        source_reference = properties.get("sourceReference") or {}
+        contracts.check(
+            _schema_types(source_reference) == {"string", "null"}
+            and source_reference.get("maxLength")
+            == NOTIFICATION_SOURCE_REFERENCE_MAX_LENGTH,
+            f"{relative}: {schema_name}.sourceReference must be a nullable "
+            f"string of at most {NOTIFICATION_SOURCE_REFERENCE_MAX_LENGTH} "
+            "characters",
+        )
+        type_rule, pairing_rule = _notification_source_rules(schema)
+        contracts.check(
+            type_rule,
+            f"{relative}: {schema_name} must require sourceId when sourceType "
+            "is supplied",
+        )
+        contracts.check(
+            pairing_rule,
+            f"{relative}: {schema_name} must require sourceType when sourceId "
+            "is supplied",
+        )
+
+    paths = document.get("paths") or {}
+    for create_path in ("/api/v1/notifications", "/internal/v1/notifications"):
+        path_item = paths.get(create_path) if isinstance(paths, dict) else None
+        operation = path_item.get("post") if isinstance(path_item, dict) else None
+        where = f"{relative}: POST {create_path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required create operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+        description = str(operation.get("description") or "")
+        for code in NOTIFICATION_SOURCE_ERROR_CODES:
+            contracts.check(
+                code in description,
+                f"{where}: description must document 400 {code}",
+            )
+        contracts.check(
+            "400" in (operation.get("responses") or {}),
+            f"{where}: must document the 400 response",
+        )
+
+
 def _notification_template_channel(schema) -> bool:
     """A template channel is either a NotificationChannel or null."""
     options = [option for option in (schema.get("oneOf") or []) if isinstance(option, dict)]
@@ -12776,6 +12991,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_direct_claim_litigation(contracts, document, relative)
         if vertical == "notifications":
             check_notifications_openapi(contracts, document, relative)
+            check_notification_sources_openapi(contracts, document, relative)
             check_notification_templates_openapi(contracts, document, relative)
         contracts.check_openapi_schemas(document, relative)
         if verbose:
@@ -12784,6 +13000,95 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             print(f"  OK {relative}  {len(paths)} paths, {operation_count} operations")
     contracts.check_openapi_schemas(components, Path("openapi/components.yaml"))
 
+
+
+def check_notifications_asyncapi_sources(contracts: ContractSet, document, relative: str):
+    """Require the optional source fields on the created and sent payloads.
+
+    The expert emits each present field and omits all three for an unlinked
+    notification, so every source member stays optional and nullable. The
+    source type is the six-value notification set; ``sourceId`` is a UUID and
+    ``sourceReference`` is capped at 64 characters.
+    """
+    channels = document.get("channels") or {}
+    operations = document.get("operations") or {}
+    messages = (document.get("components") or {}).get("messages") or {}
+    send_events = {
+        operation.get("x-event-type")
+        for operation in operations.values()
+        if isinstance(operation, dict) and operation.get("action") == "send"
+    }
+
+    for event, channel_key, message_name in NOTIFICATION_SOURCE_EVENT_MESSAGES:
+        where = f"{relative}: {event}"
+        channel = channels.get(channel_key) or {}
+        contracts.check(isinstance(channel, dict), f"{where} channel is missing")
+        if not isinstance(channel, dict):
+            continue
+        contracts.check(
+            channel.get("address") == event,
+            f"{where} channel must address {event}",
+        )
+        contracts.check(
+            event in send_events,
+            f"{where} must have an implemented send operation",
+        )
+        channel_messages = channel.get("messages") or {}
+        contracts.check(
+            (channel_messages.get(message_name) or {}).get("$ref")
+            == f"#/components/messages/{message_name}",
+            f"{where} must reference {message_name}",
+        )
+
+        message = messages.get(message_name) or {}
+        contracts.check(
+            message.get("contentType") == "application/json",
+            f"{relative}: {message_name} must declare application/json",
+        )
+        payload = message.get("payload") or {}
+        contracts.check(
+            payload.get("type") == "object",
+            f"{relative}: {message_name}.payload must be an object",
+        )
+        properties = payload.get("properties") or {}
+        required = set(payload.get("required") or [])
+        for field in NOTIFICATION_SOURCE_FIELDS:
+            contracts.check(
+                field in properties,
+                f"{relative}: {message_name}.payload.properties.{field} is required",
+            )
+            contracts.check(
+                field not in required,
+                f"{relative}: {message_name}.payload.{field} must stay optional",
+            )
+        contracts.check(
+            _source_type_values(properties.get("sourceType"), document)
+            == set(NOTIFICATION_SOURCE_TYPES),
+            f"{relative}: {message_name}.sourceType must enumerate "
+            f"{list(NOTIFICATION_SOURCE_TYPES)}",
+        )
+        contracts.check(
+            any(
+                isinstance(option, dict) and option.get("type") == "null"
+                for option in (properties.get("sourceType") or {}).get("oneOf") or []
+            ),
+            f"{relative}: {message_name}.sourceType must stay nullable",
+        )
+        source_id = properties.get("sourceId") or {}
+        contracts.check(
+            _schema_types(source_id) == {"string", "null"}
+            and source_id.get("format") == "uuid",
+            f"{relative}: {message_name}.sourceId must be a nullable uuid",
+        )
+        source_reference = properties.get("sourceReference") or {}
+        contracts.check(
+            _schema_types(source_reference) == {"string", "null"}
+            and source_reference.get("maxLength")
+            == NOTIFICATION_SOURCE_REFERENCE_MAX_LENGTH,
+            f"{relative}: {message_name}.sourceReference must be a nullable "
+            f"string of at most {NOTIFICATION_SOURCE_REFERENCE_MAX_LENGTH} "
+            "characters",
+        )
 
 
 def check_notification_templates_asyncapi(contracts: ContractSet, document, relative: str):
@@ -13640,6 +13945,7 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
             )
 
         if vertical == "notifications":
+            check_notifications_asyncapi_sources(contracts, document, relative)
             check_notification_templates_asyncapi(contracts, document, relative)
 
         entry = catalog_entries.get(vertical) or {}

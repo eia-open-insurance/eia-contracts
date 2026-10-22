@@ -1728,6 +1728,41 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   refreshes the validation evidence.
 - `python scripts/validate_contracts.py` passes 14,825 checks with 0 failures.
 
+### Added in the Notifications source-linkage contract (2026-10-22)
+
+- `openapi/notifications.yaml` is 1.4.0: `Notification`,
+  `CreateNotificationRequest`, and `CreateNotificationRequestInternal` add the
+  optional nullable `sourceType`, `sourceId`, and `sourceReference` members;
+  the `NotificationSourceType` enum adds `DIRECT_CLAIM`, `ASSUMED_CLAIM`,
+  `POLICY`, `CONTRACT`, `PAYMENT`, and `OTHER`; and both create commands carry
+  the both-or-neither `sourceType`/`sourceId` rule plus the 64-character
+  `sourceReference` cap. The public and expert create descriptions document
+  400 `INVALID_SOURCE_TYPE` (`EIA-NTF-9409`), `INVALID_SOURCE_LINKAGE`
+  (`EIA-NTF-9410`), and `INVALID_SOURCE_REFERENCE` (`EIA-NTF-9411`), the
+  trim/upper-case normalization, and the accepted reference-only link.
+  `x-compatibility` moves to 1.4.0 over 1.3.0, and `x-implementation` names the
+  source enum and event factory.
+- `asyncapi/notifications.yaml` is 1.3.0: the implemented
+  `notifications.notification.created` and `.sent` channels gain the
+  `NotificationCreatedData` and `NotificationSentData` payload schemas with the
+  optional nullable source members, and both channel descriptions document the
+  link and its omission when unlinked. `eventVersion` stays 1.
+- `asyncapi/event-catalog.yaml` is unchanged at 1.34.0 because no event name is
+  added or removed; the catalog stays at 218 published and 99 implemented
+  names (Notifications 15 published and 5 implemented).
+- `scripts/validate_contracts.py` requires the source members on the projection
+  and both create requests, their optional/nullable status, the ordered
+  six-value `NotificationSourceType` enum, the nullable UUID `sourceId` and
+  64-character nullable `sourceReference`, the two both-or-neither conditional
+  rules, the three documented 400 codes on both create operations, and the two
+  implemented payload messages with their optional source members.
+- `README.md` records the additive versions, the six-value enum, the
+  both-or-neither and reference-only semantics, the SPEC 11.8.4/12.5.5 subject
+  gap, the event payloads, and the validation count; `MISMATCHES.md` adds M-53,
+  updates M-12, M-13, M-14, and the scope/evidence notes, and refreshes the
+  validation evidence.
+- `python scripts/validate_contracts.py` passes 14,914 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was
