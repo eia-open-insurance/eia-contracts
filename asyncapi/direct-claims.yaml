@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:direct-claims
 info:
   title: EIA Direct Claims events
-  version: 1.4.0
+  version: 1.5.0
   summary: Published domain event names for the Direct Claims vertical.
   description: >
     Event contract for the Direct Claims vertical. The authoritative event names are
@@ -17,15 +17,16 @@ info:
     The Direct Claims expert now publishes `direct.claim.registered`,
     `direct.claim.updated`, `direct.claim.assigned`,
     `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`,
-    `direct.claim.settlement-authorized`, `direct.claim.task-created`,
+    `direct.claim.settlement-authorized`,
+    `direct.claim.settlement-payment-linked`, `direct.claim.task-created`,
     `direct.claim.task-completed`, `direct.claim.task-updated`,
     `direct.claim.note-added`, `direct.claim.allocation-created`, and
     `direct.claim.closed` through the transactional outbox; those channels and
     operations are marked `x-status: implemented`. The task, note, assignment,
-    and allocation-created names are new in this contract and have no SPEC
-    11.4.9 equivalent (MISMATCHES.md M-22). The SPEC name
-    `direct.claim.allocated` remains planned. Every other implemented name
-    already exists in the SPEC.
+    allocation-created, and settlement-payment-linked names are new in this
+    contract and have no SPEC 11.4.9 equivalent (MISMATCHES.md M-22, M-45). The
+    SPEC name `direct.claim.allocated` remains planned. Every other implemented
+    name already exists in the SPEC.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -293,6 +294,29 @@ channels:
     x-event-version: 1
     x-status: planned
     x-spec-section: SPEC 11.4.9
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+  DirectClaimSettlementPaymentLinked:
+    address: direct.claim.settlement-payment-linked
+    title: direct.claim.settlement-payment-linked
+    description: >
+      Emitted when the Payment record linked to a settlement is set or cleared,
+      in the same transaction as the settlement row update, the claim and
+      settlement version bumps, and the outbox insert. Only an AUTHORIZED or
+      EXECUTED settlement is linkable; a PROPOSED or REJECTED settlement is 409
+      `SETTLEMENT_NOT_LINKABLE` and emits nothing, and repeating the current
+      link is an idempotent no-op that also emits nothing. The payload carries
+      the claim identity and version context plus `claimId`, `settlementId`,
+      `settlementNumber`, `paymentId`, and `linkedAt`. `paymentId` and `linkedAt`
+      are omitted on an unlink, which is still a recorded state change. This
+      name is new in this contract and has no SPEC 11.4.9 equivalent
+      (MISMATCHES.md M-22, M-45).
+    x-event-type: direct.claim.settlement-payment-linked
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.4.9
+    x-implemented-by: repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -598,6 +622,18 @@ operations:
       HTTPS (SPEC 7.5). Planned.
     x-event-type: direct.claim.settlement-executed
     x-status: planned
+  publishDirectClaimSettlementPaymentLinked:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimSettlementPaymentLinked'
+    summary: Publish direct.claim.settlement-payment-linked
+    description: >
+      Publishes direct.claim.settlement-payment-linked through the transactional
+      outbox in the same transaction as a real settlement payment link or unlink
+      and the parent claim version bump. A repeated link and a non-linkable
+      settlement write no event.
+    x-event-type: direct.claim.settlement-payment-linked
+    x-status: implemented
   publishDirectClaimPaymentRequested:
     action: send
     channel:
@@ -738,13 +774,14 @@ x-implementation:
   publisher: eia-direct-claims-expert
   subscriber: none
   notes: >
-    Twelve Direct Claims events are written to the transactional outbox in the
+    Thirteen Direct Claims events are written to the transactional outbox in the
     same transaction as the aggregate or child write: `registered`, `updated`,
     `assigned`, `coverage-assessed`, `reserve-changed`,
-    `settlement-authorized`, `task-created`, `task-completed`, `task-updated`,
-    `note-added`, `allocation-created`, and `closed`. The SPEC name
-    `direct.claim.allocated` and the other SPEC 11.4.9 names remain planned.
-    There is no business subscriber or subscription registry yet.
+    `settlement-authorized`, `settlement-payment-linked`, `task-created`,
+    `task-completed`, `task-updated`, `note-added`, `allocation-created`, and
+    `closed`. The SPEC name `direct.claim.allocated` and the other SPEC 11.4.9
+    names remain planned. There is no business subscriber or subscription
+    registry yet.
 
 x-consumed-events:
   - policy.policy.issued

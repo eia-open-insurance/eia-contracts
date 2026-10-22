@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.26.0
+  version: 1.27.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -118,6 +118,13 @@ info:
     adds one published and one implemented name, bringing the platform totals to
     209 published and 89 implemented; Policy becomes 33 published and 21
     implemented (M-22, M-41).
+    The 2026-10-21 Direct Claims settlement-payment-link slice adds one Direct
+    Claims name, `direct.claim.settlement-payment-linked`, with no SPEC 11.4.9
+    equivalent: linking the Payment record that pays a settlement is a Direct
+    Claims state change and SPEC names no link fact. It adds one published and
+    one implemented name, bringing the platform totals to 210 published and 90
+    implemented; Direct Claims becomes 27 published and 13 implemented (M-22,
+    M-45).
     The platform
     event-ingest service
     is the inbox:
@@ -378,6 +385,7 @@ x-event-catalog:
       - direct.claim.litigation-updated
       - direct.claim.settlement-authorized
       - direct.claim.settlement-executed
+      - direct.claim.settlement-payment-linked
       - direct.claim.payment-requested
       - direct.claim.paid
       - direct.claim.recovery-recorded
@@ -401,6 +409,7 @@ x-event-catalog:
       - direct.claim.task-updated
       - direct.claim.note-added
       - direct.claim.settlement-authorized
+      - direct.claim.settlement-payment-linked
       - direct.claim.closed
     consumed:
       - policy.policy.issued

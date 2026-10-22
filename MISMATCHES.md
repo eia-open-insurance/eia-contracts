@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-21 (technical-account settlement references).
+Status: open, reviewed 2026-10-21 (Direct Claims settlement payment links).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -30,7 +30,11 @@ where the running code does not meet it yet.
   2026-10-21 technical-account settlement-reference pass re-reads the domain
   status command, client, and projection and the expert status request, rules,
   repository, event factory, and `schema.sql` for the reference field. The
-  Contract period-bordereau pass reads the
+  2026-10-21 Direct Claims settlement-payment-link pass reads the domain detail
+  controller, service, command, projection, client, and exception mapping plus
+  the expert settlement controller, request, service, repository, projection,
+  not-linkable exception, event factory, `schema.sql`, and the domain and expert
+  tests. The Contract period-bordereau pass reads the
   domain controller, service, client, projection, and command rules plus the
   expert period controller, legacy header controller, rules, repositories,
   status enum, event factory, and `schema.sql`. The Direct Claims allocation
@@ -173,6 +177,7 @@ removed per the resolution policy.
 | M-42 | Contract technical-account lines implement the 13-type SPEC vocabulary and bucket reconciliation but omit line correction, per-line currency/source metadata, and per-line approval | L |
 | M-43 | Policy legal entity catalog is a narrow five-type slice with a nullable issuing-entity link | M |
 | M-44 | Document legal holds and disposition are a per-document, synchronous slice without the SPEC hold collection or the approval/certificate workflow | L |
+| M-45 | Direct Claims settlement payment links are a SPEC-less route and event over one stored Payment id | L |
 
 ## M-01 Public base paths
 
@@ -751,7 +756,7 @@ ten publishing verticals now emit a subset:
 | Party | `party.party.created`, `party.party.updated` | `repos/eia-party-expert/.../PartyEvents.java` |
 | Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.billing-plan.created`, `policy.installment.paid`, `policy.installment.waived`, `policy.dunning.sent`, `policy.mass-tort-profile.updated`, `policy.program.created`, `policy.policy.program-assigned`, `policy.credit-note.created`, `policy.credit-note.issued`, `policy.credit-note.applied`, `policy.credit-note.cancelled`, `policy.credit-note.reversed`, `policy.legal-entity.created`, `policy.policy.legal-entity-assigned` | `repos/eia-policy-expert/.../PolicyEvents.java` |
 | Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded`, `contract.technical-account.created`, `contract.technical-account.issued`, `contract.technical-account.settled`, `contract.technical-account.line-added`, `contract.technical-account.line-removed`, `contract.bordereau.received`, `contract.bordereau.processed`, `contract.bordereau.failed`, `contract.cash-call.requested`, `contract.cash-call.issued`, `contract.cash-call.settled`, `contract.cash-call.cancelled`, `contract.security.recorded`, `contract.security.status-changed` | `repos/eia-contract-expert/.../ContractEvents.java` |
-| Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.assigned`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.closed`, `direct.claim.task-created`, `direct.claim.task-completed`, `direct.claim.task-updated`, `direct.claim.note-added`, `direct.claim.allocation-created` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
+| Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.assigned`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.settlement-payment-linked`, `direct.claim.closed`, `direct.claim.task-created`, `direct.claim.task-completed`, `direct.claim.task-updated`, `direct.claim.note-added`, `direct.claim.allocation-created` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
 | Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.assigned`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted`, `assumed.claim.task-created`, `assumed.claim.task-completed`, `assumed.claim.task-updated`, `assumed.claim.note-added` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
 | Cession | `cession.cession.created`, `cession.cession.updated`, `cession.cession.handed-off` | `repos/eia-cession-expert/.../CessionEvents.java` |
 | Retrocession | `retrocession.retrocession.created`, `retrocession.retrocession.updated`, `retrocession.retrocession.handed-off` | `repos/eia-retrocession-expert/.../RetrocessionEvents.java` |
@@ -833,6 +838,15 @@ license number) in the payload. `PolicyEvents.legalEntityAssigned` writes
 version, with the new and previous entity ids (either may be null) and
 `changedFields: [legalEntityId]`. Both are inserted in the same transaction as
 the row change; the names have no SPEC 11.2.9 equivalent (M-22, M-43).
+
+The settlement-payment-linked fact is a claim state change:
+`ClaimEvents.settlementPaymentLinked` writes
+`direct.claim.settlement-payment-linked` with the claim identity and version
+context, the settlement id and number, and the nullable `paymentId`/`linkedAt`;
+an unlink omits both members. It is written in the same transaction as the
+settlement link update and the claim version bump, while a repeated link and a
+non-linkable settlement write nothing. The name has no SPEC 11.4.9 equivalent
+(M-22, M-45).
 
 The Contract expert's generic status command can additionally emit the
 already-cataloged `contract.contract.signed`, `.endorsed`, `.expired`, and
@@ -966,7 +980,7 @@ planned name |
 |---|---|---|
 | Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created`; `policy.installment.paid` / `.waived`; `policy.dunning.sent`; `policy.program.created` / `policy.policy.program-assigned`; `policy.credit-note.created` / `.issued` / `.applied` / `.cancelled` / `.reversed`; `policy.legal-entity.created` / `policy.policy.legal-entity-assigned` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name; the dunning fact differs from SPEC 11.2.13 `policy.billing.dunning-changed`; the two program facts have no SPEC name because SPEC defines no program create or policy-assignment event. SPEC 11.2.13 publishes only `policy.billing.credit-note-issued` and defines no created, applied, cancelled, or reversed fact, so all five credit-note names are new (M-41). The two legal-entity facts are new because SPEC 10.11.2/11.2.16 define the model and link but SPEC 11.2.9 names no catalog-create or assignment event (M-43). `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
 | Contract | `contract.contract.updated`; `contract.technical-account.created` / `.issued` / `.settled`; `contract.bordereau.processed` / `.failed`; `contract.security.status-changed` | No SPEC name for updated, the technical-account facts, the two terminal bordereau facts, or the security status fact: SPEC 11.3.9 lists lifecycle verbs, the contract-level `contract.account.issued` / `.agreed` facts, `contract.bordereau.posted` / `.rejected`, and only the `contract.security.recorded` / `.breached` security facts. `created`, `bound`, `commuted`, `cession.recorded`, `contract.bordereau.received`, and `contract.security.recorded` match SPEC. |
-| Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned`; `direct.claim.allocation-created` | No SPEC names: SPEC 11.4.9 defines no assignment, task, note, or allocation-created event; it names the allocation fact `direct.claim.allocated`, which remains planned. `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and `closed` match SPEC. |
+| Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned`; `direct.claim.allocation-created`; `direct.claim.settlement-payment-linked` | No SPEC names: SPEC 11.4.9 defines no assignment, task, note, allocation-created, or settlement-payment-link event; it names the allocation fact `direct.claim.allocated`, which remains planned, and models the settlement `payment_id` only as a Payment projection (M-45). `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and `closed` match SPEC. |
 | Assumed Claims | `assumed.claim.updated`; `assumed.claim.assigned`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no assignment, task, or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
 | Cession | `cession.cession.created` / `.updated` / `.handed-off` | `cession.case.created`, `cession.handoff.sent`/`.acknowledged` |
 | Retrocession | `retrocession.retrocession.created` / `.updated` / `.handed-off` | `retrocession.case.created`, `retrocession.handoff.sent`/`.acknowledged` |
@@ -986,7 +1000,7 @@ Evidence:
   dunning, mass tort, program, credit-note creation, and credit-note-transition
   names)
 - `repos/eia-contract-expert/.../ContractEvents.java:41-56`
-- `repos/eia-direct-claims-expert/.../ClaimEvents.java:57-68`
+- `repos/eia-direct-claims-expert/.../ClaimEvents.java:62-74`
 - `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java:52-65`
 - `repos/eia-cession-expert/.../CessionEvents.java:27-29`
 - `repos/eia-retrocession-expert/.../RetrocessionEvents.java:28-30`
@@ -2820,10 +2834,81 @@ columns, the snapshot restore, and the synchronous tombstone. The two
 legal-hold event names need the EV-05 dual-publish treatment if they are
 aligned to the SPEC names.
 
+## M-45 Direct Claims settlement payment links are a SPEC-less route and event over one stored Payment id
+
+SPEC 11.4.4 defines a `claim_settlement.payment_id` column described as a
+"Projection from Payment", and the SPEC relationship model names
+`SETTLEMENT_HAS_PAYMENT` (1:N) with its inverse `PAYMENT_SETTLES` (N:1). SPEC
+11.4.10 defines no payment-link operation under the settlement resource, and
+SPEC 11.4.9 publishes no link event. The 2026-10-21 slice documents an already
+implemented Direct Claims extension:
+
+| Area | Implemented | SPEC / gap |
+|---|---|---|
+| Route | `PATCH /api/v1/claims/{claimId}/settlements/{settlementId}/payment` (the M-01 short form) and the `/internal/v1` expert alias the domain calls | SPEC 11.4.10 lists only the settlement GET, POST authorize, and execute operations; the link command is an implementation extension. |
+| Command | Required body `SettlementPaymentRequest` `{paymentId}`; `paymentId` is required but nullable: a UUID links and stamps `paymentLinkedAt`, null clears both members, and repeating the current value is an idempotent no-op | SPEC models `payment_id` as a projection from Payment and does not define a command. The canonical body requires the explicit null, but neither the expert nor the domain marks the record component required, so a body that omits `paymentId` is also treated as a clear. |
+| Projection | `Settlement.paymentId` and `Settlement.paymentLinkedAt` are required-but-nullable; both are null while unlinked | SPEC has `payment_id` but no link timestamp, and it does not expose the field through a documented settlement projection. |
+| Linkability | Only `AUTHORIZED` or `EXECUTED` is linkable; a `PROPOSED` or `REJECTED` settlement is 409 `SETTLEMENT_NOT_LINKABLE`. A concurrent settlement change is 409 `CONFLICT`; an unknown claim or settlement, a foreign tenant, and a missing or non-DIRECT book are 404 | SPEC defines no link state machine. Its settlement status vocabulary is wider (`PROPOSED`, `NEGOTIATING`, `AUTHORIZED`, `APPROVED`, `EXECUTED`, `PAID`, `REJECTED`, `VOID`), while the implemented set is `PROPOSED`/`AUTHORIZED`/`EXECUTED`/`REJECTED`; `PAID` is not implemented. |
+| Link cardinality | One nullable `paymentId` per settlement, stored by Direct Claims; no Payment service call, no existence or tenant check, and no amount or currency reconciliation | SPEC 11.4.4 and the relationship model allow many payments per settlement. The link is free of Payment-side validation, so a foreign, unknown, or cancelled Payment id is accepted. |
+| Event | `direct.claim.settlement-payment-linked`; the payload carries the claim identity and version context, `claimId`, `settlementId`, `settlementNumber`, `paymentId`, and `linkedAt`, and an unlink omits `paymentId`/`linkedAt` | SPEC 11.4.9 names no settlement-payment-link fact, so the name is new (M-22). A real link or unlink bumps the claim and settlement versions; a repeat and a non-linkable settlement write nothing. |
+| Error surface | The expert returns 409 `SETTLEMENT_NOT_LINKABLE`; the public domain maps every expert 409 except `EIA-DIR-4091` to 409 `CONFLICT` while preserving the detail | The canonical public contract documents `SETTLEMENT_NOT_LINKABLE`; the running domain reports `CONFLICT`, in the same way M-31 records the remapped allocation codes. |
+| Book | The public and expert operations require `X-EIA-Book: DIRECT`; another book is 404 `BOOK_SCOPE_VIOLATION` | Matches the claim-vertical book wall (WALL-06); a missing header is also 404 in this vertical (M-08, M-23). |
+
+Evidence:
+
+- `repos/eia-direct-claims-domain/.../ClaimDetailController.java:252-267`
+  (the public PATCH route, the DIRECT book guard, and the command body) and
+  `ClaimDetailService.java:351-361` (pass-through to the expert), and
+  `ClaimCommands.java:123-129` (the `SettlementPayment` command with the
+  nullable `paymentId`).
+- `repos/eia-direct-claims-domain/.../ClaimDetailDtos.java:165-187` (the
+  settlement projection with `paymentId` and `paymentLinkedAt`),
+  `ClaimClient.java:332-349` (the expert PATCH call with the tenant and book
+  headers), and `ApiExceptionHandler.java:88-113` (the expert 400/404/409
+  remap, including the `CONFLICT` collapse).
+- `repos/eia-direct-claims-expert/.../SettlementController.java:79-87` (the
+  public and internal PATCH mapping) and `SettlementPaymentRequest.java:5-16`
+  (the nullable `paymentId` contract).
+- `repos/eia-direct-claims-expert/.../SettlementService.java:142-177` (the
+  AUTHORIZED/EXECUTED gate, the same-value no-op, the claim and settlement
+  version bumps, and the outbox insert) and
+  `SettlementNotLinkableException.java:3-11` with
+  `ApiExceptionHandler.java:83-91` (the 409 `SETTLEMENT_NOT_LINKABLE` code).
+- `repos/eia-direct-claims-expert/.../SettlementRepository.java:137-164` (the
+  compare-and-set link update, the null clear, and the settled status
+  predicate) and `Settlement.java:18-39` (the projection members).
+- `repos/eia-direct-claims-expert/src/main/resources/schema.sql:208-247`
+  (`claim_settlement` with nullable `payment_id` and `payment_linked_at`, the
+  status check, and the additive forward ALTERs).
+- `repos/eia-direct-claims-expert/.../ClaimEvents.java:51-54,67,191-205` (the
+  event name, the claim partition key, and the nullable `paymentId`/`linkedAt`
+  payload members).
+- Tests: `SettlementServiceTest` (the AUTHORIZED link, the EXECUTED unlink, the
+  PROPOSED/REJECTED refusal, the tenant scope, and the repeat no-op),
+  `DirectClaimsEndpointTest` (the public and internal routes, the null clear,
+  and the 409 code), `DirectClaimsOutboxIntegrationTest` (the emitted payload
+  and the unlink omission), `ClaimClientTest` (the PATCH body and link parsing),
+  and `ClaimDetailControllerTest` (the public route, the book wall, and the
+  preserved expert errors).
+- `openapi/direct-claims.yaml` (1.10.0), `asyncapi/direct-claims.yaml`
+  (1.5.0), and `asyncapi/event-catalog.yaml` (1.27.0) record the implemented
+  shape; the README settlement-payment-link section and the validator require
+  it.
+
+Resolution: the implemented slice is documented as canonical for now. Closing
+the gap means adding the SPEC route or amending SPEC 11.4.10, deciding whether a
+settlement carries one payment or many, validating the Payment id against the
+Payment service (existence, tenant, status, amount, and currency), implementing
+the SPEC `PAID` settlement status, and either publishing a SPEC link fact or
+recording the new name under the EV-05 rule. Renaming the route or the event is
+breaking and needs an ADR and a `/v2` or dual-publish period. Aligning the
+public error code with the expert's `SETTLEMENT_NOT_LINKABLE` is a service fix
+that does not need a contract change.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-21
-cancellation-linked credit-note contract:
+Direct Claims settlement-payment-link contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -2835,7 +2920,7 @@ OpenAPI 3.1 documents
   OK openapi/party.yaml  5 paths, 7 operations
   OK openapi/policy.yaml  51 paths, 67 operations
   OK openapi/contract.yaml  43 paths, 62 operations
-  OK openapi/direct-claims.yaml  49 paths, 72 operations
+  OK openapi/direct-claims.yaml  51 paths, 74 operations
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
   OK openapi/cession.yaml  9 paths, 11 operations
   OK openapi/retrocession.yaml  9 paths, 11 operations
@@ -2847,14 +2932,14 @@ AsyncAPI 3 documents
   OK asyncapi/party.yaml  9 event channels
   OK asyncapi/policy.yaml  33 event channels
   OK asyncapi/contract.yaml  32 event channels
-  OK asyncapi/direct-claims.yaml  26 event channels
+  OK asyncapi/direct-claims.yaml  27 event channels
   OK asyncapi/assumed-claims.yaml  21 event channels
   OK asyncapi/cession.yaml  17 event channels
   OK asyncapi/retrocession.yaml  17 event channels
   OK asyncapi/document.yaml  23 event channels
   OK asyncapi/payment.yaml  19 event channels
   OK asyncapi/notifications.yaml  12 event channels
-  OK catalog: 209 unique published events across 10 verticals
+  OK catalog: 210 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -2862,7 +2947,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 13645 checks, 0 failures
+  PASS 13815 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -3099,6 +3184,14 @@ Additional checks and limits:
   removing the optional `CreateCreditNoteRequest.cancellationId` property each
   fail with the specific required-list, nullable-string, implemented-event, or
   optional-uuid message. All four were run on a throwaway copy and exited
+  non-zero (exit 1); the working copy was left unchanged. The Direct Claims
+  settlement-payment-link pass added five more: renaming the public settlement
+  payment-link path, renaming `Settlement.paymentId`, making
+  `SettlementPaymentRequest.paymentId` non-nullable, dropping
+  `direct.claim.settlement-payment-linked` from the catalog `implemented` list,
+  and removing the `DirectClaimSettlementPaymentLinked` channel each fail with
+  the specific missing-operation, nullable-uuid, implemented-event, or
+  missing-channel message. All five were run on a throwaway copy and exited
   non-zero (exit 1); the working copy was left unchanged.
 
 ## Resolution policy

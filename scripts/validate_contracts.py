@@ -248,6 +248,7 @@ ROUND5_OPENAPI_PATHS = {
         ("/api/v1/claims/{claimId}/settlements", "post"),
         ("/api/v1/claims/{claimId}/settlements/{settlementId}/approve", "post"),
         ("/api/v1/claims/{claimId}/settlements/{settlementId}/execute", "post"),
+        ("/api/v1/claims/{claimId}/settlements/{settlementId}/payment", "patch"),
         ("/api/v1/claims/{claimId}/recoveries", "get"),
         ("/api/v1/claims/{claimId}/recoveries", "post"),
         ("/api/v1/claims/{claimId}/recoveries/{recoveryId}", "patch"),
@@ -266,6 +267,7 @@ ROUND5_OPENAPI_PATHS = {
         ("/internal/v1/claims/{claimId}/coverage", "post"),
         ("/internal/v1/claims/{claimId}/litigation", "post"),
         ("/internal/v1/claims/{claimId}/settlements/{settlementId}/execute", "post"),
+        ("/internal/v1/claims/{claimId}/settlements/{settlementId}/payment", "patch"),
         ("/internal/v1/claims/{claimId}/recoveries", "post"),
         ("/internal/v1/claims/{claimId}/liens", "post"),
         ("/internal/v1/claims/{claimId}/tasks", "get"),
@@ -971,6 +973,37 @@ ALLOCATION_EROSION_MESSAGE_MAX_LENGTH = 4000
 ALLOCATION_EROSION_CONFLICT_CODE = "CONFLICT"
 
 
+# Direct Claims settlement payment link. The public and expert PATCH routes set
+# or clear the Payment aggregate linked to a settlement. Only an AUTHORIZED or
+# EXECUTED settlement is linkable; a PROPOSED or REJECTED settlement is 409
+# SETTLEMENT_NOT_LINKABLE and nothing is written. A real link or unlink bumps
+# the claim and settlement versions and emits
+# direct.claim.settlement-payment-linked in the same transaction; repeating the
+# current value is an idempotent no-op that writes no version and no event.
+SETTLEMENT_PAYMENT_OPENAPI_PATHS = (
+    (
+        "/api/v1/claims/{claimId}/settlements/{settlementId}/payment",
+        "linkClaimSettlementPayment",
+    ),
+    (
+        "/internal/v1/claims/{claimId}/settlements/{settlementId}/payment",
+        "expertLinkClaimSettlementPayment",
+    ),
+)
+SETTLEMENT_PAYMENT_SCHEMA = "SettlementPaymentRequest"
+SETTLEMENT_PAYMENT_EVENT = "direct.claim.settlement-payment-linked"
+SETTLEMENT_PAYMENT_EVENT_FIELDS = (
+    "claimId",
+    "settlementId",
+    "settlementNumber",
+    "paymentId",
+    "linkedAt",
+)
+SETTLEMENT_PAYMENT_LINKABLE_STATUSES = ("AUTHORIZED", "EXECUTED")
+SETTLEMENT_PAYMENT_UNLINKABLE_STATUSES = ("PROPOSED", "REJECTED")
+SETTLEMENT_PAYMENT_CONFLICT_CODE = "SETTLEMENT_NOT_LINKABLE"
+
+
 # Policy billing (SPEC 11.2.13). The public domain routes proxy the expert's
 # billing service; the expert's /internal/v1 alias is an implementation detail
 # and is not part of the public contract. Every operation requires the tenant
@@ -1644,6 +1677,7 @@ IMPLEMENTED_EVENTS = {
         "direct.claim.coverage-assessed",
         "direct.claim.reserve-changed",
         "direct.claim.settlement-authorized",
+        "direct.claim.settlement-payment-linked",
         "direct.claim.closed",
         "direct.claim.task-created",
         "direct.claim.task-completed",
@@ -9495,6 +9529,281 @@ def check_direct_claim_allocations(contracts: ContractSet, document, relative: s
 
 
 # ---------------------------------------------------------------------------
+# Direct Claims settlement payment-link checks
+# ---------------------------------------------------------------------------
+
+
+def check_direct_claim_settlement_payment(contracts: ContractSet, document, relative: str):
+    """Require the settlement payment-link route, projection, and conflict code.
+
+    The public domain route and the expert ``/internal/v1`` alias both set or
+    clear the Payment link on an AUTHORIZED or EXECUTED settlement. The body is
+    the required ``SettlementPaymentRequest`` whose ``paymentId`` is required
+    but nullable; the response is the updated ``Settlement`` with the two
+    required-but-nullable link members. A PROPOSED or REJECTED settlement is
+    409 ``SETTLEMENT_NOT_LINKABLE``. The operation documents the idempotent
+    repeat and the event written in the same transaction.
+    """
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    settlement = schemas.get("Settlement") or {}
+    settlement_properties = settlement.get("properties") or {}
+    settlement_required = settlement.get("required") or []
+    contracts.check(
+        isinstance(settlement, dict) and settlement.get("type") == "object",
+        f"{relative}: Settlement must be an object schema",
+    )
+    settlement_payment_id = settlement_properties.get("paymentId") or {}
+    contracts.check(
+        isinstance(settlement_payment_id, dict),
+        f"{relative}: Settlement.paymentId is required",
+    )
+    contracts.check(
+        "paymentId" in settlement_required,
+        f"{relative}: Settlement.required must list paymentId",
+    )
+    contracts.check(
+        _schema_types(settlement_payment_id) == {"string", "null"}
+        and settlement_payment_id.get("format") == "uuid",
+        f"{relative}: Settlement.paymentId must be a nullable uuid",
+    )
+    settlement_linked_at = settlement_properties.get("paymentLinkedAt") or {}
+    contracts.check(
+        isinstance(settlement_linked_at, dict),
+        f"{relative}: Settlement.paymentLinkedAt is required",
+    )
+    contracts.check(
+        "paymentLinkedAt" in settlement_required,
+        f"{relative}: Settlement.required must list paymentLinkedAt",
+    )
+    contracts.check(
+        _schema_types(settlement_linked_at) == {"string", "null"}
+        and settlement_linked_at.get("format") == "date-time",
+        f"{relative}: Settlement.paymentLinkedAt must be a nullable date-time",
+    )
+
+    request = schemas.get(SETTLEMENT_PAYMENT_SCHEMA) or {}
+    request_properties = request.get("properties") or {}
+    request_required = request.get("required") or []
+    contracts.check(
+        isinstance(request, dict) and request.get("type") == "object",
+        f"{relative}: {SETTLEMENT_PAYMENT_SCHEMA} must be an object schema",
+    )
+    request_payment_id = request_properties.get("paymentId") or {}
+    contracts.check(
+        isinstance(request_payment_id, dict),
+        f"{relative}: {SETTLEMENT_PAYMENT_SCHEMA}.paymentId is required",
+    )
+    contracts.check(
+        "paymentId" in request_required,
+        f"{relative}: {SETTLEMENT_PAYMENT_SCHEMA}.required must list paymentId",
+    )
+    contracts.check(
+        _schema_types(request_payment_id) == {"string", "null"}
+        and request_payment_id.get("format") == "uuid",
+        f"{relative}: {SETTLEMENT_PAYMENT_SCHEMA}.paymentId must be a nullable uuid",
+    )
+
+    paths = document.get("paths") or {}
+    for path, operation_id in SETTLEMENT_PAYMENT_OPENAPI_PATHS:
+        path_item = paths.get(path) if isinstance(paths, dict) else None
+        operation = path_item.get("patch") if isinstance(path_item, dict) else None
+        where = f"{relative}: PATCH {path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required settlement payment-link operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+        contracts.check(
+            operation.get("operationId") == operation_id,
+            f"{where}: operationId must be {operation_id}",
+        )
+        parameter_refs = []
+        inline_names = []
+        for parameter in operation.get("parameters") or []:
+            if not isinstance(parameter, dict):
+                continue
+            reference = parameter.get("$ref")
+            if isinstance(reference, str):
+                parameter_refs.append(reference.rsplit("/", 1)[-1])
+            if isinstance(parameter.get("name"), str):
+                inline_names.append(parameter["name"])
+        for required_parameter in ("TenantHeader", "BookHeaderDirect"):
+            contracts.check(
+                required_parameter in parameter_refs,
+                f"{where}: must document the shared {required_parameter} parameter",
+            )
+        for path_parameter in ("claimId", "settlementId"):
+            contracts.check(
+                path_parameter in inline_names,
+                f"{where}: must declare the {path_parameter} path parameter",
+            )
+        request_body = operation.get("requestBody") or {}
+        body_schema = (
+            ((request_body.get("content") or {}).get("application/json") or {})
+            .get("schema")
+            if isinstance(request_body, dict)
+            else None
+        )
+        contracts.check(
+            isinstance(request_body, dict) and request_body.get("required") is True,
+            f"{where}: requestBody must be required",
+        )
+        contracts.check(
+            isinstance(body_schema, dict)
+            and str(body_schema.get("$ref", "")).endswith(
+                f"/schemas/{SETTLEMENT_PAYMENT_SCHEMA}"
+            ),
+            f"{where}: request body must use the {SETTLEMENT_PAYMENT_SCHEMA} schema",
+        )
+        responses = operation.get("responses") or {}
+        success = responses.get("200") if isinstance(responses, dict) else None
+        success_schema = (
+            ((success.get("content") or {}).get("application/json") or {}).get("schema")
+            if isinstance(success, dict)
+            else None
+        )
+        contracts.check(
+            isinstance(success_schema, dict)
+            and str(success_schema.get("$ref", "")).endswith("/schemas/Settlement"),
+            f"{where}: 200 must return the Settlement schema",
+        )
+        for code in ("400", "404", "409"):
+            contracts.check(
+                isinstance(responses, dict) and code in responses,
+                f"{where}: must document response {code}",
+            )
+        conflict = responses.get("409") if isinstance(responses, dict) else None
+        conflict_text = (
+            str(conflict.get("description") or "")
+            if isinstance(conflict, dict)
+            else ""
+        )
+        contracts.check(
+            f"`{SETTLEMENT_PAYMENT_CONFLICT_CODE}`" in conflict_text,
+            f"{where}: 409 must document `{SETTLEMENT_PAYMENT_CONFLICT_CODE}`",
+        )
+        contracts.check(
+            "CONFLICT" in conflict_text,
+            f"{where}: 409 must document the concurrent-change CONFLICT code",
+        )
+        description = str(operation.get("description") or "")
+        for status in SETTLEMENT_PAYMENT_LINKABLE_STATUSES:
+            contracts.check(
+                status in description,
+                f"{where}: description must document the linkable {status} status",
+            )
+        for status in SETTLEMENT_PAYMENT_UNLINKABLE_STATUSES:
+            contracts.check(
+                status in description,
+                f"{where}: description must document the rejected {status} status",
+            )
+        contracts.check(
+            "idempotent no-op" in description,
+            f"{where}: description must document the idempotent repeat",
+        )
+        contracts.check(
+            SETTLEMENT_PAYMENT_EVENT in description,
+            f"{where}: description must document {SETTLEMENT_PAYMENT_EVENT}",
+        )
+
+    planned = document.get("x-planned-operations") or []
+    implemented_payment_paths = {
+        path for path, _ in SETTLEMENT_PAYMENT_OPENAPI_PATHS
+    }
+    contracts.check(
+        not any(
+            isinstance(entry, dict) and entry.get("path") in implemented_payment_paths
+            for entry in planned
+        ),
+        f"{relative}: x-planned-operations must not list an implemented "
+        "settlement payment-link path",
+    )
+
+
+def check_direct_claim_settlement_payment_asyncapi(
+    contracts: ContractSet, document, relative: str
+):
+    """Require the implemented settlement-payment-linked channel and payload.
+
+    The event name is new in this contract and has no SPEC 11.4.9 equivalent.
+    The channel is implemented, names its emitter, and documents the five
+    payload members plus the unlink that omits ``paymentId`` and ``linkedAt``.
+    """
+    channels = document.get("channels") or {}
+    operations = document.get("operations") or {}
+    channel = None
+    for candidate in channels.values():
+        if (
+            isinstance(candidate, dict)
+            and candidate.get("address") == SETTLEMENT_PAYMENT_EVENT
+        ):
+            channel = candidate
+            break
+    contracts.check(
+        channel is not None,
+        f"{relative}: required {SETTLEMENT_PAYMENT_EVENT} channel is missing",
+    )
+    if not isinstance(channel, dict):
+        return
+    contracts.check(
+        channel.get("x-event-type") == SETTLEMENT_PAYMENT_EVENT,
+        f"{relative}: {SETTLEMENT_PAYMENT_EVENT} x-event-type must equal the address",
+    )
+    contracts.check(
+        channel.get("x-status") == "implemented",
+        f"{relative}: {SETTLEMENT_PAYMENT_EVENT} must be implemented",
+    )
+    contracts.check(
+        bool(channel.get("x-implemented-by")),
+        f"{relative}: {SETTLEMENT_PAYMENT_EVENT} must name the emitting source",
+    )
+    description = str(channel.get("description") or "")
+    for field in SETTLEMENT_PAYMENT_EVENT_FIELDS:
+        contracts.check(
+            f"`{field}`" in description,
+            f"{relative}: {SETTLEMENT_PAYMENT_EVENT} description must document "
+            f"payload member {field}",
+        )
+    for status in SETTLEMENT_PAYMENT_LINKABLE_STATUSES:
+        contracts.check(
+            status in description,
+            f"{relative}: {SETTLEMENT_PAYMENT_EVENT} description must document "
+            f"the linkable {status} status",
+        )
+    contracts.check(
+        "omitted on an unlink" in description,
+        f"{relative}: {SETTLEMENT_PAYMENT_EVENT} description must document that "
+        "paymentId and linkedAt are omitted on an unlink",
+    )
+    send_operations = [
+        operation
+        for operation in operations.values()
+        if isinstance(operation, dict)
+        and operation.get("action") == "send"
+        and operation.get("x-event-type") == SETTLEMENT_PAYMENT_EVENT
+    ]
+    contracts.check(
+        bool(send_operations),
+        f"{relative}: {SETTLEMENT_PAYMENT_EVENT} must have a send operation",
+    )
+    if not send_operations:
+        return
+    operation = send_operations[0]
+    contracts.check(
+        operation.get("x-status") == "implemented",
+        f"{relative}: the {SETTLEMENT_PAYMENT_EVENT} send operation must be implemented",
+    )
+    channel_ref = (operation.get("channel") or {}).get("$ref")
+    contracts.check(
+        isinstance(channel_ref, str) and channel_ref.startswith("#/channels/"),
+        f"{relative}: the {SETTLEMENT_PAYMENT_EVENT} send operation must "
+        "reference the local channel",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Direct Claims claim-list filter checks
 # ---------------------------------------------------------------------------
 
@@ -10197,6 +10506,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
         if vertical == "direct-claims":
             check_direct_claim_allocations(contracts, document, relative)
             check_direct_claim_list_filter(contracts, document, relative)
+            check_direct_claim_settlement_payment(contracts, document, relative)
         contracts.check_openapi_schemas(document, relative)
         if verbose:
             print(f"  OK {relative}  paths={len(paths)} operations={operation_count}")
@@ -10285,6 +10595,11 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
             contracts.check(
                 operation.get("x-status") in ("planned", "implemented"),
                 f"{where} must be marked x-status: planned or x-status: implemented",
+            )
+
+        if vertical == "direct-claims":
+            check_direct_claim_settlement_payment_asyncapi(
+                contracts, document, relative
             )
 
         if vertical == "policy":

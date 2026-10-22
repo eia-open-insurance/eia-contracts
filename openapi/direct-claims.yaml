@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Direct Claims API
-  version: 1.9.0
+  version: 1.10.0
   summary: Direct-book claim administration and the Direct Claims expert API.
   description: >
     This document describes the implemented public Direct Claims domain API and
@@ -66,6 +66,18 @@ info:
     claim version and emits `direct.claim.allocation-created` in the same
     transaction. A missing or non-DIRECT book is hidden as 404 (SPEC 3.6.2,
     WALL-06).
+
+    A settlement records whether the Payment record that pays it has been
+    linked. `PATCH /api/v1/claims/{claimId}/settlements/{settlementId}/payment`
+    sets or clears that link: a UUID `paymentId` links the Payment aggregate and
+    stamps `paymentLinkedAt`, while a null `paymentId` clears both members. Only
+    an AUTHORIZED or EXECUTED settlement is linkable; a PROPOSED or REJECTED
+    settlement is 409 `SETTLEMENT_NOT_LINKABLE`. An unknown claim or settlement,
+    a foreign tenant, and a missing or non-DIRECT book are 404. Repeating the
+    current link is an idempotent no-op; a real change bumps the claim and
+    settlement versions and emits `direct.claim.settlement-payment-linked` in
+    the same transaction. The `Settlement` projection exposes the
+    required-but-nullable `paymentId` and `paymentLinkedAt`.
 
     Allocation erosion records the policy-limit posting outcome. An allocation
     may link the policy limit it erodes through the optional `limitId` and
@@ -1199,6 +1211,73 @@ paths:
           $ref: './components.yaml#/components/responses/NotFound'
         '409':
           $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/claims/{claimId}/settlements/{settlementId}/payment:
+    patch:
+      operationId: linkClaimSettlementPayment
+      tags:
+        - Direct Claims
+      summary: Link or clear the settlement payment.
+      description: >
+        Sets or clears the Payment record that pays a settlement. Only an
+        AUTHORIZED or EXECUTED settlement is linkable; a PROPOSED or REJECTED
+        settlement is 409 `SETTLEMENT_NOT_LINKABLE` and nothing is written. A
+        non-null `paymentId` links that Payment aggregate and stamps
+        `paymentLinkedAt`; a null `paymentId` clears both members. Repeating the
+        current value is an idempotent no-op that bumps no version and writes no
+        event; a real change bumps the claim and settlement versions and emits
+        `direct.claim.settlement-payment-linked` in the same transaction. An
+        unknown claim or settlement, a foreign tenant, and a missing or
+        non-DIRECT book are 404.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: settlementId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SettlementPaymentRequest'
+      responses:
+        '200':
+          description: Settlement payment link set or cleared.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Settlement'
+        '400':
+          description: >
+            400. A malformed JSON body is `INVALID_JSON`; a missing header is
+            `MISSING_HEADER`. The settlement is not modified.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            409. The settlement is PROPOSED or REJECTED and cannot link a
+            payment: the code is `SETTLEMENT_NOT_LINKABLE`. A concurrent
+            settlement change that fails the version compare-and-set is
+            `CONFLICT`. Nothing is written in either case.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /api/v1/claims/{claimId}/recoveries:
@@ -2522,6 +2601,75 @@ paths:
           $ref: './components.yaml#/components/responses/Conflict'
         default:
           $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/claims/{claimId}/settlements/{settlementId}/payment:
+    patch:
+      operationId: expertLinkClaimSettlementPayment
+      tags:
+        - Direct Claims internal
+      summary: Link or clear the settlement payment (expert).
+      security: []
+      x-internal-api: true
+      description: >
+        Sets or clears the Payment record that pays a settlement. Only an
+        AUTHORIZED or EXECUTED settlement is linkable; a PROPOSED or REJECTED
+        settlement is 409 `SETTLEMENT_NOT_LINKABLE` and nothing is written. A
+        non-null `paymentId` links that Payment aggregate and stamps
+        `paymentLinkedAt`; a null `paymentId` clears both members. Repeating the
+        current value is an idempotent no-op that bumps no version and writes no
+        event; a real change bumps the claim and settlement versions and emits
+        `direct.claim.settlement-payment-linked` in the same transaction. The
+        domain calls this alias with the tenant and the DIRECT book; an unknown
+        claim or settlement and a missing or non-DIRECT book are 404.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
+        - name: claimId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: settlementId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SettlementPaymentRequest'
+      responses:
+        '200':
+          description: Settlement payment link set or cleared.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Settlement'
+        '400':
+          description: >
+            400. A malformed JSON body is `INVALID_JSON`; a missing header is
+            `MISSING_HEADER`. The settlement is not modified.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            409. The settlement is PROPOSED or REJECTED and cannot link a
+            payment: the code is `SETTLEMENT_NOT_LINKABLE`. A concurrent
+            settlement change that fails the version compare-and-set is
+            `CONFLICT`. Nothing is written in either case.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
   /internal/v1/claims/{claimId}/recoveries:
     get:
       operationId: expertListClaimRecoveries
@@ -3602,7 +3750,12 @@ components:
       description: >
         A settlement is PROPOSED, then AUTHORIZED against the claim's
         settlement authority, then EXECUTED once the release and payment
-        instructions are recorded.
+        instructions are recorded. An AUTHORIZED or EXECUTED settlement may
+        additionally link the Payment record that pays it: `paymentId` is the
+        external Payment aggregate id and `paymentLinkedAt` is when the link was
+        last set by
+        `PATCH .../settlements/{settlementId}/payment`. Both are null while the
+        settlement is unlinked.
       required:
         - id
         - tenantId
@@ -3612,6 +3765,8 @@ components:
         - currency
         - structure
         - status
+        - paymentId
+        - paymentLinkedAt
         - version
       properties:
         id:
@@ -3669,6 +3824,18 @@ components:
         executedAt:
           type: [string, 'null']
           format: date-time
+        paymentId:
+          type: [string, 'null']
+          format: uuid
+          description: >
+            Payment aggregate that pays the settlement, or null while unlinked.
+            Set or cleared only on an AUTHORIZED or EXECUTED settlement.
+        paymentLinkedAt:
+          type: [string, 'null']
+          format: date-time
+          description: >
+            When the payment link was last set, or null while unlinked. A null
+            `paymentId` clears it.
         version:
           type: integer
           minimum: 0
@@ -4276,6 +4443,24 @@ components:
         expectedVersion:
           type: integer
           minimum: 0
+    SettlementPaymentRequest:
+      type: object
+      description: >
+        Set or clear the Payment record linked to a settlement. `paymentId` is
+        required but nullable: a UUID links that Payment aggregate and the
+        expert stamps `paymentLinkedAt`, while null clears both members. Only
+        an AUTHORIZED or EXECUTED settlement is linkable; a PROPOSED or REJECTED
+        settlement is 409 `SETTLEMENT_NOT_LINKABLE`. The body itself is
+        required.
+      required:
+        - paymentId
+      properties:
+        paymentId:
+          type: [string, 'null']
+          format: uuid
+          description: >
+            Payment aggregate to link; null clears the settlement's payment
+            link and `paymentLinkedAt`.
     RecoveryRequest:
       type: object
       description: >
@@ -4552,7 +4737,7 @@ components:
 x-vertical: direct-claims
 x-implementation:
   status: implemented
-  verifiedAt: '2026-10-20'
+  verifiedAt: '2026-10-21'
   verifiedAgainst:
     - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimController.java
     - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimDto.java
@@ -4588,6 +4773,10 @@ x-implementation:
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/PolicyMismatchException.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/LitigationController.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/SettlementController.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/SettlementService.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/SettlementRepository.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/SettlementPaymentRequest.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/SettlementNotLinkableException.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/RecoveryController.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/LienController.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimTaskController.java
@@ -4619,6 +4808,9 @@ x-implementation:
     - repos/eia-direct-claims-domain/src/test/java/com/eia/directclaims/domain/PolicyMassTortClientTest.java
     - repos/eia-direct-claims-domain/src/test/java/com/eia/directclaims/domain/ClaimDetailServiceTest.java
     - repos/eia-direct-claims-domain/src/test/java/com/eia/directclaims/domain/ClaimDetailControllerTest.java
+    - repos/eia-direct-claims-domain/src/test/java/com/eia/directclaims/domain/ClaimClientTest.java
+    - repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/SettlementServiceTest.java
+    - repos/eia-direct-claims-expert/src/test/java/com/eia/directclaims/expert/DirectClaimsOutboxIntegrationTest.java
   errorEnvelope: >
     Vertical-specific ApiError {timestamp, status, code, message, path,
     details[{field, message}]}. Not the canonical Problem envelope yet.
@@ -4667,10 +4859,16 @@ x-implementation:
     `CONFLICT` for a terminal `POSTED` allocation and returns the pre-update
     allocation with 200, and it also returns the pre-update allocation when the
     expert record call itself fails; MISMATCHES.md M-36 records both
-    differences.
+    differences. Settlement payment linking is implemented on both surfaces:
+    the public domain forwards the tenant and DIRECT book to the expert alias,
+    which owns the AUTHORIZED/EXECUTED gate and stamps `paymentLinkedAt`. The
+    expert returns 409 `SETTLEMENT_NOT_LINKABLE` for a PROPOSED or REJECTED
+    settlement and 409 `CONFLICT` for a concurrent change; the public domain
+    currently reports both as `CONFLICT` while preserving the detail
+    (MISMATCHES.md M-45). The event name has no SPEC 11.4.9 equivalent (M-22).
 x-compatibility:
-  contractVersion: 1.9.0
-  previousContractVersion: 1.8.0
+  contractVersion: 1.10.0
+  previousContractVersion: 1.9.0
   breaking: []
   compatible:
     - Adds the optional claimantPartyId UUID query parameter to GET /api/v1/claims and GET /internal/v1/claims, alongside the existing status filter.
@@ -4698,6 +4896,8 @@ x-compatibility:
     - Adds claimType, settlementAuthorityAmount, settlementAuthorityCurrency, litigationFlag, and currentReserveAmount to the claim projection.
     - Corrects the claim money fields to decimal strings; the services already serialize them as strings.
     - Documents the retention of the domain's 400 MASS_TORT_YEAR_OUTSIDE_BLOCK coverage-block guard on the allocation create, alongside the remapped expert codes.
+    - Adds PATCH /api/v1/claims/{claimId}/settlements/{settlementId}/payment and the /internal/v1 expert alias, with the required SettlementPaymentRequest body whose nullable paymentId links or clears the Payment record.
+    - Adds the required-but-nullable paymentId and paymentLinkedAt fields to the Settlement projection, and documents the AUTHORIZED/EXECUTED linkability gate, 409 SETTLEMENT_NOT_LINKABLE, the idempotent repeat, and the direct.claim.settlement-payment-linked event.
   note: >
     Idempotency on the task and note POSTs is additive over 1.3.0: the header is
     optional, no existing path, request body field, or response body field
@@ -4749,6 +4949,19 @@ x-compatibility:
     profile still allow the allocation, so the profile read is never an
     availability dependency. MISMATCHES.md M-31 records the stable code and M-32
     the profile it consumes.
+
+    Settlement payment linking is additive over 1.9.0: the two PATCH operations
+    and the SettlementPaymentRequest schema are new, `Settlement.paymentId` and
+    `paymentLinkedAt` are required-but-nullable and null for every unlinked
+    settlement, and no existing path, request field, response status, or event
+    name changed. Only an AUTHORIZED or EXECUTED settlement is linkable; a
+    PROPOSED or REJECTED settlement is 409 `SETTLEMENT_NOT_LINKABLE`. Repeating
+    the current payment id is an idempotent no-op that writes no version and no
+    event, while a real link or unlink bumps the claim and settlement versions
+    and emits `direct.claim.settlement-payment-linked`. The public domain
+    currently collapses the expert's stable `SETTLEMENT_NOT_LINKABLE` code to
+    409 `CONFLICT` while preserving the status and detail (MISMATCHES.md M-45);
+    the event name has no SPEC 11.4.9 equivalent (MISMATCHES.md M-22, M-45).
 x-planned-operations:
   - method: PATCH
     path: /api/v1/claims/{claimId}

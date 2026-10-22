@@ -1435,6 +1435,50 @@ it forwards the create:
   not re-read the profile. `MISMATCHES.md` M-31 records the stable code and
   M-32 the narrow profile that supplies the block.
 
+### Direct Claims settlement payment links (2026-10-21)
+
+Direct Claims 1.10.0 documents the Payment record that pays a settlement. The
+change is additive: the settlement projection gains two nullable members and a
+new PATCH command sets or clears them. No existing path, request field, response
+status, or event name changed.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/direct-claims.yaml` | 1.10.0 | Additive | Adds `PATCH /api/v1/claims/{claimId}/settlements/{settlementId}/payment` and the `/internal/v1` expert alias, the `SettlementPaymentRequest` schema with its required-but-nullable `paymentId`, and the required-but-nullable `Settlement.paymentId` and `paymentLinkedAt` members. |
+| `asyncapi/direct-claims.yaml` | 1.5.0 | Additive | The implemented `direct.claim.settlement-payment-linked` channel and `send` operation. |
+| `asyncapi/event-catalog.yaml` | 1.27.0 | Additive | The new name is published and implemented (210 published and 90 implemented names; Direct Claims 27 published and 13 implemented). |
+
+Payment-link semantics:
+
+- `PATCH .../settlements/{settlementId}/payment` takes the required body
+  `{paymentId}`. `paymentId` is required but nullable: a UUID links that
+  Payment aggregate and the expert stamps `paymentLinkedAt` with the link
+  instant; null clears both members. Repeating the current id is an idempotent
+  no-op that bumps no version and writes no event.
+- Only an AUTHORIZED or EXECUTED settlement is linkable. A PROPOSED or REJECTED
+  settlement is 409 `SETTLEMENT_NOT_LINKABLE` and nothing is written; a
+  concurrent settlement change that fails the version compare-and-set is 409
+  `CONFLICT`. An unknown claim or settlement, a foreign tenant, and a missing or
+  non-DIRECT book are 404, consistent with every other claim route.
+- A real link or unlink bumps the settlement version and the claim row version
+  and writes `direct.claim.settlement-payment-linked` in the same transaction.
+  The payload carries the claim identity and version context plus `claimId`,
+  `settlementId`, `settlementNumber`, `paymentId`, and `linkedAt`; an unlink
+  omits `paymentId` and `linkedAt` while still recording the state change, and
+  `eventVersion` stays 1.
+- The event name is new and has no SPEC 11.4.9 equivalent. SPEC 11.4.4 models a
+  `claim_settlement.payment_id` projection from Payment, but the implemented
+  link is stored by the Direct Claims expert and no Payment service is called;
+  the SPEC `PAID` settlement status is not implemented either. M-45 records the
+  SPEC-less route, single-payment link, and event; M-22 records the naming gap.
+- The public domain currently collapses the expert's stable
+  `SETTLEMENT_NOT_LINKABLE` code to 409 `CONFLICT` while preserving the status
+  and detail, so the stable code is documented as the canonical target. The
+  validator requires both implemented operations, the required request body, the
+  two projection members, the 400/404/409 responses, the DIRECT book scope, the
+  implemented channel with its five payload members, and the catalog entry. The
+  full run passes 13,815 checks.
+
 ### Policy program catalog and membership (2026-10-20)
 
 Policy 2.8.0 adds the commercial program catalog and the policy-to-program
@@ -2655,6 +2699,14 @@ missing directory.
    the `claimantPartyId` filter on the public and expert Direct Claims lists
    with its optional UUID query schema, tenant and DIRECT book parameters,
    retained status filter, and bare `Claim` array response,
+   the public and expert settlement payment-link PATCH operations with their
+   required `TenantHeader` and `BookHeaderDirect` parameters, the
+   `claimId`/`settlementId` path parameters, the required
+   `SettlementPaymentRequest` nullable-uuid `paymentId`, the 200 `Settlement`,
+   the 400/404/409 responses with `SETTLEMENT_NOT_LINKABLE` and the
+   concurrent-change `CONFLICT`, the required-but-nullable
+   `Settlement.paymentId`/`paymentLinkedAt`, and the idempotent-repeat and
+   event documentation,
    the six document association-link operations on
    the public and expert surfaces, the `DocumentLink`, `CreateDocumentLinkRequest`,
    and `DocumentLinkedType` schemas, the `linkedType` + `linkedId` list filter,
@@ -2788,7 +2840,10 @@ missing directory.
 4. **AsyncAPI structure.** `asyncapi: 3.0.0`, channel addresses, `x-event-type`,
    `x-status: planned|implemented`, `x-implemented-by` on every implemented
    channel, one `send` operation per channel, a `DomainEvent` message on
-   every channel, the optional source fields on the payment created payload,
+   every channel, the implemented `direct.claim.settlement-payment-linked`
+   channel with its `claimId`, `settlementId`, `settlementNumber`, `paymentId`,
+   and `linkedAt` payload members documented and the unlink omission, the
+   optional source fields on the payment created payload,
    the `PaymentAllocationCreatedData` payload with its required payment
    identity, target, component, money, and allocation-total members, the
    `PolicyDunningSentData` payload with its required policy, installment,
@@ -2828,7 +2883,8 @@ missing directory.
    and the catalog `implemented` list must equal the channels marked
    `x-status: implemented`. The implemented event names for all ten publishing
    verticals are required explicitly, including `direct.claim.assigned`,
-   `direct.claim.allocation-created`, `assumed.claim.assigned`,
+   `direct.claim.allocation-created`, `direct.claim.settlement-payment-linked`,
+   `assumed.claim.assigned`,
    `document.link.added`,
    `document.link.removed`, `document.content.uploaded`,
    `document.legal-hold.placed`, `document.legal-hold.released`,
@@ -2967,6 +3023,15 @@ missing directory.
   200 with the recorded state, but the public domain currently catches the
   expert 409 and the expert record-write failure and returns the pre-update
   allocation with 200 (M-22, M-31, M-36);
+- Direct Claims settlement payment links are implemented at
+  `PATCH /api/v1/claims/{claimId}/settlements/{settlementId}/payment` and the
+  expert alias, storing one optional Payment id on the settlement and publishing
+  `direct.claim.settlement-payment-linked`. SPEC 11.4.10 has no link operation
+  and SPEC 11.4.9 names no link fact; SPEC 11.4.4 instead models `payment_id`
+  as a Payment projection and adds a `PAID` settlement status. The implemented
+  link is owned by the Direct Claims expert, calls no Payment service, and the
+  public domain collapses the expert's stable `SETTLEMENT_NOT_LINKABLE` code to
+  409 `CONFLICT` (M-22, M-45);
 - Policy billing is implemented under `/api/v1/policies/{policyId}/billing`
   with the flat `BillingPlan`/`Installment` projection, while SPEC 11.2.13 names
   the route `/installments` and defines the plan event as

@@ -1377,6 +1377,42 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   contract versions.
 - `python scripts/validate_contracts.py` passes 13,688 checks with 0 failures.
 
+### Added in the Direct Claims settlement payment-link contract (2026-10-21)
+
+- `openapi/direct-claims.yaml` is 1.10.0: adds
+  `PATCH /api/v1/claims/{claimId}/settlements/{settlementId}/payment` and its
+  `/internal/v1` expert alias, plus the `SettlementPaymentRequest` schema whose
+  required-but-nullable `paymentId` links a Payment and whose null clears the
+  link. `Settlement` adds the required-but-nullable `paymentId` and
+  `paymentLinkedAt` members. The operations document that only an AUTHORIZED or
+  EXECUTED settlement is linkable (409 `SETTLEMENT_NOT_LINKABLE`), that a
+  repeated value is an idempotent no-op, that a real change bumps the claim and
+  settlement versions and emits `direct.claim.settlement-payment-linked`, and
+  that an unknown claim or settlement and a missing or non-DIRECT book are 404.
+  `x-compatibility` moves to 1.10.0 over 1.9.0.
+- `asyncapi/direct-claims.yaml` is 1.5.0: the implemented
+  `direct.claim.settlement-payment-linked` channel and `send` operation. The
+  channel documents the payload (`claimId`, `settlementId`, `settlementNumber`,
+  `paymentId`, and `linkedAt`), that `paymentId` and `linkedAt` are omitted on
+  an unlink, and that a non-linkable settlement or a repeated link writes no
+  event; `eventVersion` stays 1.
+- `asyncapi/event-catalog.yaml` is 1.27.0:
+  `direct.claim.settlement-payment-linked` is published and implemented, for 210
+  published and 90 implemented names (Direct Claims 27 published and 13
+  implemented).
+- `scripts/validate_contracts.py` requires both payment-link operations with
+  their tenant and DIRECT book parameters, the required
+  `SettlementPaymentRequest` nullable-uuid `paymentId`, the 200 `Settlement`,
+  the 400/404/409 responses with `SETTLEMENT_NOT_LINKABLE` and the
+  concurrent-change `CONFLICT`, the required-but-nullable
+  `Settlement.paymentId`/`paymentLinkedAt`, the implemented channel and its five
+  payload members, and the catalog entry.
+- `README.md` records the new slice, the payment-link semantics, the payload,
+  the catalog totals, and the validation count; `MISMATCHES.md` adds M-45 for
+  the SPEC-less route, single-payment link, and event, updates M-14 and M-22,
+  and refreshes the validation evidence.
+- `python scripts/validate_contracts.py` passes 13,815 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was
