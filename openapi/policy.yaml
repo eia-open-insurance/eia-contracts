@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Policy API
-  version: 2.21.0
+  version: 2.22.0
   summary: Direct-book policy administration and the Policy expert API.
   description: >
     This document describes the implemented public Policy domain API and the
@@ -522,6 +522,37 @@ info:
     chain and names no conversion route or event, so the implemented command and
     `policy.submission.converted` name are recorded in MISMATCHES.md M-01, M-22,
     and M-60.
+
+    The 2026-10-22 product-catalog slice adds the DIRECT-book product catalog:
+
+    - `GET/POST /api/v1/products`, `GET /api/v1/products/search`, and
+      `GET /api/v1/products/{productId}` expose the tenant's sellable products
+      as the flat `Product` projection: `productId`, the upper-case
+      tenant-unique `productCode`, `productName`, the `productLine` taxonomy
+      (`CGL`, `PRODUCTS_LIABILITY`, `UMBRELLA`, `EXCESS`, `OTHER`), the
+      two-letter `jurisdiction`, `status` (`ACTIVE` or `RETIRED`), `version`,
+      `createdAt`, and `updatedAt`. The list and its `/search` alias return a
+      bare array ordered by product code and accept the optional
+      case-insensitive `q` (code/name substring) and exact `status` filters.
+    - `POST /api/v1/products` creates an ACTIVE product with a server-owned
+      identity, version 0, and timestamps, and returns 201 with the stored
+      projection, its strong `ETag`, and a `Location`. `PATCH
+      /api/v1/products/{productId}/status` retires or reactivates a product;
+      replaying the current status is a 200 no-op that keeps the version and
+      writes no event, while a real change advances `version` and writes
+      `product.product.status-changed`. Creation writes
+      `product.product.created`; both facts are inserted in the same
+      transaction as the row, against the `Product` aggregate. They are the
+      first facts of the product event vertical, which the Policy expert
+      publishes and which is documented in asyncapi/product.yaml.
+    - `X-EIA-Tenant` is required and a supplied `X-EIA-Book` must be DIRECT;
+      an absent book is accepted and another book is hidden as 404
+      `BOOK_SCOPE_VIOLATION`. A duplicate code is 409
+      `DUPLICATE_PRODUCT_CODE`, an unknown or foreign product is 404
+      `PRODUCT_NOT_FOUND`, and a concurrent status change is 409
+      `CONCURRENT_MODIFICATION`. The implemented catalog is narrower than the
+      SPEC 11.2.14 product table and SPEC 11.2.9 names no product event, so
+      MISMATCHES.md M-01, M-22, and M-61 record the deviation.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -3191,6 +3222,291 @@ paths:
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
           $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/products:
+    get:
+      operationId: listProducts
+      tags:
+        - Policy
+      summary: List the tenant's product catalog.
+      description: >
+        Returns the tenant's products as a bare `Product` array ordered by
+        `productCode` ascending with `productId` as the tie-breaker. The list is
+        not paginated in this slice (M-04). The optional `q` filter is a
+        case-insensitive contains over `productCode` and `productName`; the
+        optional `status` filter is an exact ACTIVE or RETIRED match. The two
+        filters combine with AND. A blank value is treated as absent, and
+        `status` is trimmed and upper-cased before validation; an unknown value
+        is 400 `INVALID_PRODUCT_STATUS`.
+
+        `X-EIA-Tenant` is required; a missing header is 400
+        `MISSING_TENANT_HEADER` and a malformed one is 400
+        `INVALID_TENANT_HEADER`. A supplied `X-EIA-Book` must be DIRECT; an
+        absent book is accepted for compatibility with the other Policy proxy
+        routes and another book is hidden as 404 `BOOK_SCOPE_VIOLATION`.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirectOptional'
+        - name: q
+          in: query
+          required: false
+          description: >
+            Optional case-insensitive contains match over `productCode` and
+            `productName`. A blank value returns the unfiltered catalog.
+          schema:
+            type: string
+        - name: status
+          in: query
+          required: false
+          description: >
+            Optional exact product status filter. The value is trimmed and
+            upper-cased; an unknown value is 400 `INVALID_PRODUCT_STATUS`.
+          schema:
+            $ref: '#/components/schemas/ProductStatus'
+      responses:
+        '200':
+          description: The tenant's products, ordered by product code.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Product'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createProduct
+      tags:
+        - Policy
+      summary: Create a product in the DIRECT-book catalog.
+      description: >
+        Creates an ACTIVE product in the caller's tenant. `productId`, `status`,
+        `version`, `createdAt`, and `updatedAt` are server-owned; `version`
+        starts at 0 and the first event is aggregate version 1. The caller
+        supplies `productCode`, `productName`, `productLine`, and
+        `jurisdiction`; the public body also accepts the short aliases `code`,
+        `name`, and `line`.
+
+        `productCode` is trimmed, upper-cased, capped at 32 characters, and
+        unique per tenant; a duplicate is 409 `DUPLICATE_PRODUCT_CODE` with
+        `errors[0].field` = `productCode`. `productName` is trimmed and capped
+        at 200 characters. `productLine` is trimmed, upper-cased, and must be
+        one of CGL, PRODUCTS_LIABILITY, UMBRELLA, EXCESS, or OTHER; it is not
+        resolved against a product-version or form catalog. `jurisdiction` is
+        trimmed, upper-cased, and must be exactly two ASCII letters. An invalid
+        field is 400 `INVALID_PRODUCT_CODE`, `INVALID_PRODUCT_NAME`,
+        `INVALID_PRODUCT_LINE`, or `INVALID_PRODUCT_JURISDICTION`; a missing
+        required field or a blank value is 400 `VALIDATION_ERROR`, and a
+        malformed body is 400 `MALFORMED_REQUEST`.
+
+        The accepted create writes `product.product.created` against the
+        `Product` aggregate in the same transaction as the row, and returns 201
+        with the stored projection, the strong `ETag` of version 0, and a
+        `Location`. `X-EIA-Tenant` is required; a missing header is 400
+        `MISSING_TENANT_HEADER` and a malformed one is 400
+        `INVALID_TENANT_HEADER`. A supplied `X-EIA-Book` must be DIRECT; an
+        absent book is accepted and another book is hidden as 404
+        `BOOK_SCOPE_VIOLATION`. The command accepts neither `Idempotency-Key`
+        nor `If-Match`, so the tenant-scoped code uniqueness is the only retry
+        guard (M-06, M-07).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirectOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProductRequest'
+      responses:
+        '201':
+          description: Product created ACTIVE with a server-owned identity.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Location:
+              description: Canonical path of the created product.
+              schema:
+                type: string
+                format: uri-reference
+              example: /api/v1/products/aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/products/search:
+    get:
+      operationId: searchProducts
+      tags:
+        - Policy
+      summary: Search the tenant's product catalog.
+      description: >
+        Alias for `GET /api/v1/products` with the same optional case-insensitive
+        `q` code/name substring and exact `status` filters, and the same bare,
+        product-code-ordered `Product` array. It is not the shared global-search
+        envelope and carries no `x-search-type`: the product catalog reuses its
+        list projection instead of the shell `SearchResponse`. A blank `q`
+        returns the unfiltered catalog and a blank `status` is absent. The list
+        is not paginated in this slice (M-04).
+
+        `X-EIA-Tenant` is required; a missing header is 400
+        `MISSING_TENANT_HEADER` and a malformed one is 400
+        `INVALID_TENANT_HEADER`. A supplied `X-EIA-Book` must be DIRECT; an
+        absent book is accepted and another book is hidden as 404
+        `BOOK_SCOPE_VIOLATION`. An unknown `status` is 400
+        `INVALID_PRODUCT_STATUS`.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirectOptional'
+        - name: q
+          in: query
+          required: false
+          description: >
+            Optional case-insensitive contains match over `productCode` and
+            `productName`. A blank value returns the unfiltered catalog.
+          schema:
+            type: string
+        - name: status
+          in: query
+          required: false
+          description: >
+            Optional exact product status filter. The value is trimmed and
+            upper-cased; an unknown value is 400 `INVALID_PRODUCT_STATUS`.
+          schema:
+            $ref: '#/components/schemas/ProductStatus'
+      responses:
+        '200':
+          description: Matching products, ordered by product code.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Product'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/products/{productId}:
+    get:
+      operationId: getProduct
+      tags:
+        - Policy
+      summary: Get one product from the tenant catalog.
+      description: >
+        Returns one tenant-scoped product with the strong `ETag` of its
+        `version`. An id from another tenant is indistinguishable from a
+        missing one and is 404 `PRODUCT_NOT_FOUND`; a malformed id is 400
+        `INVALID_PARAMETER`. `X-EIA-Tenant` is required; a missing header is
+        400 `MISSING_TENANT_HEADER` and a malformed one is 400
+        `INVALID_TENANT_HEADER`. A supplied `X-EIA-Book` must be DIRECT; an
+        absent book is accepted and another book is hidden as 404
+        `BOOK_SCOPE_VIOLATION`.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirectOptional'
+        - name: productId
+          in: path
+          required: true
+          description: Product to read.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The stored product projection.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/products/{productId}/status:
+    patch:
+      operationId: updateProductStatus
+      tags:
+        - Policy
+      summary: Retire or reactivate a product.
+      description: >
+        Sets the product `status` to ACTIVE or RETIRED. The value is trimmed and
+        upper-cased; a value outside the two-state vocabulary is 400
+        `INVALID_PRODUCT_STATUS` and a blank value is 400 `VALIDATION_ERROR`.
+        Replaying the current status is an idempotent 200 no-op that returns the
+        unchanged projection and `ETag`, writes no row, and writes no event.
+
+        A real change advances `version` by one, returns the updated projection
+        with the new strong `ETag`, and writes `product.product.status-changed`
+        against the `Product` aggregate in the same transaction as the row. The
+        payload carries the previous and new status, the bumped version, the
+        update instant, and `changedFields: [status]`. A concurrent writer is
+        409 `CONCURRENT_MODIFICATION` with `meta.currentVersion` and
+        `meta.expectedVersion`, and writes nothing. An unknown or foreign
+        product is 404 `PRODUCT_NOT_FOUND` and a malformed id is 400
+        `INVALID_PARAMETER`.
+
+        `X-EIA-Tenant` is required; a missing header is 400
+        `MISSING_TENANT_HEADER` and a malformed one is 400
+        `INVALID_TENANT_HEADER`. A supplied `X-EIA-Book` must be DIRECT; an
+        absent book is accepted and another book is hidden as 404
+        `BOOK_SCOPE_VIOLATION`. The command accepts neither `If-Match` nor
+        `Idempotency-Key`; the version-and-status predicate is the conflict
+        guard (M-06, M-07).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirectOptional'
+        - name: productId
+          in: path
+          required: true
+          description: Product whose status changes.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProductStatusRequest'
+      responses:
+        '200':
+          description: >
+            Product after the status change, or the unchanged product when the
+            current status is replayed.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /api/v1/policies/{policyId}/legal-entity:
@@ -7428,6 +7744,168 @@ components:
           type: [string, 'null']
           format: uuid
           description: Program to assign; null clears the policy's program link.
+    Product:
+      type: object
+      description: >
+        Public projection of a sellable product in the DIRECT-book catalog
+        (SPEC 11.2.14 `product`, narrowed to the implemented slice). A policy
+        and an underwriting submission reference the product by `productCode`,
+        not by a product-version foreign key. `productId` is server-owned and
+        the code is unique per tenant after trimming and upper-casing.
+        `productLine` is the closed internal taxonomy and `jurisdiction` is a
+        two-letter ISO 3166-1 alpha-2 code. `status` is ACTIVE or RETIRED;
+        `version` is the aggregate sequence and starts at 0 on create, and each
+        accepted status change advances it by one while a replay of the current
+        status does not. The projection omits `tenantId` and is narrower than
+        the SPEC 11.2.14 `product` table: no `form_family`, effective dates,
+        owner, or `product_version`, a two-state status instead of DRAFT/
+        FILED/APPROVED/ACTIVE/SUSPENDED/RETIRED, and a two-letter jurisdiction
+        instead of ISO 3166-2 or a country (MISMATCHES.md M-61).
+      required:
+        - productId
+        - productCode
+        - productName
+        - productLine
+        - jurisdiction
+        - status
+        - version
+        - createdAt
+        - updatedAt
+      properties:
+        productId:
+          type: string
+          format: uuid
+        productCode:
+          type: string
+          minLength: 1
+          maxLength: 32
+          description: >
+            Tenant-unique product code, stored trimmed and upper-case. A
+            duplicate create is 409 `DUPLICATE_PRODUCT_CODE`.
+          examples:
+            - CGL
+        productName:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Trimmed display name of the product.
+          examples:
+            - Commercial General Liability
+        productLine:
+          $ref: '#/components/schemas/ProductLine'
+        jurisdiction:
+          type: string
+          pattern: '^[A-Z]{2}$'
+          description: >
+            Two-letter ISO 3166-1 alpha-2 jurisdiction, stored upper-case.
+          examples:
+            - US
+        status:
+          $ref: '#/components/schemas/ProductStatus'
+        version:
+          type: integer
+          minimum: 0
+          description: >
+            Aggregate sequence. It starts at 0 on create and advances by one on
+            every accepted status change; a same-status replay keeps the current
+            value. The value backs the strong `ETag`.
+          examples:
+            - 0
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ProductLine:
+      type: string
+      description: >
+        Closed product-line taxonomy enforced by the Policy expert and the
+        database CHECK constraint. The value is trimmed and upper-cased before
+        validation. SPEC 11.2.14 mirrors the wider `policy.product_line` set
+        (`COMMERCIAL_GENERAL_LIABILITY`, `PRODUCTS_LIABILITY`,
+        `EXCESS_LIABILITY`, `UMBRELLA`, and the other policy lines), so the
+        implemented five-value set is a contract deviation (MISMATCHES.md M-61).
+      enum:
+        - CGL
+        - PRODUCTS_LIABILITY
+        - UMBRELLA
+        - EXCESS
+        - OTHER
+    ProductStatus:
+      type: string
+      description: >
+        Product lifecycle state. A product is created ACTIVE and can be retired
+        or reactivated. SPEC 11.2.14 defines DRAFT, FILED, APPROVED, ACTIVE,
+        SUSPENDED, and RETIRED, so the implemented two-state set is a contract
+        deviation (MISMATCHES.md M-61).
+      enum:
+        - ACTIVE
+        - RETIRED
+    CreateProductRequest:
+      type: object
+      description: >
+        Public create command for the product catalog. The tenant comes from
+        `X-EIA-Tenant`; `productId`, `status`, `version`, `createdAt`, and
+        `updatedAt` are server-owned and are not part of the body. The public
+        body also accepts the short aliases `code`, `name`, and `line` for the
+        three catalog members. `productCode` is trimmed, upper-cased, and unique
+        per tenant; `productName` is trimmed; `productLine` and `jurisdiction`
+        are trimmed and upper-cased. A duplicate code is 409
+        `DUPLICATE_PRODUCT_CODE`.
+      required:
+        - productCode
+        - productName
+        - productLine
+        - jurisdiction
+      properties:
+        productCode:
+          type: string
+          minLength: 1
+          maxLength: 32
+          description: >
+            Product code, trimmed and upper-cased. Alias `code` is accepted.
+            Unique per tenant; a duplicate is 409 `DUPLICATE_PRODUCT_CODE`.
+          examples:
+            - CGL
+        productName:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: >
+            Product name, trimmed and capped at 200 characters. Alias `name` is
+            accepted.
+          examples:
+            - Commercial General Liability
+        productLine:
+          $ref: '#/components/schemas/ProductLine'
+          description: >
+            Case-insensitive product line; the stored value is upper-case.
+            Alias `line` is accepted.
+        jurisdiction:
+          type: string
+          pattern: '^[A-Za-z]{2}$'
+          description: >
+            Two-letter jurisdiction. The value is trimmed and upper-cased
+            before validation, so `us` is stored as `US`; a one-letter,
+            three-letter, digit, or non-ASCII value is 400
+            `INVALID_PRODUCT_JURISDICTION`.
+          examples:
+            - US
+    UpdateProductStatusRequest:
+      type: object
+      description: >
+        Product status command. `status` is required; it is trimmed and
+        upper-cased and must be ACTIVE or RETIRED. Replaying the current status
+        is a 200 no-op that keeps the version and writes no event, while a real
+        change advances `version` and writes
+        `product.product.status-changed`.
+      required:
+        - status
+      properties:
+        status:
+          $ref: '#/components/schemas/ProductStatus'
+          description: Target ACTIVE or RETIRED state.
     CreditNote:
       type: object
       description: >
@@ -8071,6 +8549,31 @@ x-implementation:
     - repos/eia-policy-expert/src/main/resources/schema.sql
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/SubmissionConversionServiceTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/SubmissionConversionIntegrationTest.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/ProductController.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/ProductService.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/ProductDto.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/CreateProductCommand.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/UpdateProductStatusCommand.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/Mutation.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/ProductController.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/ProductService.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/ProductRules.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/ProductRepository.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/ProductView.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/Product.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/CreateProductRequest.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/UpdateProductStatusRequest.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/ProductEvents.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/RequestScope.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/ProductSeeder.java
+    - repos/eia-policy-expert/src/main/resources/schema.sql
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/ProductControllerTest.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/ProductClientTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/ProductControllerTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/ProductServiceTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/ProductRulesTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/ProductSeedTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/ProductIntegrationTest.java
   errorEnvelope: >
     Canonical RFC 9457 Problem with content type application/problem+json, from
     both the Policy domain and the Policy expert. The vertical keeps its legacy
@@ -8308,47 +8811,60 @@ x-implementation:
     same transaction as the policy, the coverage, and the link; the SPEC 11.2.14
     quote/bind command chain and the SPEC-less route and event name are recorded
     in M-01, M-22, and M-60.
+
+    The product catalog is a tenant-scoped DIRECT-book resource at the short
+    `/api/v1/products` paths. The domain proxies the expert's `/internal/v1`
+    alias with the tenant and DIRECT book and preserves expert 400/404/409
+    problems. The expert owns the upper-case tenant-unique code, the closed
+    `CGL`/`PRODUCTS_LIABILITY`/`UMBRELLA`/`EXCESS`/`OTHER` line vocabulary, the
+    two-letter jurisdiction, the ACTIVE/RETIRED lifecycle, the aggregate
+    version, and the catalog search. The list and the `/search` alias return
+    the same bare product-code-ordered array and are not paginated (M-04); the
+    list and search accept the optional `q` code/name substring and exact
+    `status` filter. A create is ACTIVE at version 0 with a server identity and
+    returns 201 with `Location` and the strong `ETag`; a status change advances
+    the version and returns the new `ETag`, while a replay of the current status
+    is a 200 no-op that writes no event. The accepted create writes
+    `product.product.created` and the accepted status change writes
+    `product.product.status-changed` against the `Product` aggregate in the same
+    transaction as the row; both are the first facts of the `product` event
+    vertical documented in asyncapi/product.yaml, which the Policy expert
+    publishes by constructing the outbox rows directly; the platform
+    event-vertical registry admits `product` (M-14, M-61). The
+    product line, two-state status, two-letter jurisdiction, and missing
+    form-family/effective-date/owner/product-version members are narrower than
+    SPEC 11.2.14, and the short path replaces `/api/v1/policy/products` (M-01,
+    M-61).
 x-compatibility:
-  contractVersion: 2.21.0
-  previousContractVersion: 2.20.0
+  contractVersion: 2.22.0
+  previousContractVersion: 2.21.0
   breaking: []
   compatible:
-    - Rating and submission conversion now store a canonical request hash on the Idempotency-Key reservation and return 409 IDEMPOTENCY_CONFLICT with meta.operation and meta.key when the same key is reused with a different canonical request.
-    - The identical-request replay remains 200 with Idempotent-Replayed and the stored body and ETag, so a conforming retry is unaffected.
-    - A legacy policy_idempotency row with a null request hash replays its stored response without a comparison.
-    - Documents the request-hash canons: rating hashes policyId, the trimmed and upper-cased method, the numerically normalized baseRate/exposureAmount/factor (factor defaults to 1), and the effective apply flag (false when absent); conversion hashes submissionId, the normalized premium, the trimmed and upper-cased currency, and the null-or-date expiration.
-    - Removes the stale rating and conversion no-request-comparison caveats and records the closed SPEC 12.6 request-hash gap.
-    - Removes no path or field and changes no existing field meaning.
+    - Adds the DIRECT-book product catalog at GET/POST /api/v1/products, GET /api/v1/products/search, GET /api/v1/products/{productId}, and PATCH /api/v1/products/{productId}/status.
+    - Adds the Product, ProductLine, ProductStatus, CreateProductRequest, and UpdateProductStatusRequest schemas and the strong ETag on the detail and mutation responses.
+    - Adds the product.product.created and product.product.status-changed facts of the new product event vertical; the facts are documented in asyncapi/product.yaml and the event catalog.
+    - Adds no path, request field, response field, or enum value to an existing Policy route and removes nothing.
   note: >
-    This slice closes the SPEC 12.6 request-hash gap for the two response-bearing
-    Policy commands. Rating and conversion keep their 201 first execution and
-    their 200 stored-response replay of an identical canonical request, with the
-    stored body and the original strong `ETag`. Reusing the same
-    `(tenant, operation, key)` with a different canonical request is now 409
-    `IDEMPOTENCY_CONFLICT` with `errors[0].field` = `Idempotency-Key` and
-    `errors[0].code` = `IDEMPOTENCY_CONFLICT`, plus
-    `meta.operation` = `rating` or `conversion` and
-    `meta.key` = the normalized key; the command writes no worksheet, policy,
-    coverage, link, or event. The canonical form normalizes decimal scale and
-    surrounding whitespace (`0.0125` and `0.012500` hash alike, as do null and
-    absent expiration), and includes the path aggregate id, so one key cannot
-    replay a worksheet from another policy or a policy from another submission.
-    A row written before the hash existed (`request_hash` null) still replays its
-    stored response rather than conflicting, so the rollout does not turn an
-    old key into a 409. A first keyed command that performs the work remains 201
-    with `Idempotent-Replayed: false`. The only behaviour change is for a caller that
-    reused a key with changed terms: it now gets 409 instead of the previous
-    silent replay, which is the canonical idempotency rule rather than a new
-    success-path shape. No path, request field, response field, or event changes;
-    the domain policy projection still drops Policy.submissionId (M-60). The
-    shared IdempotencyKey parameter, IdempotentReplayed header, and Conflict
-    response are updated in components 1.8.0. The behaviour is implemented by
-    `PolicyIdempotencyService` (hash compare before replay), the
-    `policy_idempotency` table's hash column and tenant + operation + key
-    uniqueness, `IdempotencyKeys.requestHash`, and
-    `PolicyIdempotencyReplayIntegrationTest`; MISMATCHES.md M-06, M-07, M-57,
-    and M-60 record the now-closed request-hash difference and the remaining
-    idempotency gaps.
+    The product catalog is additive. It exposes the tenant's products as a bare
+    product-code-ordered array with the optional `q` code/name substring and
+    exact `status` filters, creates ACTIVE products with a server identity and
+    version 0, and toggles ACTIVE/RETIRED with an optimistic version check. A
+    same-status replay is a 200 no-op that keeps the ETag and writes no event.
+    A duplicate code is 409 `DUPLICATE_PRODUCT_CODE`, an unknown or foreign
+    product is 404 `PRODUCT_NOT_FOUND`, and a concurrent status change is 409
+    `CONCURRENT_MODIFICATION`; a missing or malformed tenant is 400
+    `MISSING_TENANT_HEADER`/`INVALID_TENANT_HEADER`, an invalid status is 400
+    `INVALID_PRODUCT_STATUS`, and another book is hidden as 404
+    `BOOK_SCOPE_VIOLATION`. The create writes `product.product.created` and an
+    accepted status change writes `product.product.status-changed` in the same
+    transaction as the row. The two facts are the first names of the `product`
+    event vertical, which the Policy expert publishes directly as outbox rows;
+    the platform event-vertical registry admits `product`, so the canonical
+    envelope is reconstructible. asyncapi/product.yaml, the event catalog, and
+    MISMATCHES.md M-14 and M-61 record the vertical. The implemented product line, two-state status,
+    two-letter jurisdiction, and missing form-family/effective-date/owner/
+    product-version members are narrower than SPEC 11.2.14, and the short path
+    replaces the SPEC `/api/v1/policy/products` mount (M-01, M-61).
 x-planned-operations:
   - method: POST
     path: /api/v1/policies/{policyId}/bind

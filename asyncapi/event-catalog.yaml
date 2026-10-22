@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.39.0
+  version: 1.40.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -16,11 +16,13 @@ info:
     no broker (ADR-0004); delivery is an authenticated HTTPS POST from the
     transactional outbox (SPEC 7.5.1).
 
-    The transactional-outbox rollout now covers all ten publishing verticals.
-    Each expert writes a subset of its events in the same transaction as the
+    The transactional-outbox rollout covers all ten publishing services. Each
+    expert writes a subset of its events in the same transaction as the
     aggregate write. Each vertical entry lists that subset under `implemented`;
     `published` remains the full agreed contract, so an event is planned until
-    it appears in both lists. The Direct Claims and Assumed Claims task, note,
+    it appears in both lists. The 2026-10-22 product slice adds `product` as an
+    eleventh event vertical, published by the Policy expert; it has no separate
+    HTTP document and its two facts are SPEC-less (M-61). The Direct Claims and Assumed Claims task, note,
     and assignment events and the Direct Claims allocation-created and
     litigation-created events are
     new names with no SPEC 11.4.9 or 11.5.9 equivalent, and the Document link
@@ -237,9 +239,21 @@ info:
     and one implemented name, bringing the platform totals to 228 published and
     109 implemented; Policy becomes 39 published and 27 implemented (M-22,
     M-60).
-    The platform
-    event-ingest service
-    is the inbox:
+    The 2026-10-22 product-catalog slice adds the Product event vertical with
+    two names, `product.product.created` and
+    `product.product.status-changed`, and no SPEC 11.2.9 equivalent: SPEC
+    11.2.14 defines the product aggregate and its reads but publishes no product
+    fact. The Policy expert builds the two outbox rows directly; the platform
+    event-vertical registry admits `product`, so the canonical envelope is
+    reconstructible. The new vertical is recorded in M-14 and M-61. The create
+    fact is aggregate version 1
+    with payload `version` 0, and the status fact is the bumped row version plus
+    one. The two names add two published and two implemented names, bringing the
+    platform totals to 230 published and 111 implemented; the Product vertical
+    becomes 2 published and 2 implemented, and the catalog now spans eleven event
+    verticals. Policy stays at 39 published and 27 implemented because the
+    product facts belong to the Product vertical.
+    The platform event-ingest service is the inbox:
     it validates the canonical envelope, verifies the HMAC signature when
     configured, and stores each event idempotently. There is still no business
     subscriber, subscription registry, or gap detection, and no vertical
@@ -433,6 +447,20 @@ x-event-catalog:
       - payment.payment.paid
       - document.document.associated
       - party.party.merged
+  product:
+    eventVertical: product
+    specSection: SPEC 11.2.14
+    published:
+      - product.product.created
+      - product.product.status-changed
+    implemented:
+      - product.product.created
+      - product.product.status-changed
+    consumed: []
+    consumedNote: >
+      SPEC 11.2.14 defines no product subscription and no vertical consumes a
+      product fact; the Policy domain reads the catalog through the Policy API
+      rather than a subscription.
   contract:
     eventVertical: contract
     specSection: SPEC 11.3.9
@@ -821,8 +849,11 @@ x-implementation:
   subscriber: eia-platform event-ingest inbox (no business subscriber)
   notes: >
     All ten experts write a subset of their catalog events to the transactional
-    outbox in the same transaction as the aggregate write. The platform outbox
-    dispatcher delivers them to the event-ingest inbox when
+    outbox in the same transaction as the aggregate write. The Policy expert
+    also writes the two Product-vertical facts, because a product is a Policy
+    domain catalog aggregate; it builds those outbox rows directly, and the
+    platform event-vertical registry admits `product` (M-14, M-61). The platform
+    outbox dispatcher delivers them to the event-ingest inbox when
     `eia.outbox.enabled=true`; the inbox validates the canonical envelope,
     verifies the HMAC signature when configured, and deduplicates by event id.
     No vertical consumes another vertical's events, so every `consumed` list

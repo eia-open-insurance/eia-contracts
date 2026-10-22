@@ -64,6 +64,7 @@
       "enum": [
         "party",
         "policy",
+        "product",
         "contract",
         "direct",
         "assumed",
@@ -73,7 +74,7 @@
         "cession",
         "retrocession"
       ],
-      "description": "Publishing vertical. The claim verticals use direct and assumed in event names even though their HTTP path segments are direct-claims and assumed-claims."
+      "description": "Publishing vertical. The claim verticals use direct and assumed in event names even though their HTTP path segments are direct-claims and assumed-claims. Product is an event vertical published by the Policy expert; its HTTP catalog lives in the Policy document."
     },
     "aggregateType": {
       "type": "string",
@@ -156,6 +157,7 @@
           "enum": [
             "party",
             "policy",
+            "product",
             "contract",
             "direct",
             "assumed",
@@ -209,6 +211,7 @@
                 "enum": [
                   "party",
                   "policy",
+                  "product",
                   "contract",
                   "direct",
                   "assumed",

@@ -33,7 +33,7 @@ standard).
 | `openapi/components.yaml` | Shared parameters, headers, responses, and schemas: canonical `Problem` error envelope, money, offset page envelope, global-search envelope, ETag/If-Match, Idempotency-Key (Policy and the claim task/note creates), the optional `X-EIA-Actor` header, audit fields, entity references, tenant and book headers, including the optional Policy billing and receivables `X-EIA-Book`. |
 | `openapi/party.yaml` … `openapi/notifications.yaml` | One OpenAPI 3.1 document per vertical. Ten documents, each covering `/api/v1/**` and `/internal/v1/**`. |
 | `asyncapi/event-catalog.yaml` | Authoritative catalog of the published event names, their publisher, and the subscribers named in SPEC 11. |
-| `asyncapi/{vertical}.yaml` | Published event channels for one vertical. One channel and one `send` operation per event name. |
+| `asyncapi/{vertical}.yaml` | Published event channels for one vertical. One channel and one `send` operation per event name. The `product` event vertical has its own document but no OpenAPI document; its HTTP catalog is part of `openapi/policy.yaml`. |
 | `schemas/error-envelope.schema.json` | Canonical RFC 9457 error envelope (`Problem`) with the EIA extension members. |
 | `schemas/money.schema.json` | Canonical `Money`, `MoneyAmount`, and `CurrencyCode` definitions. |
 | `schemas/event-envelope.schema.json` | Canonical event envelope from SPEC 7.5.4 and 12.4. |
@@ -42,7 +42,11 @@ standard).
 
 The per-vertical file names use the repository vertical identifiers
 (`direct-claims`, `assumed-claims`). Event names and `EntityRef.vertical` use
-the shorter identifiers `direct` and `assumed` that SPEC 11 and 12 use.
+the shorter identifiers `direct` and `assumed` that SPEC 11 and 12 use. The
+`product` event vertical is the same exception on the HTTP side: its events
+are published by the Policy expert and its catalog routes are documented in the
+Policy document, so it has an AsyncAPI document and no OpenAPI document of its
+own.
 
 SPEC 12.1 shows contract artifacts under an illustrative `contracts/` prefix.
 This repository keeps `openapi/`, `asyncapi/`, `schemas/`, and `scripts/` at the
@@ -3040,6 +3044,82 @@ Semantics:
   wording on both commands and on the shared components, and rejects the old
   no-comparison phrases. The full run passes 16,993 checks.
 
+### Product catalog and Product event vertical (2026-10-22)
+
+Policy 2.22.0 adds the DIRECT-book product catalog to the Policy OpenAPI
+document, and the new Product 1.0.0 event document adds the two facts the Policy
+expert already emits. The HTTP change is additive: four new paths, five new
+operations, and five new schemas; no existing path, request field, response
+field, or event changed. The event change is also additive: two published and
+two implemented names and one enum member on the canonical envelope.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/policy.yaml` | 2.22.0 | Additive | `GET/POST /api/v1/products`, `GET /api/v1/products/search`, `GET /api/v1/products/{productId}`, `PATCH /api/v1/products/{productId}/status`, the `Product`, `ProductLine`, `ProductStatus`, `CreateProductRequest`, and `UpdateProductStatusRequest` schemas, and the strong `ETag` on reads and mutations. |
+| `asyncapi/product.yaml` | 1.0.0 | Additive (new document) | The implemented `product.product.created` and `product.product.status-changed` channels, `send` operations, and `ProductProductCreatedData`/`ProductProductStatusChangedData` payloads. |
+| `asyncapi/event-catalog.yaml` | 1.40.0 | Additive | Both names are published and implemented as a new `product` event vertical, for 230 published and 111 implemented names across eleven event verticals (Product 2 published and 2 implemented; Policy stays 39 and 27). |
+| `schemas/event-envelope.schema.json` | unchanged `$id` | Additive (enum value) | `vertical`, `subject.vertical`, and `links.target.vertical` admit `product`; the event payload keeps `eventVersion` 1. |
+
+Semantics:
+
+- The list and its `/search` alias return the tenant's products as a bare
+  `Product` array ordered by `productCode` ascending with `productId` as the
+  tie-breaker. Neither is paginated (M-04). The optional `q` is a
+  case-insensitive contains over `productCode` and `productName`; the optional
+  `status` is an exact ACTIVE/RETIRED match. The filters combine with AND, a
+  blank value is absent, and `status` is trimmed and upper-cased before
+  validation. `/search` is an alias, not the shared `SearchResponse` envelope.
+- `Product` is `{productId, productCode, productName, productLine, jurisdiction,
+  status, version, createdAt, updatedAt}`. `productCode` is trimmed,
+  upper-cased, capped at 32 characters, and unique per tenant; `productName` is
+  trimmed and capped at 200. `productLine` is the closed `CGL`,
+  `PRODUCTS_LIABILITY`, `UMBRELLA`, `EXCESS`, `OTHER` set, `jurisdiction` is a
+  two-letter ISO 3166-1 alpha-2 code, and `status` is ACTIVE or RETIRED.
+  `version` starts at 0 and backs the strong `ETag`.
+- `POST /api/v1/products` creates an ACTIVE product with a server-owned identity
+  and returns 201 with the stored projection, the `ETag` of version 0, and a
+  `Location`. The short body aliases `code`, `name`, and `line` are accepted. A
+  duplicate code is 409 `DUPLICATE_PRODUCT_CODE`; an invalid code, name, line,
+  or jurisdiction is 400 `INVALID_PRODUCT_CODE`, `INVALID_PRODUCT_NAME`,
+  `INVALID_PRODUCT_LINE`, or `INVALID_PRODUCT_JURISDICTION`.
+- `PATCH /api/v1/products/{productId}/status` accepts only ACTIVE or RETIRED. A
+  same-status request is a 200 no-op that keeps the version and writes no event.
+  A real change advances `version`, returns the new `ETag`, and writes
+  `product.product.status-changed`; a concurrent writer is 409
+  `CONCURRENT_MODIFICATION` with `meta.currentVersion` and
+  `meta.expectedVersion`.
+- `X-EIA-Tenant` is required on all five operations. A supplied `X-EIA-Book`
+  must be DIRECT; an absent book is accepted and another book is hidden as 404
+  `BOOK_SCOPE_VIOLATION`. A missing or malformed tenant is 400
+  `MISSING_TENANT_HEADER`/`INVALID_TENANT_HEADER`, an unknown or foreign product
+  is 404 `PRODUCT_NOT_FOUND`, and a malformed UUID is 400 `INVALID_PARAMETER`.
+  No product operation accepts `Idempotency-Key` or `If-Match`; the code
+  uniqueness and the version-and-status predicate are the retry/conflict guards
+  (M-06, M-07).
+- The two facts are written in the same transaction as the row against the
+  `Product` aggregate: create is aggregate version 1 with payload `version` 0,
+  and a status change is the bumped row version plus one with `previousStatus`,
+  `status`, `version`, `updatedAt`, and `changedFields: [status]`. They are the
+  first facts of the `product` event vertical. The Policy expert constructs the
+  outbox rows directly with the canonical payload and header JSON, and the
+  platform event-vertical registry admits `product`, so the canonical envelope
+  is reconstructible; `event-catalog.yaml`, `asyncapi/product.yaml`, and M-61
+  record the vertical.
+- SPEC 11.2.14 defines the wider `product` and `product_version` tables and
+  mounts the reads at `/api/v1/policy/products`; the implementation has no form
+  family, effective dates, owner, or product version, uses a five-value line
+  set instead of the sixteen `policy.product_line` values, a two-state status
+  instead of DRAFT/FILED/APPROVED/ACTIVE/SUSPENDED/RETIRED, and a two-letter
+  jurisdiction instead of ISO 3166-2 or a country. SPEC 11.2.9 names no product
+  fact. M-01, M-22, and M-61 record the deviations.
+- The validator requires the five product operations and their tenant/optional
+  DIRECT book parameters, the bare ordered list and search array, the five
+  schemas and their fields/enums/patterns, the 400/404/409 responses and their
+  codes, the 201 `Location` and `ETag` headers, the two implemented Product
+  channels and their ordered payloads, the catalog entries, the 201/200/409
+  event wording, the new envelope vertical, and the absence of the implemented
+  paths from `x-planned-operations`. The full run passes 17,367 checks.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -4143,6 +4223,70 @@ Rules:
   reduced entity-type/status vocabulary, and the nullable clear are recorded in
   M-01, M-12, M-13, and M-43.
 
+### Product catalog
+
+The product catalog is Policy domain master data: a sellable product line that
+a policy or an underwriting submission references by `productCode`. The public
+surface is a domain proxy over the Policy expert; the expert also serves the
+same resources under `/internal/v1` for the domain adapter, but that alias is
+not part of the public contract. The two facts use the `product` event vertical
+documented in [Product catalog and Product event vertical](#product-catalog-and-product-event-vertical-2026-10-22).
+
+| Operation | Path | Success | Errors |
+|---|---|---|---|
+| List | `GET /api/v1/products` | 200 `Product[]` | 400, 404 |
+| Search alias | `GET /api/v1/products/search` | 200 `Product[]` | 400, 404 |
+| Create | `POST /api/v1/products` | 201 `Product` | 400, 404, 409 |
+| Get | `GET /api/v1/products/{productId}` | 200 `Product` | 400, 404 |
+| Status | `PATCH /api/v1/products/{productId}/status` | 200 `Product` | 400, 404, 409 |
+
+`Product` is `{productId, productCode, productName, productLine, jurisdiction,
+status, version, createdAt, updatedAt}`. `version` starts at 0 and backs the
+strong `ETag`; the list and search responses carry no ETag. `ProductLine` is
+`CGL`, `PRODUCTS_LIABILITY`, `UMBRELLA`, `EXCESS`, or `OTHER`, and
+`ProductStatus` is `ACTIVE` or `RETIRED`.
+
+Rules:
+
+- The list and `/search` are the same read: a bare `Product` array ordered by
+  `productCode` then `productId`, with the optional case-insensitive `q`
+  (code/name substring) and exact `status` filters combined with AND. A blank
+  filter is absent, a blank `q` returns the whole catalog, and an unknown
+  `status` is 400 `INVALID_PRODUCT_STATUS`. Neither route is paginated (M-04).
+  `/search` is not the shared global-search `SearchResponse`; it deliberately
+  reuses the list projection.
+- `POST` creates an ACTIVE product with a server-owned id and timestamps and
+  returns 201 with the stored projection, the `ETag` of version 0, and a
+  `Location`. `productCode` is trimmed, upper-cased, capped at 32 characters,
+  and unique per tenant, so a duplicate is 409 `DUPLICATE_PRODUCT_CODE`;
+  `productName` is trimmed and capped at 200; `productLine` and `jurisdiction`
+  are trimmed and upper-cased, and the jurisdiction must be exactly two ASCII
+  letters. The body aliases `code`, `name`, and `line` are accepted.
+- `PATCH .../status` sets ACTIVE or RETIRED. Replaying the current status is a
+  200 no-op that keeps the version and writes no event. A real change advances
+  `version` and returns the new `ETag`; a concurrent writer is 409
+  `CONCURRENT_MODIFICATION` with the current and expected versions. The
+  version-and-status predicate is the conflict guard, because the command
+  accepts neither `If-Match` nor `Idempotency-Key` (M-06, M-07).
+- `X-EIA-Tenant` is required. A supplied `X-EIA-Book` must be DIRECT and another
+  book is hidden as 404 `BOOK_SCOPE_VIOLATION`; an absent book is accepted for
+  compatibility with the other Policy proxy routes. A missing or malformed
+  tenant is 400 `MISSING_TENANT_HEADER`/`INVALID_TENANT_HEADER`, an unknown or
+  foreign product is 404 `PRODUCT_NOT_FOUND`, and a malformed id is 400
+  `INVALID_PARAMETER`.
+- The create writes `product.product.created` and an accepted status change
+  writes `product.product.status-changed` in the same transaction as the row,
+  against the `Product` aggregate. Create is aggregate version 1 with payload
+  `version` 0; a status change is the bumped row version plus one and carries
+  `previousStatus`, `status`, `version`, `updatedAt`, and
+  `changedFields: [status]`. A same-status replay writes no event.
+- SPEC 11.2.14 mounts the catalog at `/api/v1/policy/products`, defines the
+  wider `product`/`product_version` tables, six statuses, and a sixteen-value
+  `policy.product_line` taxonomy, and has no product event in SPEC 11.2.9. The
+  implemented short paths, five-value line set, two-state status, two-letter
+  jurisdiction, and missing form family/effective dates/owner/product version
+  are recorded in M-01, M-22, and M-61.
+
 ### Policy rating worksheets
 
 Policy rating is a domain proxy over the Policy expert. The public surface is
@@ -4404,8 +4548,9 @@ missing directory.
    maps, folded and literal block scalars, comments). Unsupported constructs
    and tab indentation fail with a file and line number.
 2. **File inventory.** Exactly the ten vertical OpenAPI documents plus
-   `components.yaml`, the ten vertical AsyncAPI documents plus
-   `event-catalog.yaml`, and the three JSON Schemas.
+   `components.yaml`, the eleven event-vertical AsyncAPI documents plus
+   `event-catalog.yaml`, and the three JSON Schemas. The eleven AsyncAPI
+   documents are the ten HTTP verticals plus the product event vertical.
 3. **OpenAPI structure.** `openapi: 3.1.0`, SemVer `info.version`, the JSON
    Schema 2020-12 dialect, non-empty `paths`, operation IDs (unique per file and
    across the repository), summaries, tags, responses with a 2xx, request-body
@@ -4692,7 +4837,16 @@ missing directory.
    statement, the bare-array list, the 201
    `ETag`/`Idempotent-Replayed`/`Location` headers, the 200 `ETag`, the
    400/404/409 responses and their codes, and the absence of a replay 200 and of
-   a public `q`/`status` list parameter.
+   a public `q`/`status` list parameter. It also requires the five product
+   operations with the tenant and optional DIRECT book parameters, the bare
+   product-code-ordered list and search arrays, the `Product`,
+   `ProductLine`, `ProductStatus`, `CreateProductRequest`, and
+   `UpdateProductStatusRequest` schemas with their exact fields, enums, and
+   jurisdiction patterns, the 201 `Location`/`ETag`, the 200 detail/status
+   `ETag`, the 400/404/409 responses and the `DUPLICATE_PRODUCT_CODE`/
+   `PRODUCT_NOT_FOUND`/`CONCURRENT_MODIFICATION`/`INVALID_PRODUCT_*` wording,
+   and the absence of the implemented product paths from
+   `x-planned-operations`.
 4. **AsyncAPI structure.** `asyncapi: 3.0.0`, channel addresses, `x-event-type`,
    `x-status: planned|implemented`, `x-implemented-by` on every implemented
    channel, one `send` operation per channel, a `DomainEvent` message on
@@ -4786,14 +4940,19 @@ missing directory.
    replay wording, the tenant + operation scope and 128-character key cap, the
    expert conversion operation with the bare `Policy` response and
    `IdempotencyKey`, and the nullable `Policy.submissionId` and
-   `PolicySubmission.policyId` links.
+   `PolicySubmission.policyId` links. For the product event vertical it requires
+   the exact two channels and `send` operations, both marked implemented and
+   naming `ProductEvents.java`, the ordered `ProductProductCreatedData` and
+   `ProductProductStatusChangedData` payloads, the five-value line enum, the
+   two-value status and previous-status enums, the version minima, and the
+   one-member `changedFields: [status]` list.
 5. **Event catalog cross-check.** The published set in `event-catalog.yaml`
    must equal the channel addresses in the matching vertical document, event
    names must be unique across the platform and must match
    `{vertical}.{aggregate}.{verb}`, every consumed event must have a publisher,
    and the catalog `implemented` list must equal the channels marked
    `x-status: implemented`. The implemented event names for all ten publishing
-   verticals are required explicitly, including
+   verticals plus the product event vertical are required explicitly, including
    `party.party.created`, `party.party.updated` (the implemented status-update
    fact),
    `party.party.identifier-added`,
@@ -4817,6 +4976,8 @@ missing directory.
    `policy.submission.created`,
    `policy.submission.status-changed`,
    `policy.submission.converted`,
+   `product.product.created`,
+   `product.product.status-changed`,
    `policy.billing-plan.created`, `policy.billing-plan.adjusted`,
    `policy.installment.paid`,
    `policy.installment.waived`, `policy.dunning.sent`,
@@ -5112,6 +5273,24 @@ missing directory.
   reference or tenant check, and the domain and expert accept an absent
   `X-EIA-Book` although the canonical contract requires DIRECT (M-01, M-22,
   M-39);
+- the product catalog is implemented at the short `GET/POST /api/v1/products`,
+  `GET /api/v1/products/search`, `GET /api/v1/products/{productId}`, and
+  `PATCH /api/v1/products/{productId}/status` paths, while SPEC 11.2.14 mounts
+  the catalog at `/api/v1/policy/products` and adds a version collection. The
+  implemented projection is a flat nine-member row with a five-value
+  `CGL`/`PRODUCTS_LIABILITY`/`UMBRELLA`/`EXCESS`/`OTHER` line set, a two-letter
+  jurisdiction, and an ACTIVE/RETIRED status only, whereas SPEC defines a
+  sixteen-value `policy.product_line` taxonomy, ISO 3166-2 or country
+  jurisdiction, DRAFT/FILED/APPROVED/ACTIVE/SUSPENDED/RETIRED, and a separate
+  `product_version` with form family, effective dates, and owner. The two
+  facts `product.product.created` and `product.product.status-changed` have no
+  SPEC 11.2.9 name, use the new `product` event vertical, and are written by the
+  Policy expert directly as outbox rows; the platform event-vertical registry
+  admits `product`, so the envelope is reconstructible. The domain and expert
+  accept an absent
+  `X-EIA-Book` although the canonical contract documents DIRECT, and no product
+  command accepts `Idempotency-Key` or `If-Match` (M-01, M-06, M-07, M-14,
+  M-22, M-61);
 - the premium-receivables queue is a tenant-wide read at
   `GET /api/v1/billing/installments`, outside `/api/v1/policies`, and returns the
   flat `Receivable`/`ReceivableSummary` projection. SPEC 11.2.13 describes the
@@ -5159,10 +5338,11 @@ missing directory.
   neither, so there is no 409 and a repeated non-no-op request applies again
   (M-06, M-07, M-22, M-55);
 - ten experts publish a subset of their events through the transactional
-  outbox into the platform `event-ingest` inbox, but no vertical consumes
+  outbox into the platform `event-ingest` inbox, and the Policy expert also
+  publishes the two facts of the product event vertical. No vertical consumes
   another vertical's events, there is no subscription registry or gap
-  detection, and the implemented event names still differ from the SPEC
-  catalog names (M-14, M-22).
+  detection, and the implemented event names still differ from the SPEC catalog
+  names (M-14, M-22, M-61).
 
 ## Repository standard
 

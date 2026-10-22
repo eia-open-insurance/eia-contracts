@@ -1,0 +1,296 @@
+asyncapi: 3.0.0
+id: urn:eia:contracts:events:product
+info:
+  title: EIA Product events
+  version: 1.0.0
+  summary: Published domain event names for the Product event vertical.
+  description: >
+    Event contract for the Product event vertical. The product events are
+    SPEC-less: SPEC 11.2.14 defines the `product` and `product_version`
+    aggregates and the `/api/v1/policy/products` reads, but SPEC 11.2.9 names no
+    product fact. The implemented names are `product.product.created` and
+    `product.product.status-changed`; the canonical envelope is
+    ../schemas/event-envelope.schema.json.
+
+    There is no message broker (ADR-0004). The platform outbox delivers events
+    over authenticated HTTPS to each subscriber endpoint, with an HMAC-SHA256
+    signature (SPEC 7.5.1). A channel address is the logical routing key and
+    equals the event name; it is not a broker topic.
+
+    The Policy expert publishes both facts in the same transaction as the
+    `product` row against the `Product` aggregate. A product is created ACTIVE
+    at version 0 and the create fact is aggregate version 1; each accepted
+    ACTIVE/RETIRED change advances the row version and is emitted at the new
+    version plus one, while a replay of the current status writes no fact. The
+    Product event vertical has no HTTP document of its own: the catalog reads
+    and commands are part of the Policy OpenAPI document at `/api/v1/products`,
+    and the Policy expert's ProductEvents factory constructs the outbox rows
+    directly with the canonical payload and header JSON; the platform
+    event-vertical registry admits `product`, so `OutboxEvent.toEnvelope()`
+    reconstructs the canonical envelope unchanged (MISMATCHES.md M-14 and
+    M-61).
+  contact:
+    name: EIA Architecture
+    url: https://github.com/eia-open-insurance
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+defaultContentType: application/json
+servers:
+  subscriberEndpoint:
+    host: subscriber-defined
+    protocol: https
+    description: >
+      Each subscriber registers an HTTPS endpoint and signing key. The outbox
+      posts one event per request and requires a 2xx acknowledgement.
+channels:
+  ProductProductCreated:
+    address: product.product.created
+    title: product.product.created
+    description: >
+      Emitted by the Policy expert when a product is persisted, in the same
+      transaction as the row. The payload carries the product identity, the
+      normalized code, name, line, and jurisdiction, the ACTIVE status, the row
+      version 0, and both timestamps. The event is keyed by the `Product`
+      aggregate with the product id as the partition key; the envelope aggregate
+      version is 1.
+    x-event-type: product.product.created
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.2.14
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/ProductEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      ProductProductCreatedData:
+        $ref: '#/components/messages/ProductProductCreatedData'
+  ProductProductStatusChanged:
+    address: product.product.status-changed
+    title: product.product.status-changed
+    description: >
+      Emitted when a product moves between ACTIVE and RETIRED, in the same
+      transaction as the row update. The payload carries the product identity
+      and catalog fields, the previous and new status, the bumped row version,
+      the update instant, and `changedFields: [status]`. Replaying the current
+      status is a no-op that writes no event. The event is keyed by the
+      `Product` aggregate with the product id as the partition key; the envelope
+      aggregate version is the bumped row version plus one.
+    x-event-type: product.product.status-changed
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.2.14
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/ProductEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      ProductProductStatusChangedData:
+        $ref: '#/components/messages/ProductProductStatusChangedData'
+operations:
+  publishProductProductCreated:
+    action: send
+    channel:
+      $ref: '#/channels/ProductProductCreated'
+    summary: Publish product.product.created
+    description: >
+      Publishes product.product.created through the transactional outbox over
+      authenticated HTTPS (SPEC 7.5) when an ACTIVE product is created,
+      in the same transaction as the row. A rejected body or a duplicate code
+      writes no event.
+    x-event-type: product.product.created
+    x-status: implemented
+  publishProductProductStatusChanged:
+    action: send
+    channel:
+      $ref: '#/channels/ProductProductStatusChanged'
+    summary: Publish product.product.status-changed
+    description: >
+      Publishes product.product.status-changed when a product is retired or
+      reactivated, in the same transaction as the row update and version bump.
+      A same-status replay writes no event.
+    x-event-type: product.product.status-changed
+    x-status: implemented
+components:
+  messages:
+    DomainEvent:
+      name: DomainEvent
+      title: EIA domain event envelope
+      summary: One immutable fact published by a vertical.
+      contentType: application/json
+      headers:
+        type: object
+        additionalProperties: true
+        properties:
+          X-EIA-Event-Id:
+            type: string
+            format: uuid
+          X-EIA-Event-Type:
+            type: string
+          X-EIA-Event-Version:
+            type: integer
+          X-EIA-Aggregate-Version:
+            type: integer
+          Idempotency-Key:
+            type: string
+          X-EIA-Signature:
+            type: string
+      payload:
+        $ref: '../schemas/event-envelope.schema.json'
+    ProductProductCreatedData:
+      name: ProductProductCreatedData
+      title: product.product.created data
+      summary: One product created ACTIVE in the DIRECT-book catalog.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - productId
+          - productCode
+          - productName
+          - productLine
+          - jurisdiction
+          - status
+          - version
+          - createdAt
+          - updatedAt
+        properties:
+          productId:
+            type: string
+            format: uuid
+          productCode:
+            type: string
+            maxLength: 32
+            description: Trimmed and upper-case tenant-unique product code.
+            examples:
+              - CGL
+          productName:
+            type: string
+            maxLength: 200
+            examples:
+              - Commercial General Liability
+          productLine:
+            type: string
+            description: Closed internal product-line taxonomy.
+            enum:
+              - CGL
+              - PRODUCTS_LIABILITY
+              - UMBRELLA
+              - EXCESS
+              - OTHER
+          jurisdiction:
+            type: string
+            pattern: '^[A-Z]{2}$'
+            description: Two-letter ISO 3166-1 alpha-2 jurisdiction.
+            examples:
+              - US
+          status:
+            type: string
+            description: A product is always created ACTIVE.
+            enum:
+              - ACTIVE
+              - RETIRED
+          version:
+            type: integer
+            minimum: 0
+            description: Row version at creation, always 0.
+          createdAt:
+            type: string
+            format: date-time
+          updatedAt:
+            type: string
+            format: date-time
+    ProductProductStatusChangedData:
+      name: ProductProductStatusChangedData
+      title: product.product.status-changed data
+      summary: One product moved between ACTIVE and RETIRED.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - productId
+          - productCode
+          - productName
+          - productLine
+          - jurisdiction
+          - status
+          - version
+          - previousStatus
+          - updatedAt
+          - changedFields
+        properties:
+          productId:
+            type: string
+            format: uuid
+          productCode:
+            type: string
+            maxLength: 32
+          productName:
+            type: string
+            maxLength: 200
+          productLine:
+            type: string
+            enum:
+              - CGL
+              - PRODUCTS_LIABILITY
+              - UMBRELLA
+              - EXCESS
+              - OTHER
+          jurisdiction:
+            type: string
+            pattern: '^[A-Z]{2}$'
+          status:
+            type: string
+            description: New product status.
+            enum:
+              - ACTIVE
+              - RETIRED
+          version:
+            type: integer
+            minimum: 1
+            description: Bumped row version after the status change.
+          previousStatus:
+            type: string
+            description: Status before the change.
+            enum:
+              - ACTIVE
+              - RETIRED
+          updatedAt:
+            type: string
+            format: date-time
+          changedFields:
+            type: array
+            description: The one changed member on a product status fact.
+            minItems: 1
+            maxItems: 1
+            items:
+              type: string
+              enum:
+                - status
+  securitySchemes:
+    outboxSignature:
+      type: httpApiKey
+      name: X-EIA-Signature
+      in: header
+      description: >
+        HMAC-SHA256 over the timestamp and the exact request body, in the form
+        t=<unix>,v1=<hex> (SPEC 7.5.1).
+x-vertical: product
+x-spec-section: SPEC 11.2.14
+x-status: implemented
+x-implementation:
+  publisher: eia-policy-expert
+  subscriber: none
+  notes: >
+    Both product facts are written to the transactional outbox in the same
+    transaction as the `product` row by `ProductEvents`. The product vertical is
+    not in the platform event-vertical registry yet, so the factory constructs
+    the outbox rows directly with the canonical payload and header JSON rather
+    than through the shared envelope factory; once the registry admits
+    `product`, `OutboxEvent.toEnvelope()` reconstructs the canonical envelope
+    unchanged. Create is aggregate version 1 with payload `version` 0; a status
+    change is the bumped row version plus one with the new `version`,
+    `previousStatus`, and `changedFields: [status]`. A same-status replay writes
+    no row and no event. There is no subscriber, subscription registry, or
+    business consumer yet; the catalog `consumed` list is empty.
+x-consumed-events: []

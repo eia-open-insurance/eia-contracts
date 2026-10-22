@@ -52,6 +52,26 @@ VERTICAL_FILES = [
     "notifications",
 ]
 
+# The Product catalog is published by the Policy expert but the two facts carry
+# the `product` event vertical. It therefore has an AsyncAPI document and a
+# catalog entry without a separate OpenAPI document; the product HTTP reads and
+# commands are part of openapi/policy.yaml. See MISMATCHES.md M-14 and M-61.
+EVENT_VERTICAL_FILES = VERTICAL_FILES + ["product"]
+
+EVENT_ENVELOPE_VERTICALS = (
+    "party",
+    "policy",
+    "product",
+    "contract",
+    "direct",
+    "assumed",
+    "document",
+    "payment",
+    "notifications",
+    "cession",
+    "retrocession",
+)
+
 HTTP_METHODS = ("get", "put", "post", "delete", "options", "head", "patch", "trace")
 
 REQUIRED_OPENAPI_PATHS = {
@@ -1531,6 +1551,139 @@ POLICY_PROGRAM_ASSIGNED_FIELDS = (
 )
 
 
+# Product catalog (SPEC 11.2.14 `product`). The public DIRECT-book routes are
+# part of the Policy OpenAPI document even though the two facts belong to the
+# separate `product` event vertical. Each tuple is
+# (method, path, success status, success schema, request schema or None,
+# required error response codes). The list and the `/search` alias return the
+# same bare product-code-ordered array; the create returns 201 with Location and
+# the strong ETag; the detail and status responses carry the ETag. A duplicate
+# code is 409 DUPLICATE_PRODUCT_CODE, an unknown or foreign product is 404
+# PRODUCT_NOT_FOUND, and a concurrent status change is 409
+# CONCURRENT_MODIFICATION. The implemented catalog is narrower than the SPEC
+# 11.2.14 table and the two event names are SPEC-less (MISMATCHES.md M-61).
+PRODUCT_OPENAPI_PATHS = [
+    (
+        "get",
+        "/api/v1/products",
+        "200",
+        "Product",
+        None,
+        ("400", "404"),
+    ),
+    (
+        "post",
+        "/api/v1/products",
+        "201",
+        "Product",
+        "CreateProductRequest",
+        ("400", "404", "409"),
+    ),
+    (
+        "get",
+        "/api/v1/products/search",
+        "200",
+        "Product",
+        None,
+        ("400", "404"),
+    ),
+    (
+        "get",
+        "/api/v1/products/{productId}",
+        "200",
+        "Product",
+        None,
+        ("400", "404"),
+    ),
+    (
+        "patch",
+        "/api/v1/products/{productId}/status",
+        "200",
+        "Product",
+        "UpdateProductStatusRequest",
+        ("400", "404", "409"),
+    ),
+]
+
+PRODUCT_FIELDS = (
+    "productId",
+    "productCode",
+    "productName",
+    "productLine",
+    "jurisdiction",
+    "status",
+    "version",
+    "createdAt",
+    "updatedAt",
+)
+PRODUCT_CREATE_REQUIRED_FIELDS = (
+    "productCode",
+    "productName",
+    "productLine",
+    "jurisdiction",
+)
+PRODUCT_LINES = ("CGL", "PRODUCTS_LIABILITY", "UMBRELLA", "EXCESS", "OTHER")
+PRODUCT_STATUSES = ("ACTIVE", "RETIRED")
+PRODUCT_CODE_MAX_LENGTH = 32
+PRODUCT_NAME_MAX_LENGTH = 200
+PRODUCT_JURISDICTION_PATTERN = "^[A-Z]{2}$"
+PRODUCT_CREATE_JURISDICTION_PATTERN = "^[A-Za-z]{2}$"
+PRODUCT_EVENTS = (
+    "product.product.created",
+    "product.product.status-changed",
+)
+PRODUCT_EVENT_MESSAGES = (
+    (
+        "product.product.created",
+        "ProductProductCreatedData",
+        (
+            "productId",
+            "productCode",
+            "productName",
+            "productLine",
+            "jurisdiction",
+            "status",
+            "version",
+            "createdAt",
+            "updatedAt",
+        ),
+    ),
+    (
+        "product.product.status-changed",
+        "ProductProductStatusChangedData",
+        (
+            "productId",
+            "productCode",
+            "productName",
+            "productLine",
+            "jurisdiction",
+            "status",
+            "version",
+            "previousStatus",
+            "updatedAt",
+            "changedFields",
+        ),
+    ),
+)
+PRODUCT_EVENT_IMPLEMENTED_BY = "ProductEvents.java"
+PRODUCT_ERROR_CODES = (
+    "MISSING_TENANT_HEADER",
+    "INVALID_TENANT_HEADER",
+    "VALIDATION_ERROR",
+    "MALFORMED_REQUEST",
+    "INVALID_PARAMETER",
+    "INVALID_PRODUCT_CODE",
+    "INVALID_PRODUCT_NAME",
+    "INVALID_PRODUCT_LINE",
+    "INVALID_PRODUCT_JURISDICTION",
+    "INVALID_PRODUCT_STATUS",
+    "PRODUCT_NOT_FOUND",
+    "BOOK_SCOPE_VIOLATION",
+    "DUPLICATE_PRODUCT_CODE",
+    "CONCURRENT_MODIFICATION",
+)
+
+
 # Policy credit notes (SPEC 11.2.13 billing adjustments). The public domain
 # exposes the short /api/v1/policies/{policyId}/credit-notes resource; the
 # expert's /internal/v1 alias is an implementation detail. Every operation
@@ -2047,6 +2200,10 @@ IMPLEMENTED_EVENTS = {
         "policy.submission.created",
         "policy.submission.status-changed",
         "policy.submission.converted",
+    ],
+    "product": [
+        "product.product.created",
+        "product.product.status-changed",
     ],
     "contract": [
         "contract.contract.created",
@@ -7091,6 +7248,414 @@ def check_policy_mass_tort_profile_openapi(contracts: ContractSet, document, rel
 # ---------------------------------------------------------------------------
 
 
+def check_policy_products_openapi(contracts: ContractSet, document, relative: str):
+    """Require the product catalog routes, schemas, and lifecycle rules.
+
+    The five public operations are mandatory and tenant/DIRECT scoped. The list
+    and the ``/search`` alias return the same bare product-code-ordered array;
+    the create is ``CreateProductRequest`` with the four catalog members, and
+    the status command is ``UpdateProductStatusRequest`` with the closed
+    ACTIVE/RETIRED vocabulary. A duplicate code is 409
+    ``DUPLICATE_PRODUCT_CODE``, an unknown or foreign product is 404
+    ``PRODUCT_NOT_FOUND``, and a concurrent status change is 409
+    ``CONCURRENT_MODIFICATION``. The implemented catalog is narrower than the
+    SPEC 11.2.14 table and the two event names are SPEC-less (M-61).
+    """
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    product = schemas.get("Product") or {}
+    properties = product.get("properties") or {}
+    required = list(product.get("required") or [])
+    contracts.check(
+        isinstance(product, dict) and product.get("type") == "object",
+        f"{relative}: Product must be an object schema",
+    )
+    contracts.check(
+        tuple(required) == PRODUCT_FIELDS,
+        f"{relative}: Product.required must be exactly {list(PRODUCT_FIELDS)} in order",
+    )
+    for field in PRODUCT_FIELDS:
+        contracts.check(
+            isinstance(properties.get(field), dict),
+            f"{relative}: Product.{field} is required",
+        )
+    product_id = properties.get("productId") or {}
+    contracts.check(
+        _schema_types(product_id) == {"string"}
+        and product_id.get("format") == "uuid",
+        f"{relative}: Product.productId must be a uuid",
+    )
+    product_code = properties.get("productCode") or {}
+    contracts.check(
+        (
+            _schema_types(product_code),
+            product_code.get("minLength"),
+            product_code.get("maxLength"),
+        )
+        == ({"string"}, 1, PRODUCT_CODE_MAX_LENGTH),
+        f"{relative}: Product.productCode must be a 1-{PRODUCT_CODE_MAX_LENGTH} "
+        "character string",
+    )
+    product_name = properties.get("productName") or {}
+    contracts.check(
+        (
+            _schema_types(product_name),
+            product_name.get("minLength"),
+            product_name.get("maxLength"),
+        )
+        == ({"string"}, 1, PRODUCT_NAME_MAX_LENGTH),
+        f"{relative}: Product.productName must be a 1-{PRODUCT_NAME_MAX_LENGTH} "
+        "character string",
+    )
+    contracts.check(
+        str((properties.get("productLine") or {}).get("$ref", "")).endswith(
+            "/schemas/ProductLine"
+        ),
+        f"{relative}: Product.productLine must reference ProductLine",
+    )
+    contracts.check(
+        _schema_types(properties.get("jurisdiction")) == {"string"}
+        and (properties.get("jurisdiction") or {}).get("pattern")
+        == PRODUCT_JURISDICTION_PATTERN,
+        f"{relative}: Product.jurisdiction must be a two-letter upper-case code",
+    )
+    contracts.check(
+        str((properties.get("status") or {}).get("$ref", "")).endswith(
+            "/schemas/ProductStatus"
+        ),
+        f"{relative}: Product.status must reference ProductStatus",
+    )
+    version = properties.get("version") or {}
+    contracts.check(
+        _schema_types(version) == {"integer"} and version.get("minimum") == 0,
+        f"{relative}: Product.version must be an integer >= 0",
+    )
+    for field in ("createdAt", "updatedAt"):
+        contracts.check(
+            (properties.get(field) or {}).get("format") == "date-time",
+            f"{relative}: Product.{field} must be a date-time",
+        )
+
+    for schema_name, expected in (
+        ("ProductLine", PRODUCT_LINES),
+        ("ProductStatus", PRODUCT_STATUSES),
+    ):
+        enum_schema = schemas.get(schema_name) or {}
+        contracts.check(
+            enum_schema.get("type") == "string",
+            f"{relative}: {schema_name} must be a string enum",
+        )
+        contracts.check(
+            tuple(enum_schema.get("enum") or []) == expected,
+            f"{relative}: {schema_name} must enumerate {list(expected)}",
+        )
+
+    create = schemas.get("CreateProductRequest") or {}
+    create_properties = create.get("properties") or {}
+    create_required = list(create.get("required") or [])
+    contracts.check(
+        isinstance(create, dict) and create.get("type") == "object",
+        f"{relative}: CreateProductRequest must be an object schema",
+    )
+    contracts.check(
+        tuple(create_required) == PRODUCT_CREATE_REQUIRED_FIELDS,
+        f"{relative}: CreateProductRequest.required must be exactly "
+        f"{list(PRODUCT_CREATE_REQUIRED_FIELDS)} in order",
+    )
+    for field in PRODUCT_CREATE_REQUIRED_FIELDS:
+        contracts.check(
+            isinstance(create_properties.get(field), dict),
+            f"{relative}: CreateProductRequest.{field} is required",
+        )
+    create_code = create_properties.get("productCode") or {}
+    contracts.check(
+        (
+            _schema_types(create_code),
+            create_code.get("minLength"),
+            create_code.get("maxLength"),
+        )
+        == ({"string"}, 1, PRODUCT_CODE_MAX_LENGTH),
+        f"{relative}: CreateProductRequest.productCode must be a "
+        f"1-{PRODUCT_CODE_MAX_LENGTH} character string",
+    )
+    create_name = create_properties.get("productName") or {}
+    contracts.check(
+        (
+            _schema_types(create_name),
+            create_name.get("minLength"),
+            create_name.get("maxLength"),
+        )
+        == ({"string"}, 1, PRODUCT_NAME_MAX_LENGTH),
+        f"{relative}: CreateProductRequest.productName must be a "
+        f"1-{PRODUCT_NAME_MAX_LENGTH} character string",
+    )
+    contracts.check(
+        str((create_properties.get("productLine") or {}).get("$ref", "")).endswith(
+            "/schemas/ProductLine"
+        ),
+        f"{relative}: CreateProductRequest.productLine must reference ProductLine",
+    )
+    contracts.check(
+        _schema_types(create_properties.get("jurisdiction")) == {"string"}
+        and (create_properties.get("jurisdiction") or {}).get("pattern")
+        == PRODUCT_CREATE_JURISDICTION_PATTERN,
+        f"{relative}: CreateProductRequest.jurisdiction must accept a "
+        "two-letter ASCII code and be normalized to upper case",
+    )
+    create_description = str(create.get("description") or "")
+    for token in ("code", "name", "line", "DUPLICATE_PRODUCT_CODE"):
+        contracts.check(
+            token in create_description,
+            f"{relative}: CreateProductRequest description must document {token}",
+        )
+
+    update = schemas.get("UpdateProductStatusRequest") or {}
+    update_properties = update.get("properties") or {}
+    contracts.check(
+        isinstance(update, dict) and update.get("type") == "object",
+        f"{relative}: UpdateProductStatusRequest must be an object schema",
+    )
+    contracts.check(
+        list(update.get("required") or []) == ["status"],
+        f"{relative}: UpdateProductStatusRequest.required must be exactly [status]",
+    )
+    contracts.check(
+        str((update_properties.get("status") or {}).get("$ref", "")).endswith(
+            "/schemas/ProductStatus"
+        ),
+        f"{relative}: UpdateProductStatusRequest.status must reference ProductStatus",
+    )
+
+    for (
+        method,
+        product_path,
+        success_status,
+        success_schema,
+        request_schema,
+        error_codes,
+    ) in PRODUCT_OPENAPI_PATHS:
+        path_item = paths.get(product_path) if isinstance(paths, dict) else None
+        operation = path_item.get(method) if isinstance(path_item, dict) else None
+        where = f"{relative}: {method.upper()} {product_path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required product operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+
+        parameter_refs, inline_names = _parameter_names(operation)
+        contracts.check(
+            "TenantHeader" in parameter_refs,
+            f"{where}: must require the shared TenantHeader",
+        )
+        contracts.check(
+            "BookHeaderDirectOptional" in parameter_refs,
+            f"{where}: must document the optional DIRECT book header",
+        )
+        for unsupported in ("BookHeaderDirect", "IdempotencyKey", "IfMatch"):
+            contracts.check(
+                unsupported not in parameter_refs,
+                f"{where}: product operations do not support {unsupported}",
+            )
+        if product_path.endswith("/{productId}") or product_path.endswith(
+            "/{productId}/status"
+        ):
+            contracts.check(
+                "productId" in inline_names,
+                f"{where}: must declare the productId path parameter",
+            )
+
+        description = str(operation.get("description") or "")
+        for token in ("MISSING_TENANT_HEADER", "BOOK_SCOPE_VIOLATION"):
+            contracts.check(
+                token in description,
+                f"{where}: description must document {token}",
+            )
+
+        responses = operation.get("responses") or {}
+        for code in error_codes:
+            contracts.check(
+                code in responses,
+                f"{where}: must document response {code}",
+            )
+        for code, suffix in (("400", "BadRequest"), ("404", "NotFound")):
+            response = responses.get(code) if isinstance(responses, dict) else None
+            contracts.check(
+                isinstance(response, dict)
+                and str(response.get("$ref", "")).endswith(f"/responses/{suffix}"),
+                f"{where}: {code} must reference the shared {suffix} response",
+            )
+        if "409" in error_codes:
+            conflict = responses.get("409") if isinstance(responses, dict) else None
+            contracts.check(
+                isinstance(conflict, dict)
+                and str(conflict.get("$ref", "")).endswith("/responses/Conflict"),
+                f"{where}: 409 must reference the shared Conflict response",
+            )
+
+        success_body = _response_schema(operation, success_status)
+        success_reference = str((success_body or {}).get("$ref", ""))
+        success_items_reference = str(
+            ((success_body or {}).get("items") or {}).get("$ref", "")
+        )
+        expect_array = product_path in (
+            "/api/v1/products",
+            "/api/v1/products/search",
+        ) and method == "get"
+        if expect_array:
+            contracts.check(
+                isinstance(success_body, dict)
+                and success_body.get("type") == "array"
+                and success_items_reference.endswith(f"/schemas/{success_schema}"),
+                f"{where}: {success_status} must be a bare array of {success_schema}",
+            )
+        else:
+            contracts.check(
+                isinstance(success_body, dict)
+                and success_reference.endswith(f"/schemas/{success_schema}"),
+                f"{where}: {success_status} must return the {success_schema} schema",
+            )
+
+        if request_schema:
+            request_body = operation.get("requestBody") or {}
+            body_schema = (
+                ((request_body.get("content") or {}).get("application/json") or {})
+                .get("schema")
+                if isinstance(request_body, dict)
+                else None
+            )
+            contracts.check(
+                isinstance(request_body, dict) and request_body.get("required") is True,
+                f"{where}: requestBody must be required",
+            )
+            contracts.check(
+                isinstance(body_schema, dict)
+                and str(body_schema.get("$ref", "")).endswith(
+                    f"/schemas/{request_schema}"
+                ),
+                f"{where}: request body must use the {request_schema} schema",
+            )
+        else:
+            contracts.check(
+                operation.get("requestBody") is None,
+                f"{where}: read operations must not declare a requestBody",
+            )
+
+        if product_path in ("/api/v1/products", "/api/v1/products/search"):
+            if method == "get":
+                q_parameter = _inline_parameter(operation, "q")
+                status_parameter = _inline_parameter(operation, "status")
+                contracts.check(
+                    isinstance(q_parameter, dict)
+                    and q_parameter.get("in") == "query"
+                    and q_parameter.get("required") is False,
+                    f"{where}: must document the optional q query parameter",
+                )
+                contracts.check(
+                    isinstance(status_parameter, dict)
+                    and status_parameter.get("in") == "query"
+                    and status_parameter.get("required") is False,
+                    f"{where}: must document the optional status query parameter",
+                )
+                contracts.check(
+                    str(((status_parameter or {}).get("schema") or {}).get("$ref", ""))
+                    .endswith("/schemas/ProductStatus"),
+                    f"{where}: status filter must reference ProductStatus",
+                )
+                contracts.check(
+                    "INVALID_PRODUCT_STATUS" in description,
+                    f"{where}: description must document 400 INVALID_PRODUCT_STATUS",
+                )
+                contracts.check(
+                    "case-insensitive" in description,
+                    f"{where}: description must document the case-insensitive q",
+                )
+
+        if method == "post":
+            for token in (
+                "DUPLICATE_PRODUCT_CODE",
+                "INVALID_PRODUCT_LINE",
+                "INVALID_PRODUCT_JURISDICTION",
+                "product.product.created",
+            ):
+                contracts.check(
+                    token in description,
+                    f"{where}: description must document {token}",
+                )
+            created = responses.get("201") if isinstance(responses, dict) else None
+            headers = created.get("headers") if isinstance(created, dict) else None
+            contracts.check(
+                isinstance(headers, dict) and "Location" in headers,
+                f"{where}: 201 must declare the Location header",
+            )
+            etag = headers.get("ETag") if isinstance(headers, dict) else None
+            contracts.check(
+                isinstance(etag, dict)
+                and str(etag.get("$ref", "")).endswith("/headers/ETag"),
+                f"{where}: 201 must declare the shared ETag header",
+            )
+
+        if method == "get" and product_path.endswith("/{productId}"):
+            contracts.check(
+                "PRODUCT_NOT_FOUND" in description,
+                f"{where}: description must document 404 PRODUCT_NOT_FOUND",
+            )
+            ok = responses.get("200") if isinstance(responses, dict) else None
+            headers = ok.get("headers") if isinstance(ok, dict) else None
+            etag = headers.get("ETag") if isinstance(headers, dict) else None
+            contracts.check(
+                isinstance(etag, dict)
+                and str(etag.get("$ref", "")).endswith("/headers/ETag"),
+                f"{where}: 200 must declare the shared ETag header",
+            )
+
+        if method == "patch":
+            for token in (
+                "INVALID_PRODUCT_STATUS",
+                "CONCURRENT_MODIFICATION",
+                "product.product.status-changed",
+                "meta.currentVersion",
+                "meta.expectedVersion",
+                "no event",
+            ):
+                contracts.check(
+                    token in description,
+                    f"{where}: description must document {token}",
+                )
+            ok = responses.get("200") if isinstance(responses, dict) else None
+            headers = ok.get("headers") if isinstance(ok, dict) else None
+            etag = headers.get("ETag") if isinstance(headers, dict) else None
+            contracts.check(
+                isinstance(etag, dict)
+                and str(etag.get("$ref", "")).endswith("/headers/ETag"),
+                f"{where}: 200 must declare the shared ETag header",
+            )
+
+    operation_descriptions = []
+    for method, product_path, *_rest in PRODUCT_OPENAPI_PATHS:
+        path_item = paths.get(product_path) if isinstance(paths, dict) else None
+        operation = path_item.get(method) if isinstance(path_item, dict) else None
+        if isinstance(operation, dict):
+            operation_descriptions.append(str(operation.get("description") or ""))
+    for code in PRODUCT_ERROR_CODES:
+        contracts.check(
+            any(code in description for description in operation_descriptions),
+            f"{relative}: a product operation must document {code}",
+        )
+
+    planned = document.get("x-planned-operations") or []
+    for product_path in sorted({entry[1] for entry in PRODUCT_OPENAPI_PATHS}):
+        contracts.check(
+            not any(
+                isinstance(entry, dict) and entry.get("path") == product_path
+                for entry in planned
+            ),
+            f"{relative}: {product_path} must not remain in x-planned-operations",
+        )
+
+
 def check_policy_programs(contracts: ContractSet, document, relative: str):
     """Require the program catalog routes, schemas, and membership command.
 
@@ -7511,6 +8076,201 @@ def check_policy_programs(contracts: ContractSet, document, relative: str):
             ),
             f"{relative}: {implemented_path} must not remain in x-planned-operations",
         )
+
+
+def check_product_asyncapi(contracts: ContractSet, document, relative: str):
+    """Require the two implemented Product event channels and payloads.
+
+    The product vertical has no HTTP document of its own; its channels are
+    emitted by the Policy expert. Both names are implemented, carry the
+    ``Product`` aggregate, and are keyed by the product id. A create is
+    aggregate version 1 with payload ``version`` 0; a status change carries the
+    previous and new status, the bumped version, the update instant, and the
+    one-member ``changedFields`` list. Both names are SPEC-less (M-22, M-61).
+    """
+    contracts.check(
+        document.get("x-vertical") == "product",
+        f"{relative}: x-vertical must be 'product'",
+    )
+    channels = document.get("channels") or {}
+    operations = document.get("operations") or {}
+    messages = ((document.get("components") or {}).get("messages") or {})
+
+    addresses = {
+        channel.get("address")
+        for channel in channels.values()
+        if isinstance(channel, dict)
+    }
+    contracts.check(
+        addresses == set(PRODUCT_EVENTS),
+        f"{relative}: product channels must be exactly {list(PRODUCT_EVENTS)}",
+    )
+
+    send_events = {
+        operation.get("x-event-type")
+        for operation in operations.values()
+        if isinstance(operation, dict) and operation.get("action") == "send"
+    }
+    for event in PRODUCT_EVENTS:
+        contracts.check(
+            event in addresses,
+            f"{relative}: required product event channel '{event}' is missing",
+        )
+        contracts.check(
+            event in send_events,
+            f"{relative}: product event '{event}' must have a send operation",
+        )
+        channel = next(
+            (
+                value
+                for value in channels.values()
+                if isinstance(value, dict) and value.get("address") == event
+            ),
+            None,
+        )
+        contracts.check(
+            isinstance(channel, dict) and channel.get("x-status") == "implemented",
+            f"{relative}: product event channel '{event}' must be implemented",
+        )
+        contracts.check(
+            isinstance(channel, dict)
+            and str(channel.get("x-implemented-by", "")).endswith(
+                PRODUCT_EVENT_IMPLEMENTED_BY
+            ),
+            f"{relative}: {event} must name {PRODUCT_EVENT_IMPLEMENTED_BY} in "
+            "x-implemented-by",
+        )
+        contracts.check(
+            isinstance(channel, dict) and channel.get("x-event-version") == 1,
+            f"{relative}: {event} must keep eventVersion 1",
+        )
+
+    for event, message_name, fields in PRODUCT_EVENT_MESSAGES:
+        channel = next(
+            (
+                value
+                for value in channels.values()
+                if isinstance(value, dict) and value.get("address") == event
+            ),
+            None,
+        )
+        channel_messages = (
+            channel.get("messages") if isinstance(channel, dict) else None
+        ) or {}
+        contracts.check(
+            "DomainEvent" in channel_messages,
+            f"{relative}: {event} must reference the DomainEvent message",
+        )
+        contracts.check(
+            message_name in channel_messages,
+            f"{relative}: {event} must reference {message_name}",
+        )
+        message = messages.get(message_name) or {}
+        payload = message.get("payload") or {}
+        required = list(payload.get("required") or [])
+        properties = payload.get("properties") or {}
+        contracts.check(
+            payload.get("type") == "object",
+            f"{relative}: {message_name} payload must be an object",
+        )
+        contracts.check(
+            tuple(required) == fields,
+            f"{relative}: {message_name}.required must be exactly "
+            f"{list(fields)} in order",
+        )
+        for field in fields:
+            contracts.check(
+                isinstance(properties.get(field), dict),
+                f"{relative}: {message_name}.properties.{field} is required",
+            )
+        contracts.check(
+            (properties.get("productId") or {}).get("format") == "uuid",
+            f"{relative}: {message_name}.productId must be a uuid",
+        )
+        contracts.check(
+            (properties.get("productCode") or {}).get("maxLength")
+            == PRODUCT_CODE_MAX_LENGTH,
+            f"{relative}: {message_name}.productCode maxLength must be "
+            f"{PRODUCT_CODE_MAX_LENGTH}",
+        )
+        contracts.check(
+            (properties.get("productName") or {}).get("maxLength")
+            == PRODUCT_NAME_MAX_LENGTH,
+            f"{relative}: {message_name}.productName maxLength must be "
+            f"{PRODUCT_NAME_MAX_LENGTH}",
+        )
+        contracts.check(
+            tuple((properties.get("productLine") or {}).get("enum") or [])
+            == PRODUCT_LINES,
+            f"{relative}: {message_name}.productLine must enumerate "
+            f"{list(PRODUCT_LINES)}",
+        )
+        contracts.check(
+            (properties.get("jurisdiction") or {}).get("pattern")
+            == PRODUCT_JURISDICTION_PATTERN,
+            f"{relative}: {message_name}.jurisdiction must be a two-letter "
+            "upper-case code",
+        )
+        contracts.check(
+            tuple((properties.get("status") or {}).get("enum") or [])
+            == PRODUCT_STATUSES,
+            f"{relative}: {message_name}.status must enumerate "
+            f"{list(PRODUCT_STATUSES)}",
+        )
+        version = properties.get("version") or {}
+        contracts.check(
+            _schema_types(version) == {"integer"}
+            and version.get("minimum") == (0 if event.endswith(".created") else 1),
+            f"{relative}: {message_name}.version must be an integer >= "
+            f"{0 if event.endswith('.created') else 1}",
+        )
+        contracts.check(
+            (properties.get("updatedAt") or {}).get("format") == "date-time",
+            f"{relative}: {message_name}.updatedAt must be a date-time",
+        )
+        if event.endswith(".created"):
+            contracts.check(
+                (properties.get("createdAt") or {}).get("format") == "date-time",
+                f"{relative}: {message_name}.createdAt must be a date-time",
+            )
+            contracts.check(
+                (properties.get("status") or {}).get("description", "").find(
+                    "ACTIVE"
+                )
+                >= 0,
+                f"{relative}: {message_name}.status must document ACTIVE creation",
+            )
+        else:
+            contracts.check(
+                tuple((properties.get("previousStatus") or {}).get("enum") or [])
+                == PRODUCT_STATUSES,
+                f"{relative}: {message_name}.previousStatus must enumerate "
+                f"{list(PRODUCT_STATUSES)}",
+            )
+            changed = properties.get("changedFields") or {}
+            contracts.check(
+                changed.get("type") == "array"
+                and changed.get("minItems") == 1
+                and changed.get("maxItems") == 1
+                and tuple(((changed.get("items") or {}).get("enum")) or [])
+                == ("status",),
+                f"{relative}: {message_name}.changedFields must be the one-member "
+                "status list",
+            )
+
+    implementation = document.get("x-implementation") or {}
+    contracts.check(
+        implementation.get("publisher") == "eia-policy-expert",
+        f"{relative}: x-implementation.publisher must be eia-policy-expert",
+    )
+    contracts.check(
+        implementation.get("subscriber") == "none",
+        f"{relative}: x-implementation.subscriber must be none",
+    )
+    contracts.check(
+        document.get("x-consumed-events") == [],
+        f"{relative}: the product vertical consumes no events",
+    )
 
 
 def check_policy_programs_asyncapi(contracts: ContractSet, document, relative: str):
@@ -17239,6 +17999,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_policy_premium_audit_openapi(contracts, document, relative)
             check_policy_rating_openapi(contracts, document, relative)
             check_policy_submissions_openapi(contracts, document, relative)
+            check_policy_products_openapi(contracts, document, relative)
         if vertical == "contract":
             check_contract_security(contracts, document, relative)
             check_contract_security_status(contracts, document, relative)
@@ -17583,7 +18344,7 @@ def check_notification_templates_asyncapi(contracts: ContractSet, document, rela
 
 def check_asyncapi(contracts: ContractSet, verbose: bool):
     print("\nAsyncAPI 3 documents")
-    expected = {"event-catalog"} | set(VERTICAL_FILES)
+    expected = {"event-catalog"} | set(EVENT_VERTICAL_FILES)
     present = {path.stem for path in ASYNCAPI_DIR.glob("*.yaml")}
     contracts.check(
         present == expected,
@@ -17597,12 +18358,12 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
     catalog_entries = catalog.get("x-event-catalog") or {}
     contracts.check(isinstance(catalog_entries, dict), "event-catalog.yaml: x-event-catalog must be a mapping")
     contracts.check(
-        set(catalog_entries) == set(VERTICAL_FILES),
-        f"event-catalog.yaml: x-event-catalog must list exactly {sorted(VERTICAL_FILES)}",
+        set(catalog_entries) == set(EVENT_VERTICAL_FILES),
+        f"event-catalog.yaml: x-event-catalog must list exactly {sorted(EVENT_VERTICAL_FILES)}",
     )
 
     published_by_vertical = {}
-    for vertical in VERTICAL_FILES:
+    for vertical in EVENT_VERTICAL_FILES:
         path = ASYNCAPI_DIR / f"{vertical}.yaml"
         if not path.exists():
             contracts.check(False, f"missing asyncapi/{vertical}.yaml")
@@ -17669,6 +18430,9 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
             check_direct_claim_litigation_asyncapi(
                 contracts, document, relative
             )
+
+        if vertical == "product":
+            check_product_asyncapi(contracts, document, relative)
 
         if vertical == "policy":
             send_events = {
@@ -18467,8 +19231,37 @@ def check_json_schemas(contracts: ContractSet, verbose: bool):
             (properties.get("book") or {}).get("enum") == ["DIRECT", "ASSUMED"],
             "schemas/event-envelope.schema.json: book must be the DIRECT/ASSUMED enum",
         )
-        verticals = set((properties.get("vertical") or {}).get("enum") or [])
-        contracts.check(len(verticals) == 10, "schemas/event-envelope.schema.json: vertical must enumerate the ten verticals")
+        verticals = tuple((properties.get("vertical") or {}).get("enum") or [])
+        contracts.check(
+            verticals == EVENT_ENVELOPE_VERTICALS,
+            "schemas/event-envelope.schema.json: vertical must enumerate "
+            f"{list(EVENT_ENVELOPE_VERTICALS)}",
+        )
+        subject_vertical = (
+            ((properties.get("subject") or {}).get("properties") or {}).get(
+                "vertical"
+            )
+            or {}
+        )
+        contracts.check(
+            tuple(subject_vertical.get("enum") or []) == EVENT_ENVELOPE_VERTICALS,
+            "schemas/event-envelope.schema.json: subject.vertical must enumerate "
+            f"{list(EVENT_ENVELOPE_VERTICALS)}",
+        )
+        link_vertical = (
+            (
+                (
+                    (
+                        (properties.get("links") or {}).get("items") or {}
+                    ).get("properties") or {}
+                ).get("target") or {}
+            ).get("properties") or {}
+        ).get("vertical") or {}
+        contracts.check(
+            tuple(link_vertical.get("enum") or []) == EVENT_ENVELOPE_VERTICALS,
+            "schemas/event-envelope.schema.json: links.target.vertical must "
+            f"enumerate {list(EVENT_ENVELOPE_VERTICALS)}",
+        )
 
 
 def _validate_instance(instance, schema, root, path="$"):

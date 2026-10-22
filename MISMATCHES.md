@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-22 (Notification template approver directory ids).
+Status: open, reviewed 2026-10-22 (Product catalog and Product event vertical).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -227,6 +227,15 @@ where the running code does not meet it yet.
   conversion hashes, the 409 `IDEMPOTENCY_CONFLICT` with
   `meta.operation`/`meta.key`, the concurrent-reservation outcome, and the
   legacy null-hash replay.
+  The Product catalog pass reads the domain `ProductController`,
+  `ProductService`, `ProductDto`, `CreateProductCommand`,
+  `UpdateProductStatusCommand`, `BookScope`, and `PolicyClient` product calls
+  plus the expert `ProductController`, `ProductService`, `ProductRules`,
+  `ProductRepository`, `Product`, `ProductView`, `CreateProductRequest`,
+  `UpdateProductStatusRequest`, `ProductEvents`, `ProductSeeder`, `schema.sql`
+  and its H2 mirror, and the domain and expert product controller, service,
+  rules, client, seed, and integration tests. It also reads the platform
+  `EventVerticals` registry, which now admits `product`.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -266,7 +275,7 @@ removed per the resolution policy.
 | M-11 | Illegal-transition status codes: Policy is 409, five verticals are 400 | M |
 | M-12 | Resource models are narrower than the SPEC aggregates | M |
 | M-13 | Field names differ from the SPEC representations | L |
-| M-14 | Ten experts publish a subset of their events; the platform inbox has no business subscriber | M |
+| M-14 | Ten experts publish a subset of their events plus the product event vertical; the platform inbox has no business subscriber | M |
 | M-16 | Assumed Claims mounts two public path sets | L |
 | M-17 | Error content type is `application/json` outside Policy, Notifications, and one book filter | M |
 | M-18 | SPEC 12.4 example envelope omits the book required by SPEC 3.6 | L |
@@ -312,6 +321,7 @@ removed per the resolution policy.
 | M-58 | Party identifier and address maintenance adds SPEC-less PATCH/DELETE child routes with full replacement, a no-op update, a hard delete, and unenforced duplicate/in-use guards and concurrency headers | M |
 | M-59 | Policy underwriting submissions are a SPEC-less pre-policy collection with a narrower six-state graph, no clearance/rating/referral/quote/producer slices, two new event names, unhonoured concurrency/idempotency headers, and a JSON-number limit amount | M |
 | M-60 | Submission conversion is a SPEC-less command with a bare-policy expert shape, a stored-key 200 replay with a canonical request hash since 2.21.0 and a linked-policy 200 replay without one, a new event name, an unprojected public `Policy.submissionId`, and no SPEC clearance/rating gate | M |
+| M-61 | Product catalog uses short paths, a five-value line taxonomy, a two-state ACTIVE/RETIRED lifecycle, a two-letter jurisdiction, no form family/effective dates/owner/product version, and two SPEC-less `product` event-vertical names | L |
 
 ## M-01 Public base paths
 
@@ -324,6 +334,7 @@ remotes agree with the implementation, so the SPEC tables are the outlier.
 | Party | `/api/v1/parties` | `/api/v1/party/parties` |
 | Policy | `/api/v1/policies` | `/api/v1/policy/policies` |
 | Policy legal entities | `/api/v1/legal-entities` | `/api/v1/policy/legal-entities` |
+| Product | `/api/v1/products` | `/api/v1/policy/products` |
 | Contract | `/api/v1/contracts` | `/api/v1/contract/contracts` |
 | Direct Claims | `/api/v1/claims` | `/api/v1/direct-claims/claims` |
 | Assumed Claims | `/api/v1/assumed-claims` (alias `/api/v1/assumed-claims/claims`) | `/api/v1/assumed-claims/claims` |
@@ -1032,12 +1043,14 @@ The platform gained a transactional outbox library in Round 2
 (`eia-platform/libs`) and the Party expert wrote its event in the same
 transaction as the Party row. Round 5 rolled the outbox out to five more
 experts, and the 2026-10-20 completion added the four remaining verticals. All
-ten publishing verticals now emit a subset:
+ten publishing services now emit a subset; the Policy expert also publishes the
+two facts of the separate `product` event vertical:
 
 | Vertical | Implemented event names | Source |
 |---|---|---|
 | Party | `party.party.created`, `party.party.updated`, `party.party.identifier-added`, `party.party.identifier-updated`, `party.party.identifier-deleted`, `party.party.address-added`, `party.party.address-updated`, `party.party.address-deleted` | `repos/eia-party-expert/.../PartyEvents.java` |
 | Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.policy.premium-audited`, `policy.policy.rated`, `policy.billing-plan.created`, `policy.billing-plan.adjusted`, `policy.installment.paid`, `policy.installment.waived`, `policy.dunning.sent`, `policy.mass-tort-profile.updated`, `policy.program.created`, `policy.policy.program-assigned`, `policy.credit-note.created`, `policy.credit-note.issued`, `policy.credit-note.applied`, `policy.credit-note.cancelled`, `policy.credit-note.reversed`, `policy.legal-entity.created`, `policy.policy.legal-entity-assigned`, `policy.submission.created`, `policy.submission.status-changed`, `policy.submission.converted` | `repos/eia-policy-expert/.../PolicyEvents.java` |
+| Product | `product.product.created`, `product.product.status-changed` | `repos/eia-policy-expert/.../ProductEvents.java` |
 | Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded`, `contract.technical-account.created`, `contract.technical-account.issued`, `contract.technical-account.settled`, `contract.technical-account.line-added`, `contract.technical-account.line-removed`, `contract.bordereau.received`, `contract.bordereau.processed`, `contract.bordereau.failed`, `contract.cash-call.requested`, `contract.cash-call.issued`, `contract.cash-call.settled`, `contract.cash-call.cancelled`, `contract.security.recorded`, `contract.security.status-changed` | `repos/eia-contract-expert/.../ContractEvents.java` |
 | Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.assigned`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.settlement-payment-linked`, `direct.claim.closed`, `direct.claim.task-created`, `direct.claim.task-completed`, `direct.claim.task-updated`, `direct.claim.note-added`, `direct.claim.allocation-created` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
 | Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.assigned`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted`, `assumed.claim.task-created`, `assumed.claim.task-completed`, `assumed.claim.task-updated`, `assumed.claim.note-added` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
@@ -1182,6 +1195,20 @@ names replace the SPEC 11.2.9 `policy.submission.received` and
 `policy.submission.declined` pair, add a status fact SPEC does not define, and
 add a conversion fact with no SPEC name (M-22, M-59, M-60).
 
+The two product facts are catalog facts of the separate `product` event
+vertical. `ProductEvents.created` writes `product.product.created` against the
+`Product` aggregate at version 1, with the product id as the partition key and
+the normalized code, name, line, jurisdiction, ACTIVE status, row version 0,
+and both timestamps in the payload. `ProductEvents.statusChanged` writes
+`product.product.status-changed` at the bumped row version + 1, with the same
+catalog fields plus `previousStatus`, `status`, `version`, `updatedAt`, and
+`changedFields: [status]`. Both are inserted in the same transaction as the row
+and the Policy expert constructs the outbox rows directly with the canonical
+payload and header JSON; the platform `EventVerticals` registry admits
+`product`, so `OutboxEvent.toEnvelope()` reconstructs the envelope. A
+same-status replay writes no event. Neither name has a SPEC 11.2.9 equivalent
+(M-22, M-61).
+
 The settlement-payment-linked fact is a claim state change:
 `ClaimEvents.settlementPaymentLinked` writes
 `direct.claim.settlement-payment-linked` with the claim identity and version
@@ -1325,6 +1352,7 @@ planned name |
 |---|---|---|
 | Party | `party.party.identifier-added` / `.identifier-updated` / `.identifier-deleted` / `party.party.address-added` / `.address-updated` / `.address-deleted`; `party.party.updated` for a status change | No SPEC 11.1.9 name for the reference-data facts: SPEC publishes the party lifecycle, role, screening, and consent facts but no fact for an added, replaced, or deleted identifier or address, so all six names are new (M-54, M-58). `created` and `updated` match SPEC. A status change reuses the generic `party.party.updated` name with `changedFields: [status]` instead of publishing SPEC 11.1.9's dedicated `party.party.status-changed`, which remains planned; `party.party.status-updated` is not an emitted name (M-55). |
 | Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created` / `.adjusted`; `policy.installment.paid` / `.waived`; `policy.dunning.sent`; `policy.program.created` / `policy.policy.program-assigned`; `policy.credit-note.created` / `.issued` / `.applied` / `.cancelled` / `.reversed`; `policy.legal-entity.created` / `policy.policy.legal-entity-assigned`; `policy.policy.premium-audited`; `policy.policy.rated`; `policy.submission.created` / `policy.submission.status-changed` / `policy.submission.converted` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name; the positive premium adjustment fact has no SPEC 11.2.13 name either (M-51); the dunning fact differs from SPEC 11.2.13 `policy.billing.dunning-changed`; the two program facts have no SPEC name because SPEC defines no program create or policy-assignment event. SPEC 11.2.13 publishes only `policy.billing.credit-note-issued` and defines no created, applied, cancelled, or reversed fact, so all five credit-note names are new (M-41). The two legal-entity facts are new because SPEC 10.11.2/11.2.16 define the model and link but SPEC 11.2.9 names no catalog-create or assignment event (M-43). The premium-audit fact differs from SPEC 11.2.9 `policy.premium.audited`, which remains planned (M-50). The rating fact has no SPEC 11.2.9 or 11.2.14 equivalent: SPEC models rating under a submission-scoped worksheet and publishes no rating event, so the policy-scoped name is new (M-57). The three submission facts are new as well: SPEC 11.2.9 publishes `policy.submission.received` and `policy.submission.declined` but no status-change or conversion fact, and the implemented graph/conversion are separate commands rather than SPEC 11.2.14's clearance/rating/referral/quote chain (M-59, M-60). `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
+| Product | `product.product.created` / `.status-changed` | No SPEC 11.2.9 product fact: SPEC 11.2.14 defines the `product`/`product_version` tables and the `/api/v1/policy/products` reads but names no product event, and the two facts are the first names of a separate `product` event vertical, so both are new (M-61). |
 | Contract | `contract.contract.updated`; `contract.technical-account.created` / `.issued` / `.settled`; `contract.bordereau.processed` / `.failed`; `contract.security.status-changed` | No SPEC name for updated, the technical-account facts, the two terminal bordereau facts, or the security status fact: SPEC 11.3.9 lists lifecycle verbs, the contract-level `contract.account.issued` / `.agreed` facts, `contract.bordereau.posted` / `.rejected`, and only the `contract.security.recorded` / `.breached` security facts. `created`, `bound`, `commuted`, `cession.recorded`, `contract.bordereau.received`, and `contract.security.recorded` match SPEC. |
 | Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned`; `direct.claim.allocation-created`; `direct.claim.settlement-payment-linked`; `direct.claim.litigation-created` | No SPEC names: SPEC 11.4.9 defines no assignment, task, note, allocation-created, settlement-payment-link, or matter-creation event; it names the allocation fact `direct.claim.allocated`, which remains planned, and models the settlement `payment_id` only as a Payment projection (M-45). SPEC 11.4.4 also defines no litigation damages pair (M-52). `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `litigation-updated`, `settlement-authorized`, and `closed` match SPEC. |
 | Assumed Claims | `assumed.claim.updated`; `assumed.claim.assigned`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no assignment, task, or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
@@ -1348,6 +1376,9 @@ Evidence:
   billing, dunning, mass tort, program, credit-note creation,
   credit-note-transition, premium-audit, rating, submission, and conversion
   names)
+- `repos/eia-policy-expert/.../ProductEvents.java:35-77` (product create and
+  status-change names, payload, aggregate type, vertical, and aggregate
+  versions)
 - `repos/eia-contract-expert/.../ContractEvents.java:41-56`
 - `repos/eia-direct-claims-expert/.../ClaimEvents.java:62-74`
 - `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java:52-65`
@@ -4780,10 +4811,122 @@ compare against the original conversion terms (currently it returns the linked
 policy without a comparison), and whether `Policy.submissionId` should be
 public.
 
+## M-61 Product catalog uses a narrow two-state slice and a SPEC-less product event vertical
+
+Policy 2.22.0 documents the DIRECT-book product catalog at the short
+`/api/v1/products` paths, and the new Product 1.0.0 AsyncAPI document records the
+two facts. SPEC 11.2.14 defines the `product` and `product_version` tables and
+mounts `GET/POST /api/v1/policy/products` plus
+`GET /api/v1/policy/products/{productId}/versions`; it names no product event in
+SPEC 11.2.9. The implemented slice is a flat catalog row with an ACTIVE/RETIRED
+toggle and two new event names.
+
+| Aspect | Implemented | SPEC 11.2.14 / 11.2.9 |
+|---|---|---|
+| Routes | `GET/POST /api/v1/products`, `GET /api/v1/products/search`, `GET /api/v1/products/{productId}`, and `PATCH /api/v1/products/{productId}/status` (the expert also maps `/internal/v1`) | `GET/POST /api/v1/policy/products` and `GET /api/v1/policy/products/{productId}/versions`; no search alias or status command |
+| Projection | `Product` `{productId, productCode, productName, productLine, jurisdiction, status, version, createdAt, updatedAt}` | `product` also carries `form_family`, `effective_from`, `effective_to`, and `owner`; `product_version` is a separate aggregate with `version_number`, effective dates, `rate_plan_id`, and `underwriting_guideline_id` |
+| Code / name | `productCode` trimmed, upper-cased, capped at 32, and unique per tenant; `productName` trimmed and capped at 200; a duplicate is 409 `DUPLICATE_PRODUCT_CODE` | `product_code varchar(32)` and `product_name varchar(200)`; no upper-case or duplicate rule is stated |
+| Product line | `ProductLine` is `CGL`, `PRODUCTS_LIABILITY`, `UMBRELLA`, `EXCESS`, or `OTHER`, trimmed and upper-cased | mirrors the sixteen-value `policy.product_line` taxonomy (`COMMERCIAL_GENERAL_LIABILITY`, `PRODUCTS_LIABILITY`, `EXCESS_LIABILITY`, `UMBRELLA`, `COMMERCIAL_AUTO`, and the rest) |
+| Jurisdiction | exactly two ASCII letters, stored upper-case, documented as ISO 3166-1 alpha-2 | `varchar(8)` holding ISO 3166-2 or a country |
+| Status | `ACTIVE` or `RETIRED`; create is always ACTIVE; a status command toggles both ways; a same-status replay is a 200 no-op that keeps the ETag and writes no event | `DRAFT`, `FILED`, `APPROVED`, `ACTIVE`, `SUSPENDED`, `RETIRED`; no create or status route is specified |
+| Version | `version` is the row aggregate sequence, 0 on create and one higher per accepted status change, and backs the strong `ETag` | `product_version` is a separate row with `version_number`, a rate plan, and an underwriting guideline; the product row has no version column |
+| Events | `product.product.created` and `product.product.status-changed`, written in the same transaction as the row against the `Product` aggregate, at aggregate version 1 and the bumped row version + 1 | no SPEC 11.2.9 product fact; the two names and the `product` event vertical are new (M-22) |
+| Concurrency / idempotency | create accepts neither `Idempotency-Key` nor `If-Match`; the tenant-scoped code uniqueness is the retry guard; the status command accepts neither header and uses the version-and-status predicate for 409 `CONCURRENT_MODIFICATION` | SPEC 12.6 requires `If-Match`/`Idempotency-Key` on transaction submission |
+| Book / tenant | `X-EIA-Tenant` required; `X-EIA-Book` optional but DIRECT when supplied, with another book hidden as 404 `BOOK_SCOPE_VIOLATION`; the canonical contract documents the same optional header | SPEC 3.6 requires the book on every business record |
+| Error envelope | canonical Policy `Problem` with `application/problem+json` | canonical `Problem` (matches) |
+
+Additional differences:
+
+- The list and the `/search` alias return the same bare `Product` array ordered
+  by `productCode` then `productId`; the list is not paginated (M-04), and
+  `/search` is not the shared global-search `SearchResponse` because the catalog
+  reuses its list projection.
+- No `product_version` row, version collection, form family, effective dating,
+  owner, rate plan, or underwriting guideline is implemented, and the create
+  body has no filed/approved gate. A product is ACTIVE immediately, so SPEC
+  11.2.14 UWR-03 (a product version must not be used before its forms and rates
+  are filed or approved) is not enforced.
+- A policy and an underwriting submission reference the product by a free-text
+  `productCode`; neither stores a `product_id` foreign key, and no product or
+  version existence check runs.
+- The demo seed writes Commercial General Liability, Products Liability, and
+  Umbrella for the demo tenant idempotently by `(tenant_id, product_code)`,
+  writes no events, and is disabled in the test profile.
+- The two facts carry the new `product` event vertical. `ProductEvents`
+  constructs the outbox rows directly with the canonical payload and header
+  JSON; the platform `EventVerticals` registry admits `product`, so
+  `OutboxEvent.toEnvelope()` reconstructs the envelope. A consumer that only
+  knows SPEC 11.2.9 sees no product fact, and a consumer that filters on the
+  Policy vertical misses these two facts.
+- The create payload carries `version` 0 and both timestamps; the status
+  payload carries `previousStatus`, `status`, the bumped `version`,
+  `updatedAt`, and `changedFields: [status]`. `eventVersion` stays 1.
+
+Consequences:
+
+- A client generated from SPEC 11.2.14 expects the `/api/v1/policy/products`
+  paths, the six-state lifecycle, the wider line and jurisdiction values, and a
+  `/versions` resource; the implemented client must use the short paths and the
+  two-state toggle.
+- A consumer of the product events must consume the `product` names and the
+  `product` envelope vertical rather than a `policy.*` name. Renaming either
+  later is breaking under EV-05.
+- Because no product-version row exists, a quote, bind, or submission cannot
+  prove that the referenced product/form/rate set was filed or approved. That
+  gap is inherited by the underwriting-submission slice (M-59).
+
+Evidence:
+
+- `repos/eia-policy-domain/.../ProductController.java:33-115` (the five public
+  routes, header-only tenant, optional DIRECT book, ETag fallback, Location,
+  201/200)
+- `repos/eia-policy-domain/.../ProductService.java:23-48` (filter trimming and
+  delegation), `ProductDto.java:20-30`,
+  `CreateProductCommand.java:18-24`, and
+  `UpdateProductStatusCommand.java:12-15`
+- `repos/eia-policy-domain/.../PolicyClient.java:687-844` (list/read/create/
+  status forwarding, both list shapes, ETag preservation, product projection)
+- `repos/eia-policy-expert/.../ProductController.java:27-91` (dual `/api/v1`
+  and `/internal/v1` base, tenant query/header, DIRECT-book gate, ETags)
+- `repos/eia-policy-expert/.../ProductService.java:50-112` (create, filters,
+  status toggle, no-op, conditional update, outbox insert),
+  `ProductRules.java:16-106` (code/name caps, five-value line, two-letter
+  jurisdiction, two-value status), `ProductRepository.java:62-125` (tenant
+  reads, code/name contains, product-code ordering, conditional update)
+- `repos/eia-policy-expert/.../Product.java:17-28`,
+  `ProductView.java:12-27`, `CreateProductRequest.java:12-17`, and
+  `UpdateProductStatusRequest.java:10-12`
+- `repos/eia-policy-expert/.../ProductEvents.java:35-107` (names, payload,
+  `Product` aggregate, `product` vertical, aggregate versions, direct
+  `OutboxEvent` construction)
+- `repos/eia-policy-expert/src/main/resources/schema.sql:156-182` (the
+  `product` table, tenant-unique code, line/status/jurisdiction CHECKs, and
+  index) and its H2 mirror
+- `repos/eia-platform/libs/src/main/java/com/eia/platform/libs/events/EventVerticals.java:11-22`
+  (the `product` vertical is admitted)
+- `repos/eia-policy-expert/src/test/java/com/eia/policy/expert/ProductIntegrationTest.java:72-340`
+  (create/list/search/get, both events and their aggregate versions, tenant
+  wall, duplicate, retire/reactivate no-op, validation, rollback),
+  `ProductControllerTest.java`, `ProductServiceTest.java`,
+  `ProductRulesTest.java`, and `ProductSeedTest.java`
+- `repos/eia-policy-domain/src/test/java/com/eia/policy/domain/ProductControllerTest.java`
+  and `ProductClientTest.java` (routes, headers, ETag fallback, aliases,
+  problem preservation)
+- `repos/eia-contracts/scripts/validate_contracts.py` (the product OpenAPI,
+  AsyncAPI, catalog, and envelope requirements; the run passes 17,367 checks)
+
+Resolution: amend SPEC 11.2.14 to the implemented five-value line, two-state
+status, two-letter jurisdiction, flat projection, and short routes, and publish
+the two product event names and the `product` vertical in SPEC 11.2.9, or
+implement the `product_version` aggregate, the six-state lifecycle, the versions
+resource, the sixteen-value line set, and the filed/approved gate, and align the
+event names with the SPEC catalog. No `/v2` is needed while the product surface
+is additive and no consumer outside the co-released Policy web remote uses it.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-22
-Notifications template-approver contract:
+Product catalog and Product event vertical contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -4793,7 +4936,7 @@ python: 3.12.8 (standard library only)
 
 OpenAPI 3.1 documents
   OK openapi/party.yaml  15 paths, 25 operations
-  OK openapi/policy.yaml  59 paths, 77 operations
+  OK openapi/policy.yaml  63 paths, 82 operations
   OK openapi/contract.yaml  43 paths, 62 operations
   OK openapi/direct-claims.yaml  51 paths, 74 operations
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
@@ -4814,21 +4957,22 @@ AsyncAPI 3 documents
   OK asyncapi/document.yaml  24 event channels
   OK asyncapi/payment.yaml  20 event channels
   OK asyncapi/notifications.yaml  15 event channels
-  OK catalog: 228 unique published events across 10 verticals
+  OK asyncapi/product.yaml  2 event channels
+  OK catalog: 230 unique published events across 11 verticals
 
 JSON Schema 2020-12 documents
 
 JSON Reference resolution
-  OK walked 22 YAML documents
+  OK walked 23 YAML documents
 
 Result
-  PASS 17002 checks, 0 failures
+  PASS 17367 checks, 0 failures
 ```
 
 Additional checks and limits:
 
 - The validator's own YAML parser rejects duplicate keys and unsupported
-  constructs; all 22 YAML documents parsed.
+  constructs; all 23 YAML documents parsed.
 - The JSON Schema documents are checked by the validator's schema subset and
   their own examples; no external JSON Schema validator was installed for this
   round.
@@ -5244,8 +5388,17 @@ Additional checks and limits:
   `format: uuid` on that property fails the not-a-uuid message; and widening
   `NotificationTemplateData.approvedBy.maxLength` from 128 to 255 fails the
   nullable directory-id payload message. Removing `server-assigned` from the
-  approve description fails the missing-term message. The working copy was left
-  unchanged.
+  approve description fails the missing-term message. The Product catalog pass
+  added six more, each run on a throwaway copy and exited non-zero (exit 1):
+  renaming the public `GET/POST /api/v1/products` path fails with the missing
+  required product operation message; removing `productCode` from
+  `Product.required` fails with the exact required-list message; adding
+  `PROPERTY` to `ProductLine` fails with the exact-enum message; marking the
+  `product.product.created` channel planned fails with the must-be-implemented
+  and channel/catalog-set messages; and removing both product names from the
+  catalog lists fails with the non-empty-published and channel-set messages.
+  Removing `product` from the envelope `vertical` enum fails the exact
+  event-vertical message. The working copy was left unchanged.
 
 ## Resolution policy
 

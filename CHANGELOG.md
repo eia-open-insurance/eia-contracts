@@ -14,8 +14,9 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
 - `openapi/components.yaml` with the canonical Problem error envelope, money,
   the offset page envelope, ETag and If-Match, Idempotency-Key, audit fields,
   entity references, and tenant/book headers.
-- AsyncAPI 3 event catalog and ten vertical event documents for the 151 domain
-  events declared in SPEC 11.
+- AsyncAPI 3 event catalog and vertical event documents for the 151 domain
+  events declared in SPEC 11, plus the two product facts of the `product` event
+  vertical.
 - JSON Schema 2020-12 documents for the error envelope, money, and event
   envelope.
 - `scripts/validate_contracts.py`, a standard-library-only validator for YAML
@@ -2234,6 +2235,56 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   the implemented `VARCHAR(128)` column, and the forward-only migration, and
   updates the validation evidence.
 - `python scripts/validate_contracts.py` passes 17,002 checks with 0 failures.
+
+### Added in the product catalog and Product event vertical contract (2026-10-22)
+
+- `openapi/policy.yaml` is 2.22.0: adds `GET/POST /api/v1/products`,
+  `GET /api/v1/products/search`, `GET /api/v1/products/{productId}`, and
+  `PATCH /api/v1/products/{productId}/status`, the nine-member `Product`
+  projection, the `ProductLine` (`CGL`, `PRODUCTS_LIABILITY`, `UMBRELLA`,
+  `EXCESS`, `OTHER`) and `ProductStatus` (`ACTIVE`, `RETIRED`) enums, the
+  `CreateProductRequest` body with the `code`/`name`/`line` aliases, and the
+  `UpdateProductStatusRequest` body. The list and search alias return a bare
+  product-code-ordered array with optional case-insensitive `q` and exact
+  `status` filters; create returns 201 with `Location` and the strong `ETag` of
+  version 0; the detail returns the strong `ETag`; and a status change returns
+  the new `ETag` while a same-status replay is a 200 no-op. A duplicate code is
+  409 `DUPLICATE_PRODUCT_CODE`, an unknown or foreign product is 404
+  `PRODUCT_NOT_FOUND`, and a concurrent status change is 409
+  `CONCURRENT_MODIFICATION`; the operations document 400/404/409 and the
+  tenant/optional DIRECT book rules. `x-compatibility` moves to 2.22.0 over
+  2.21.0.
+- `asyncapi/product.yaml` is a new 1.0.0 document for the `product` event
+  vertical: the implemented `product.product.created` and
+  `product.product.status-changed` channels and `send` operations, with the
+  `ProductProductCreatedData` (nine members including `version: 0` and both
+  timestamps) and `ProductProductStatusChangedData` (ten members including
+  `previousStatus`, the bumped `version`, and `changedFields: [status]`)
+  payloads. Both name `ProductEvents.java`; the create is aggregate version 1
+  and a status change is the bumped row version plus one. The vertical has no
+  OpenAPI document of its own: the HTTP catalog is part of `openapi/policy.yaml`.
+- `asyncapi/event-catalog.yaml` is 1.40.0: the two product names are published
+  and implemented as a new `product` entry, for 230 published and 111 implemented
+  names across eleven event verticals (Product 2 published and 2 implemented;
+  Policy stays 39 published and 27 implemented). The catalog notes that the
+  Policy expert writes the two rows directly and that the platform
+  event-vertical registry admits `product`.
+- `schemas/event-envelope.schema.json` adds `product` to the `vertical`,
+  `subject.vertical`, and `links.target.vertical` enums. The change is additive
+  and keeps the schema `$id`.
+- `scripts/validate_contracts.py` requires the five product operations with the
+  tenant and optional DIRECT book parameters, the bare ordered list/search
+  arrays, the five product schemas and their fields/enums/patterns, the
+  400/404/409 responses and the duplicate/not-found/conflict/invalid codes, the
+  201 `Location`/`ETag`, the two implemented Product channels and their ordered
+  payloads, the `IMPLEMENTED_EVENTS` entry, the catalog entry, the eleven
+  event-vertical inventory, and the new envelope enum.
+- `README.md` records the additive versions, the routes and filter semantics,
+  the projection and lifecycle rules, the events and event-vertical split, the
+  SPEC 11.2.14 deviations, the validator requirements, and the check count;
+  `MISMATCHES.md` adds M-61 and updates M-01, M-14, M-22, the scope and source
+  evidence, and the validation evidence.
+- `python scripts/validate_contracts.py` passes 17,367 checks with 0 failures.
 
 ### Notes
 
