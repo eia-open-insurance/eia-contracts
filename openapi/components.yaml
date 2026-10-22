@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA canonical shared API components
-  version: 1.6.0
+  version: 1.7.0
   summary: Shared error, money, paging, global-search, concurrency, idempotency, actor, audit, and tenant/book components for every EIA API.
   description: >
     Shared OpenAPI 3.1 components referenced by the per-vertical contract
@@ -50,6 +50,17 @@ info:
     but a supplied value must be DIRECT and any other book is hidden as 404
     `BOOK_SCOPE_VIOLATION` (SPEC 3.6.2, WALL-06). The addition is compatible: it
     adds no required request field and changes no existing component.
+
+    The 2026-10-22 Policy rating and conversion replay contract (1.7.0) narrows
+    the shared `IdempotencyKey` maximum to 128 characters and records the
+    tenant + operation + key scope, the blank-key normalization, and the 400
+    `INVALID_IDEMPOTENCY_KEY` rejection for a longer value. It also updates the
+    `Idempotent-Replayed` header to name the Policy create, rating, and
+    conversion responses. The change is compatible: the header stays optional
+    and no request or response body changes. The request-hash conflict on
+    create and second-slice commands, and the rating/conversion replay without
+    a request comparison, are described on the Policy operations and recorded in
+    MISMATCHES.md M-06, M-07, M-57, and M-60.
 
     Authority is SPEC.md sections 6.11, 7.6, 7.18-7.23, 10.3, 12.2, and 12.6.
     Where an implemented service deviates from a component, the deviation is
@@ -223,19 +234,27 @@ components:
       in: header
       required: false
       description: >
-        Idempotency scope for a create request, implemented by the Policy
-        create endpoints in Round 2. The key is optional for backward
-        compatibility, but SPEC 12.6 requires it on transaction submission and
-        clients SHOULD always send a UUID. The scope is the tenant plus the key;
-        the maximum length is 255 characters. A retry with the same key and an
-        identical request replays the original resource with 200 and
-        `Idempotent-Replayed: true`; reusing the key with a different request is
-        409 `IDEMPOTENCY_CONFLICT`.
+        Optional idempotency scope for a Policy command. The value is trimmed; a
+        blank value is treated as absent, and a value longer than 128 characters
+        is 400 `INVALID_IDEMPOTENCY_KEY` with the field naming
+        `Idempotency-Key` on the commands that read it. Commands that store the
+        key scope it by the tenant, the operation, and the key: the same key may
+        be used once per operation (for example once for a create and once for a
+        rating) and is not narrowed by a policy, submission, or child id. A
+        replayed command returns 200 with `Idempotent-Replayed: true`. The
+        operation description states whether a reused key compares the request
+        (409 `IDEMPOTENCY_CONFLICT`) or replays the stored response without a
+        comparison: Policy create and the second-slice commands compare, while
+        rating and submission conversion replay the stored body and strong
+        `ETag`. Submission create/status, the billing adjustment, and the
+        premium audit forward the header without replay. The header is optional
+        for backward compatibility, but SPEC 12.6 requires it on transaction
+        submission and clients SHOULD always send a UUID.
       x-status: implemented
       schema:
         type: string
         minLength: 1
-        maxLength: 255
+        maxLength: 128
     ClaimIdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -306,8 +325,12 @@ components:
     IdempotentReplayed:
       description: >
         `true` when the response replays an earlier request that carried the
-        same `Idempotency-Key`, `false` when a new resource was created.
-        Emitted by the Policy create responses.
+        same `Idempotency-Key` and therefore emits `Idempotent-Replayed: true`;
+        `false` when a new resource, worksheet, or conversion was created.
+        Emitted by the Policy create, rating, and submission-conversion
+        responses (201 and 200); a linked-policy conversion replay without a key
+        also reports `true`. The shared `IdempotentReplay` header used by the
+        claim verticals is a different spelling (MISMATCHES.md M-07).
       schema:
         type: string
         enum:
@@ -672,7 +695,10 @@ components:
         characters (and, in Direct Claims, a key with a non-printable or space
         character); Assumed Claims names the field `Idempotency-Key` with code
         `INVALID_IDEMPOTENCY_KEY`, while Direct Claims reports
-        `VALIDATION_ERROR`.
+        `VALIDATION_ERROR`. The Policy commands that read the shared
+        `IdempotencyKey` parameter (create, the second-slice commands, rating,
+        and submission conversion) cap it at 128 characters and return
+        400 `INVALID_IDEMPOTENCY_KEY` for a longer value before any write.
       content:
         application/problem+json:
           schema:

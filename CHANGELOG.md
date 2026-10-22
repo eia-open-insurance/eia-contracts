@@ -2133,6 +2133,37 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   the scope and validation evidence.
 - `python scripts/validate_contracts.py` passes 16,871 checks with 0 failures.
 
+### Added in the Policy rating and conversion idempotency-replay contract (2026-10-22)
+
+- `openapi/policy.yaml` is 2.20.0: `POST /api/v1/policies/{policyId}/rating`
+  documents the 200 stored-response replay with `PolicyRatingResult`, the
+  shared `ETag`/`Idempotent-Replayed` headers, the stored policy version and
+  `ETag` when the original applied the rating, and the calculation-only replay
+  without either. The public and expert submission-conversion operations
+  document keyed replay (stored policy body and original `ETag`) alongside the
+  linked-policy 200. Both commands document the tenant + operation + key scope,
+  blank-key normalization, the 128-character cap with 400
+  `INVALID_IDEMPOTENCY_KEY`, and the absence of a request comparison on replay.
+  The stale "does not replay / does not consult / always false" caveats are
+  removed. `x-compatibility` moves to 2.20.0 over 2.19.0.
+- `openapi/components.yaml` is 1.7.0: the shared `IdempotencyKey` parameter is
+  1-128 characters and names the tenant + operation scope and the 400
+  `INVALID_IDEMPOTENCY_KEY` rejection; `IdempotentReplayed` now names the
+  create, rating, and conversion responses; the shared 400 names the Policy
+  key cap.
+- `scripts/validate_contracts.py` requires the rating 201 and 200 responses
+  with the shared `ETag`/`Idempotent-Replayed` headers and the
+  `PolicyRatingResult` schema, the public and expert conversion 200 replay
+  headers and bare/envelope bodies, the `IdempotencyKey` parameter on the
+  expert conversion, the 1-128-character shared parameter, the replay wording
+  on both commands, and the absence of the stale no-replay phrases.
+- `README.md` records the additive versions, both replay paths, the stored
+  body/ETag rules, the key normalization and scope, the no-request-comparison
+  deviation, and the validation count; `MISMATCHES.md` updates M-06, M-07,
+  M-57, and M-60, the summary table, the concurrency/version table, the source
+  evidence, and the validation evidence.
+- `python scripts/validate_contracts.py` passes 16,936 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

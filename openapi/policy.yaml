@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Policy API
-  version: 2.19.0
+  version: 2.20.0
   summary: Direct-book policy administration and the Policy expert API.
   description: >
     This document describes the implemented public Policy domain API and the
@@ -25,9 +25,15 @@ info:
     - Detail, create, and mutation responses carry a strong `ETag`
       (`"<version>"`). Mutations accept `If-Match`; a stale value is 409
       `CONCURRENT_MODIFICATION`.
-    - Creates accept an optional `Idempotency-Key`. A same-key replay returns
-      200 with `Idempotent-Replayed: true`; reusing the key with a different
-      request is 409 `IDEMPOTENCY_CONFLICT`.
+    - Commands that consume `Idempotency-Key` trim it, treat a blank value as
+      absent, and reject a value longer than 128 characters with 400
+      `INVALID_IDEMPOTENCY_KEY`. A stored-key replay returns 200 with
+      `Idempotent-Replayed: true`. Create and second-slice commands compare the
+      request and return 409 `IDEMPOTENCY_CONFLICT` when it differs; rating and
+      submission conversion replay the stored response without comparing the
+      request. Submission create/status, the billing adjustment, and the premium
+      audit forward the header without replay. The key is scoped by tenant,
+      operation, and key where it is stored.
     - Illegal lifecycle transitions and duplicate policy numbers are 409
       conflicts, not 400 validation errors.
 
@@ -391,6 +397,13 @@ info:
       untouched and omits `policy`; an applied calculation replaces the policy
       premium, bumps the aggregate version, and returns the refreshed `Policy`
       with its strong `ETag`.
+    - The command replays a supplied `Idempotency-Key` in the tenant and
+      operation scope: a first keyed calculation is 201 and a replay is 200 with
+      `Idempotent-Replayed: true`, the stored `{worksheet, policy?}` body, and
+      the stored strong `ETag` when the original applied the rating. A replay
+      writes no worksheet or policy change, does not compare the request body,
+      and is not scoped by `policyId`; a key longer than 128 characters is 400
+      `INVALID_IDEMPOTENCY_KEY` before any write.
     - Only a `DRAFT` or `QUOTED` policy is rateable. Any other status is 409
       `POLICY_NOT_RATEABLE` with `meta.policyId`, `meta.sourceStatus`, and
       `meta.allowedStatuses` and writes nothing. The computed premium is
@@ -455,8 +468,19 @@ info:
       `{premiumAmount, premiumCurrency, expirationDate?}` and turns a `QUOTED`
       submission (or a `BOUND` submission with no policy yet) into a new `DRAFT`
       policy. A fresh conversion is 201 with the `{submission, policy}`
-      envelope; repeating it for the already-linked submission is 200 with
-      `Idempotent-Replayed: true`, the same policy, and no write.
+      envelope and `Idempotent-Replayed: false`; repeating it for the
+      already-linked submission is 200 with `Idempotent-Replayed: true`, the same
+      policy, and no write.
+    - The public and expert conversion commands replay a supplied
+      `Idempotency-Key` in the tenant and operation scope. A first keyed call
+      that creates a policy is 201; a later call with the same key is 200 with
+      `Idempotent-Replayed: true` and the stored policy body, including the
+      policy version and strong `ETag` stored by the first call. A keyed call on
+      an already-linked submission is the linked-policy 200 replay and is stored
+      under that key. A key longer than 128 characters is 400
+      `INVALID_IDEMPOTENCY_KEY` before any write; a blank key is treated as
+      absent. Neither path compares the request body, and the key is not narrowed
+      by `submissionId`, so the first successful response is authoritative.
     - The policy takes the submission applicant, product code, requested
       effective date, and requested limit and currency, plus the command
       premium. `expirationDate` defaults to the requested effective date plus
@@ -901,19 +925,35 @@ paths:
         command also creates one base coverage and its limit schedule with the
         same coverage rules as the coverage command.
 
-        A fresh conversion is 201 with the `{submission, policy}` envelope. The
-        converted submission is `BOUND` (a `BOUND` submission without a policy
-        keeps its status), carries `policyId`, and its `version` advances. The
-        created policy is `DRAFT` with the normal server-generated
-        `POL-{YYYY}-{7 digits}` number, the bumped `version` 1, and a strong
-        `ETag`; a replay keeps the linked policy's current tag. The accepted
-        command writes `policy.submission.converted` and the normal
-        `policy.policy.created` in the same transaction as the policy, the base
-        coverage, and the submission link, so a rollback leaves neither row nor
-        event. Repeating the command for an already-converted submission is 200
-        with `Idempotent-Replayed: true`, the same policy, and no write or
-        event; the request members are not compared with the original
-        conversion.
+        A fresh conversion is 201 with the `{submission, policy}` envelope and
+        `Idempotent-Replayed: false`. The converted submission is `BOUND` (a
+        `BOUND` submission without a policy keeps its status), carries
+        `policyId`, and its `version` advances. The created policy is `DRAFT`
+        with the normal server-generated `POL-{YYYY}-{7 digits}` number, the
+        bumped `version` 1, and a strong `ETag`; a linked-policy replay keeps the
+        linked policy's current tag. The accepted command writes
+        `policy.submission.converted` and the normal `policy.policy.created` in
+        the same transaction as the policy, the base coverage, and the
+        submission link, so a rollback leaves neither row nor event. Repeating
+        the command for an already-converted submission is 200 with
+        `Idempotent-Replayed: true`, the same policy, and no write or event; the
+        request members are not compared with the original conversion.
+
+        A supplied `Idempotency-Key` is replayed. The key is normalized by
+        trimming, a blank value is treated as absent, and a value longer than
+        128 characters is 400 `INVALID_IDEMPOTENCY_KEY` with
+        `errors[0].field` naming `Idempotency-Key` before any policy, link, or
+        event write. The scope is
+        the tenant, the operation, and the key: the conversion and rating
+        operations do not collide and the same key may be used once per
+        operation, but the scope is not narrowed by `submissionId`. A first
+        keyed call that creates a policy is 201; a later call with the same key
+        is 200 with `Idempotent-Replayed: true`, the stored policy body, and the
+        original strong `ETag` (the `submission` member is projected from the
+        linked submission). A keyed call on an already-linked submission is the
+        linked-policy 200 replay and is stored under that key. The replay does
+        not compare the request premium, currency, or expiration, so the first
+        successful response is authoritative (MISMATCHES.md M-06, M-07, M-60).
 
         `premiumAmount` must be zero or greater with at most four fraction
         digits, and `premiumCurrency` must be three upper-case ISO 4217 letters
@@ -931,10 +971,10 @@ paths:
         `SUBMISSION_NOT_FOUND`. `X-EIA-Tenant` is required (400
         `MISSING_TENANT_HEADER` or `INVALID_TENANT_HEADER`), an absent
         `X-EIA-Book` is accepted, and another book is 404
-        `BOOK_SCOPE_VIOLATION` before the expert call. `Idempotency-Key` is
-        accepted and forwarded but the expert does not consult it: replay is
-        keyed by the submission's linked policy, not by the key or the request
-        body (MISMATCHES.md M-06, M-07, M-60).
+        `BOOK_SCOPE_VIOLATION` before the expert call. Without a key, a repeat
+        for the linked submission is still the 200 linked-policy replay; with a
+        key, the tenant and operation scope above decides between the stored
+        response and a fresh command.
 
         The `/internal/v1` expert alias returns the bare `Policy`; this public
         operation composes the envelope. SPEC 11.2.14 models the step as a
@@ -963,7 +1003,8 @@ paths:
         '201':
           description: >
             Submission converted and policy created in DRAFT. The body is the
-            converted submission with `policyId` and the created policy. The
+            converted submission with `policyId` and the created policy. A fresh
+            keyed conversion also reports `Idempotent-Replayed: false`. The
             expert policy carries `submissionId`; the public policy projection
             currently omits that member (MISMATCHES.md M-60).
           headers:
@@ -977,9 +1018,14 @@ paths:
                 $ref: '#/components/schemas/ConvertPolicySubmissionResult'
         '200':
           description: >
-            Replay: the submission already has a linked policy. The same policy
-            is returned with `Idempotent-Replayed: true`; no policy, link, or
-            event is written and the supplied terms are not compared.
+            Replay. A stored-key replay returns the policy body and strong `ETag`
+            saved by the first call with the same `Idempotency-Key` in this
+            tenant and operation; the `submission` member is projected from the
+            linked submission. A linked-policy replay (no key, or a key with no
+            stored response) returns the current linked policy and its current
+            tag. Either way the policy is returned with
+            `Idempotent-Replayed: true`; no policy, link, coverage, or event is
+            written and the supplied terms are not compared.
           headers:
             ETag:
               $ref: './components.yaml#/components/headers/ETag'
@@ -3400,10 +3446,24 @@ paths:
         The 201 body is `{worksheet, policy?}`. `worksheet` is always present;
         `policy` is present only when the calculation was applied and carries
         the new premium and strong `ETag`, which the response also returns as
-        its own header. `Idempotent-Replayed` is always false: the domain
-        forwards an optional `Idempotency-Key` but the expert does not replay
-        it, so a retry calculates and persists a second worksheet and applies a
-        second premium replacement (MISMATCHES.md M-06, M-07, M-57).
+        its own header.
+
+        A supplied `Idempotency-Key` is replayed. The key is normalized by
+        trimming, a blank value is treated as absent, and a value longer than
+        128 characters is 400 `INVALID_IDEMPOTENCY_KEY` with
+        `errors[0].field` naming `Idempotency-Key` before any worksheet or
+        policy write. The scope is the
+        tenant, the operation, and the key: the rating and conversion operations
+        do not collide and the same key may be used once per operation, but the
+        scope is not narrowed by `policyId`. A first keyed calculation is 201; a
+        later request with the same key is 200 with `Idempotent-Replayed: true`,
+        the stored `{worksheet, policy?}` body, and the stored strong `ETag` when
+        the original calculation was applied. The replay returns the stored
+        policy version even when the policy has since advanced, and a stored
+        calculation-only response carries no `policy` and no `ETag`. The request
+        is not compared with the stored one, so the first successful response is
+        authoritative and a different body under the same key replays it instead
+        of writing a second worksheet (MISMATCHES.md M-06, M-07, M-57).
 
         `X-EIA-Tenant` is required and a supplied `X-EIA-Book` must be DIRECT;
         an absent book is accepted for compatibility, and another book is
@@ -3436,9 +3496,29 @@ paths:
       responses:
         '201':
           description: >
-            The worksheet was persisted; when the request applied it, the body
+            A new worksheet was persisted; when the request applied it, the body
             also carries the refreshed policy and the response carries its new
-            strong ETag.
+            strong ETag. A first keyed execution reports
+            `Idempotent-Replayed: false`.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyRatingResult'
+        '200':
+          description: >
+            Idempotent replay: the same `Idempotency-Key` already produced a
+            response in this tenant and operation. The stored
+            `{worksheet, policy?}` body is returned unchanged with
+            `Idempotent-Replayed: true` and, when the original calculation was
+            applied, the stored strong `ETag` of that policy version. A
+            calculation-only replay carries no `policy` and no `ETag`; no
+            worksheet is inserted, the policy premium is not replaced, and no
+            event is written.
           headers:
             ETag:
               $ref: './components.yaml#/components/headers/ETag'
@@ -4485,14 +4565,20 @@ paths:
         The response is the **bare** created `Policy` (this expert route does
         not compose the public `{submission, policy}` envelope): 201 on a fresh
         conversion with the strong `ETag` of the policy version, and 200 with
-        the same `Idempotent-Replayed: true` when the submission already has a
-        linked policy. A replay returns the linked policy at its current
-        version, writes nothing, and emits no event. The command accepts no
-        `Idempotency-Key` and compares no request body on the replay path; the
-        submission row lock and the tenant-scoped unique `submission_id` are
-        the concurrency guards. It writes `policy.submission.converted` and the
-        normal `policy.policy.created` in the same transaction as the policy,
-        the base coverage, and the submission link.
+        `Idempotent-Replayed: true` for either replay path. The command accepts
+        an optional `Idempotency-Key` scoped by the tenant, the operation, and
+        the key. A first keyed conversion is 201 and its bare policy response is
+        stored; a later call with the same key is 200 with the stored body and
+        its original strong `ETag`, even when the linked policy has advanced. A
+        keyed or unkeyed call on an already-linked submission is the
+        linked-policy 200 and returns the current linked policy version. Neither
+        replay path compares the request body and no event is written; the key
+        is not narrowed by `submissionId` and a value longer than 128 characters
+        is 400 `INVALID_IDEMPOTENCY_KEY` before any write. The submission row
+        lock and the tenant-scoped unique `submission_id` are the concurrency
+        guards. The command writes `policy.submission.converted` and the normal
+        `policy.policy.created` in the same transaction as the policy, the base
+        coverage, and the submission link.
 
         Only `QUOTED` and `BOUND` submissions are convertible: any other status
         is 409 `SUBMISSION_NOT_CONVERTIBLE` with `meta.submissionId` and
@@ -4507,6 +4593,7 @@ paths:
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantIdQuery'
         - $ref: './components.yaml#/components/parameters/BookHeaderDirectOptional'
+        - $ref: './components.yaml#/components/parameters/IdempotencyKey'
         - name: submissionId
           in: path
           required: true
@@ -4524,7 +4611,8 @@ paths:
         '201':
           description: >
             Submission converted and policy created in DRAFT. The body is the
-            bare created policy with `submissionId`.
+            bare created policy with `submissionId` and
+            `Idempotent-Replayed: false`.
           headers:
             ETag:
               $ref: './components.yaml#/components/headers/ETag'
@@ -4536,9 +4624,11 @@ paths:
                 $ref: '#/components/schemas/Policy'
         '200':
           description: >
-            Replay: the submission already has a linked policy. The body is that
-            bare policy with `Idempotent-Replayed: true`; no write or event is
-            made.
+            Replay. A stored-key replay returns the bare policy and original
+            `ETag` saved by the first keyed call; a linked-policy replay (no
+            key, or a key with no stored response) returns the current linked
+            bare policy. Both set `Idempotent-Replayed: true` and write no row
+            or event.
           headers:
             ETag:
               $ref: './components.yaml#/components/headers/ETag'
@@ -7888,6 +7978,12 @@ x-implementation:
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/PolicyRatingServiceTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/RatingRulesTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/PolicyRatingIntegrationTest.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyIdempotencyService.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyIdempotencyRepository.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyIdempotencyResponse.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/IdempotentResponse.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/IdempotencyKeys.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/PolicyIdempotencyReplayIntegrationTest.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/SubmissionController.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/SubmissionService.java
     - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/SubmissionDto.java
@@ -8089,12 +8185,17 @@ x-implementation:
     conditional premium replacement, and the `policy.policy.rated` fact. A
     calculation-only request returns the worksheet without a policy and writes
     no event; an applied request returns `{worksheet, policy}` and the advanced
-    `ETag`. The expert compares the optional `If-Match` before any write but
-    does not replay `Idempotency-Key`. The worksheet is always CALCULATED,
-    policy-scoped, and does not store the SPEC exposure lines, factor trace,
-    tax, or fee. SPEC 11.2.14 mounts rating under the submission and SPEC
-    11.2.9 publishes `policy.rating.completed`; the implemented route and event
-    name are recorded in M-01, M-22, and M-57.
+    `ETag`. The expert compares the optional `If-Match` before any write and
+    replays `Idempotency-Key` from the shared `policy_idempotency` row for the
+    tenant and operation: a first keyed calculation is 201 and a replay is 200
+    with `Idempotent-Replayed: true`, the stored body, and the stored strong
+    `ETag` when the original was applied. A key longer than 128 characters is
+    400 `INVALID_IDEMPOTENCY_KEY` before any write, and the replay does not
+    compare the request. The worksheet is always CALCULATED, policy-scoped, and
+    does not store the SPEC exposure lines, factor trace, tax, or fee. SPEC
+    11.2.14 mounts rating under the submission and SPEC 11.2.9 publishes
+    `policy.rating.completed`; the implemented route and event name are recorded
+    in M-01, M-22, and M-57.
 
     Underwriting submissions are a top-level DIRECT-book collection, not a
     policy child. The domain proxies the expert's `/internal/v1` alias with the
@@ -8128,11 +8229,16 @@ x-implementation:
     and limit schedule when the requested limit is positive, the nullable
     `policy.submission_id` link with its tenant-scoped unique constraint, the
     submission status/version movement, and the replay of the linked policy. A
-    fresh conversion is 201; a replay is 200 with `Idempotent-Replayed: true`,
-    returns the current linked policy, and writes nothing. The request body is
-    not compared on replay and the expert never replays the forwarded
-    `Idempotency-Key`; the submission row lock and the unique link are the
-    concurrency guards (M-06, M-07). A non-convertible status is 409
+    fresh conversion is 201; a replay is 200 with `Idempotent-Replayed: true`
+    and writes nothing. The expert replays a supplied `Idempotency-Key` from
+    the tenant and operation scope: a stored key returns the bare policy and
+    `ETag` saved by the first call, while an unkeyed or newly keyed call on an
+    already-linked submission returns the current linked policy and stores that
+    200 under the key. The request body is not compared on either replay path,
+    the key is not narrowed by `submissionId`, and a key longer than 128
+    characters is 400 `INVALID_IDEMPOTENCY_KEY` before any write; the
+    submission row lock and the unique link are the concurrency guards (M-06,
+    M-07). A non-convertible status is 409
     `SUBMISSION_NOT_CONVERTIBLE`, a lost write is 409 `CONCURRENT_MODIFICATION`,
     an unknown or foreign submission is 404 `SUBMISSION_NOT_FOUND`, and a
     submission product code longer than the 32-character policy column is 422
@@ -8142,32 +8248,36 @@ x-implementation:
     quote/bind command chain and the SPEC-less route and event name are recorded
     in M-01, M-22, and M-60.
 x-compatibility:
-  contractVersion: 2.19.0
-  previousContractVersion: 2.18.0
+  contractVersion: 2.20.0
+  previousContractVersion: 2.19.0
   breaking: []
   compatible:
-    - Adds POST /api/v1/policies/submissions/{submissionId}/convert and its /internal/v1 expert alias.
-    - Adds the ConvertPolicySubmissionRequest and ConvertPolicySubmissionResult schemas.
-    - Adds the optional nullable Policy.submissionId link and the optional nullable PolicySubmission.policyId link.
-    - Documents the 201 fresh conversion, the 200 linked-policy replay with Idempotent-Replayed, the strong policy ETag, and the 400/404/409/422 problems.
-    - Adds the policy.submission.converted event.
+    - Adds the 200 stored-response replay to POST /api/v1/policies/{policyId}/rating, with Idempotent-Replayed and the stored strong ETag.
+    - Documents Idempotency-Key replay on the public and expert submission-conversion operations, including the stored policy body and original ETag.
+    - Documents the tenant + operation + key scope, the 128-character key cap, and the 400 INVALID_IDEMPOTENCY_KEY rejection.
+    - Removes the stale no-replay caveats for rating and conversion.
     - Removes no path or field and changes no existing field meaning.
   note: >
-    The submission-conversion slice is additive over 2.18.0: two operations (the
-    public envelope and the expert bare-policy alias), two schemas, two nullable
-    link members, and one implemented event name. A QUOTED or unlinked BOUND
-    submission becomes a DRAFT policy from its applicant, product, requested
-    effective date, and requested limit plus the command premium; the expiration
-    defaults to one year and both aggregate versions advance. A repeat is a 200
-    replay of the linked policy with Idempotent-Replayed: true and no write. The
-    expert does not consult the forwarded Idempotency-Key and does not compare
-    the request body on replay; the submission row lock and the tenant-scoped
-    unique submission link are the guards. The public domain policy projection
-    still drops Policy.submissionId, which M-60 records. The catalog grows to 228
-    published and 109 implemented names, with Policy at 39 published and 27
-    implemented. The SPEC quote/bind command chain, the SPEC-less route, and the
-    new event name are recorded in MISMATCHES.md M-01, M-06, M-07, M-22, and
-    M-60.
+    The rating and conversion idempotency-replay slice is additive over 2.19.0:
+    the rating POST now documents a 200 replay response with the stored
+    `{worksheet, policy?}` body and ETag, and the conversion commands document
+    the tenant + operation + key scope of a supplied Idempotency-Key. A first
+    keyed command is 201; a replay is 200 with `Idempotent-Replayed: true` and
+    the stored body, including the original strong policy ETag, even when the
+    policy has advanced. A linked-policy conversion replay without a stored key
+    returns the current policy, and a keyed call on an already-linked submission
+    stores that 200. Keys are trimmed, a blank key is absent, and a key longer
+    than 128 characters is 400 `INVALID_IDEMPOTENCY_KEY` before any write. The
+    rating and conversion replay paths do not compare the request body, so they
+    never return 409 `IDEMPOTENCY_CONFLICT`; the first successful response is
+    authoritative. No path, request field, response field, or event changes, and
+    the domain policy projection still drops Policy.submissionId (M-60). The
+    shared IdempotencyKey parameter and IdempotentReplayed header are updated in
+    components 1.7.0. The behaviour is implemented by
+    `PolicyIdempotencyService`, the `policy_idempotency` table's tenant +
+    operation + key uniqueness, and the replay integration test; the SPEC 12.6
+    request-hash conflict is not implemented for these two commands, which
+    MISMATCHES.md M-06, M-07, M-57, and M-60 record.
 x-planned-operations:
   - method: POST
     path: /api/v1/policies/{policyId}/bind

@@ -1793,7 +1793,9 @@ POLICY_PREMIUM_AUDIT_EVENT_IMPLEMENTED_BY = "PolicyEvents.java"
 # public command persists one immutable worksheet and optionally applies the
 # computed premium; only a DRAFT or QUOTED policy is rateable, and the worksheet
 # status is always CALCULATED. Applying replaces the policy premium, bumps the
-# aggregate version, and writes policy.policy.rated. The event is new: SPEC
+# aggregate version, and writes policy.policy.rated. A supplied Idempotency-Key
+# replays the stored 201 body as a 200 with the stored strong ETag, scoped by
+# tenant and operation (MISMATCHES.md M-06, M-07, M-57). The event is new: SPEC
 # 11.2.14 models rating under a submission and SPEC 11.2.9 publishes no rating
 # fact (MISMATCHES.md M-22, M-57).
 POLICY_RATING_PATH = "/api/v1/policies/{policyId}/rating"
@@ -1970,10 +1972,12 @@ POLICY_SUBMISSION_EVENT_IMPLEMENTED_BY = "PolicyEvents.java"
 
 # Submission-to-policy conversion (SPEC 11.2.14 quote/bind slice). The public
 # command composes {submission, policy}; the expert alias returns the bare
-# policy. A fresh conversion is 201 and a linked-policy replay is 200. The
-# convertible statuses are QUOTED and BOUND; the policy records submissionId and
-# the submission records policyId. The event carries the four identity members
-# and keeps eventVersion 1 (MISMATCHES.md M-01, M-22, M-60).
+# policy. A fresh conversion is 201 and both the linked-policy replay and a
+# stored Idempotency-Key replay are 200 with the stored body and ETag, scoped by
+# tenant and operation. The convertible statuses are QUOTED and BOUND; the
+# policy records submissionId and the submission records policyId. The event
+# carries the four identity members and keeps eventVersion 1 (MISMATCHES.md
+# M-01, M-06, M-07, M-22, M-60).
 POLICY_SUBMISSION_CONVERT_PATH = (
     "/api/v1/policies/submissions/{submissionId}/convert"
 )
@@ -9132,6 +9136,46 @@ def check_policy_rating_openapi(contracts: ContractSet, document, relative: str)
             ),
             f"{where_post}: 201 must return the {POLICY_RATING_RESULT} schema",
         )
+        created_description = (
+            str(created.get("description") or "") if isinstance(created, dict) else ""
+        )
+        contracts.check(
+            "Idempotent-Replayed: false" in created_description,
+            f"{where_post}: 201 must document Idempotent-Replayed: false",
+        )
+
+        replayed = (post.get("responses") or {}).get("200")
+        replay_headers = (
+            replayed.get("headers") if isinstance(replayed, dict) else None
+        )
+        for header, suffix in (
+            ("ETag", "ETag"),
+            ("Idempotent-Replayed", "IdempotentReplayed"),
+        ):
+            value = (
+                replay_headers.get(header) if isinstance(replay_headers, dict) else None
+            )
+            contracts.check(
+                isinstance(value, dict)
+                and str(value.get("$ref", "")).endswith(f"/headers/{suffix}"),
+                f"{where_post}: 200 replay must declare the shared {header} header",
+            )
+        replay_schema = _response_schema(post, "200")
+        contracts.check(
+            isinstance(replay_schema, dict)
+            and str(replay_schema.get("$ref", "")).endswith(
+                f"/schemas/{POLICY_RATING_RESULT}"
+            ),
+            f"{where_post}: 200 replay must return the {POLICY_RATING_RESULT} schema",
+        )
+        replay_description = (
+            str(replayed.get("description") or "") if isinstance(replayed, dict) else ""
+        )
+        for term in ("stored", "Idempotent-Replayed", "ETag", "worksheet"):
+            contracts.check(
+                term in replay_description,
+                f"{where_post}: 200 replay must describe the {term}",
+            )
 
         responses = post.get("responses") or {}
         for code, suffix in (("400", "BadRequest"), ("404", "NotFound")):
@@ -9174,10 +9218,26 @@ def check_policy_rating_openapi(contracts: ContractSet, document, relative: str)
             POLICY_RATING_EVENT,
             "same transaction",
             "ETag",
+            "Idempotency-Key",
+            "200",
+            "Idempotent-Replayed",
+            "INVALID_IDEMPOTENCY_KEY",
+            "tenant",
+            "operation",
+            "stored",
+            "128",
+            "not compared",
+            "policyId",
         ):
             contracts.check(
                 term in description,
                 f"{where_post}: description must document {term}",
+            )
+        for stale in ("always false", "does not replay", "not replayed"):
+            contracts.check(
+                stale not in description,
+                f"{where_post}: description must not claim the key is not "
+                f"replayed ({stale})",
             )
 
     if isinstance(get, dict):
@@ -9866,6 +9926,17 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
                 description_term in response_description,
                 f"{where}: {code} must describe {description_term}",
             )
+            if code == "201":
+                contracts.check(
+                    "Idempotent-Replayed: false" in response_description,
+                    f"{where}: 201 must document Idempotent-Replayed: false",
+                )
+            else:
+                for term in ("stored", "ETag", "no policy"):
+                    contracts.check(
+                        term in response_description,
+                        f"{where}: 200 replay must describe the {term}",
+                    )
         responses = convert_operation.get("responses") or {}
         for code, suffix in (
             ("400", "BadRequest"),
@@ -9917,13 +9988,31 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
             "policy.policy.created",
             "same transaction",
             "not compared",
-            "does not consult",
+            "Idempotency-Key",
+            "stored",
+            "original",
+            "128",
+            "INVALID_IDEMPOTENCY_KEY",
+            "tenant",
+            "operation",
+            "not narrowed by",
             "bare `Policy`",
             "policyId",
         ):
             contracts.check(
                 term in description,
                 f"{where}: description must document {term}",
+            )
+        for stale in (
+            "does not consult",
+            "does not replay",
+            "never replays",
+            "not replayed",
+        ):
+            contracts.check(
+                stale not in description,
+                f"{where}: description must not claim the key is not replayed "
+                f"({stale})",
             )
 
     if isinstance(expert_convert_operation, dict):
@@ -9946,7 +10035,11 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
             f"{where}: internal operation must carry the Policy internal tag",
         )
         parameter_refs, inline_names = _parameter_names(expert_convert_operation)
-        for parameter in ("TenantIdQuery", "BookHeaderDirectOptional"):
+        for parameter in (
+            "TenantIdQuery",
+            "BookHeaderDirectOptional",
+            "IdempotencyKey",
+        ):
             contracts.check(
                 parameter in parameter_refs,
                 f"{where}: must document the shared {parameter} parameter",
@@ -9996,6 +10089,24 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
                     and str(value.get("$ref", "")).endswith(f"/headers/{suffix}"),
                     f"{where}: {code} must declare the shared {header} header",
                 )
+            response_description = str(
+                (
+                    ((expert_convert_operation.get("responses") or {}).get(code))
+                    or {}
+                ).get("description")
+                or ""
+            )
+            if code == "200":
+                for term in ("stored", "linked-policy", "no row"):
+                    contracts.check(
+                        term in response_description,
+                        f"{where}: 200 replay must describe the {term}",
+                    )
+            else:
+                contracts.check(
+                    "Idempotent-Replayed: false" in response_description,
+                    f"{where}: 201 must document Idempotent-Replayed: false",
+                )
         responses = expert_convert_operation.get("responses") or {}
         for code, suffix in (
             ("400", "BadRequest"),
@@ -10017,10 +10128,28 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
             "SUBMISSION_NOT_CONVERTIBLE",
             "PRODUCT_CODE_TOO_LONG_FOR_POLICY",
             "no event",
+            "200",
+            "Idempotent-Replayed",
+            "stored",
+            "128",
+            "INVALID_IDEMPOTENCY_KEY",
+            "tenant",
+            "operation",
+            "not narrowed by",
         ):
             contracts.check(
                 term in description,
                 f"{where}: description must document {term}",
+            )
+        for stale in (
+            "accepts no `Idempotency-Key`",
+            "does not consult",
+            "never replays",
+        ):
+            contracts.check(
+                stale not in description,
+                f"{where}: description must not claim the key is not replayed "
+                f"({stale})",
             )
 
     planned_operations = document.get("x-planned-operations") or []
@@ -16422,6 +16551,44 @@ def check_openapi(contracts: ContractSet, verbose: bool):
         ) == ("string", 1, 64),
         "components.yaml: ClaimIdempotencyKey must be a 1-64 character string",
     )
+    policy_key = (component_sections.get("parameters") or {}).get("IdempotencyKey") or {}
+    policy_key_schema = policy_key.get("schema") or {}
+    policy_key_description = str(policy_key.get("description") or "")
+    contracts.check(
+        policy_key.get("name") == "Idempotency-Key",
+        "components.yaml: IdempotencyKey.name must be Idempotency-Key",
+    )
+    contracts.check(
+        policy_key.get("in") == "header",
+        "components.yaml: IdempotencyKey.in must be header",
+    )
+    contracts.check(
+        policy_key.get("required") is False,
+        "components.yaml: IdempotencyKey must stay optional",
+    )
+    contracts.check(
+        (
+            policy_key_schema.get("type"),
+            policy_key_schema.get("minLength"),
+            policy_key_schema.get("maxLength"),
+        ) == ("string", 1, 128),
+        "components.yaml: IdempotencyKey must be a 1-128 character string",
+    )
+    for term in ("tenant", "operation", "INVALID_IDEMPOTENCY_KEY", "replay"):
+        contracts.check(
+            term in policy_key_description,
+            f"components.yaml: IdempotencyKey description must document {term}",
+        )
+    shared_replayed = (
+        component_sections.get("headers") or {}
+    ).get("IdempotentReplayed") or {}
+    shared_replayed_description = str(shared_replayed.get("description") or "")
+    for term in ("Idempotent-Replayed", "create", "rating", "conversion"):
+        contracts.check(
+            term in shared_replayed_description,
+            "components.yaml: IdempotentReplayed description must document "
+            f"{term}",
+        )
     actor_header = (component_sections.get("parameters") or {}).get("ActorHeader") or {}
     actor_header_schema = actor_header.get("schema") or {}
     contracts.check(

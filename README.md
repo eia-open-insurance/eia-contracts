@@ -2630,9 +2630,10 @@ Semantics:
   absent book is accepted for compatibility and another book is hidden as 404
   `BOOK_SCOPE_VIOLATION`. Optional `If-Match` is compared before any write; a
   stale tag is 409 `CONCURRENT_MODIFICATION` and a malformed tag is 400
-  `INVALID_IF_MATCH`. The domain forwards an optional `Idempotency-Key`, but
-  the expert does not replay it, so a retry persists a second worksheet and
-  applies a second premium replacement (M-06, M-07).
+  `INVALID_IF_MATCH`. Policy 2.17.0 forwarded an optional `Idempotency-Key`
+  without replaying it; Policy 2.20.0 adds the tenant + operation keyed replay
+  with the stored 201 body, a 200 `Idempotent-Replayed` response, and the stored
+  `ETag` (M-06, M-07).
 - `PolicyPolicyRatedData` requires `policyId`, `policyNumber`, `premiumAmount`,
   `currency`, `ratingMethod`, `calcHash`, and `worksheetId`, and keeps
   `eventVersion` 1. The event is keyed by the policy at the bumped aggregate
@@ -2849,10 +2850,11 @@ Semantics:
 - The `/internal/v1` expert alias returns the bare `Policy`, not the public
   envelope; the domain accepts it (or an expert envelope), composes
   `{submission, policy}`, and preserves the expert 400/404/409/422 problems.
-  The expert does not consult the forwarded `Idempotency-Key`: replay is keyed
-  by the submission's linked policy, not by the key or a request hash. The
-  submission row lock and the tenant-scoped unique `submission_id` are the
-  concurrency guards (M-06, M-07).
+  Policy 2.19.0 replayed only the linked policy; Policy 2.20.0 adds the
+  tenant + operation keyed replay with the stored body and original `ETag`,
+  while an unkeyed or newly keyed call on an already-linked submission remains
+  the linked-policy 200. The submission row lock and the tenant-scoped unique
+  `submission_id` are the concurrency guards (M-06, M-07).
 - The public domain policy projection still drops `Policy.submissionId`, while
   the expert returns it. `PolicySubmission.policyId` is omitted from the public
   payload while null and published once linked. SPEC 11.2.14 models the step as
@@ -2869,6 +2871,54 @@ and their codes, the `submission`/`policy` envelope members, the nullable
 `/internal/v1` operation with the bare `Policy` response. It also requires the
 implemented `policy.submission.converted` channel and payload and the
 `IMPLEMENTED_EVENTS` and catalog entries. The full run passes 16,871 checks.
+
+### Policy rating and conversion idempotency replay (2026-10-22)
+
+Policy 2.20.0 adds keyed replay to the rating and submission-conversion POSTs
+and removes the earlier no-replay caveats. The change is compatible: it
+documents a new 200 response on rating, the stored body and ETag rules, the
+tenant + operation key scope, and the 128-character key cap; no path, request
+field, response field, or event changes.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/policy.yaml` | 2.20.0 | Additive | The rating POST's 200 stored-response replay with `PolicyRatingResult`, `ETag`, and `Idempotent-Replayed`; replay wording on the public and expert conversion operations; the tenant + operation + key scope, blank-key normalization, 128-character cap, and 400 `INVALID_IDEMPOTENCY_KEY`; and the updated `x-compatibility` block. |
+| `openapi/components.yaml` | 1.7.0 | Additive and documentation | The shared `IdempotencyKey` parameter becomes 1-128 characters and documents the tenant + operation scope and invalid-key rejection; `IdempotentReplayed` names the create, rating, and conversion responses; the shared 400 names the Policy cap. |
+
+Semantics:
+
+- Both commands accept the optional `Idempotency-Key`. The value is trimmed, a
+  blank value is treated as absent, and a value longer than 128 characters is
+  400 `INVALID_IDEMPOTENCY_KEY` with `errors[0].field` naming
+  `Idempotency-Key`, before any worksheet, policy, link, or event write. A
+  first keyed command is 201 with `Idempotent-Replayed: false`.
+- The key is scoped by the tenant, the operation, and the key. Rating
+  (`rating`) and conversion (`conversion`) do not collide, so one key can be
+  used once for each, and the scope is not narrowed by `policyId` or
+  `submissionId`.
+- A replay is 200 with `Idempotent-Replayed: true` and the stored response
+  body. When the first command applied the rating or created the policy, the
+  replay also returns the stored strong `ETag`, which is the policy version
+  captured by the first call even if the policy has since advanced. A
+  calculation-only rating replay stores no `policy` and returns no `ETag`.
+- Conversion has two 200 sources. A stored-key replay returns the policy body
+  and `ETag` saved by the first keyed call, with the `submission` member
+  projected from the linked submission; a linked-policy replay for an unkeyed
+  call, or a new key on an already-linked submission, returns the current
+  linked policy and current tag and stores that 200 under the new key. Both
+  write no policy, link, coverage, or event.
+- The replay paths do not compare the request body: a different premium,
+  currency, expiration, rating method, or operand set under the same key
+  returns the first response rather than 409 `IDEMPOTENCY_CONFLICT`. The first
+  successful response is authoritative; this is the M-06/M-07 deviation from
+  the SPEC 12.6 request-hash conflict, recorded for rating in M-57 and for
+  conversion in M-60.
+- The validator requires the rating 201 and 200 responses with the shared
+  `ETag`/`Idempotent-Replayed` headers and `PolicyRatingResult`, the public and
+  expert conversion 200 replay headers and bodies, the `IdempotencyKey`
+  parameter on the expert conversion, the 1-128-character shared parameter, the
+  replay wording, and the absence of the stale no-replay phrases. The full run
+  passes 16,936 checks.
 
 ### Compatibility matrix
 
@@ -2975,7 +3025,12 @@ Policy is the reference implementation:
   recommended. A same-key replay of an identical request returns 200 with
   `Idempotent-Replayed: true`; reusing the key with a different request is 409
   `IDEMPOTENCY_CONFLICT`; a duplicate business key is 409
-  `DUPLICATE_POLICY_NUMBER`, `DUPLICATE_COVERAGE_CODE`, or a similar code.
+  `DUPLICATE_POLICY_NUMBER`, `DUPLICATE_COVERAGE_CODE`, or a similar code. The
+  key is trimmed, a blank value is absent, and a value longer than 128
+  characters is 400 `INVALID_IDEMPOTENCY_KEY` before any write. Rating and
+  submission conversion are the exception to the request comparison: they
+  replay the stored body and ETag without hashing the request, so a different
+  body under the same key returns the first response instead of a 409.
 - An illegal lifecycle transition is 409 `INVALID_STATUS_TRANSITION`; a domain
   policy rejection is 422 `BUSINESS_RULE`; a missing approval is 428
   `APPROVAL_REQUIRED`.
@@ -4006,8 +4061,13 @@ Rules:
   and canonical hash in the same transaction as the worksheet insert.
 - `X-EIA-Tenant` is required. A supplied `X-EIA-Book` must be DIRECT; an absent
   header is accepted and another book is hidden as 404 `BOOK_SCOPE_VIOLATION`.
-  The optional `If-Match` is compared, but the optional `Idempotency-Key` is
-  only forwarded: a retry is not replayed and persists a second worksheet
+  The optional `If-Match` is compared before any write. `Idempotency-Key` is
+  replayed in the tenant + operation scope: a first keyed calculation is 201 and
+  a replay returns the stored `{worksheet, policy?}` body with 200 and
+  `Idempotent-Replayed: true`, including the stored strong `ETag` when the
+  original applied the rating. A calculation-only replay carries no `ETag`; a
+  blank key is absent, a key longer than 128 characters is 400
+  `INVALID_IDEMPOTENCY_KEY`, and the replay does not compare the request body
   (M-06, M-07).
 - The SPEC 11.2.14 submission-scoped route and the
   DRAFT/CALCULATED/APPROVED/SUPERSEDED worksheet lifecycle are not implemented;
@@ -4105,11 +4165,15 @@ Rules:
   `PRODUCT_CODE_TOO_LONG_FOR_POLICY`.
 - The expert conversion route returns the bare `Policy` rather than the public
   envelope, and the domain composes `{submission, policy}` while preserving the
-  expert 400/404/409/422 problems. The expert does not consult the forwarded
-  `Idempotency-Key`; replay is keyed by the linked policy, and the request body
-  is not compared. The public domain policy projection still drops
-  `Policy.submissionId`, while `PolicySubmission.policyId` is omitted while null
-  (M-06, M-07, M-60).
+  expert 400/404/409/422 problems. `Idempotency-Key` is replayed in the tenant +
+  operation scope: a first keyed conversion stores its 201 response and a replay
+  returns the stored body and original `ETag` as 200 with
+  `Idempotent-Replayed: true`; an unkeyed or newly keyed call on an
+  already-linked submission remains the linked-policy 200 with the current tag.
+  Neither path compares the request body, a key longer than 128 characters is
+  400 `INVALID_IDEMPOTENCY_KEY`, and the key is not narrowed by `submissionId`.
+  The public domain policy projection still drops `Policy.submissionId`, while
+  `PolicySubmission.policyId` is omitted while null (M-06, M-07, M-60).
 - SPEC 11.2.14 mounts the collection at `/api/v1/policy/submissions`, adds the
   clearance, rating, referral, quote, authority, declination, and producer
   slices and the `CLEARANCE`/`RATING` intermediate states, models conversion as
@@ -4484,8 +4548,11 @@ missing directory.
    enum, the thirteen-member `RatingWorksheet` with its nullable exposure and
    64-character hash, the `PolicyRatingResult` envelope with its optional
    applied `policy`, the 201 `ETag`/`Idempotent-Replayed` headers, the 200
-   worksheet read, and the 400/404/409 responses with the `RATING_*`,
-   `POLICY_NOT_RATEABLE`, and `RATING_WORKSHEET_NOT_FOUND` codes. It also
+   stored-response replay with `PolicyRatingResult` and its shared
+   `ETag`/`Idempotent-Replayed` headers, the 200 worksheet read, and the
+   400/404/409 responses with the `RATING_*`, `POLICY_NOT_RATEABLE`, and
+   `RATING_WORKSHEET_NOT_FOUND` codes, plus the key-scope, 128-character-cap,
+   and `INVALID_IDEMPOTENCY_KEY` wording. It also
    requires the four submission operations with the shared tenant and optional
    DIRECT book parameters, the create `IdempotencyKey` header, the status
    `IfMatch` and `IdempotencyKey` headers, the required create and status
@@ -4582,9 +4649,12 @@ missing directory.
    `UnderwritingSubmission` channel wording. It also requires the implemented
    `policy.submission.converted` channel and `send` operation with the
    four-member `PolicySubmissionConvertedData` payload, the public conversion
-   operation with the `{submission, policy}` envelope, the expert conversion
-   operation with the bare `Policy` response, and the nullable
-   `Policy.submissionId` and `PolicySubmission.policyId` links.
+   operation with the `{submission, policy}` envelope and its 201/200
+   `Idempotent-Replayed`/`ETag` headers, the stored-key and linked-policy
+   replay wording, the tenant + operation scope and 128-character key cap, the
+   expert conversion operation with the bare `Policy` response and
+   `IdempotencyKey`, and the nullable `Policy.submissionId` and
+   `PolicySubmission.policyId` links.
 5. **Event catalog cross-check.** The published set in `event-catalog.yaml`
    must equal the channel addresses in the matching vertical document, event
    names must be unique across the platform and must match
@@ -4682,8 +4752,8 @@ missing directory.
 - `ETag`/`If-Match` are complete in Policy, and the Party status command returns
   an `ETag` and accepts `If-Match` but the expert does not compare it; the
   Policy billing plan, installment, and renewal commands do not accept the
-  headers, and Policy rating compares `If-Match` but does not replay
-  `Idempotency-Key`. `Idempotency-Key` covers Policy plus
+  headers, and Policy rating and submission conversion replay `Idempotency-Key`
+  without hashing or comparing the request. `Idempotency-Key` covers Policy plus
   the Direct Claims and Assumed Claims task/note creates; the remaining vertical
   creates do not accept it, the claim task/note responses spell the marker
   `Idempotent-Replay`, and the Direct Claims reservation has a narrow concurrent
@@ -4833,10 +4903,12 @@ missing directory.
   worksheet under a submission and product version with `exposure_lines`,
   `factor_trace`, tax, fee, and DRAFT/CALCULATED/APPROVED/SUPERSEDED states. The
   applied command publishes the new `policy.policy.rated` name and SPEC 11.2.9
-  publishes no rating fact. The optional `If-Match` is compared but an
-  `Idempotency-Key` retry is not replayed, so a retry calculates and applies a
-  second worksheet; only `RATE_TIMES_EXPOSURE` and `FLAT` are implemented out
-  of the SPEC method list (M-01, M-06, M-07, M-22, M-57);
+  publishes no rating fact. The optional `If-Match` is compared and a supplied
+  `Idempotency-Key` replays the stored response in the tenant + operation scope;
+  because the replay does not hash the request, a retry with different terms
+  returns the first worksheet instead of a 409. Only `RATE_TIMES_EXPOSURE` and
+  `FLAT` are implemented out of the SPEC method list (M-01, M-06, M-07, M-22,
+  M-57);
 - policy credit notes are implemented at
   `GET/POST /api/v1/policies/{policyId}/credit-notes` and
   `PATCH .../{creditNoteId}/status` with the
