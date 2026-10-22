@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-22 (Policy underwriting submissions).
+Status: open, reviewed 2026-10-22 (Policy submission conversion).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -199,6 +199,15 @@ where the running code does not meet it yet.
   `UpdateUnderwritingSubmissionStatusRequest`, `PolicyEvents`, `schema.sql`,
   the shared `RequestScope`/`ApiExceptionHandler`, and the domain and expert
   controller, service, rules, client, and integration tests.
+  The Policy submission-conversion pass reads the domain conversion controller,
+  service, `ConvertSubmissionCommand`, `SubmissionConversionResult`,
+  `SubmissionDto`, `PolicyDto`, `PolicyClient`, and ETag/replay mapping plus the
+  expert conversion controller, `ConvertSubmissionRequest`,
+  `SubmissionConversionService`, `SubmissionConversionResult`,
+  `UnderwritingSubmissionRules`, `UnderwritingSubmissionRepository`,
+  `UnderwritingSubmissionView`, `Policy`, `PolicyRepository`, `PolicyEvents`,
+  the coverage repository, `schema.sql`, and the domain and expert controller,
+  service, client, and integration tests.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -283,6 +292,7 @@ removed per the resolution policy.
 | M-57 | Policy rating worksheets are a SPEC-less policy-scoped route and event with only two rating methods, a CALCULATED-only worksheet, and no submission/product, exposure-line, factor-trace, tax, or fee model | L |
 | M-58 | Party identifier and address maintenance adds SPEC-less PATCH/DELETE child routes with full replacement, a no-op update, a hard delete, and unenforced duplicate/in-use guards and concurrency headers | M |
 | M-59 | Policy underwriting submissions are a SPEC-less pre-policy collection with a narrower six-state graph, no clearance/rating/referral/quote/producer slices, two new event names, unhonoured concurrency/idempotency headers, and a JSON-number limit amount | M |
+| M-60 | Submission conversion is a SPEC-less command with a bare-policy expert shape, 200 linked-policy replay, a new event name, an unprojected public `Policy.submissionId`, and no request comparison or SPEC clearance/rating gate | M |
 
 ## M-01 Public base paths
 
@@ -332,7 +342,11 @@ underwriting submissions add a collection row: the implemented
 `/api/v1/policies/submissions` lives under the short `/api/v1/policies` base,
 while SPEC 11.2.14 lists `POST /api/v1/policy/submissions` (no list, read, or
 status row) and mounts clearance, rating, referral, and quote as further
-submission commands rather than status edges (M-59).
+submission commands rather than status edges (M-59). Submission conversion adds
+a command row: the implemented
+`POST /api/v1/policies/submissions/{submissionId}/convert` (expert alias
+`/internal/v1`) has no SPEC 11.2.14 route; the SPEC models the step as the
+submission `quote`/`bind` commands and names no conversion event (M-60).
 
 The ten global-search routes follow the same shorter form
 (`/api/v1/{resource}/search`); their SPEC naming gap and validation differences
@@ -366,6 +380,10 @@ Evidence:
   `repos/eia-policy-expert/.../PremiumAuditController.java:22-25` -
   `/api/v1/policies/{policyId}/premium-audit` (the expert also maps the
   `/internal/v1` alias).
+- `repos/eia-policy-domain/.../SubmissionController.java:122-140` and
+  `repos/eia-policy-expert/.../UnderwritingSubmissionController.java:106-122` -
+  `POST /api/v1/policies/submissions/{submissionId}/convert` (the expert also
+  maps the same path under `/internal/v1`).
 - `repos/eia-platform/gateway/src/main/resources/application.yml:18-48` - the
   same public prefixes are routed.
 - Web remotes call the implemented prefixes, for example
@@ -522,6 +540,7 @@ Policy now implements the SPEC 12.6 concurrency mechanism:
 | Policy public rating | Accepts optional `If-Match` and compares it before any write; the applied 201 returns the refreshed policy `ETag`, while a calculation-only 201 has no `ETag`; a stale tag is 409 `CONCURRENT_MODIFICATION` |
 | Policy public mass tort profile | No `ETag`/`If-Match`; a concurrent profile or policy change is 409 `CONCURRENT_MODIFICATION` |
 | Policy public submissions | List/get/create return the submission `ETag`; the status command accepts and forwards `If-Match` but the expert compares neither it nor an `expectedVersion` body field, so a stale tag is not a 409 by itself; a concurrent transition is 409 `CONCURRENT_MODIFICATION` with the current and expected versions |
+| Policy public submission conversion | Accepts no `If-Match`; the 201/200 returns the linked policy `ETag` and `Idempotent-Replayed`; the submission row is locked for the command and the tenant-scoped unique `submission_id` is the second guard, so a lost write is 409 `CONCURRENT_MODIFICATION` rather than a caller-tag comparison |
 | Party public PATCH status | Returns `ETag: "<version>"`; accepts optional `If-Match` and `Idempotency-Key`, forwards both, but the expert compares neither, so a stale tag is not a 409 and a retry is not replayed |
 | Party public child PATCH/DELETE | No `ETag`/`If-Match`; a replacement and a delete are unconditional once the party and child resolve, and a concurrent change is last-write-wins |
 | Policy expert GET/create/PATCH | Same ETag and If-Match behaviour as the public service |
@@ -575,6 +594,12 @@ Policy nuances:
   and status the command itself read, so a stale caller tag changes nothing and
   only a write that loses that internal race is 409 `CONCURRENT_MODIFICATION`
   (M-59).
+- Conversion takes no caller version at all: the domain forwards no `If-Match`
+  and the expert command is not a `PATCH`. It locks the submission row with
+  `SELECT ... FOR UPDATE`, re-reads the linked policy inside the transaction,
+  and returns the policy `ETag` on both 201 and 200. The submitted premium is
+  not protected by a caller tag; a retry after a successful conversion is the
+  200 replay instead of a second policy (M-60).
 
 Evidence:
 
@@ -673,7 +698,12 @@ Residual differences:
   accept and forward an optional key, but the expert submission service has no
   idempotency store or replay path: a retried create makes a second submission
   with a new number and a retried real transition applies again with a new
-  version (M-59). The Party status command also
+  version (M-59). The submission conversion command accepts and forwards an
+  optional key, but the expert neither stores nor consults it: replay is keyed
+  by the submission's linked policy (`policy.submission_id`), a repeat returns
+  200 with the existing policy, and the request premium and expiration are not
+  compared with the original conversion, so a different body is silently
+  accepted as a replay (M-60). The Party status command also
   accepts and forwards an optional key, but the expert status route does not
   read it; a repeated non-no-op request applies the transition again (M-55). The
   Party child maintenance routes accept no key: a repeated real replacement
@@ -752,6 +782,7 @@ Three mechanisms coexist:
 | Party, Policy, Contract, Cession, Retrocession, Document, Payment, Notifications experts | `?tenantId=` query parameter, plus `tenantId` in the create body |
 | Policy second-slice expert routes | `?tenantId=` query parameter |
 | Policy submission expert routes | `?tenantId=` query parameter or `X-EIA-Tenant` header (the domain sends both with the same value) |
+| Policy submission-conversion expert route | `?tenantId=` query parameter or `X-EIA-Tenant` header; the domain sends both with the same value and an optional `Idempotency-Key` the expert ignores |
 | Direct Claims expert status transition | `X-EIA-Tenant` header instead of the query parameter (`ClaimController.java:52-58`) |
 | Direct Claims expert child routes | `?tenantId=` on GET, `X-EIA-Tenant` on POST/PATCH |
 | Assumed Claims expert create and status | `tenantId` in the body plus `X-EIA-Tenant` sent by the domain client |
@@ -938,7 +969,7 @@ ten publishing verticals now emit a subset:
 | Vertical | Implemented event names | Source |
 |---|---|---|
 | Party | `party.party.created`, `party.party.updated`, `party.party.identifier-added`, `party.party.identifier-updated`, `party.party.identifier-deleted`, `party.party.address-added`, `party.party.address-updated`, `party.party.address-deleted` | `repos/eia-party-expert/.../PartyEvents.java` |
-| Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.policy.premium-audited`, `policy.policy.rated`, `policy.billing-plan.created`, `policy.billing-plan.adjusted`, `policy.installment.paid`, `policy.installment.waived`, `policy.dunning.sent`, `policy.mass-tort-profile.updated`, `policy.program.created`, `policy.policy.program-assigned`, `policy.credit-note.created`, `policy.credit-note.issued`, `policy.credit-note.applied`, `policy.credit-note.cancelled`, `policy.credit-note.reversed`, `policy.legal-entity.created`, `policy.policy.legal-entity-assigned`, `policy.submission.created`, `policy.submission.status-changed` | `repos/eia-policy-expert/.../PolicyEvents.java` |
+| Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.policy.premium-audited`, `policy.policy.rated`, `policy.billing-plan.created`, `policy.billing-plan.adjusted`, `policy.installment.paid`, `policy.installment.waived`, `policy.dunning.sent`, `policy.mass-tort-profile.updated`, `policy.program.created`, `policy.policy.program-assigned`, `policy.credit-note.created`, `policy.credit-note.issued`, `policy.credit-note.applied`, `policy.credit-note.cancelled`, `policy.credit-note.reversed`, `policy.legal-entity.created`, `policy.policy.legal-entity-assigned`, `policy.submission.created`, `policy.submission.status-changed`, `policy.submission.converted` | `repos/eia-policy-expert/.../PolicyEvents.java` |
 | Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded`, `contract.technical-account.created`, `contract.technical-account.issued`, `contract.technical-account.settled`, `contract.technical-account.line-added`, `contract.technical-account.line-removed`, `contract.bordereau.received`, `contract.bordereau.processed`, `contract.bordereau.failed`, `contract.cash-call.requested`, `contract.cash-call.issued`, `contract.cash-call.settled`, `contract.cash-call.cancelled`, `contract.security.recorded`, `contract.security.status-changed` | `repos/eia-contract-expert/.../ContractEvents.java` |
 | Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.assigned`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.settlement-payment-linked`, `direct.claim.closed`, `direct.claim.task-created`, `direct.claim.task-completed`, `direct.claim.task-updated`, `direct.claim.note-added`, `direct.claim.allocation-created` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
 | Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.assigned`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted`, `assumed.claim.task-created`, `assumed.claim.task-completed`, `assumed.claim.task-updated`, `assumed.claim.note-added` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
@@ -1064,7 +1095,7 @@ version, with the new and previous entity ids (either may be null) and
 `changedFields: [legalEntityId]`. Both are inserted in the same transaction as
 the row change; the names have no SPEC 11.2.9 equivalent (M-22, M-43).
 
-The two underwriting-submission facts are facts of their own aggregate.
+The three underwriting-submission facts are facts of their own aggregate.
 `PolicyEvents.submissionCreated` writes `policy.submission.created` against the
 `UnderwritingSubmission` aggregate at version 1, with the submission id as the
 partition key and the intake facts in the payload (number, applicant, product,
@@ -1072,11 +1103,16 @@ requested term/limit/currency, tort codes, notes, `RECEIVED` status, version 0,
 and timestamps). `PolicyEvents.submissionStatusChanged` writes
 `policy.submission.status-changed` at the new submission version + 1, with the
 previous and new status, version, `updatedAt`, and the optional reason; the
-reason is event-only because the row has no history. Both are inserted in the
-same transaction as the row change, so a rejected or concurrent transition
-writes nothing. The names replace the SPEC 11.2.9 `policy.submission.received`
-and `policy.submission.declined` pair and add a status fact SPEC does not
-define (M-22, M-59).
+reason is event-only because the row has no history. `PolicyEvents
+.submissionConverted` writes `policy.submission.converted` at the
+post-conversion submission version + 1, with exactly `submissionId`,
+`submissionNumber`, `policyId`, and `policyNumber`; the same transaction also
+inserts the normal `policy.policy.created` for the new policy. All three are
+inserted in the same transaction as the row change, so a rejected or concurrent
+transition writes nothing, and a conversion replay writes no event at all. The
+names replace the SPEC 11.2.9 `policy.submission.received` and
+`policy.submission.declined` pair, add a status fact SPEC does not define, and
+add a conversion fact with no SPEC name (M-22, M-59, M-60).
 
 The settlement-payment-linked fact is a claim state change:
 `ClaimEvents.settlementPaymentLinked` writes
@@ -1220,7 +1256,7 @@ tables. The differences are:
 planned name |
 |---|---|---|
 | Party | `party.party.identifier-added` / `.identifier-updated` / `.identifier-deleted` / `party.party.address-added` / `.address-updated` / `.address-deleted`; `party.party.updated` for a status change | No SPEC 11.1.9 name for the reference-data facts: SPEC publishes the party lifecycle, role, screening, and consent facts but no fact for an added, replaced, or deleted identifier or address, so all six names are new (M-54, M-58). `created` and `updated` match SPEC. A status change reuses the generic `party.party.updated` name with `changedFields: [status]` instead of publishing SPEC 11.1.9's dedicated `party.party.status-changed`, which remains planned; `party.party.status-updated` is not an emitted name (M-55). |
-| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created` / `.adjusted`; `policy.installment.paid` / `.waived`; `policy.dunning.sent`; `policy.program.created` / `policy.policy.program-assigned`; `policy.credit-note.created` / `.issued` / `.applied` / `.cancelled` / `.reversed`; `policy.legal-entity.created` / `policy.policy.legal-entity-assigned`; `policy.policy.premium-audited`; `policy.policy.rated`; `policy.submission.created` / `policy.submission.status-changed` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name; the positive premium adjustment fact has no SPEC 11.2.13 name either (M-51); the dunning fact differs from SPEC 11.2.13 `policy.billing.dunning-changed`; the two program facts have no SPEC name because SPEC defines no program create or policy-assignment event. SPEC 11.2.13 publishes only `policy.billing.credit-note-issued` and defines no created, applied, cancelled, or reversed fact, so all five credit-note names are new (M-41). The two legal-entity facts are new because SPEC 10.11.2/11.2.16 define the model and link but SPEC 11.2.9 names no catalog-create or assignment event (M-43). The premium-audit fact differs from SPEC 11.2.9 `policy.premium.audited`, which remains planned (M-50). The rating fact has no SPEC 11.2.9 or 11.2.14 equivalent: SPEC models rating under a submission-scoped worksheet and publishes no rating event, so the policy-scoped name is new (M-57). The two submission facts are new as well: SPEC 11.2.9 publishes `policy.submission.received` and `policy.submission.declined` but no status-change fact, and the implemented graph is a separate command rather than SPEC 11.2.14's clearance/rating/referral/quote chain (M-59). `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
+| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created` / `.adjusted`; `policy.installment.paid` / `.waived`; `policy.dunning.sent`; `policy.program.created` / `policy.policy.program-assigned`; `policy.credit-note.created` / `.issued` / `.applied` / `.cancelled` / `.reversed`; `policy.legal-entity.created` / `policy.policy.legal-entity-assigned`; `policy.policy.premium-audited`; `policy.policy.rated`; `policy.submission.created` / `policy.submission.status-changed` / `policy.submission.converted` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name; the positive premium adjustment fact has no SPEC 11.2.13 name either (M-51); the dunning fact differs from SPEC 11.2.13 `policy.billing.dunning-changed`; the two program facts have no SPEC name because SPEC defines no program create or policy-assignment event. SPEC 11.2.13 publishes only `policy.billing.credit-note-issued` and defines no created, applied, cancelled, or reversed fact, so all five credit-note names are new (M-41). The two legal-entity facts are new because SPEC 10.11.2/11.2.16 define the model and link but SPEC 11.2.9 names no catalog-create or assignment event (M-43). The premium-audit fact differs from SPEC 11.2.9 `policy.premium.audited`, which remains planned (M-50). The rating fact has no SPEC 11.2.9 or 11.2.14 equivalent: SPEC models rating under a submission-scoped worksheet and publishes no rating event, so the policy-scoped name is new (M-57). The three submission facts are new as well: SPEC 11.2.9 publishes `policy.submission.received` and `policy.submission.declined` but no status-change or conversion fact, and the implemented graph/conversion are separate commands rather than SPEC 11.2.14's clearance/rating/referral/quote chain (M-59, M-60). `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
 | Contract | `contract.contract.updated`; `contract.technical-account.created` / `.issued` / `.settled`; `contract.bordereau.processed` / `.failed`; `contract.security.status-changed` | No SPEC name for updated, the technical-account facts, the two terminal bordereau facts, or the security status fact: SPEC 11.3.9 lists lifecycle verbs, the contract-level `contract.account.issued` / `.agreed` facts, `contract.bordereau.posted` / `.rejected`, and only the `contract.security.recorded` / `.breached` security facts. `created`, `bound`, `commuted`, `cession.recorded`, `contract.bordereau.received`, and `contract.security.recorded` match SPEC. |
 | Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned`; `direct.claim.allocation-created`; `direct.claim.settlement-payment-linked`; `direct.claim.litigation-created` | No SPEC names: SPEC 11.4.9 defines no assignment, task, note, allocation-created, settlement-payment-link, or matter-creation event; it names the allocation fact `direct.claim.allocated`, which remains planned, and models the settlement `payment_id` only as a Payment projection (M-45). SPEC 11.4.4 also defines no litigation damages pair (M-52). `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `litigation-updated`, `settlement-authorized`, and `closed` match SPEC. |
 | Assumed Claims | `assumed.claim.updated`; `assumed.claim.assigned`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no assignment, task, or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
@@ -1240,9 +1276,10 @@ Evidence:
 
 - `repos/eia-party-expert/.../PartyEvents.java:25-32,70-207` (reference-data
   names, update snapshots, delete snapshots, and aggregate version)
-- `repos/eia-policy-expert/.../PolicyEvents.java:37-56,62-63,98-420` (policy,
+- `repos/eia-policy-expert/.../PolicyEvents.java:37-56,62-64,98-420` (policy,
   billing, dunning, mass tort, program, credit-note creation,
-  credit-note-transition, premium-audit, rating, and submission names)
+  credit-note-transition, premium-audit, rating, submission, and conversion
+  names)
 - `repos/eia-contract-expert/.../ContractEvents.java:41-56`
 - `repos/eia-direct-claims-expert/.../ClaimEvents.java:62-74`
 - `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java:52-65`
@@ -4362,21 +4399,22 @@ it models the workflow as separate clearance, rating, referral, quote, bind,
 and declination commands with the
 `RECEIVED`/`CLEARANCE`/`RATING`/`REFERRED`/`QUOTED`/`BOUND`/`DECLINED`/
 `WITHDRAWN` status set. The implemented slice is an intake record with a
-one-way six-state graph and two new event names.
+one-way six-state graph and two new event names; the follow-on conversion
+command and its third event are recorded in M-60.
 
 | Aspect | Implemented | SPEC 11.2.14 / 11.2.9 |
 |---|---|---|
-| Routes | `GET/POST /api/v1/policies/submissions`, `GET .../{submissionId}`, `PATCH .../{submissionId}/status` (the expert also maps `/internal/v1`) | `POST /api/v1/policy/submissions` only; no list, read, or status route |
-| Projection | `PolicySubmission` `{submissionId, submissionNumber, tenantId, applicantPartyId, productCode, requestedEffectiveDate, requestedLimitAmount, requestedLimitCurrency, tortCodes, notes, status, version, createdAt, updatedAt}` | `underwriting_submission` also carries `program_id`, `product_id` (the implementation stores a product code), `requested_limits`, `requested_coverages`, `exposures`, `owner`, and `received_at` |
+| Routes | `GET/POST /api/v1/policies/submissions`, `GET .../{submissionId}`, `PATCH .../{submissionId}/status`, and `POST .../{submissionId}/convert` (the expert also maps `/internal/v1`; conversion is M-60) | `POST /api/v1/policy/submissions` only; no list, read, status, or conversion route |
+| Projection | `PolicySubmission` `{submissionId, submissionNumber, tenantId, applicantPartyId, productCode, requestedEffectiveDate, requestedLimitAmount, requestedLimitCurrency, tortCodes, notes, status, version, createdAt, updatedAt, policyId?}` | `underwriting_submission` also carries `program_id`, `product_id` (the implementation stores a product code), `requested_limits`, `requested_coverages`, `exposures`, `owner`, and `received_at` |
 | Identity | server-generated per-tenant `SUB-{YYYY}-{7 digits}` number from `underwriting_submission_number_seq`; `(tenant_id, submission_number)` unique | `submission_number varchar(32)` with no generator rule |
 | Statuses | `RECEIVED`, `REFERRED`, `QUOTED`, `BOUND`, `DECLINED`, `WITHDRAWN` | adds `CLEARANCE` and `RATING` |
 | Graph | `RECEIVED -> REFERRED/QUOTED/DECLINED/WITHDRAWN`, `REFERRED -> QUOTED/DECLINED/WITHDRAWN`, `QUOTED -> BOUND/DECLINED/WITHDRAWN`; `BOUND`/`DECLINED`/`WITHDRAWN` terminal | the graph is implied by the clearance, rating, referral, quote, bind, and declination commands, not a status command |
-| Workflow commands | only the status command | clearance, rating, referral, quote, bind, declination, producer licensing/appointment, and the product/form/rating-plan slices |
+| Workflow commands | the status command and the conversion command (M-60) | clearance, rating, referral, quote, bind, declination, producer licensing/appointment, and the product/form/rating-plan slices |
 | Amount | `requestedLimitAmount` is a JSON number with at most four fraction digits plus a separate currency in the HTTP projection and create body (`BigDecimal` without `@JsonFormat`), while the event payload converts the same value to a scale-4 decimal string | `requested_limits jsonb`; SPEC 10.3 requires a decimal string and never a JSON number (M-03) |
 | List | bare tenant-scoped array, newest update first; no public `q`/`status` filter (the expert implements both) | SPEC 7.6 cursor pagination and the submission-list filters by producer, tort, status, age, and premium |
 | Concurrency / idempotency | create, read, and transition return the submission `ETag`; `If-Match` and `Idempotency-Key` are accepted and forwarded but the expert compares neither the tag nor an `expectedVersion` body field and does not replay the key; a lost internal version race is 409 `CONCURRENT_MODIFICATION` | SPEC 12.6 requires `If-Match`/`Idempotency-Key` on transaction submission |
 | Duplicate | 409 `DUPLICATE_SUBMISSION_NUMBER` on the unique tenant number; the locked allocator should prevent the collision, so the code is a database backstop | no explicit duplicate rule |
-| Events | `policy.submission.created` and `policy.submission.status-changed`, keyed by the `UnderwritingSubmission` aggregate at version 1 and at version + 1 per transition | `policy.submission.received` and `policy.submission.declined` (both planned); no status fact |
+| Events | `policy.submission.created` and `policy.submission.status-changed`, keyed by the `UnderwritingSubmission` aggregate at version 1 and at version + 1 per transition; conversion adds `policy.submission.converted` (M-60) | `policy.submission.received` and `policy.submission.declined` (both planned); no status or conversion fact |
 | Error envelope | canonical Policy `Problem` with `application/problem+json` | canonical `Problem` (matches) |
 
 Additional differences:
@@ -4384,11 +4422,11 @@ Additional differences:
 - The public domain route does not expose the expert's list filters. The
   `q`/`status` parameters exist only on the expert's `/internal/v1` alias, while
   the public list is the bare array ordered by `updated_at DESC, id ASC`.
-- The status command is the only mutation: there is no submission edit or
-  delete, no clearance/rating/referral/quote/bind/declination command, no
-  underwriting-authority check, no declination record, and no
-  submission-to-policy conversion. A `BOUND` submission does not create a
-  policy.
+- Apart from conversion (M-60), the status command is the only mutation: there
+  is no submission edit or delete, no clearance/rating/referral/quote/bind/
+  declination command, no underwriting-authority check, and no declination
+  record. A `BOUND` status edge alone does not create a policy; conversion is a
+  separate command that accepts a `QUOTED` or unlinked `BOUND` submission.
 - The `reason` is carried only on the event; the row stores the resulting
   status, version, and `updated_at`. There is no status-history table, so a
   consumer must persist the event to explain a transition.
@@ -4424,7 +4462,8 @@ Consequences:
 - A consumer of the SPEC `policy.submission.received` name sees nothing; the
   catalog publishes and implements `policy.submission.created` instead, so a
   subscriber must consume the implemented name to observe intake.
-- Because the only mutation is a status edge, the implemented workflow cannot
+- Because the workflow edge is a plain status command and conversion does not
+  require clearance or an approved rating, the implemented workflow cannot
   express SPEC 11.2.14's clearance, rating, referral, quote, authority, and
   declination evidence. UWR-01 (no bind without clearance and rating) and
   UW-01 through UW-05 are not enforced.
@@ -4434,8 +4473,9 @@ Consequences:
 
 Evidence:
 
-- `repos/eia-policy-domain/.../SubmissionController.java:33-110` (public
-  routes, header-only tenant, optional book, ETag, replay marker, Location)
+- `repos/eia-policy-domain/.../SubmissionController.java:33-113` (public
+  intake routes, header-only tenant, optional book, ETag, replay marker,
+  Location) and `:115-140` (the conversion route and envelope; M-60)
 - `repos/eia-policy-domain/.../SubmissionService.java:22-51`,
   `SubmissionDto.java:22-51`, `CreateSubmissionCommand.java:25-34`, and
   `UpdateSubmissionStatusCommand.java:12-16` (projection and body shapes)
@@ -4443,8 +4483,9 @@ Evidence:
   status calls, `{submission}` envelope and array/`items` list acceptance,
   tenant projection, and 400/404/409 preservation)
 - `repos/eia-policy-domain/.../Problems.java:117-121` (submission codes)
-- `repos/eia-policy-expert/.../UnderwritingSubmissionController.java:28-93`
-  (dual base, tenant query/header, DIRECT-book gate, 201/200/204 and ETags)
+- `repos/eia-policy-expert/.../UnderwritingSubmissionController.java:28-97`
+  (dual base, tenant query/header, DIRECT-book gate, 201/200 and ETags) and
+  `:99-122` (the bare-policy conversion response; M-60)
 - `repos/eia-policy-expert/.../UnderwritingSubmissionService.java:61-195`
   (list filters, create, conditional transition, conflict and event insert)
 - `repos/eia-policy-expert/.../UnderwritingSubmissionRules.java:25-229`
@@ -4457,9 +4498,9 @@ Evidence:
   `UnderwritingSubmissionView.java:13-44`,
   `CreateUnderwritingSubmissionRequest.java:17-26`, and
   `UpdateUnderwritingSubmissionStatusRequest.java:11-15`
-- `repos/eia-policy-expert/.../PolicyEvents.java:62-63,317-400` (the two
-  submission facts, aggregate type/subject, payload fields, and aggregate
-  version)
+- `repos/eia-policy-expert/.../PolicyEvents.java:62-64,317-400` (the three
+  submission facts including conversion, aggregate type/subject, payload
+  fields, and aggregate version)
 - `repos/eia-policy-expert/src/main/resources/schema.sql` (`underwriting_submission`
   and `underwriting_submission_number_seq`, unique number, limit/currency/status
   checks)
@@ -4470,17 +4511,148 @@ Evidence:
   and `SubmissionClientTest.java:44-530` (routes, headers, ETag, replay marker,
   problem preservation, and wire shapes)
 
-Resolution: amend SPEC 11.2.14 to the implemented intake slice and the two
-event names, or implement the clearance, rating, referral, quote, bind, and
-producer chain with the full status set and align the amount serialization,
-pagination, concurrency, and idempotency. In either case decide whether a
-submission must convert to a policy and whether a `BOUND` edge must require a
-passed clearance and an approved rating worksheet (UWR-01, UW-01).
+Resolution: amend SPEC 11.2.14 to the implemented intake and conversion slices
+and the three event names, or implement the clearance, rating, referral, quote,
+bind, and producer chain with the full status set and align the amount
+serialization, pagination, concurrency, and idempotency. In either case decide
+whether conversion must become the SPEC quote/bind command with a required
+clearance and approved rating worksheet, and whether a `BOUND` edge must require
+the same (UWR-01, UW-01).
+
+## M-60 Submission conversion is a SPEC-less command with a bare-policy expert shape
+
+Policy 2.19.0 adds `POST /api/v1/policies/submissions/{submissionId}/convert`
+and its `/internal/v1` expert alias. SPEC 11.2.14 models the submission-to-policy
+step as separate quote and bind commands with the clearance and rating
+preconditions; it names no conversion route, no replay rule, and no conversion
+event. The implemented command creates a `DRAFT` policy directly from a
+`QUOTED` submission (or from a `BOUND` submission that has no linked policy yet)
+and publishes a new fact.
+
+| Aspect | Implemented | SPEC 11.2.14 / 11.2.9 |
+|---|---|---|
+| Routes | Public `POST /api/v1/policies/submissions/{submissionId}/convert`; expert alias `POST /internal/v1/policies/submissions/{submissionId}/convert` | Quote and bind commands; no conversion route |
+| Request | `{premiumAmount, premiumCurrency, expirationDate?}`; premium is non-negative with up to four fraction digits, the currency is an ISO 4217 code, and the expiration defaults to the requested effective date plus one year and must be after it | Quote/premium and bind evidence on the quote and bind commands |
+| Public response | 201 `{submission, policy}` on a fresh conversion; 200 with `Idempotent-Replayed: true` on a repeat; strong policy `ETag` on both | No conversion response |
+| Expert response | 201/200 **bare** `Policy` with `ETag` and `Idempotent-Replayed`; the expert does not compose the public envelope | n/a |
+| Convertible states | `QUOTED`, or `BOUND` with no linked policy. `RECEIVED`, `REFERRED`, `DECLINED`, and `WITHDRAWN` are 409 `SUBMISSION_NOT_CONVERTIBLE` with `meta.submissionId` and `meta.currentStatus` | Bind requires clearance and an approved rating worksheet (UWR-01, UW-01); the implemented conversion does not |
+| Policy link | Nullable `Policy.submissionId`, written together with a policy version bump and unique per tenant (`(tenant_id, submission_id)`), so one submission creates at most one policy | SPEC 11.2.14 defines the linkage but no field nullability or uniqueness rule |
+| Submission link | Nullable `PolicySubmission.policyId`; a `QUOTED` submission moves to `BOUND`, a `BOUND` submission keeps its status and only advances its version | SPEC has no submission projection or version rule |
+| Policy created | `DRAFT` with the normal server-generated `POL-{YYYY}-{7 digits}` number and version 1 after the link; one base coverage and limit schedule when the requested limit is positive | Quote/bind policy |
+| Events | `policy.submission.converted {submissionId, submissionNumber, policyId, policyNumber}` plus the normal `policy.policy.created`, in the same transaction as the policy, coverage, and link | `policy.submission.received` and `policy.submission.declined` only |
+| Idempotency | Replay is keyed by the linked policy, not by `Idempotency-Key`: the forwarded key is never stored or read and the replay does not compare the request body | SPEC 12.6 `Idempotency-Key` with a request-hash conflict |
+| Concurrency | The command locks the submission row (`SELECT ... FOR UPDATE`); the tenant-scoped unique `submission_id` is the second guard. No `If-Match`; a lost write is 409 `CONCURRENT_MODIFICATION` | SPEC 12.6 `If-Match` |
+| Errors | 400 `VALIDATION_ERROR`/`INVALID_CONVERSION_PREMIUM`/`INVALID_CONVERSION_CURRENCY`/`INVALID_CONVERSION_EXPIRATION`; 404 `SUBMISSION_NOT_FOUND`/`BOOK_SCOPE_VIOLATION`; 409 `SUBMISSION_NOT_CONVERTIBLE`/`CONCURRENT_MODIFICATION`; 422 `PRODUCT_CODE_TOO_LONG_FOR_POLICY` | Canonical `Problem` envelope (matches) |
+
+Additional differences:
+
+- The public `Policy` projection does not expose `submissionId`:
+  `PolicyDto` has no such member, so the domain drops the expert's field from
+  policy reads and from the conversion envelope's `policy`. The expert `Policy`
+  record returns it (null for a policy not created by conversion). The contract
+  therefore documents `Policy.submissionId` as optional and nullable, with the
+  public omission recorded here rather than claimed on the wire.
+- The public domain requires an upper-case `premiumCurrency` (`@Pattern`
+  `[A-Z]{3}`) and at most four `premiumAmount` fraction digits, while the expert
+  trims and upper-cases the currency and rounds a longer fraction HALF_UP, so a
+  lowercase code or a fifth fraction digit is accepted only on the expert alias.
+  A missing or malformed public body is 400 `VALIDATION_ERROR`; the expert's own
+  field codes are `INVALID_CONVERSION_PREMIUM`,
+  `INVALID_CONVERSION_CURRENCY`, and `INVALID_CONVERSION_EXPIRATION`.
+- The 422 `PRODUCT_CODE_TOO_LONG_FOR_POLICY` is a conversion-only rule: a
+  submission accepts a product code up to 64 characters, but the policy column
+  is 32, so a longer code can be created but not converted. It is a
+  `category: BUSINESS_RULE` problem.
+- A replay with a different premium or expiration is silently accepted and
+  returns the original policy. There is no request hash, no
+  `IDEMPOTENCY_CONFLICT`, and no way for a caller to detect that the new terms
+  were ignored.
+- Conversion writes two facts: the new `policy.submission.converted` against
+  the `UnderwritingSubmission` aggregate (post-conversion submission version +
+  the outbox convention offset; the integration test sees aggregate version 3
+  for a submission converted from `QUOTED`) and the normal `policy.policy.created`
+  against the new policy. A consumer that only knows the SPEC names sees neither.
+- The commit order is policy insert, base coverage/limit, `submission_id` link
+  with a policy version bump, then the submission status/version update and the
+  outbox rows. The replay checks the linked policy first and returns it before
+  re-validating the request terms.
+- The expert also maps the same conversion path under `/api/v1`; the contract
+  documents `/internal/v1` as the expert surface and the public path as the
+  domain surface.
+- The policy link update uses the policy version it created, so the returned
+  policy is version 1 for a fresh conversion. A replay returns the linked
+  policy at its current version, which may be higher if the policy was changed
+  after conversion.
+
+Consequences:
+
+- A caller that expects SPEC UWR-01/UW-01 evidence (clearance and an approved
+  rating worksheet) can convert a `QUOTED` submission without either; the
+  command only checks the submission status.
+- A retried conversion is safe by the submission link, but a retried request
+  with different premium terms is not detected as a conflict. Clients must treat
+  the first successful conversion as authoritative.
+- Public policy reads cannot navigate from the policy to its source submission
+  until `submissionId` is projected; the conversion envelope and the expert read
+  can.
+
+Evidence:
+
+- `repos/eia-policy-domain/.../SubmissionController.java:115-140` (public
+  conversion route, 201/200, ETag fallback, replay marker)
+- `repos/eia-policy-domain/.../ConvertSubmissionCommand.java:20-26` (request
+  members and the upper-case currency pattern)
+- `repos/eia-policy-domain/.../SubmissionConversionResult.java:12-15` (public
+  `{submission, policy}` envelope)
+- `repos/eia-policy-domain/.../SubmissionService.java:53-65` (key normalization
+  and delegation)
+- `repos/eia-policy-domain/.../PolicyClient.java:875-897,967-1017` (expert
+  conversion call, both accepted response shapes, scoped read-back, ETag/replay
+  mapping)
+- `repos/eia-policy-domain/.../SubmissionDto.java:25-41` (optional `policyId`)
+- `repos/eia-policy-domain/.../PolicyDto.java:12-31` (no `submissionId`, the
+  public projection gap)
+- `repos/eia-policy-domain/.../PolicyClient.java:1474-1502` (400/404/409/422
+  problem preservation)
+- `repos/eia-policy-expert/.../UnderwritingSubmissionController.java:99-122`
+  (expert route and bare-policy response)
+- `repos/eia-policy-expert/.../ConvertSubmissionRequest.java:18-24`,
+  `SubmissionConversionService.java:82-157` (eligibility, term validation,
+  policy creation, coverage, link, status/version movement, event insert,
+  replay)
+- `repos/eia-policy-expert/.../UnderwritingSubmissionRules.java:109-174`
+  (convertible statuses, premium/currency/expiration normalization,
+  product-code gate)
+- `repos/eia-policy-expert/.../PolicyEvents.java:360-379` (the four-member
+  conversion payload and aggregate version)
+- `repos/eia-policy-expert/.../Policy.java:27-51` (nullable `submissionId`),
+  `PolicyRepository.java:93-126,252-265` (find by submission, bulk projection,
+  conditional assign and version bump)
+- `repos/eia-policy-expert/src/main/resources/schema.sql:852-861` (nullable
+  `submission_id`, FK, tenant-scoped unique, index)
+- `repos/eia-policy-expert/src/test/java/com/eia/policy/expert/SubmissionConversionIntegrationTest.java:66-301`
+  (fresh conversion, coverage, links, versions, event payload and aggregate
+  version, replay, non-convertible statuses, body validation, tenant wall,
+  explicit expiration, unlinked BOUND conversion)
+- `repos/eia-policy-expert/src/test/java/com/eia/policy/expert/UnderwritingSubmissionControllerTest.java:285-370`
+  and `SubmissionConversionServiceTest.java` (controller shape and service
+  rules)
+- `repos/eia-policy-domain/src/test/java/com/eia/policy/domain/SubmissionControllerTest.java:389-510`
+  and `SubmissionConversionClientTest.java:41-330` (public envelope, replay,
+  ETag fallback, validation, book wall, both expert response shapes, problem
+  preservation)
+
+Resolution: amend SPEC 11.2.14 to the implemented conversion command and the
+`policy.submission.converted` name, or implement the SPEC quote/bind command
+chain with the clearance/rating gates and align the response shape, replay
+semantics, and links. In either case decide whether `Policy.submissionId` should
+be public, whether the `Idempotency-Key` should be stored and request-hashed,
+and whether a conversion repeat with different terms must be a 409.
 
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-22
-Policy underwriting-submission contract:
+Policy submission-conversion contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -4490,7 +4662,7 @@ python: 3.12.8 (standard library only)
 
 OpenAPI 3.1 documents
   OK openapi/party.yaml  15 paths, 25 operations
-  OK openapi/policy.yaml  57 paths, 75 operations
+  OK openapi/policy.yaml  59 paths, 77 operations
   OK openapi/contract.yaml  43 paths, 62 operations
   OK openapi/direct-claims.yaml  51 paths, 74 operations
   OK openapi/assumed-claims.yaml  41 paths, 58 operations
@@ -4502,7 +4674,7 @@ OpenAPI 3.1 documents
 
 AsyncAPI 3 documents
   OK asyncapi/party.yaml  15 event channels
-  OK asyncapi/policy.yaml  38 event channels
+  OK asyncapi/policy.yaml  39 event channels
   OK asyncapi/contract.yaml  32 event channels
   OK asyncapi/direct-claims.yaml  28 event channels
   OK asyncapi/assumed-claims.yaml  21 event channels
@@ -4511,7 +4683,7 @@ AsyncAPI 3 documents
   OK asyncapi/document.yaml  24 event channels
   OK asyncapi/payment.yaml  20 event channels
   OK asyncapi/notifications.yaml  15 event channels
-  OK catalog: 227 unique published events across 10 verticals
+  OK catalog: 228 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -4519,7 +4691,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 16687 checks, 0 failures
+  PASS 16871 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -4906,7 +5078,18 @@ Additional checks and limits:
   missing-edge message; and dropping `policy.submission.created` from both
   catalog lists fails with the published and implemented set messages. All five
   were run on a throwaway copy, exited non-zero (exit 1), and the working copy
-  was left unchanged.
+  was left unchanged. The Policy submission-conversion pass added five more:
+  renaming the public
+  `/api/v1/policies/submissions/{submissionId}/convert` path fails with the
+  missing required-path and missing conversion-operation messages; removing
+  `premiumCurrency` from `ConvertPolicySubmissionRequest.required` fails with
+  the exact-required-list and member-order messages; replacing the expert 201
+  bare `Policy` with `ConvertPolicySubmissionResult` fails with the
+  bare-Policy-response message; removing `Policy.submissionId` fails with the
+  nullable-uuid message; and dropping `policy.submission.converted` from both
+  catalog lists fails with the published/implemented set, not-published, and
+  must-be-listed messages. All five were run on a throwaway copy, exited
+  non-zero (exit 1), and the working copy was left unchanged.
 
 ## Resolution policy
 

@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.38.0
+  version: 1.39.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -225,6 +225,18 @@ info:
     optional reason. They add two published and two implemented names, bringing
     the platform totals to 227 published and 108 implemented; Policy becomes 38
     published and 26 implemented (M-22, M-59).
+    The 2026-10-22 Policy submission-conversion slice adds one Policy name,
+    `policy.submission.converted`, with no SPEC 11.2.9 equivalent: SPEC 11.2.14
+    models the step as a quote/bind command chain and publishes no conversion
+    fact. It is written against the `UnderwritingSubmission` aggregate in the
+    same transaction as the new DRAFT policy, its base coverage and limit, the
+    `policy.submission_id` link, the submission status/version movement, and the
+    normal `policy.policy.created` fact. The payload carries exactly
+    `submissionId`, `submissionNumber`, `policyId`, and `policyNumber`; a replay
+    of an already-converted submission writes no event. It adds one published
+    and one implemented name, bringing the platform totals to 228 published and
+    109 implemented; Policy becomes 39 published and 27 implemented (M-22,
+    M-60).
     The platform
     event-ingest service
     is the inbox:
@@ -383,6 +395,7 @@ x-event-catalog:
       - policy.policy.legal-entity-assigned
       - policy.submission.created
       - policy.submission.status-changed
+      - policy.submission.converted
     implemented:
       - policy.policy.created
       - policy.policy.updated
@@ -410,6 +423,7 @@ x-event-catalog:
       - policy.policy.legal-entity-assigned
       - policy.submission.created
       - policy.submission.status-changed
+      - policy.submission.converted
     consumed:
       - direct.claim.registered
       - direct.claim.allocated

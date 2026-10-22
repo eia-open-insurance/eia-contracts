@@ -2783,7 +2783,8 @@ Semantics:
   clearance, rating, referral, quote, authority, declination, and producer
   slices and the `CLEARANCE`/`RATING` intermediate states, and names the facts
   `policy.submission.received` and `policy.submission.declined`. The
-  implemented short path, six-state graph, intake-only aggregate, and the
+  implemented short path, six-state graph, intake aggregate (conversion is the
+  follow-on slice below), and the
   `policy.submission.created`/`policy.submission.status-changed` names are
   narrower and are recorded in M-01, M-22, and M-59.
 
@@ -2795,6 +2796,79 @@ responses and their codes, the bare-array list, the absence of a replay 200,
 the two implemented channels and their ordered payload members, the
 `IMPLEMENTED_EVENTS` entries, and the catalog entries. The full run passes
 16,687 checks.
+
+### Policy submission conversion (2026-10-22)
+
+Policy 2.19.0 adds the submission-to-policy conversion command. The change is
+additive: two operations (the public envelope and the expert bare-policy alias),
+two schemas, two nullable link members, and one implemented event name; no
+existing path, field, or event name changes.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/policy.yaml` | 2.19.0 | Additive | `POST /api/v1/policies/submissions/{submissionId}/convert`, its `/internal/v1` expert alias, the `ConvertPolicySubmissionRequest` and `ConvertPolicySubmissionResult` schemas, the nullable `Policy.submissionId` and `PolicySubmission.policyId` links, and the 400/404/409/422 responses. |
+| `asyncapi/policy.yaml` | 1.16.0 | Additive | The implemented `policy.submission.converted` channel, `send` operation, and four-member `PolicySubmissionConvertedData` payload. |
+| `asyncapi/event-catalog.yaml` | 1.39.0 | Additive | The new name is published and implemented (228 published and 109 implemented in total; Policy 39 published and 27 implemented). |
+
+Semantics:
+
+- `POST /api/v1/policies/submissions/{submissionId}/convert` accepts
+  `{premiumAmount, premiumCurrency, expirationDate?}`. `premiumAmount` is a
+  non-negative money amount with at most four fraction digits and
+  `premiumCurrency` is a three-letter ISO 4217 code; the expiration override is
+  optional and defaults to the submission's requested effective date plus one
+  year. Every other policy term comes from the submission: the applicant,
+  product code, requested effective date, and requested limit and currency.
+- Only a `QUOTED` submission or a `BOUND` submission with no linked policy is
+  convertible. A fresh conversion creates the policy in `DRAFT` with the normal
+  server-generated `POL-{YYYY}-{7 digits}` number and one base coverage and
+  limit schedule when the requested limit is positive. The policy row records
+  the source in `submissionId`, the submission records the policy in
+  `policyId`, a `QUOTED` submission moves to `BOUND`, a `BOUND` submission
+  keeps its status and only advances its version, and the tenant-scoped unique
+  link means one submission produces at most one policy.
+- The fresh conversion is 201 with the `{submission, policy}` envelope and the
+  strong policy `ETag`. The accepted command writes `policy.submission.converted`
+  with `{submissionId, submissionNumber, policyId, policyNumber}` plus the
+  normal `policy.policy.created` in the same transaction as the policy, the
+  base coverage, and the submission link; a rollback leaves neither row nor
+  event. A repeated conversion is 200 with `Idempotent-Replayed: true`, returns
+  the linked policy at its current version, and writes nothing. The request
+  body is not compared on the replay path.
+- A non-convertible status is 409 `SUBMISSION_NOT_CONVERTIBLE` with
+  `meta.submissionId` and `meta.currentStatus`; a lost optimistic write is 409
+  `CONCURRENT_MODIFICATION`. An unknown or foreign submission is 404
+  `SUBMISSION_NOT_FOUND` and a supplied non-DIRECT book is 404
+  `BOOK_SCOPE_VIOLATION`. `X-EIA-Tenant` is required (400
+  `MISSING_TENANT_HEADER`/`INVALID_TENANT_HEADER`); a missing, negative, or
+  malformed premium is 400 `VALIDATION_ERROR` or the expert's
+  `INVALID_CONVERSION_PREMIUM`/`INVALID_CONVERSION_CURRENCY`, and an explicit
+  expiration on or before the requested effective date is 400
+  `INVALID_CONVERSION_EXPIRATION`. A submission `productCode` longer than the
+  32-character policy column is 422 `PRODUCT_CODE_TOO_LONG_FOR_POLICY`.
+- The `/internal/v1` expert alias returns the bare `Policy`, not the public
+  envelope; the domain accepts it (or an expert envelope), composes
+  `{submission, policy}`, and preserves the expert 400/404/409/422 problems.
+  The expert does not consult the forwarded `Idempotency-Key`: replay is keyed
+  by the submission's linked policy, not by the key or a request hash. The
+  submission row lock and the tenant-scoped unique `submission_id` are the
+  concurrency guards (M-06, M-07).
+- The public domain policy projection still drops `Policy.submissionId`, while
+  the expert returns it. `PolicySubmission.policyId` is omitted from the public
+  payload while null and published once linked. SPEC 11.2.14 models the step as
+  a quote/bind command chain and names no conversion route or event, so the
+  short path, the replay semantics, the links, and the
+  `policy.submission.converted` name are recorded in M-01, M-22, M-60.
+
+The validator requires the public conversion operation with the tenant,
+optional book, `Idempotency-Key`, and `submissionId` parameters, the required
+`ConvertPolicySubmissionRequest`, the 201/200 `ConvertPolicySubmissionResult`
+responses with `ETag` and `Idempotent-Replayed`, the 400/404/409/422 problems
+and their codes, the `submission`/`policy` envelope members, the nullable
+`Policy.submissionId` and `PolicySubmission.policyId` links, and the
+`/internal/v1` operation with the bare `Policy` response. It also requires the
+implemented `policy.submission.converted` channel and payload and the
+`IMPLEMENTED_EVENTS` and catalog entries. The full run passes 16,871 checks.
 
 ### Compatibility matrix
 
@@ -3944,8 +4018,9 @@ Rules:
 
 Underwriting submissions are a top-level DIRECT-book collection rather than a
 policy child: they exist before a policy and are served at
-`/api/v1/policies/submissions`. The expert keeps the same four operations under
-`/internal/v1` for the domain adapter; that alias is an implementation detail.
+`/api/v1/policies/submissions`. The expert keeps the same four operations plus
+the conversion under `/internal/v1` for the domain adapter; that alias is an
+implementation detail.
 
 | Operation | Path | Success | Errors |
 |---|---|---|---|
@@ -3953,14 +4028,16 @@ policy child: they exist before a policy and are served at
 | Create | `POST /api/v1/policies/submissions` | 201 `PolicySubmission` | 400, 404, 409 |
 | Read | `GET /api/v1/policies/submissions/{submissionId}` | 200 `PolicySubmission` | 400, 404 |
 | Transition | `PATCH /api/v1/policies/submissions/{submissionId}/status` | 200 `PolicySubmission` | 400, 404, 409 |
+| Convert | `POST /api/v1/policies/submissions/{submissionId}/convert` | 201 `{submission, policy}` | 400, 404, 409, 422 |
 
 The projection is `{submissionId, submissionNumber, tenantId, applicantPartyId,
 productCode, requestedEffectiveDate, requestedLimitAmount,
 requestedLimitCurrency, tortCodes, notes, status, version, createdAt,
-updatedAt}`. `submissionNumber` is the immutable server-generated
+updatedAt, policyId?}`. `submissionNumber` is the immutable server-generated
 `SUB-{YYYY}-{7 digits}` business key, unique per tenant; `tenantId` is filled
 from the scoped request because the expert row does not expose it. `notes` is
 null when absent and `tortCodes` is an empty array when none were supplied.
+`policyId` appears once a conversion has linked a policy.
 `requestedLimitAmount` is a JSON number with at most four fraction digits
 rather than the canonical money string, while the created event payload carries
 the same amount as a scale-4 decimal string (M-03).
@@ -4005,13 +4082,43 @@ Rules:
   second submission with a new number. `If-Match` is accepted and forwarded on
   the status command, but the expert compares neither the header nor an
   `expectedVersion` body field, so a stale tag is not itself a 409 (M-06, M-07).
+- Conversion accepts `{premiumAmount, premiumCurrency, expirationDate?}` and
+  turns a `QUOTED` submission or an unlinked `BOUND` submission into a `DRAFT`
+  policy from the submission applicant, product, requested effective date, and
+  requested limit/currency. The expiration defaults to the requested effective
+  date plus one year and must be after it. A fresh conversion is 201 with the
+  `{submission, policy}` envelope and the strong policy `ETag`; it creates one
+  base coverage and limit when the requested limit is positive, records
+  `submissionId` on the policy and `policyId` on the submission, moves
+  `QUOTED` to `BOUND` (a `BOUND` submission just advances its version), and
+  writes `policy.submission.converted` and the normal `policy.policy.created`
+  in the same transaction. A repeat is 200 with `Idempotent-Replayed: true`,
+  returns the linked policy, and writes nothing.
+- A non-convertible status is 409 `SUBMISSION_NOT_CONVERTIBLE` with
+  `meta.submissionId` and `meta.currentStatus`; a lost optimistic write is 409
+  `CONCURRENT_MODIFICATION`. An unknown or foreign submission is 404
+  `SUBMISSION_NOT_FOUND`, another book is 404 `BOOK_SCOPE_VIOLATION`, a
+  missing/negative/malformed premium is 400 `VALIDATION_ERROR` or
+  `INVALID_CONVERSION_PREMIUM`/`INVALID_CONVERSION_CURRENCY`, an expiration on
+  or before the effective date is 400 `INVALID_CONVERSION_EXPIRATION`, and a
+  submission product code longer than the policy column is 422
+  `PRODUCT_CODE_TOO_LONG_FOR_POLICY`.
+- The expert conversion route returns the bare `Policy` rather than the public
+  envelope, and the domain composes `{submission, policy}` while preserving the
+  expert 400/404/409/422 problems. The expert does not consult the forwarded
+  `Idempotency-Key`; replay is keyed by the linked policy, and the request body
+  is not compared. The public domain policy projection still drops
+  `Policy.submissionId`, while `PolicySubmission.policyId` is omitted while null
+  (M-06, M-07, M-60).
 - SPEC 11.2.14 mounts the collection at `/api/v1/policy/submissions`, adds the
   clearance, rating, referral, quote, authority, declination, and producer
-  slices and the `CLEARANCE`/`RATING` intermediate states, and names the facts
+  slices and the `CLEARANCE`/`RATING` intermediate states, models conversion as
+  a quote/bind command chain, and names the facts
   `policy.submission.received` and `policy.submission.declined`. The implemented
-  short path, six-state graph, intake-only aggregate, and
-  `policy.submission.created`/`policy.submission.status-changed` names are
-  narrower and are recorded in M-01, M-22, and M-59.
+  short path, six-state graph, conversion command, and
+  `policy.submission.created`/`policy.submission.status-changed`/
+  `policy.submission.converted` names are narrower and are recorded in M-01,
+  M-22, M-59, and M-60.
 
 ### Global search
 
@@ -4472,7 +4579,12 @@ missing directory.
    `PolicySubmissionCreatedData` and nine-member
    `PolicySubmissionStatusChangedData` payloads, their ordered members, the
    six-value status enums, the nullable notes and reason, and the
-   `UnderwritingSubmission` channel wording.
+   `UnderwritingSubmission` channel wording. It also requires the implemented
+   `policy.submission.converted` channel and `send` operation with the
+   four-member `PolicySubmissionConvertedData` payload, the public conversion
+   operation with the `{submission, policy}` envelope, the expert conversion
+   operation with the bare `Policy` response, and the nullable
+   `Policy.submissionId` and `PolicySubmission.policyId` links.
 5. **Event catalog cross-check.** The published set in `event-catalog.yaml`
    must equal the channel addresses in the matching vertical document, event
    names must be unique across the platform and must match
@@ -4502,6 +4614,7 @@ missing directory.
    `policy.policy.rated`,
    `policy.submission.created`,
    `policy.submission.status-changed`,
+   `policy.submission.converted`,
    `policy.billing-plan.created`, `policy.billing-plan.adjusted`,
    `policy.installment.paid`,
    `policy.installment.waived`, `policy.dunning.sent`,

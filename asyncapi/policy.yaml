@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:policy
 info:
   title: EIA Policy events
-  version: 1.15.0
+  version: 1.16.0
   summary: Published domain event names for the Policy vertical.
   description: >
     Event contract for the Policy vertical. The authoritative event names are
@@ -103,9 +103,19 @@ info:
     The names replace the SPEC 11.2.9 `policy.submission.received` and
     `policy.submission.declined` pair and add a status fact SPEC does not define
     (M-22, M-59).
+    The submission-conversion slice adds one implemented fact.
+    `policy.submission.converted` carries the four identity members a
+    downstream policy-registration or document consumer needs to join the two
+    aggregates: `submissionId`, `submissionNumber`, `policyId`, and
+    `policyNumber`. It is written against the same `UnderwritingSubmission`
+    aggregate as the intake and status facts, keyed by the submission id at the
+    post-conversion submission version plus the outbox convention offset. A
+    replay of an already-converted submission writes neither this fact nor
+    another policy. SPEC 11.2.14 models conversion as a quote/bind command chain
+    and publishes no conversion fact, so the name is new (M-22, M-60).
     The other SPEC 11.2.9 and 11.2.13 names remain planned, and SPEC 11.2.14's
     `policy.submission.received` and `policy.submission.declined` names are not
-    published; the two implemented submission facts above replace them.
+    published; the three implemented submission facts above replace them.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -789,9 +799,11 @@ channels:
       and version but no history. The envelope uses `aggregateType:
       UnderwritingSubmission` with the submission id as `aggregateId` and
       partition key, at the version after the transition plus the outbox
-      convention offset. `BOUND`, `DECLINED`, and `WITHDRAWN` are terminal, so
-      no later event is written from them. The name has no SPEC 11.2.9
-      equivalent (M-22, M-59).
+      convention offset. `BOUND`, `DECLINED`, and `WITHDRAWN` are terminal for
+      the status command, so no later status event is written from them;
+      converting an unlinked `BOUND` submission still writes
+      `policy.submission.converted` once. The name has no SPEC 11.2.9 equivalent
+      (M-22, M-59).
     x-event-type: policy.submission.status-changed
     x-event-version: 1
     x-status: implemented
@@ -802,6 +814,33 @@ channels:
         $ref: '#/components/messages/DomainEvent'
       PolicySubmissionStatusChangedData:
         $ref: '#/components/messages/PolicySubmissionStatusChangedData'
+  PolicySubmissionConverted:
+    address: policy.submission.converted
+    title: policy.submission.converted
+    description: >
+      Emitted when a `QUOTED` submission (or an unlinked `BOUND` submission) is
+      converted into a policy, in the same transaction as the policy insert, its
+      single base coverage and limit, the `policy.submission_id` link, the
+      submission status/version movement, and the normal
+      `policy.policy.created` fact. The payload is exactly the four identity
+      members `submissionId`, `submissionNumber`, `policyId`, and
+      `policyNumber`, so a consumer can join the pre-policy and policy
+      aggregates. The envelope uses `aggregateType: UnderwritingSubmission` with
+      the submission id as `aggregateId` and partition key, at the
+      post-conversion submission version plus the outbox convention offset. A
+      replay of an already-converted submission returns the linked policy and
+      writes no row and no event. The name has no SPEC 11.2.9 equivalent: SPEC
+      11.2.14 models the step as a quote/bind command chain (M-22, M-60).
+    x-event-type: policy.submission.converted
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.2.14
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      PolicySubmissionConvertedData:
+        $ref: '#/components/messages/PolicySubmissionConvertedData'
   PolicyCoverageBlockUpdated:
     address: policy.coverage-block.updated
     title: policy.coverage-block.updated
@@ -1200,6 +1239,18 @@ operations:
       transition, in the same transaction as the conditional row update; a
       rejected or concurrent transition writes no event.
     x-event-type: policy.submission.status-changed
+    x-status: implemented
+  publishPolicySubmissionConverted:
+    action: send
+    channel:
+      $ref: '#/channels/PolicySubmissionConverted'
+    summary: Publish policy.submission.converted
+    description: >
+      Publishes policy.submission.converted when a submission becomes a policy,
+      in the same transaction as the policy insert, its base coverage, the
+      submission link, and the submission status/version movement. A replay of
+      an already-converted submission writes no event.
+    x-event-type: policy.submission.converted
     x-status: implemented
   publishPolicyCoverageBlockUpdated:
     action: send
@@ -2176,6 +2227,38 @@ components:
             description: >
               Trimmed transition reason; explicitly null when the command
               carried none. It is event-only and is not a submission column.
+    PolicySubmissionConvertedData:
+      name: PolicySubmissionConvertedData
+      title: policy.submission.converted data
+      summary: One underwriting submission converted into a policy.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - submissionId
+          - submissionNumber
+          - policyId
+          - policyNumber
+        properties:
+          submissionId:
+            type: string
+            format: uuid
+          submissionNumber:
+            type: string
+            maxLength: 32
+            description: Server-generated immutable `SUB-{YYYY}-{7 digits}` number.
+            examples:
+              - SUB-2026-0000001
+          policyId:
+            type: string
+            format: uuid
+          policyNumber:
+            type: string
+            maxLength: 32
+            description: Server-generated `POL-{YYYY}-{7 digits}` policy number.
+            examples:
+              - POL-2026-0000001
   securitySchemes:
     outboxSignature:
       type: httpApiKey
@@ -2191,8 +2274,8 @@ x-implementation:
   publisher: eia-policy-expert
   subscriber: none
   notes: >
-    Twenty-six Policy events are written to the transactional outbox in the same
-    transaction as the aggregate write and dispatched by the platform outbox
+    Twenty-seven Policy events are written to the transactional outbox in the
+    same transaction as the aggregate write and dispatched by the platform outbox
     dispatcher when `eia.outbox.enabled=true`: `created`, `updated`,
     `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`,
     `premium-audited`, `rated`, `billing-plan.created`, `billing-plan.adjusted`,
@@ -2204,7 +2287,8 @@ x-implementation:
     `policy.credit-note.cancelled`, and `policy.credit-note.reversed`, the
     legal-entity facts `policy.legal-entity.created` and
     `policy.policy.legal-entity-assigned`, and the submission facts
-    `policy.submission.created` and `policy.submission.status-changed`. The renewal
+    `policy.submission.created`, `policy.submission.status-changed`, and
+    `policy.submission.converted`. The renewal
     event carries both policy identities and the lineage link; the billing plan
     event carries the complete schedule; the adjustment event carries the
     derived amount, the resulting gross plan total, the appended installment
@@ -2230,10 +2314,13 @@ x-implementation:
     the policy aggregate at the bumped version and is emitted only when the
     worksheet is applied; a calculation-only rating writes no event. It carries
     the worksheet identity and the canonical hash so a consumer can reproduce
-    the applied premium. The two submission facts are keyed by the
-    `UnderwritingSubmission` aggregate and carry the intake facts on create and
-    the previous/new status, version, update instant, and optional reason on a
-    transition; the reason is event-only because the row has no history. The other
+    the applied premium. The three submission facts are keyed by the
+    `UnderwritingSubmission` aggregate and carry the intake facts on create, the
+    previous/new status, version, update instant, and optional reason on a
+    transition, and the four identity members linking the submission to its
+    policy on conversion; the reason is event-only because the row has no
+    history, and conversion also emits the normal `policy.policy.created` fact
+    against the new policy. The other
     SPEC 11.2.9 and 11.2.13 names remain planned. There is no
     business subscriber or subscription registry yet.
 

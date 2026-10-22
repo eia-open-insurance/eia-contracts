@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Policy API
-  version: 2.18.0
+  version: 2.19.0
   summary: Direct-book policy administration and the Policy expert API.
   description: >
     This document describes the implemented public Policy domain API and the
@@ -448,6 +448,42 @@ info:
       `policy.submission.declined`; the implemented facts are
       `policy.submission.created` and `policy.submission.status-changed`
       (M-01, M-22, M-59).
+
+    The 2026-10-22 submission-conversion slice closes the intake workflow:
+
+    - `POST /api/v1/policies/submissions/{submissionId}/convert` accepts
+      `{premiumAmount, premiumCurrency, expirationDate?}` and turns a `QUOTED`
+      submission (or a `BOUND` submission with no policy yet) into a new `DRAFT`
+      policy. A fresh conversion is 201 with the `{submission, policy}`
+      envelope; repeating it for the already-linked submission is 200 with
+      `Idempotent-Replayed: true`, the same policy, and no write.
+    - The policy takes the submission applicant, product code, requested
+      effective date, and requested limit and currency, plus the command
+      premium. `expirationDate` defaults to the requested effective date plus
+      one year and an explicit value must be after that date. When the requested
+      limit is positive the command also creates one base coverage and its
+      limit schedule.
+    - The policy records the source in `submissionId`; the submission records
+      the created policy in `policyId`, moves `QUOTED` to `BOUND` (a `BOUND`
+      submission without a policy keeps its status and just advances), and both
+      aggregate versions advance. The link is unique per tenant, so one
+      submission produces at most one policy.
+    - The accepted command writes `policy.submission.converted` with
+      `{submissionId, submissionNumber, policyId, policyNumber}` and the normal
+      `policy.policy.created` in the same transaction as the policy, the base
+      coverage, and the submission link. A replay writes neither row nor event.
+    - A non-convertible status is 409 `SUBMISSION_NOT_CONVERTIBLE`; an unknown
+      or foreign submission is 404 `SUBMISSION_NOT_FOUND`; a missing, negative,
+      malformed, or timeline-invalid term is 400 `VALIDATION_ERROR` or
+      `INVALID_CONVERSION_EXPIRATION`; and a submission product code longer than
+      the policy column is 422 `PRODUCT_CODE_TOO_LONG_FOR_POLICY`. The
+      `/internal/v1` expert alias returns the bare `Policy`; the public domain
+      composes the envelope.
+
+    SPEC 11.2.14 models the submission-to-policy step as a quote/bind command
+    chain and names no conversion route or event, so the implemented command and
+    `policy.submission.converted` name are recorded in MISMATCHES.md M-01, M-22,
+    and M-60.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -846,6 +882,132 @@ paths:
             application/problem+json:
               schema:
                 $ref: './components.yaml#/components/schemas/Problem'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/submissions/{submissionId}/convert:
+    post:
+      operationId: convertPolicySubmission
+      tags:
+        - Policy
+      summary: Convert an underwriting submission into a policy.
+      description: >
+        Converts one `QUOTED` submission into a new `DRAFT` policy, or returns
+        the policy already linked to the submission. The body supplies the
+        written premium and its currency; `expirationDate` is optional and
+        defaults to the requested effective date plus one year. The policy takes
+        the submission `applicantPartyId`, `productCode`,
+        `requestedEffectiveDate`, and requested limit and currency, and records
+        the source in `submissionId`. When the requested limit is positive the
+        command also creates one base coverage and its limit schedule with the
+        same coverage rules as the coverage command.
+
+        A fresh conversion is 201 with the `{submission, policy}` envelope. The
+        converted submission is `BOUND` (a `BOUND` submission without a policy
+        keeps its status), carries `policyId`, and its `version` advances. The
+        created policy is `DRAFT` with the normal server-generated
+        `POL-{YYYY}-{7 digits}` number, the bumped `version` 1, and a strong
+        `ETag`; a replay keeps the linked policy's current tag. The accepted
+        command writes `policy.submission.converted` and the normal
+        `policy.policy.created` in the same transaction as the policy, the base
+        coverage, and the submission link, so a rollback leaves neither row nor
+        event. Repeating the command for an already-converted submission is 200
+        with `Idempotent-Replayed: true`, the same policy, and no write or
+        event; the request members are not compared with the original
+        conversion.
+
+        `premiumAmount` must be zero or greater with at most four fraction
+        digits, and `premiumCurrency` must be three upper-case ISO 4217 letters
+        at the public domain (the expert trims and upper-cases it). A missing,
+        negative, or malformed premium is 400 `VALIDATION_ERROR`; the expert's
+        body backstops are `INVALID_CONVERSION_PREMIUM` and
+        `INVALID_CONVERSION_CURRENCY`, and an explicit expiration on or before
+        the requested effective date is 400 `INVALID_CONVERSION_EXPIRATION`. A
+        submission `productCode` longer than the 32-character policy column is
+        422 `PRODUCT_CODE_TOO_LONG_FOR_POLICY`. Only `QUOTED` and `BOUND`
+        submissions are convertible: any other status is 409
+        `SUBMISSION_NOT_CONVERTIBLE` with `meta.submissionId` and
+        `meta.currentStatus` and writes nothing, and a lost optimistic write is
+        409 `CONCURRENT_MODIFICATION`. An unknown or foreign submission is 404
+        `SUBMISSION_NOT_FOUND`. `X-EIA-Tenant` is required (400
+        `MISSING_TENANT_HEADER` or `INVALID_TENANT_HEADER`), an absent
+        `X-EIA-Book` is accepted, and another book is 404
+        `BOOK_SCOPE_VIOLATION` before the expert call. `Idempotency-Key` is
+        accepted and forwarded but the expert does not consult it: replay is
+        keyed by the submission's linked policy, not by the key or the request
+        body (MISMATCHES.md M-06, M-07, M-60).
+
+        The `/internal/v1` expert alias returns the bare `Policy`; this public
+        operation composes the envelope. SPEC 11.2.14 models the step as a
+        submission-scoped quote/bind command chain and names no conversion route
+        or event, so the implemented command and the
+        `policy.submission.converted` fact are recorded in MISMATCHES.md M-01,
+        M-22, and M-60.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirectOptional'
+        - $ref: './components.yaml#/components/parameters/IdempotencyKey'
+        - name: submissionId
+          in: path
+          required: true
+          description: Submission to convert.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConvertPolicySubmissionRequest'
+      responses:
+        '201':
+          description: >
+            Submission converted and policy created in DRAFT. The body is the
+            converted submission with `policyId` and the created policy. The
+            expert policy carries `submissionId`; the public policy projection
+            currently omits that member (MISMATCHES.md M-60).
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConvertPolicySubmissionResult'
+        '200':
+          description: >
+            Replay: the submission already has a linked policy. The same policy
+            is returned with `Idempotent-Replayed: true`; no policy, link, or
+            event is written and the supplied terms are not compared.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConvertPolicySubmissionResult'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            The submission status is not convertible, or the policy or
+            submission changed after it was read. A non-convertible status is
+            `SUBMISSION_NOT_CONVERTIBLE` with `meta.submissionId` and
+            `meta.currentStatus`; a lost optimistic write is
+            `CONCURRENT_MODIFICATION` with `meta.currentVersion` when the
+            command knows the version it read. Neither writes a row or an
+            event.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /api/v1/policies/{policyId}:
@@ -4303,6 +4465,99 @@ paths:
           $ref: './components.yaml#/components/responses/PreconditionRequired'
         default:
           $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/policies/submissions/{submissionId}/convert:
+    post:
+      operationId: expertConvertPolicySubmission
+      tags:
+        - Policy internal
+      summary: Convert an underwriting submission into a policy (expert).
+      description: >
+        The expert command behind the public conversion. The tenant comes from
+        `?tenantId=` or `X-EIA-Tenant`; `X-EIA-Book` is optional and must be
+        `DIRECT`, and another book is 404 `NOT_FOUND`. The body is the same
+        `{premiumAmount, premiumCurrency, expirationDate?}`: `premiumAmount` is
+        required and non-negative, the currency is trimmed and upper-cased to a
+        three-letter ISO 4217 code, and the expiration defaults to the requested
+        effective date plus one year and must be after it. A submission
+        `productCode` longer than the 32-character policy column is 422
+        `PRODUCT_CODE_TOO_LONG_FOR_POLICY`.
+
+        The response is the **bare** created `Policy` (this expert route does
+        not compose the public `{submission, policy}` envelope): 201 on a fresh
+        conversion with the strong `ETag` of the policy version, and 200 with
+        the same `Idempotent-Replayed: true` when the submission already has a
+        linked policy. A replay returns the linked policy at its current
+        version, writes nothing, and emits no event. The command accepts no
+        `Idempotency-Key` and compares no request body on the replay path; the
+        submission row lock and the tenant-scoped unique `submission_id` are
+        the concurrency guards. It writes `policy.submission.converted` and the
+        normal `policy.policy.created` in the same transaction as the policy,
+        the base coverage, and the submission link.
+
+        Only `QUOTED` and `BOUND` submissions are convertible: any other status
+        is 409 `SUBMISSION_NOT_CONVERTIBLE` with `meta.submissionId` and
+        `meta.currentStatus`, and a lost write is 409
+        `CONCURRENT_MODIFICATION`. An unknown or foreign submission is 404
+        `SUBMISSION_NOT_FOUND`. A missing or malformed body or term is 400
+        `VALIDATION_ERROR`, `INVALID_CONVERSION_PREMIUM`,
+        `INVALID_CONVERSION_CURRENCY`, or `INVALID_CONVERSION_EXPIRATION`. The
+        public domain preserves these problems and composes the envelope.
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirectOptional'
+        - name: submissionId
+          in: path
+          required: true
+          description: Submission to convert.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConvertPolicySubmissionRequest'
+      responses:
+        '201':
+          description: >
+            Submission converted and policy created in DRAFT. The body is the
+            bare created policy with `submissionId`.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Policy'
+        '200':
+          description: >
+            Replay: the submission already has a linked policy. The body is that
+            bare policy with `Idempotent-Replayed: true`; no write or event is
+            made.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Policy'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './components.yaml#/components/responses/UnprocessableContent'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
 components:
   securitySchemes:
     sessionCookie:
@@ -4390,6 +4645,16 @@ components:
             null when no entity is linked. SPEC LE-01 requires one issuing legal
             entity, but the implemented link is nullable and the assignment
             command can clear it (MISMATCHES.md M-43).
+        submissionId:
+          type: [string, 'null']
+          format: uuid
+          description: >
+            Nullable link to the underwriting submission this policy was
+            converted from (SPEC 11.2.14). The conversion command writes it and
+            bumps the policy version; every other policy carries null. This
+            member is optional because the public domain policy projection
+            currently drops it while the expert returns it on every policy read
+            (MISMATCHES.md M-60).
     PolicyStatus:
       type: string
       description: Policy lifecycle status from SPEC 11.2.6.
@@ -6501,6 +6766,15 @@ components:
         updatedAt:
           type: string
           format: date-time
+        policyId:
+          type: [string, 'null']
+          format: uuid
+          description: >
+            Nullable link to the policy created by the conversion command. It is
+            null until a conversion succeeds and is unique per tenant, so a
+            submission maps to at most one policy. The expert returns the member
+            (null before conversion); the public domain omits it while null and
+            publishes it once linked (MISMATCHES.md M-60).
     PolicySubmissionStatus:
       type: string
       description: >
@@ -6600,6 +6874,53 @@ components:
           description: >
             Optional audit explanation carried on the status-changed event; it
             is not stored on the submission row.
+    ConvertPolicySubmissionRequest:
+      type: object
+      description: >
+        Conversion command body. `premiumAmount` and `premiumCurrency` are
+        required; `expirationDate` is optional and defaults to the submission's
+        requested effective date plus one year. Every other policy term comes
+        from the submission. `premiumAmount` is a non-negative decimal string
+        with at most fifteen integer and four fraction digits; the public domain
+        rejects a longer fraction, while the expert rounds it to four fraction
+        digits HALF_UP. `premiumCurrency` is an upper-case three-letter ISO 4217
+        code at the public domain (the expert trims and upper-cases it). An
+        explicit `expirationDate` must be strictly after the requested effective
+        date, otherwise the expert returns 400
+        `INVALID_CONVERSION_EXPIRATION`.
+      required:
+        - premiumAmount
+        - premiumCurrency
+      properties:
+        premiumAmount:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+        premiumCurrency:
+          $ref: './components.yaml#/components/schemas/CurrencyCode'
+        expirationDate:
+          type: string
+          format: date
+          description: >
+            Optional policy expiration override. Defaults to the requested
+            effective date plus one year; when supplied it must be strictly
+            after that effective date.
+    ConvertPolicySubmissionResult:
+      type: object
+      description: >
+        Public conversion response: the converted submission and the policy
+        created from it. Both members are required. `submission.status` is
+        `BOUND` and `submission.policyId` is the created policy; the policy is
+        `DRAFT` with its strong `ETag`. The expert policy carries
+        `submissionId`; the public domain `PolicyDto` currently drops that
+        member from this envelope (M-60). The expert route returns the bare
+        policy instead of the envelope.
+      required:
+        - submission
+        - policy
+      properties:
+        submission:
+          $ref: '#/components/schemas/PolicySubmission'
+        policy:
+          $ref: '#/components/schemas/Policy'
     MassTortProfile:
       type: object
       description: >
@@ -7589,6 +7910,17 @@ x-implementation:
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/UnderwritingSubmissionServiceTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/UnderwritingSubmissionRulesTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/UnderwritingSubmissionIntegrationTest.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/ConvertSubmissionCommand.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/SubmissionConversionResult.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/SubmissionConversionClientTest.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/ConvertSubmissionRequest.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/SubmissionConversionService.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/SubmissionConversionResult.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/Policy.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyRepository.java
+    - repos/eia-policy-expert/src/main/resources/schema.sql
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/SubmissionConversionServiceTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/SubmissionConversionIntegrationTest.java
   errorEnvelope: >
     Canonical RFC 9457 Problem with content type application/problem+json, from
     both the Policy domain and the Policy expert. The vertical keeps its legacy
@@ -7785,32 +8117,57 @@ x-implementation:
     `policy.submission.created` and `policy.submission.status-changed` against
     the `UnderwritingSubmission` aggregate rather than the SPEC names (M-22,
     M-59).
+
+    Conversion is a submission command that creates a policy, not a policy
+    child. The domain proxies the expert's `/internal/v1` alias with the tenant,
+    DIRECT book, and the optional `Idempotency-Key`, and composes the public
+    `{submission, policy}` envelope from the expert's bare `Policy`. The expert
+    owns the convertible-status gate (`QUOTED` or `BOUND`), the premium and
+    currency normalization, the default/validated expiration, the creation of
+    the DRAFT policy through the normal policy path, the single base coverage
+    and limit schedule when the requested limit is positive, the nullable
+    `policy.submission_id` link with its tenant-scoped unique constraint, the
+    submission status/version movement, and the replay of the linked policy. A
+    fresh conversion is 201; a replay is 200 with `Idempotent-Replayed: true`,
+    returns the current linked policy, and writes nothing. The request body is
+    not compared on replay and the expert never replays the forwarded
+    `Idempotency-Key`; the submission row lock and the unique link are the
+    concurrency guards (M-06, M-07). A non-convertible status is 409
+    `SUBMISSION_NOT_CONVERTIBLE`, a lost write is 409 `CONCURRENT_MODIFICATION`,
+    an unknown or foreign submission is 404 `SUBMISSION_NOT_FOUND`, and a
+    submission product code longer than the 32-character policy column is 422
+    `PRODUCT_CODE_TOO_LONG_FOR_POLICY`. The conversion writes
+    `policy.submission.converted` and the normal `policy.policy.created` in the
+    same transaction as the policy, the coverage, and the link; the SPEC 11.2.14
+    quote/bind command chain and the SPEC-less route and event name are recorded
+    in M-01, M-22, and M-60.
 x-compatibility:
-  contractVersion: 2.18.0
-  previousContractVersion: 2.17.0
+  contractVersion: 2.19.0
+  previousContractVersion: 2.18.0
   breaking: []
   compatible:
-    - Adds GET/POST /api/v1/policies/submissions and GET /api/v1/policies/submissions/{submissionId}.
-    - Adds PATCH /api/v1/policies/submissions/{submissionId}/status with the six-state transition graph.
-    - Adds the PolicySubmission projection, the CreatePolicySubmissionRequest body, the UpdatePolicySubmissionStatusRequest body, and the PolicySubmissionStatus enum.
-    - Documents the per-tenant SUB-{YYYY}-{7 digits} number, the RECEIVED creation state, the six statuses and their one-way transitions, and the strong ETag from the submission version.
-    - Documents the 400 tenant and validation codes, the 404 SUBMISSION_NOT_FOUND and BOOK_SCOPE_VIOLATION, and the 409 DUPLICATE_SUBMISSION_NUMBER, INVALID_SUBMISSION_TRANSITION, and CONCURRENT_MODIFICATION codes.
-    - Adds the policy.submission.created and policy.submission.status-changed events.
+    - Adds POST /api/v1/policies/submissions/{submissionId}/convert and its /internal/v1 expert alias.
+    - Adds the ConvertPolicySubmissionRequest and ConvertPolicySubmissionResult schemas.
+    - Adds the optional nullable Policy.submissionId link and the optional nullable PolicySubmission.policyId link.
+    - Documents the 201 fresh conversion, the 200 linked-policy replay with Idempotent-Replayed, the strong policy ETag, and the 400/404/409/422 problems.
+    - Adds the policy.submission.converted event.
     - Removes no path or field and changes no existing field meaning.
   note: >
-    The underwriting-submission slice is additive over 2.17.0: four public
-    operations, three schemas, one status enum, and two implemented event names.
-    A submission is a tenant-owned pre-policy intake aggregate created RECEIVED
-    at version 0 with a server-generated per-tenant number; the six-state graph
-    is one-way and BOUND/DECLINED/WITHDRAWN are terminal. The list is a bare
-    array and the public route exposes no q/status filter. The optional
-    Idempotency-Key and If-Match headers are accepted but not honoured by the
-    expert, and requestedLimitAmount is a JSON number rather than a money
-    string. The catalog grows to 227 published and 108 implemented names, with
-    Policy at 38 published and 26 implemented. The SPEC base path, the missing
-    clearance/rating/referral/quote/producer slices and CLEARANCE/RATING states,
-    the different event names, and the unhonoured headers are recorded in
-    MISMATCHES.md M-01, M-03, M-06, M-07, M-22, and M-59.
+    The submission-conversion slice is additive over 2.18.0: two operations (the
+    public envelope and the expert bare-policy alias), two schemas, two nullable
+    link members, and one implemented event name. A QUOTED or unlinked BOUND
+    submission becomes a DRAFT policy from its applicant, product, requested
+    effective date, and requested limit plus the command premium; the expiration
+    defaults to one year and both aggregate versions advance. A repeat is a 200
+    replay of the linked policy with Idempotent-Replayed: true and no write. The
+    expert does not consult the forwarded Idempotency-Key and does not compare
+    the request body on replay; the submission row lock and the tenant-scoped
+    unique submission link are the guards. The public domain policy projection
+    still drops Policy.submissionId, which M-60 records. The catalog grows to 228
+    published and 109 implemented names, with Policy at 39 published and 27
+    implemented. The SPEC quote/bind command chain, the SPEC-less route, and the
+    new event name are recorded in MISMATCHES.md M-01, M-06, M-07, M-22, and
+    M-60.
 x-planned-operations:
   - method: POST
     path: /api/v1/policies/{policyId}/bind

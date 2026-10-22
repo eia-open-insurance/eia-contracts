@@ -2087,6 +2087,52 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   refreshes the scope and validation evidence.
 - `python scripts/validate_contracts.py` passes 16,687 checks with 0 failures.
 
+### Added in the Policy submission-conversion contract (2026-10-22)
+
+- `openapi/policy.yaml` is 2.19.0: adds
+  `POST /api/v1/policies/submissions/{submissionId}/convert` and its
+  `/internal/v1` expert alias, the `ConvertPolicySubmissionRequest` body
+  (`premiumAmount` and `premiumCurrency` required; optional `expirationDate`)
+  and the `ConvertPolicySubmissionResult` envelope (`submission` and `policy`),
+  the nullable `Policy.submissionId` and `PolicySubmission.policyId` links, and
+  the 400/404/409/422 responses. The public operation returns 201 with the
+  `{submission, policy}` envelope on a fresh conversion and 200 with
+  `Idempotent-Replayed: true` on a repeat, with the strong policy `ETag`; the
+  expert alias documents the bare `Policy` response. The convertible statuses
+  are `QUOTED` and `BOUND`; a non-convertible status is 409
+  `SUBMISSION_NOT_CONVERTIBLE`, a lost write is 409
+  `CONCURRENT_MODIFICATION`, an unknown or foreign submission is 404
+  `SUBMISSION_NOT_FOUND`, the body failures are 400
+  `VALIDATION_ERROR`/`INVALID_CONVERSION_*`, and an over-long submission
+  product code is 422 `PRODUCT_CODE_TOO_LONG_FOR_POLICY`.
+  `x-compatibility` moves to 2.19.0 over 2.18.0.
+- `asyncapi/policy.yaml` is 1.16.0: the implemented
+  `policy.submission.converted` channel and `send` operation with the
+  four-member `PolicySubmissionConvertedData` payload (`submissionId`,
+  `submissionNumber`, `policyId`, and `policyNumber`). The event is keyed by the
+  `UnderwritingSubmission` aggregate at the post-conversion submission version
+  plus the outbox convention offset and keeps `eventVersion` 1; a replay writes
+  no event.
+- `asyncapi/event-catalog.yaml` is 1.39.0: `policy.submission.converted` is
+  published and implemented, for 228 published and 109 implemented names
+  (Policy 39 published and 27 implemented).
+- `scripts/validate_contracts.py` requires the public conversion operation with
+  the tenant, optional-book, `Idempotency-Key`, and `submissionId` parameters,
+  the required `ConvertPolicySubmissionRequest`, the 201/200
+  `ConvertPolicySubmissionResult` responses with `ETag` and
+  `Idempotent-Replayed`, the 400/404/409/422 responses and their codes, the
+  `submission`/`policy` envelope members, the nullable `Policy.submissionId`
+  and `PolicySubmission.policyId` links, the `/internal/v1` operation with the
+  bare `Policy` response, the implemented conversion channel and its ordered
+  payload members, the `IMPLEMENTED_EVENTS` entry, and the catalog entry.
+- `README.md` records the additive versions, the request and both response
+  shapes, the status/link/version/event rules, the replay semantics, the
+  unhonoured idempotency key, the public projection gap, the 422 product-code
+  gate, the SPEC quote/bind deviation, and the validation count;
+  `MISMATCHES.md` adds M-60, updates M-01, M-06, M-07, M-14, M-22, M-59, and
+  the scope and validation evidence.
+- `python scripts/validate_contracts.py` passes 16,871 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

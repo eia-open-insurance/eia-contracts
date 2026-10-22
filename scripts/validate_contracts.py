@@ -1928,9 +1928,11 @@ POLICY_SUBMISSION_ERROR_CODES = (
 )
 POLICY_SUBMISSION_EVENT_CREATED = "policy.submission.created"
 POLICY_SUBMISSION_EVENT_STATUS_CHANGED = "policy.submission.status-changed"
+POLICY_SUBMISSION_EVENT_CONVERTED = "policy.submission.converted"
 POLICY_SUBMISSION_EVENT_MESSAGES = (
     (POLICY_SUBMISSION_EVENT_CREATED, "PolicySubmissionCreatedData"),
     (POLICY_SUBMISSION_EVENT_STATUS_CHANGED, "PolicySubmissionStatusChangedData"),
+    (POLICY_SUBMISSION_EVENT_CONVERTED, "PolicySubmissionConvertedData"),
 )
 POLICY_SUBMISSION_CREATED_EVENT_FIELDS = (
     "submissionId",
@@ -1958,7 +1960,43 @@ POLICY_SUBMISSION_STATUS_EVENT_FIELDS = (
     "updatedAt",
     "reason",
 )
+POLICY_SUBMISSION_CONVERTED_EVENT_FIELDS = (
+    "submissionId",
+    "submissionNumber",
+    "policyId",
+    "policyNumber",
+)
 POLICY_SUBMISSION_EVENT_IMPLEMENTED_BY = "PolicyEvents.java"
+
+# Submission-to-policy conversion (SPEC 11.2.14 quote/bind slice). The public
+# command composes {submission, policy}; the expert alias returns the bare
+# policy. A fresh conversion is 201 and a linked-policy replay is 200. The
+# convertible statuses are QUOTED and BOUND; the policy records submissionId and
+# the submission records policyId. The event carries the four identity members
+# and keeps eventVersion 1 (MISMATCHES.md M-01, M-22, M-60).
+POLICY_SUBMISSION_CONVERT_PATH = (
+    "/api/v1/policies/submissions/{submissionId}/convert"
+)
+POLICY_SUBMISSION_CONVERT_EXPERT_PATH = (
+    "/internal/v1/policies/submissions/{submissionId}/convert"
+)
+POLICY_SUBMISSION_CONVERT_REQUEST = "ConvertPolicySubmissionRequest"
+POLICY_SUBMISSION_CONVERT_RESULT = "ConvertPolicySubmissionResult"
+POLICY_SUBMISSION_CONVERT_REQUIRED_FIELDS = ("premiumAmount", "premiumCurrency")
+POLICY_SUBMISSION_CONVERT_OPTIONAL_FIELDS = ("expirationDate",)
+POLICY_SUBMISSION_CONVERT_ERROR_CODES = (
+    "MISSING_TENANT_HEADER",
+    "INVALID_TENANT_HEADER",
+    "VALIDATION_ERROR",
+    "INVALID_CONVERSION_PREMIUM",
+    "INVALID_CONVERSION_CURRENCY",
+    "INVALID_CONVERSION_EXPIRATION",
+    "PRODUCT_CODE_TOO_LONG_FOR_POLICY",
+    "SUBMISSION_NOT_CONVERTIBLE",
+    "SUBMISSION_NOT_FOUND",
+    "CONCURRENT_MODIFICATION",
+    "BOOK_SCOPE_VIOLATION",
+)
 
 
 # Event names the transactional-outbox rollout actually emits. The catalog must
@@ -2004,6 +2042,7 @@ IMPLEMENTED_EVENTS = {
         "policy.policy.legal-entity-assigned",
         "policy.submission.created",
         "policy.submission.status-changed",
+        "policy.submission.converted",
     ],
     "contract": [
         "contract.contract.created",
@@ -9368,7 +9407,7 @@ def check_policy_rating_openapi(contracts: ContractSet, document, relative: str)
 
 
 def check_policy_submissions_openapi(contracts: ContractSet, document, relative: str):
-    """Require the submission list/get/create/status slice and its rules."""
+    """Require the submission list/get/create/status/convert slice and its rules."""
     paths = document.get("paths") or {}
     schemas = (document.get("components") or {}).get("schemas") or {}
 
@@ -9377,11 +9416,27 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
     status_path = (
         paths.get(POLICY_SUBMISSION_STATUS_PATH) if isinstance(paths, dict) else None
     )
+    convert_path = (
+        paths.get(POLICY_SUBMISSION_CONVERT_PATH) if isinstance(paths, dict) else None
+    )
+    expert_convert_path = (
+        paths.get(POLICY_SUBMISSION_CONVERT_EXPERT_PATH)
+        if isinstance(paths, dict)
+        else None
+    )
     list_operation = collection.get("get") if isinstance(collection, dict) else None
     create_operation = collection.get("post") if isinstance(collection, dict) else None
     get_operation = detail.get("get") if isinstance(detail, dict) else None
     status_operation = (
         status_path.get("patch") if isinstance(status_path, dict) else None
+    )
+    convert_operation = (
+        convert_path.get("post") if isinstance(convert_path, dict) else None
+    )
+    expert_convert_operation = (
+        expert_convert_path.get("post")
+        if isinstance(expert_convert_path, dict)
+        else None
     )
 
     for label, path, operation in (
@@ -9389,18 +9444,22 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
         ("POST", POLICY_SUBMISSIONS_PATH, create_operation),
         ("GET", POLICY_SUBMISSION_PATH, get_operation),
         ("PATCH", POLICY_SUBMISSION_STATUS_PATH, status_operation),
+        ("POST", POLICY_SUBMISSION_CONVERT_PATH, convert_operation),
+        ("POST", POLICY_SUBMISSION_CONVERT_EXPERT_PATH, expert_convert_operation),
     ):
         contracts.check(
             isinstance(operation, dict),
             f"{relative}: required submission operation {label} {path} is missing",
         )
 
-    # The collection and detail surfaces are read/create/status only; the
-    # implemented controllers declare no PUT or DELETE operation.
+    # The collection and detail surfaces are read/create/status/convert only;
+    # the implemented controllers declare no PUT or DELETE operation.
     for path, path_item in (
         (POLICY_SUBMISSIONS_PATH, collection),
         (POLICY_SUBMISSION_PATH, detail),
         (POLICY_SUBMISSION_STATUS_PATH, status_path),
+        (POLICY_SUBMISSION_CONVERT_PATH, convert_path),
+        (POLICY_SUBMISSION_CONVERT_EXPERT_PATH, expert_convert_path),
     ):
         if isinstance(path_item, dict):
             for method in ("put", "delete"):
@@ -9729,6 +9788,241 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
                 f"{where}: description must document {term}",
             )
 
+    if isinstance(convert_operation, dict):
+        where = f"{relative}: POST {POLICY_SUBMISSION_CONVERT_PATH}"
+        contracts.check(
+            convert_operation.get("operationId") == "convertPolicySubmission",
+            f"{where}: operationId must be convertPolicySubmission",
+        )
+        parameter_refs, inline_names = _parameter_names(convert_operation)
+        for parameter in (
+            "TenantHeader",
+            "BookHeaderDirectOptional",
+            "IdempotencyKey",
+        ):
+            contracts.check(
+                parameter in parameter_refs,
+                f"{where}: must document the shared {parameter} parameter",
+            )
+        contracts.check(
+            "IfMatch" not in parameter_refs,
+            f"{where}: conversion must not accept If-Match",
+        )
+        contracts.check(
+            "submissionId" in inline_names,
+            f"{where}: must declare the submissionId path parameter",
+        )
+        request_body = convert_operation.get("requestBody") or {}
+        contracts.check(
+            request_body.get("required") is True,
+            f"{where}: request body must be required",
+        )
+        request_schema = (
+            ((request_body.get("content") or {}).get("application/json") or {}).get(
+                "schema"
+            )
+            if isinstance(request_body, dict)
+            else None
+        )
+        contracts.check(
+            isinstance(request_schema, dict)
+            and str(request_schema.get("$ref", "")).endswith(
+                f"/schemas/{POLICY_SUBMISSION_CONVERT_REQUEST}"
+            ),
+            f"{where}: request body must use {POLICY_SUBMISSION_CONVERT_REQUEST}",
+        )
+        for code, description_term in (
+            ("201", "converted"),
+            ("200", "Replay"),
+        ):
+            response = (convert_operation.get("responses") or {}).get(code)
+            headers = response.get("headers") if isinstance(response, dict) else None
+            for header, suffix in (
+                ("ETag", "ETag"),
+                ("Idempotent-Replayed", "IdempotentReplayed"),
+            ):
+                value = (
+                    headers.get(header) if isinstance(headers, dict) else None
+                )
+                contracts.check(
+                    isinstance(value, dict)
+                    and str(value.get("$ref", "")).endswith(f"/headers/{suffix}"),
+                    f"{where}: {code} must declare the shared {header} header",
+                )
+            body_schema = _response_schema(convert_operation, code)
+            contracts.check(
+                isinstance(body_schema, dict)
+                and str(body_schema.get("$ref", "")).endswith(
+                    f"/schemas/{POLICY_SUBMISSION_CONVERT_RESULT}"
+                ),
+                f"{where}: {code} must return {POLICY_SUBMISSION_CONVERT_RESULT}",
+            )
+            response_description = (
+                str(response.get("description") or "")
+                if isinstance(response, dict)
+                else ""
+            )
+            contracts.check(
+                description_term in response_description,
+                f"{where}: {code} must describe {description_term}",
+            )
+        responses = convert_operation.get("responses") or {}
+        for code, suffix in (
+            ("400", "BadRequest"),
+            ("404", "NotFound"),
+            ("422", "UnprocessableContent"),
+        ):
+            response = responses.get(code) if isinstance(responses, dict) else None
+            contracts.check(
+                isinstance(response, dict)
+                and str(response.get("$ref", "")).endswith(f"/responses/{suffix}"),
+                f"{where}: {code} must reference the shared {suffix} response",
+            )
+        conflict = responses.get("409") if isinstance(responses, dict) else None
+        conflict_text = (
+            str(conflict.get("description") or "") if isinstance(conflict, dict) else ""
+        )
+        for term in (
+            "SUBMISSION_NOT_CONVERTIBLE",
+            "CONCURRENT_MODIFICATION",
+            "meta.submissionId",
+            "meta.currentStatus",
+        ):
+            contracts.check(
+                term in conflict_text,
+                f"{where}: 409 must document {term}",
+            )
+        conflict_schema = _response_schema(
+            convert_operation, "409", "application/problem+json"
+        )
+        contracts.check(
+            isinstance(conflict_schema, dict)
+            and str(conflict_schema.get("$ref", "")).endswith("/schemas/Problem"),
+            f"{where}: 409 must document the shared Problem schema",
+        )
+        description = str(convert_operation.get("description") or "")
+        for term in (
+            "201",
+            "200",
+            "Idempotent-Replayed",
+            "SUBMISSION_NOT_CONVERTIBLE",
+            "CONCURRENT_MODIFICATION",
+            "SUBMISSION_NOT_FOUND",
+            "BOOK_SCOPE_VIOLATION",
+            "INVALID_CONVERSION_PREMIUM",
+            "INVALID_CONVERSION_CURRENCY",
+            "INVALID_CONVERSION_EXPIRATION",
+            "PRODUCT_CODE_TOO_LONG_FOR_POLICY",
+            "policy.submission.converted",
+            "policy.policy.created",
+            "same transaction",
+            "not compared",
+            "does not consult",
+            "bare `Policy`",
+            "policyId",
+        ):
+            contracts.check(
+                term in description,
+                f"{where}: description must document {term}",
+            )
+
+    if isinstance(expert_convert_operation, dict):
+        where = f"{relative}: POST {POLICY_SUBMISSION_CONVERT_EXPERT_PATH}"
+        contracts.check(
+            expert_convert_operation.get("operationId")
+            == "expertConvertPolicySubmission",
+            f"{where}: operationId must be expertConvertPolicySubmission",
+        )
+        contracts.check(
+            expert_convert_operation.get("security") == [],
+            f"{where}: internal operation must declare security: []",
+        )
+        contracts.check(
+            expert_convert_operation.get("x-internal-api") is True,
+            f"{where}: internal operation must declare x-internal-api: true",
+        )
+        contracts.check(
+            "Policy internal" in (expert_convert_operation.get("tags") or []),
+            f"{where}: internal operation must carry the Policy internal tag",
+        )
+        parameter_refs, inline_names = _parameter_names(expert_convert_operation)
+        for parameter in ("TenantIdQuery", "BookHeaderDirectOptional"):
+            contracts.check(
+                parameter in parameter_refs,
+                f"{where}: must document the shared {parameter} parameter",
+            )
+        contracts.check(
+            "submissionId" in inline_names,
+            f"{where}: must declare the submissionId path parameter",
+        )
+        request_schema = (
+            (
+                (
+                    (expert_convert_operation.get("requestBody") or {}).get("content")
+                    or {}
+                ).get("application/json")
+                or {}
+            ).get("schema")
+            if isinstance(expert_convert_operation.get("requestBody"), dict)
+            else None
+        )
+        contracts.check(
+            isinstance(request_schema, dict)
+            and str(request_schema.get("$ref", "")).endswith(
+                f"/schemas/{POLICY_SUBMISSION_CONVERT_REQUEST}"
+            ),
+            f"{where}: request body must use {POLICY_SUBMISSION_CONVERT_REQUEST}",
+        )
+        for code in ("201", "200"):
+            body_schema = _response_schema(expert_convert_operation, code)
+            contracts.check(
+                isinstance(body_schema, dict)
+                and str(body_schema.get("$ref", "")).endswith("/schemas/Policy"),
+                f"{where}: {code} must return the bare Policy schema, not the "
+                "conversion envelope",
+            )
+            headers = (
+                (expert_convert_operation.get("responses") or {}).get(code) or {}
+            ).get("headers")
+            for header, suffix in (
+                ("ETag", "ETag"),
+                ("Idempotent-Replayed", "IdempotentReplayed"),
+            ):
+                value = (
+                    headers.get(header) if isinstance(headers, dict) else None
+                )
+                contracts.check(
+                    isinstance(value, dict)
+                    and str(value.get("$ref", "")).endswith(f"/headers/{suffix}"),
+                    f"{where}: {code} must declare the shared {header} header",
+                )
+        responses = expert_convert_operation.get("responses") or {}
+        for code, suffix in (
+            ("400", "BadRequest"),
+            ("404", "NotFound"),
+            ("409", "Conflict"),
+            ("422", "UnprocessableContent"),
+        ):
+            response = responses.get(code) if isinstance(responses, dict) else None
+            contracts.check(
+                isinstance(response, dict)
+                and str(response.get("$ref", "")).endswith(f"/responses/{suffix}"),
+                f"{where}: {code} must reference the shared {suffix} response",
+            )
+        description = str(expert_convert_operation.get("description") or "")
+        for term in (
+            "bare",
+            "Idempotency-Key",
+            "policy.submission.converted",
+            "SUBMISSION_NOT_CONVERTIBLE",
+            "PRODUCT_CODE_TOO_LONG_FOR_POLICY",
+            "no event",
+        ):
+            contracts.check(
+                term in description,
+                f"{where}: description must document {term}",
+            )
+
     planned_operations = document.get("x-planned-operations") or []
     planned_pairs = {
         (str(entry.get("method", "")).lower(), entry.get("path"))
@@ -9740,6 +10034,8 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
         ("post", POLICY_SUBMISSIONS_PATH),
         ("get", POLICY_SUBMISSION_PATH),
         ("patch", POLICY_SUBMISSION_STATUS_PATH),
+        ("post", POLICY_SUBMISSION_CONVERT_PATH),
+        ("post", POLICY_SUBMISSION_CONVERT_EXPERT_PATH),
     ):
         contracts.check(
             (method, path) not in planned_pairs,
@@ -9936,6 +10232,110 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
         f"{relative}: {POLICY_SUBMISSION_STATUS_REQUEST}.reason must stay optional",
     )
 
+    conversion_request = schemas.get(POLICY_SUBMISSION_CONVERT_REQUEST) or {}
+    conversion_properties = conversion_request.get("properties") or {}
+    contracts.check(
+        isinstance(conversion_request, dict)
+        and conversion_request.get("type") == "object",
+        f"{relative}: {POLICY_SUBMISSION_CONVERT_REQUEST} must be an object schema",
+    )
+    contracts.check(
+        set(conversion_request.get("required") or [])
+        == set(POLICY_SUBMISSION_CONVERT_REQUIRED_FIELDS),
+        f"{relative}: {POLICY_SUBMISSION_CONVERT_REQUEST} must require exactly "
+        f"{list(POLICY_SUBMISSION_CONVERT_REQUIRED_FIELDS)}",
+    )
+    contracts.check(
+        tuple(conversion_request.get("required") or [])
+        == POLICY_SUBMISSION_CONVERT_REQUIRED_FIELDS,
+        f"{relative}: {POLICY_SUBMISSION_CONVERT_REQUEST}.required must keep the "
+        "documented member order",
+    )
+    for field in POLICY_SUBMISSION_CONVERT_REQUIRED_FIELDS:
+        contracts.check(
+            field in conversion_properties,
+            f"{relative}: {POLICY_SUBMISSION_CONVERT_REQUEST}.properties.{field} "
+            "is required",
+        )
+    contracts.check(
+        str((conversion_properties.get("premiumAmount") or {}).get("$ref", "")).endswith(
+            "/schemas/MoneyAmount"
+        ),
+        f"{relative}: {POLICY_SUBMISSION_CONVERT_REQUEST}.premiumAmount must "
+        "reference the shared MoneyAmount",
+    )
+    contracts.check(
+        str(
+            (conversion_properties.get("premiumCurrency") or {}).get("$ref", "")
+        ).endswith("/schemas/CurrencyCode"),
+        f"{relative}: {POLICY_SUBMISSION_CONVERT_REQUEST}.premiumCurrency must "
+        "reference the shared CurrencyCode",
+    )
+    for field in POLICY_SUBMISSION_CONVERT_OPTIONAL_FIELDS:
+        contracts.check(
+            field in conversion_properties
+            and field not in set(conversion_request.get("required") or []),
+            f"{relative}: {POLICY_SUBMISSION_CONVERT_REQUEST}.{field} must be "
+            "documented as optional",
+        )
+    contracts.check(
+        (conversion_properties.get("expirationDate") or {}).get("format") == "date",
+        f"{relative}: {POLICY_SUBMISSION_CONVERT_REQUEST}.expirationDate must be "
+        "a date",
+    )
+
+    conversion_result = schemas.get(POLICY_SUBMISSION_CONVERT_RESULT) or {}
+    result_properties = conversion_result.get("properties") or {}
+    contracts.check(
+        isinstance(conversion_result, dict)
+        and conversion_result.get("type") == "object",
+        f"{relative}: {POLICY_SUBMISSION_CONVERT_RESULT} must be an object schema",
+    )
+    contracts.check(
+        tuple(conversion_result.get("required") or []) == ("submission", "policy"),
+        f"{relative}: {POLICY_SUBMISSION_CONVERT_RESULT} must require exactly "
+        "submission then policy",
+    )
+    contracts.check(
+        str((result_properties.get("submission") or {}).get("$ref", "")).endswith(
+            f"/schemas/{POLICY_SUBMISSION_PROJECTION}"
+        ),
+        f"{relative}: {POLICY_SUBMISSION_CONVERT_RESULT}.submission must reference "
+        f"{POLICY_SUBMISSION_PROJECTION}",
+    )
+    contracts.check(
+        str((result_properties.get("policy") or {}).get("$ref", "")).endswith(
+            "/schemas/Policy"
+        ),
+        f"{relative}: {POLICY_SUBMISSION_CONVERT_RESULT}.policy must reference "
+        "Policy",
+    )
+
+    policy_schema = schemas.get("Policy") or {}
+    policy_properties = policy_schema.get("properties") or {}
+    policy_submission = policy_properties.get("submissionId") or {}
+    contracts.check(
+        _schema_types(policy_submission) == {"string", "null"}
+        and policy_submission.get("format") == "uuid",
+        f"{relative}: Policy.submissionId must be a nullable uuid",
+    )
+    contracts.check(
+        "submissionId" not in set(policy_schema.get("required") or []),
+        f"{relative}: Policy.submissionId must stay optional because the public "
+        "domain projection drops it",
+    )
+    policy_link = projection_properties.get("policyId") or {}
+    contracts.check(
+        _schema_types(policy_link) == {"string", "null"}
+        and policy_link.get("format") == "uuid",
+        f"{relative}: {POLICY_SUBMISSION_PROJECTION}.policyId must be a nullable "
+        "uuid",
+    )
+    contracts.check(
+        "policyId" not in projection_required,
+        f"{relative}: {POLICY_SUBMISSION_PROJECTION}.policyId must stay optional",
+    )
+
     documented = " ".join(
         str((operation or {}).get("description") or "")
         for operation in (
@@ -9943,12 +10343,19 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
             create_operation,
             get_operation,
             status_operation,
+            convert_operation,
+            expert_convert_operation,
         )
     )
     for code in POLICY_SUBMISSION_ERROR_CODES:
         contracts.check(
             code in documented,
             f"{relative}: submission descriptions must document {code}",
+        )
+    for code in POLICY_SUBMISSION_CONVERT_ERROR_CODES:
+        contracts.check(
+            code in documented,
+            f"{relative}: submission conversion descriptions must document {code}",
         )
 
 
@@ -10125,11 +10532,12 @@ def check_policy_submissions_asyncapi(contracts: ContractSet, document, relative
             payload.get("type") == "object",
             f"{relative}: {message_name}.payload must be an object schema",
         )
-        expected_fields = (
-            POLICY_SUBMISSION_CREATED_EVENT_FIELDS
-            if event == POLICY_SUBMISSION_EVENT_CREATED
-            else POLICY_SUBMISSION_STATUS_EVENT_FIELDS
-        )
+        if event == POLICY_SUBMISSION_EVENT_CREATED:
+            expected_fields = POLICY_SUBMISSION_CREATED_EVENT_FIELDS
+        elif event == POLICY_SUBMISSION_EVENT_STATUS_CHANGED:
+            expected_fields = POLICY_SUBMISSION_STATUS_EVENT_FIELDS
+        else:
+            expected_fields = POLICY_SUBMISSION_CONVERTED_EVENT_FIELDS
         contracts.check(
             set(required) == set(expected_fields),
             f"{relative}: {message_name} must require exactly {list(expected_fields)}",
@@ -10144,24 +10552,29 @@ def check_policy_submissions_asyncapi(contracts: ContractSet, document, relative
                 field in properties,
                 f"{relative}: {message_name}.properties.{field} is required",
             )
-        for field in ("submissionId", "applicantPartyId"):
-            contracts.check(
-                (properties.get(field) or {}).get("format") == "uuid",
-                f"{relative}: {message_name}.{field} must be a uuid",
-            )
+        contracts.check(
+            (properties.get("submissionId") or {}).get("format") == "uuid",
+            f"{relative}: {message_name}.submissionId must be a uuid",
+        )
         contracts.check(
             (properties.get("submissionNumber") or {}).get("maxLength") == 32,
             f"{relative}: {message_name}.submissionNumber must be capped at 32 "
             "characters",
         )
-        contracts.check(
-            (properties.get("productCode") or {}).get("maxLength") == 64,
-            f"{relative}: {message_name}.productCode must be capped at 64 characters",
-        )
-        contracts.check(
-            (properties.get("version") or {}).get("type") == "integer",
-            f"{relative}: {message_name}.version must be an integer",
-        )
+        if event != POLICY_SUBMISSION_EVENT_CONVERTED:
+            contracts.check(
+                (properties.get("applicantPartyId") or {}).get("format") == "uuid",
+                f"{relative}: {message_name}.applicantPartyId must be a uuid",
+            )
+            contracts.check(
+                (properties.get("productCode") or {}).get("maxLength") == 64,
+                f"{relative}: {message_name}.productCode must be capped at 64 "
+                "characters",
+            )
+            contracts.check(
+                (properties.get("version") or {}).get("type") == "integer",
+                f"{relative}: {message_name}.version must be an integer",
+            )
 
         if event == POLICY_SUBMISSION_EVENT_CREATED:
             contracts.check(
@@ -10212,7 +10625,7 @@ def check_policy_submissions_asyncapi(contracts: ContractSet, document, relative
                     (properties.get(field) or {}).get("format") == "date-time",
                     f"{relative}: {message_name}.{field} must be a date-time",
                 )
-        else:
+        elif event == POLICY_SUBMISSION_EVENT_STATUS_CHANGED:
             contracts.check(
                 tuple((properties.get("previousStatus") or {}).get("enum") or [])
                 == POLICY_SUBMISSION_STATUSES,
@@ -10239,6 +10652,21 @@ def check_policy_submissions_asyncapi(contracts: ContractSet, document, relative
                 and (properties.get("reason") or {}).get("maxLength") == 500,
                 f"{relative}: {message_name}.reason must be a nullable "
                 "500-character string",
+            )
+        else:
+            contracts.check(
+                (properties.get("policyId") or {}).get("format") == "uuid",
+                f"{relative}: {message_name}.policyId must be a uuid",
+            )
+            contracts.check(
+                (properties.get("policyNumber") or {}).get("maxLength") == 32,
+                f"{relative}: {message_name}.policyNumber must be capped at 32 "
+                "characters",
+            )
+            contracts.check(
+                "no event" in channel_description,
+                f"{relative}: {event} description must document the replay no-event "
+                "rule",
             )
 
 
