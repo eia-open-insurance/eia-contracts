@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:party
 info:
   title: EIA Party events
-  version: 1.1.0
+  version: 1.2.0
   summary: Published domain event names for the Party vertical.
   description: >
     Event contract for the Party vertical. The authoritative event names are
@@ -14,11 +14,19 @@ info:
     signature (SPEC 7.5.1). A channel address is the logical routing key and
     equals the event name; it is not a broker topic.
 
-    The Party expert publishes `party.party.created` and
-    `party.party.updated` through the transactional outbox; those channels and
-    operations are marked `x-status: implemented`. A status change is published
-    as `party.party.updated` with `changedFields: [status]`, so
-    `party.party.status-changed` and the other SPEC 11.1.9 names remain planned.
+    The Party expert publishes `party.party.created`, `party.party.updated`,
+    `party.party.identifier-added`, and `party.party.address-added` through the
+    transactional outbox; those channels and operations are marked
+    `x-status: implemented`. A status change is published as
+    `party.party.updated` with `changedFields: [status]`. Adding one identifier
+    or address bumps the Party row version and writes one child fact in the
+    same transaction: the payload names the child id, the Party identity, and
+    the Party row `version`, while the envelope `aggregateVersion` is that row
+    version plus one. The two
+    reference-data names are new: SPEC 11.1.9 publishes no identifier-added or
+    address-added fact (MISMATCHES.md M-22, M-54), so they are additive under
+    EV-05. `party.party.status-changed` and the other SPEC 11.1.9 names remain
+    planned.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -64,6 +72,50 @@ channels:
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
+  PartyPartyIdentifierAdded:
+    address: party.party.identifier-added
+    title: party.party.identifier-added
+    description: >
+      Emitted by the Party expert when one identifier is appended to a party, in
+      the same transaction as the child insert and the Party row version bump.
+      The payload is `PartyIdentifierAddedData`: the Party identity and row
+      version, the identifier id and normalized type, the trimmed value, the
+      optional authority and effective date, and the actor and instant. The
+      identifier type and the Party version are the stored values; the envelope
+      aggregate is the Party aggregate at the bumped version. The name has no
+      SPEC 11.1.9 equivalent (MISMATCHES.md M-22, M-54).
+    x-event-type: party.party.identifier-added
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.1.9
+    x-implemented-by: repos/eia-party-expert/src/main/java/com/eia/party/expert/PartyEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      PartyIdentifierAddedData:
+        $ref: '#/components/messages/PartyIdentifierAddedData'
+  PartyPartyAddressAdded:
+    address: party.party.address-added
+    title: party.party.address-added
+    description: >
+      Emitted by the Party expert when one address is appended to a party, in
+      the same transaction as the child insert and the Party row version bump.
+      The payload is `PartyAddressAddedData`: the Party identity and row
+      version, the address id and normalized type, the trimmed lines, city,
+      region, postal code, the upper-case two-letter country, the optional
+      effective date, and the actor and instant. The envelope aggregate is the
+      Party aggregate at the bumped version. The name has no SPEC 11.1.9
+      equivalent (MISMATCHES.md M-22, M-54).
+    x-event-type: party.party.address-added
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.1.9
+    x-implemented-by: repos/eia-party-expert/src/main/java/com/eia/party/expert/PartyEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      PartyAddressAddedData:
+        $ref: '#/components/messages/PartyAddressAddedData'
   PartyPartyStatusChanged:
     address: party.party.status-changed
     title: party.party.status-changed
@@ -182,6 +234,28 @@ operations:
       Publishes party.party.updated when the party status changes.
     x-event-type: party.party.updated
     x-status: implemented
+  publishPartyPartyIdentifierAdded:
+    action: send
+    channel:
+      $ref: '#/channels/PartyPartyIdentifierAdded'
+    summary: Publish party.party.identifier-added
+    description: >
+      Publishes party.party.identifier-added through the transactional outbox in
+      the same transaction as the identifier insert and the Party version bump
+      (SPEC 7.5.1).
+    x-event-type: party.party.identifier-added
+    x-status: implemented
+  publishPartyPartyAddressAdded:
+    action: send
+    channel:
+      $ref: '#/channels/PartyPartyAddressAdded'
+    summary: Publish party.party.address-added
+    description: >
+      Publishes party.party.address-added through the transactional outbox in
+      the same transaction as the address insert and the Party version bump
+      (SPEC 7.5.1).
+    x-event-type: party.party.address-added
+    x-status: implemented
   publishPartyPartyStatusChanged:
     action: send
     channel:
@@ -278,6 +352,182 @@ components:
             type: string
       payload:
         $ref: '../schemas/event-envelope.schema.json'
+    PartyIdentifierAddedData:
+      name: PartyIdentifierAddedData
+      title: party.party.identifier-added data
+      summary: One appended party identifier and the Party row version.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - partyId
+          - partyNumber
+          - version
+          - identifierId
+          - identifierType
+          - identifierValue
+          - createdBy
+          - createdAt
+        properties:
+          partyId:
+            type: string
+            format: uuid
+          partyNumber:
+            type: string
+            description: Generated Party business key, format PTY-000000001.
+          version:
+            type: integer
+            minimum: 0
+            description: >
+              Party row version after the child insert and version bump. The
+              envelope `aggregateVersion` is this value plus one because Party
+              rows start at version 0.
+          identifierId:
+            type: string
+            format: uuid
+          identifierType:
+            type: string
+            description: Normalized (trimmed and upper-cased) identifier type.
+            enum:
+              - TAX_ID
+              - REGISTRATION
+              - LICENSE
+              - TIN
+              - EIN
+              - SSN
+              - ITIN
+              - DUNS
+              - LEI
+              - PASSPORT
+              - DRIVER_LICENSE
+              - STATE_ID
+              - MEDICARE_ID
+              - MEDICAID_ID
+              - NPI
+              - BAR_NUMBER
+              - ACORD_PARTY_ID
+              - ISO_PARTY_ID
+              - TRUST_CLAIM_NUMBER
+              - BANKRUPTCY_CASE_NUMBER
+              - OTHER
+          identifierValue:
+            type: string
+            minLength: 1
+            maxLength: 128
+            description: Trimmed identifier value as stored.
+          issuingAuthority:
+            type: string
+            maxLength: 128
+            description: >
+              Optional issuing authority. The expert omits the member when it
+              is null.
+          effectiveDate:
+            type: string
+            format: date
+            description: >
+              Optional date from which the identifier is effective, as an ISO
+              8601 calendar date. The expert omits the member when it is null.
+          createdBy:
+            type: string
+            maxLength: 128
+            description: Stored actor; `system` in the current slice.
+          createdAt:
+            type: string
+            format: date-time
+    PartyAddressAddedData:
+      name: PartyAddressAddedData
+      title: party.party.address-added data
+      summary: One appended party address and the Party row version.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - partyId
+          - partyNumber
+          - version
+          - addressId
+          - addressType
+          - line1
+          - city
+          - postalCode
+          - country
+          - createdBy
+          - createdAt
+        properties:
+          partyId:
+            type: string
+            format: uuid
+          partyNumber:
+            type: string
+            description: Generated Party business key, format PTY-000000001.
+          version:
+            type: integer
+            minimum: 0
+            description: >
+              Party row version after the child insert and version bump. The
+              envelope `aggregateVersion` is this value plus one because Party
+              rows start at version 0.
+          addressId:
+            type: string
+            format: uuid
+          addressType:
+            type: string
+            description: Normalized (trimmed and upper-cased) address type.
+            enum:
+              - PRIMARY
+              - LEGAL
+              - PHYSICAL
+              - MAILING
+              - BILLING
+              - CLAIM_SITE
+              - EXPOSURE_SITE
+              - EMPLOYER
+              - PROVIDER
+              - BANK
+              - OTHER
+          line1:
+            type: string
+            minLength: 1
+            maxLength: 128
+          line2:
+            type: string
+            maxLength: 128
+            description: >
+              Optional second line, trimmed. The expert omits the member when
+              it is null.
+          city:
+            type: string
+            minLength: 1
+            maxLength: 64
+          stateRegion:
+            type: string
+            maxLength: 64
+            description: >
+              Optional state, province, or region, trimmed but not upper-cased.
+              The expert omits the member when it is null.
+          postalCode:
+            type: string
+            minLength: 1
+            maxLength: 16
+          country:
+            type: string
+            pattern: '^[A-Z]{2}$'
+            description: ISO 3166-1 alpha-2 country code, normalized to upper-case.
+          effectiveDate:
+            type: string
+            format: date
+            description: >
+              Optional date from which the address is effective, as an ISO 8601
+              calendar date. The expert omits the member when it is null.
+          createdBy:
+            type: string
+            maxLength: 128
+            description: Stored actor; `system` in the current slice.
+          createdAt:
+            type: string
+            format: date-time
   securitySchemes:
     outboxSignature:
       type: httpApiKey
@@ -293,11 +543,16 @@ x-implementation:
   publisher: eia-party-expert
   subscriber: none
   notes: >
-    `party.party.created` and `party.party.updated` are written to the
-    transactional outbox in the same transaction as the party write and
-    dispatched by the platform outbox dispatcher when `eia.outbox.enabled=true`.
-    The other SPEC 11.1.9 names remain planned. There is no subscriber, inbox,
-    or subscription registry yet.
+    `party.party.created`, `party.party.updated`,
+    `party.party.identifier-added`, and `party.party.address-added` are written
+    to the transactional outbox in the same transaction as the party,
+    identifier, or address write and dispatched by the platform outbox
+    dispatcher when `eia.outbox.enabled=true`. Each reference-data fact is one
+    outbox row per appended child, keyed by the Party aggregate at the bumped
+    version, with the child id and normalized values in the payload. The two
+    reference-data names have no SPEC 11.1.9 equivalent (M-22, M-54); the other
+    SPEC 11.1.9 names remain planned. There is no subscriber, inbox, or
+    subscription registry yet.
 
 x-consumed-events:
   - policy.policy.issued

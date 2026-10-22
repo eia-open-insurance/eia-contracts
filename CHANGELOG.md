@@ -1789,6 +1789,48 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   refreshed validation evidence.
 - `python scripts/validate_contracts.py` passes 14,947 checks with 0 failures.
 
+### Added in the Party reference-data contract (2026-10-22)
+
+- `openapi/party.yaml` is 1.2.0: adds
+  `GET/POST /api/v1/parties/{partyId}/identifiers` and
+  `GET/POST /api/v1/parties/{partyId}/addresses` with their four
+  `/internal/v1` expert equivalents, the `PartyIdentifier`, `PartyAddress`,
+  `CreatePartyIdentifierRequest`, and `CreatePartyAddressRequest` schemas, and
+  the closed `PartyIdentifierType` (21 values) and `PartyAddressType` (11
+  values) enums. The identifier request requires `identifierType` and
+  `identifierValue` and accepts the optional `issuingAuthority` and
+  `effectiveDate`; the address request requires `addressType`, `line1`, `city`,
+  `postalCode`, and `country` and accepts the optional `line2`, `stateRegion`,
+  and `effectiveDate`. The projections carry the child and Party identity, the
+  normalized values, `createdAt`, and `createdBy`. The four public operations
+  document 200/201/400/404/409; the identifier duplicate is
+  `DUPLICATE_PARTY_IDENTIFIER` and the address duplicate guard is
+  `DUPLICATE_PARTY_ADDRESS`. `x-compatibility` moves to 1.2.0 over 1.1.0.
+- `asyncapi/party.yaml` is 1.2.0: the implemented
+  `party.party.identifier-added` and `party.party.address-added` channels and
+  `send` operations with the `PartyIdentifierAddedData` and
+  `PartyAddressAddedData` payloads (Party identity and row `version`, child id,
+  normalized type and values, optional authority, effective date, second line,
+  and region, country, actor, and instant). Both channels name
+  `PartyEvents.java`; `eventVersion` stays 1.
+- `asyncapi/event-catalog.yaml` is 1.35.0: both names are published and
+  implemented, for 220 published and 101 implemented names (Party 11 published
+  and 4 implemented).
+- `scripts/validate_contracts.py` requires the four public and four expert
+  operations with the shared tenant parameters and the uuid `partyId` path
+  parameter, the 200/201/400/404/409 responses and the two duplicate codes, the
+  exact type enums, the projection and command field sets and bounds, the
+  nullable optional members, the identifier-value and country patterns, the two
+  implemented channels with their payload members, the `IMPLEMENTED_EVENTS`
+  entries, and the catalog entries.
+- `README.md` records the additive versions, the routes and both edges, the
+  full type vocabularies, the normalization and duplicate rules, the plaintext
+  identifier value and alpha-2 country deviations, the bare array lists, the
+  event payloads, and the validation count; `MISMATCHES.md` adds M-54, updates
+  M-02, M-04, M-14, M-20, and M-22, and refreshes the scope and validation
+  evidence.
+- `python scripts/validate_contracts.py` passes 15,375 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-22 (Notifications source filter).
+Status: open, reviewed 2026-10-22 (Party reference data).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -155,6 +155,11 @@ where the running code does not meet it yet.
   list controller, service, `NotificationSourceType.validateFilter`, the
   `findAllBySource` repository query, error codes, and the domain and expert
   source-filter tests.
+  The Party reference-data pass reads the domain identifier and address
+  controllers, DTOs, client, and exception handler plus the expert shared
+  reference-data controller and service, the identifier and address records,
+  their repositories, `PartyEvents`, `schema.sql`, the expert
+  `ApiExceptionHandler`, and the domain and expert reference-data tests.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -233,6 +238,7 @@ removed per the resolution policy.
 | M-51 | Policy billing adjustment is a SPEC-less derived-delta route and event and does not honour the optional concurrency/idempotency headers | L |
 | M-52 | Direct Claims litigation damages are a SPEC-less pair and the created event has no SPEC name | L |
 | M-53 | Notification source linkage and list source filter are a flat SPEC-less triple and exact pair rather than the SPEC subject reference | L |
+| M-54 | Party identifiers and addresses are SPEC-less append-only child routes with wider type sets, a plaintext value, and no implemented address duplicate guard | M |
 
 ## M-01 Public base paths
 
@@ -328,7 +334,7 @@ shapes.
 | Retrocession (domain and expert) | `com.eia.retrocession.*.ApiError` | `{code, message, details{field: message}}` |
 | Assumed Claims (domain and expert) | `com.eia.assumedclaims.*.ApiError` | `{type, title, status, detail, instance, code, category, retryable, errors[{field, code, message}]}` with `application/problem+json` and `EIA-RNS-7xxx` codes |
 | Notifications (domain) | Spring `ProblemDetail` plus properties | RFC 9457 body with `code`, `category`, `retryable`, `errors[{field, code, message}]`; no `correlationId`, `transactionId`, or `meta` |
-| Party (expert) | inline `Map<String, String>` | `{code, message}` for `NOT_FOUND` only |
+| Party (expert) | inline `Map<String, String>` | `{code, message}` for `NOT_FOUND`, `CONFLICT`, `VALIDATION_ERROR`, and the malformed-body case |
 | Party (domain) | `com.eia.party.domain.ApiError` | `{code, message, details{field: message}}` |
 
 Policy now matches the canonical shape and media type. Two Policy differences
@@ -361,7 +367,8 @@ Evidence:
 - `repos/eia-retrocession-domain/.../ApiError.java:8`, `repos/eia-retrocession-expert/.../ApiError.java:8`
 - `repos/eia-assumed-claims-domain/.../ApiError.java:12`, `repos/eia-assumed-claims-expert/.../ApiError.java:12`
 - `repos/eia-notifications-domain/.../ApiExceptionHandler.java:97`
-- `repos/eia-party-expert/.../ApiExceptionHandler.java:10-14`
+- `repos/eia-party-expert/.../ApiExceptionHandler.java` (NOT_FOUND, CONFLICT,
+  VALIDATION_ERROR, and malformed-body handlers)
 - `repos/eia-party-domain/.../ApiExceptionHandler.java`,
   `repos/eia-party-domain/.../PartyClient.java`
 
@@ -388,8 +395,9 @@ Every other vertical still returns a bare `List<Dto>`: for example
 `ClaimController.list`, `ContractController.list`,
 `NotificationController.list`, `CessionController.list` (public and expert), and
 `RetrocessionController.list` (public and expert). The Contract second-slice
-collections, the Direct Claims child collections, and the Assumed Claims child
-collections in Round 5 are also bare arrays. The Policy program catalog list
+collections, the Direct Claims child collections, the Assumed Claims child
+collections in Round 5, and the Party identifier and address lists are also
+bare arrays. The Policy program catalog list
 (`GET /api/v1/programs`) is also a bare `Program[]` rather than the Policy page
 envelope (M-39). There is no `page` object, no cursor, and no `total` in those
 responses.
@@ -830,7 +838,7 @@ ten publishing verticals now emit a subset:
 
 | Vertical | Implemented event names | Source |
 |---|---|---|
-| Party | `party.party.created`, `party.party.updated` | `repos/eia-party-expert/.../PartyEvents.java` |
+| Party | `party.party.created`, `party.party.updated`, `party.party.identifier-added`, `party.party.address-added` | `repos/eia-party-expert/.../PartyEvents.java` |
 | Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.billing-plan.created`, `policy.installment.paid`, `policy.installment.waived`, `policy.dunning.sent`, `policy.mass-tort-profile.updated`, `policy.program.created`, `policy.policy.program-assigned`, `policy.credit-note.created`, `policy.credit-note.issued`, `policy.credit-note.applied`, `policy.credit-note.cancelled`, `policy.credit-note.reversed`, `policy.legal-entity.created`, `policy.policy.legal-entity-assigned` | `repos/eia-policy-expert/.../PolicyEvents.java` |
 | Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded`, `contract.technical-account.created`, `contract.technical-account.issued`, `contract.technical-account.settled`, `contract.technical-account.line-added`, `contract.technical-account.line-removed`, `contract.bordereau.received`, `contract.bordereau.processed`, `contract.bordereau.failed`, `contract.cash-call.requested`, `contract.cash-call.issued`, `contract.cash-call.settled`, `contract.cash-call.cancelled`, `contract.security.recorded`, `contract.security.status-changed` | `repos/eia-contract-expert/.../ContractEvents.java` |
 | Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.assigned`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.settlement-payment-linked`, `direct.claim.closed`, `direct.claim.task-created`, `direct.claim.task-completed`, `direct.claim.task-updated`, `direct.claim.note-added`, `direct.claim.allocation-created` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
@@ -863,6 +871,15 @@ the same allocation id at version 2, with the parent payment, the allocation
 fields, the released amount, the required reason, and the reversal instant.
 Neither bumps the payment row version, and a repeat reversal writes no event.
 Both names have no SPEC 11.7.10 equivalent (M-22, M-35).
+
+The two Party reference-data facts are child facts of the Party aggregate.
+`PartyEvents.identifierAdded` and `PartyEvents.addressAdded` write one outbox
+row per appended child in the same transaction as the child insert and the
+Party row version bump, keyed by the party id at the bumped aggregate version,
+with the child id, the normalized values, and the actor and instant in the
+payload. The payload `version` is the bumped Party row version and the envelope
+`aggregateVersion` is that value plus one, matching the existing Party
+convention. The two names have no SPEC 11.1.9 equivalent (M-22, M-54).
 
 The Document expert's link writes append `document.link.added` or
 `document.link.removed` from `DocumentLinkEvents.java` in the same transaction
@@ -1027,9 +1044,11 @@ Every persisted aggregate projection carries `createdAt`, `updatedAt`, and
 `version` (the Policy and Contract headers, the Direct Claim, and the Assumed
 Claim). The second-slice child projections are append-only or immutable, so they
 carry `createdAt` and either a row `version` or `sequence` but not always
-`updatedAt`. None carries `createdBy` or `updatedBy`. SPEC 7.10 requires actor
-attribution in the audit record, which the services keep in their audit tables
-and not in the resource projection. The shared `AuditFields` component therefore
+`updatedAt`. None carries `createdBy` or `updatedBy`, except the Party
+identifier and address child projections, which return the stored `createdBy`
+(`system` in the current slice) and no `updatedBy` (M-54). SPEC 7.10 requires
+actor attribution in the audit record, which the services keep in their audit
+tables and not in the resource projection. The shared `AuditFields` component therefore
 documents only the three implemented header fields and notes the planned actor
 fields in its description. If actor identity is added to the projection later,
 it is an additive, compatible change.
@@ -1079,6 +1098,7 @@ tables. The differences are:
 | Vertical | Implemented | SPEC /
 planned name |
 |---|---|---|
+| Party | `party.party.identifier-added` / `party.party.address-added` | No SPEC 11.1.9 name: SPEC publishes the party lifecycle, role, screening, and consent facts but no reference-data fact for an appended identifier or address, so both names are new (M-54). `created` and `updated` match SPEC. |
 | Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created` / `.adjusted`; `policy.installment.paid` / `.waived`; `policy.dunning.sent`; `policy.program.created` / `policy.policy.program-assigned`; `policy.credit-note.created` / `.issued` / `.applied` / `.cancelled` / `.reversed`; `policy.legal-entity.created` / `policy.policy.legal-entity-assigned`; `policy.policy.premium-audited` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name; the positive premium adjustment fact has no SPEC 11.2.13 name either (M-51); the dunning fact differs from SPEC 11.2.13 `policy.billing.dunning-changed`; the two program facts have no SPEC name because SPEC defines no program create or policy-assignment event. SPEC 11.2.13 publishes only `policy.billing.credit-note-issued` and defines no created, applied, cancelled, or reversed fact, so all five credit-note names are new (M-41). The two legal-entity facts are new because SPEC 10.11.2/11.2.16 define the model and link but SPEC 11.2.9 names no catalog-create or assignment event (M-43). The premium-audit fact differs from SPEC 11.2.9 `policy.premium.audited`, which remains planned (M-50). `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
 | Contract | `contract.contract.updated`; `contract.technical-account.created` / `.issued` / `.settled`; `contract.bordereau.processed` / `.failed`; `contract.security.status-changed` | No SPEC name for updated, the technical-account facts, the two terminal bordereau facts, or the security status fact: SPEC 11.3.9 lists lifecycle verbs, the contract-level `contract.account.issued` / `.agreed` facts, `contract.bordereau.posted` / `.rejected`, and only the `contract.security.recorded` / `.breached` security facts. `created`, `bound`, `commuted`, `cession.recorded`, `contract.bordereau.received`, and `contract.security.recorded` match SPEC. |
 | Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned`; `direct.claim.allocation-created`; `direct.claim.settlement-payment-linked`; `direct.claim.litigation-created` | No SPEC names: SPEC 11.4.9 defines no assignment, task, note, allocation-created, settlement-payment-link, or matter-creation event; it names the allocation fact `direct.claim.allocated`, which remains planned, and models the settlement `payment_id` only as a Payment projection (M-45). SPEC 11.4.4 also defines no litigation damages pair (M-52). `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `litigation-updated`, `settlement-authorized`, and `closed` match SPEC. |
@@ -1097,6 +1117,8 @@ implemented name is breaking and needs the EV-05 dual-publish window.
 
 Evidence:
 
+- `repos/eia-party-expert/.../PartyEvents.java:27-28,66-112` (reference-data
+  names, payloads, and aggregate version)
 - `repos/eia-policy-expert/.../PolicyEvents.java:37-56,98-169` (policy, billing,
   dunning, mass tort, program, credit-note creation, credit-note-transition, and
   premium-audit names)
@@ -3682,10 +3704,90 @@ this release. The list filter needs the same reconciliation: if the subject
 columns are modelled, the filter can move to `subject_type`/`subject_id` while
 keeping the exact-pair rule.
 
+## M-54 Party identifiers and addresses are SPEC-less child routes
+
+Party identifiers and addresses are implemented as append-only child facts of
+the Party aggregate. The same four operations are served on the public base and
+on the `/internal/v1` expert base (the domain forwards to the expert), and each
+append bumps the Party row version and writes
+`party.party.identifier-added` or `party.party.address-added` in the same
+transaction.
+
+| Aspect | Implemented | SPEC 11.1.4 / 11.1.10 |
+|---|---|---|
+| Public routes | `GET/POST /api/v1/parties/{partyId}/identifiers`, `GET/POST /api/v1/parties/{partyId}/addresses` | No route: SPEC 11.1.10 lists the party, role, relationship, screening, consent, document, lineage, match, and audit routes only |
+| Expert routes | the same four operations under `/internal/v1/parties/{partyId}/...` | No internal reference-data route in SPEC 11.1.10 |
+| Identifier types | 21 values: `TAX_ID`, `REGISTRATION`, `LICENSE`, `TIN`, `EIN`, `SSN`, `ITIN`, `DUNS`, `LEI`, `PASSPORT`, `DRIVER_LICENSE`, `STATE_ID`, `MEDICARE_ID`, `MEDICAID_ID`, `NPI`, `BAR_NUMBER`, `ACORD_PARTY_ID`, `ISO_PARTY_ID`, `TRUST_CLAIM_NUMBER`, `BANKRUPTCY_CASE_NUMBER`, `OTHER` | 17 values; no `TAX_ID`, `REGISTRATION`, `LICENSE`, or `OTHER` |
+| Address types | 11 values: `PRIMARY`, `LEGAL`, `PHYSICAL`, `MAILING`, `BILLING`, `CLAIM_SITE`, `EXPOSURE_SITE`, `EMPLOYER`, `PROVIDER`, `BANK`, `OTHER` | 10 values; no `PRIMARY` |
+| Identifier value | plaintext `identifier_value varchar(128)` returned on the projection | `identifier_value_encrypted bytea` plus an `identifier_last4 char(4)` display projection |
+| Identifier coverage | type, value, issuing authority, effective date | adds `issuing_country`, `effective_from`/`effective_to`, `verified_flag`, `verified_at`, and `verification_source` |
+| Address coverage | type, line1/line2, city, stateRegion, postalCode, country (alpha-2), effective date | adds `line3`, `district`, `region`, `region_code`, latitude/longitude, `geocode_accuracy`, `effective_from`/`effective_to`, `direct_flag`, `validated_flag`, and `normalized_hash` |
+| Country | two-letter ISO 3166-1 alpha-2, normalized upper-case | `char(3)` ISO 3166-1 alpha-3 |
+| Identifier duplicate | 409 on the unique `(tenant, party, type, value)` key | No explicit unique key in SPEC 11.1.4; the implemented key is scoped to one party and identifier type |
+| Address duplicate | no uniqueness rule; a party may hold several addresses of the same type | `normalized_hash` is the SPEC dedup key |
+| List shape | bare array, oldest first (`created_at`, `id`) | the SPEC list conventions are cursor-paged (M-04) |
+| Events | `party.party.identifier-added`, `party.party.address-added` | SPEC 11.1.9 publishes neither fact |
+| Error envelope | expert `{code, message}`; domain `{code, message, details}`; `application/json` | canonical `Problem` with `application/problem+json` (M-02, M-17) |
+
+Additional differences:
+
+- The expert returns the generic `CONFLICT` code for a duplicate identifier.
+  The canonical contract documents `DUPLICATE_PARTY_IDENTIFIER`, and the
+  domain preserves the expert code, so a client that branches on the code sees
+  `CONFLICT` today.
+- The contract documents a 409 `DUPLICATE_PARTY_ADDRESS` guard for a repeat of
+  the same normalized address. The expert implements no address uniqueness
+  check and accepts the repeat; the status is the agreed target, not current
+  behaviour.
+- The public domain requires `X-EIA-Tenant` and reports its absence as 400
+  `TENANT_REQUIRED`. The expert accepts `?tenantId=` or `X-EIA-Tenant`,
+  requires one of them (400 `VALIDATION_ERROR`), and rejects a mismatch with
+  400 `VALIDATION_ERROR`. The domain sends both with the same value.
+- `createdBy` is hard-coded to `system`; there is no caller identity on either
+  route, so the actor is not attributable (M-20).
+- The expert README still lists five identifier types (`TAX_ID`,
+  `REGISTRATION`, `LICENSE`, `PASSPORT`, `OTHER`) and four address types
+  (`PRIMARY`, `MAILING`, `BILLING`, `OTHER`). The code enforces the full sets
+  above; that README section is stale, and this contract follows the code and
+  SPEC.
+
+Evidence:
+
+- `repos/eia-party-domain/.../PartyIdentifierController.java:22-46`,
+  `PartyAddressController.java:22-46` (public routes, header-only tenant, 201)
+- `repos/eia-party-domain/.../PartyIdentifierDto.java`,
+  `PartyAddressDto.java` (NON_NULL projection)
+- `repos/eia-party-domain/.../PartyClient.java:79-186` (tenant forwarding and
+  404/409/4xx mapping)
+- `repos/eia-party-domain/.../ApiExceptionHandler.java:18-53`
+- `repos/eia-party-expert/.../PartyReferenceDataController.java:20-77` (dual
+  base and tenant resolution)
+- `repos/eia-party-expert/.../PartyReferenceDataService.java:24-163` (type
+  sets, country normalization, identifier conflict, version bump, outbox)
+- `repos/eia-party-expert/.../PartyIdentifierRepository.java:38-56` and
+  `PartyAddressRepository.java:40-48` (oldest-first reads; the address table
+  has no unique key)
+- `repos/eia-party-expert/.../schema.sql:21-59` (`party_identifier` unique key,
+  plaintext value, `char(2)` country)
+- `repos/eia-party-expert/.../PartyEvents.java:27-28,66-112`
+- `repos/eia-party-expert/src/test/java/com/eia/party/expert/PartyReferenceDataApiTest.java:101-131,190-301`
+  (validation, duplicate 409, country normalization, tenant wall)
+- `repos/eia-party-expert/src/test/java/com/eia/party/expert/PartyReferenceDataOutboxIntegrationTest.java:61-232`
+  (event per append, transaction rollback, monotonic versions)
+- `repos/eia-party-domain/src/test/java/com/eia/party/domain/PartyIdentifierControllerTest.java:90-150`
+  and `PartyAddressControllerTest.java:91-140` (tenant-required, 404, 409, 400)
+- `repos/eia-party-expert/README.md:39-68` (stale type lists)
+
+Resolution: keep the implemented child-resource shape and widen SPEC
+11.1.4/11.1.10 to it, or adopt the SPEC encrypted identifier projection, the
+alpha-3 country, the address dedup key, and a SPEC route for reference data. In
+either case decide the PII/encryption treatment of `identifier_value` and the
+address duplicate rule, and correct the expert README.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-22
-Notifications source-filter contract:
+Party reference-data contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -3694,7 +3796,7 @@ repository: .../repos/eia-contracts
 python: 3.12.8 (standard library only)
 
 OpenAPI 3.1 documents
-  OK openapi/party.yaml  5 paths, 7 operations
+  OK openapi/party.yaml  9 paths, 15 operations
   OK openapi/policy.yaml  53 paths, 69 operations
   OK openapi/contract.yaml  43 paths, 62 operations
   OK openapi/direct-claims.yaml  51 paths, 74 operations
@@ -3706,7 +3808,7 @@ OpenAPI 3.1 documents
   OK openapi/notifications.yaml  10 paths, 13 operations
 
 AsyncAPI 3 documents
-  OK asyncapi/party.yaml  9 event channels
+  OK asyncapi/party.yaml  11 event channels
   OK asyncapi/policy.yaml  35 event channels
   OK asyncapi/contract.yaml  32 event channels
   OK asyncapi/direct-claims.yaml  28 event channels
@@ -3716,7 +3818,7 @@ AsyncAPI 3 documents
   OK asyncapi/document.yaml  24 event channels
   OK asyncapi/payment.yaml  20 event channels
   OK asyncapi/notifications.yaml  15 event channels
-  OK catalog: 218 unique published events across 10 verticals
+  OK catalog: 220 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -3724,7 +3826,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 14947 checks, 0 failures
+  PASS 15375 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -4041,7 +4143,21 @@ Additional checks and limits:
   same operation, and removing `INVALID_SOURCE_FILTER` from the public list
   description each fail with the specific parameter, extra-filter, or
   error-documentation message. All three were run on a throwaway copy and exited
-  non-zero (exit 1); the working copy was left unchanged.
+  non-zero (exit 1); the working copy was left unchanged. The Party
+  reference-data pass added eight more, each run on a throwaway copy and exited
+  non-zero (exit 1): renaming the public
+  `/api/v1/parties/{partyId}/identifiers` path fails with the
+  missing-operation message; changing a `PartyIdentifierType` member fails with
+  the exact-enum message; removing `party.party.identifier-added` from both
+  catalog lists fails with the published and implemented set messages; renaming
+  `DUPLICATE_PARTY_ADDRESS` fails with the 409 documentation message on both
+  address operations; renaming `DUPLICATE_PARTY_IDENTIFIER` fails the same way
+  on both identifier operations; adding `issuingAuthority` to the required list
+  of the two projections fails with the required-set message; renaming the
+  `PartyIdentifierAddedData` message reference fails with the
+  unresolved-reference message; and marking the identifier request body
+  `required: false` fails with the required-body message. The working copy was
+  left unchanged.
 
 ## Resolution policy
 

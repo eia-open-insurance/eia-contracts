@@ -1,21 +1,32 @@
 openapi: 3.1.0
 info:
   title: EIA Party API
-  version: 1.1.0
+  version: 1.2.0
   summary: Party identity, reference data, and the Party expert API.
   description: >
     Party is shared identity data across both books. This document describes the
     implemented public domain API served by eia-party-domain and the internal
     expert API served by eia-party-expert. The authoritative requirement is
-    SPEC 11.1 and SPEC 12; the implemented surface is the first vertical slice.
+    SPEC 11.1 and SPEC 12; the implemented surface is the first vertical slice
+    plus the party identifier and address reference data.
 
     The public routes are `/api/v1/parties` and are routed by eia-platform
     gateway. The internal routes are `/internal/v1/parties` and are reachable
     only inside the platform network.
 
-    Deviations from this document are recorded in MISMATCHES.md. In particular
-    the Party domain service has no exception handler yet, so a missing party
-    currently surfaces as an unhandled 500 rather than the canonical 404.
+    Party identifiers and addresses are append-only child facts of the Party
+    aggregate. The same four operations are implemented on the public path and
+    on the expert path; the domain forwards the tenant and the caller's body to
+    the expert. Adding one bumps the Party row version and writes its fact to
+    the transactional outbox in the same transaction as the child insert:
+    `party.party.identifier-added` or `party.party.address-added`.
+
+    Deviations from this document are recorded in MISMATCHES.md. The Party
+    domain translates expert 404, 409, and other 4xx failures into its
+    `{code, message, details}` `ApiError` body rather than the canonical
+    `application/problem+json` `Problem`, and the expert returns `{code,
+    message}`; M-02 and M-17 record the envelope gap and M-54 records the
+    reference-data slice.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -144,6 +155,187 @@ paths:
           $ref: './components.yaml#/components/responses/NotFound'
         default:
           $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/parties/{partyId}/identifiers:
+    get:
+      operationId: listPartyIdentifiers
+      tags:
+        - Party
+      summary: List a party's identifiers.
+      description: >
+        Returns the party's identifiers as a bare JSON array ordered by
+        `createdAt`, then `id` (oldest first). The party must exist in the
+        caller's tenant; an unknown party and another tenant's party are both
+        404 `NOT_FOUND`, so the response cannot confirm that a foreign party
+        exists. The domain forwards `X-EIA-Tenant` and the party id to the
+        expert's internal route and returns the expert projection.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: partyId
+          in: path
+          required: true
+          description: Party whose identifiers are listed.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Identifiers of the party, oldest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PartyIdentifier'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: addPartyIdentifier
+      tags:
+        - Party
+      summary: Add an identifier to a party.
+      description: >
+        Appends one identifier to the party and returns it with 201. The type is
+        trimmed and upper-cased and must be a member of `PartyIdentifierType`;
+        `identifierValue` is trimmed and must be 1-128 characters. The unique
+        key is the normalized `(tenantId, partyId, identifierType,
+        identifierValue)`, so a duplicate is 409. The insert, the Party version
+        bump, and the `party.party.identifier-added` outbox row commit in one
+        transaction, so a rejected duplicate leaves no row, no version bump, and
+        no event.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: partyId
+          in: path
+          required: true
+          description: Party that receives the identifier.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePartyIdentifierRequest'
+      responses:
+        '201':
+          description: Identifier stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PartyIdentifier'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            The normalized identifier already exists for this party. The
+            canonical code is `DUPLICATE_PARTY_IDENTIFIER`. The expert currently
+            returns the generic `CONFLICT` code in its `{code, message}` body
+            and the domain preserves that status and code (MISMATCHES.md M-54).
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/parties/{partyId}/addresses:
+    get:
+      operationId: listPartyAddresses
+      tags:
+        - Party
+      summary: List a party's addresses.
+      description: >
+        Returns the party's addresses as a bare JSON array ordered by
+        `createdAt`, then `id` (oldest first). A party may hold any number of
+        addresses of the same type; there is no address uniqueness rule. The
+        party must exist in the caller's tenant; an unknown party and another
+        tenant's party are both 404 `NOT_FOUND`.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: partyId
+          in: path
+          required: true
+          description: Party whose addresses are listed.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Addresses of the party, oldest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PartyAddress'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: addPartyAddress
+      tags:
+        - Party
+      summary: Add an address to a party.
+      description: >
+        Appends one address to the party and returns it with 201. The type is
+        trimmed and upper-cased and must be a member of `PartyAddressType`;
+        every text field is trimmed, and `country` is upper-cased and must be a
+        two-letter ISO 3166-1 alpha-2 code. The insert, the Party version bump,
+        and the `party.party.address-added` outbox row commit in one
+        transaction. A party may hold several addresses of the same type, and
+        the expert implements no address uniqueness rule yet: the canonical
+        duplicate guard is documented as 409 `DUPLICATE_PARTY_ADDRESS` for a
+        repeat of the same normalized address, but the running expert currently
+        stores the repeat (MISMATCHES.md M-54).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: partyId
+          in: path
+          required: true
+          description: Party that receives the address.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePartyAddressRequest'
+      responses:
+        '201':
+          description: Address stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PartyAddress'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            A duplicate address for this party. The canonical code is
+            `DUPLICATE_PARTY_ADDRESS` for a repeat of the same normalized
+            address; the implemented expert has no address uniqueness rule and
+            currently accepts the repeat, so this status is the agreed guard
+            rather than current behaviour (MISMATCHES.md M-54). The identifier
+            duplicate rule, by contrast, is enforced today.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
   /internal/v1/parties:
     get:
       operationId: expertListParties
@@ -218,6 +410,178 @@ paths:
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
           $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/parties/{partyId}/identifiers:
+    get:
+      operationId: expertListPartyIdentifiers
+      tags:
+        - Party internal
+      summary: List a party's identifiers (expert).
+      description: >
+        Expert read used by the Party domain. The tenant is taken from
+        `?tenantId=` or from `X-EIA-Tenant`; supplying both with different
+        values is 400 `VALIDATION_ERROR`, and supplying neither is 400. An
+        unknown party and another tenant's party are both 404 `NOT_FOUND`.
+        Identifiers are returned oldest first.
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: partyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Identifiers of the party, oldest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PartyIdentifier'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertAddPartyIdentifier
+      tags:
+        - Party internal
+      summary: Add an identifier to a party (expert).
+      description: >
+        Expert command used by the Party domain. The identifier rules, the
+        duplicate guard, the Party version bump, and the
+        `party.party.identifier-added` outbox row are owned here. The body is
+        validated against `CreatePartyIdentifierRequest`; a duplicate of the
+        normalized unique key is 409.
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: partyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePartyIdentifierRequest'
+      responses:
+        '201':
+          description: Identifier stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PartyIdentifier'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            The normalized identifier already exists for this party. The expert
+            currently returns `{code: CONFLICT, message}`; the canonical code is
+            `DUPLICATE_PARTY_IDENTIFIER` (MISMATCHES.md M-54).
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/parties/{partyId}/addresses:
+    get:
+      operationId: expertListPartyAddresses
+      tags:
+        - Party internal
+      summary: List a party's addresses (expert).
+      description: >
+        Expert read used by the Party domain. The tenant comes from `?tenantId=`
+        or `X-EIA-Tenant` and a mismatch is 400 `VALIDATION_ERROR`; neither is
+        400. An unknown party and another tenant's party are both 404
+        `NOT_FOUND`. Addresses are returned oldest first.
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: partyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Addresses of the party, oldest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PartyAddress'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: expertAddPartyAddress
+      tags:
+        - Party internal
+      summary: Add an address to a party (expert).
+      description: >
+        Expert command used by the Party domain. The address rules, the Party
+        version bump, and the `party.party.address-added` outbox row are owned
+        here. `addressType` is normalized and every text field is trimmed;
+        `country` is normalized to two upper-case letters. There is no address
+        uniqueness rule in this slice (MISMATCHES.md M-54).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: partyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePartyAddressRequest'
+      responses:
+        '201':
+          description: Address stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PartyAddress'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            A duplicate address for this party. The canonical code is
+            `DUPLICATE_PARTY_ADDRESS`; the implemented expert has no address
+            uniqueness rule and currently accepts a repeat (MISMATCHES.md
+            M-54).
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
         default:
           $ref: './components.yaml#/components/responses/Problem'
 components:
@@ -309,22 +673,292 @@ components:
         legalName:
           type: string
           minLength: 1
+    PartyIdentifierType:
+      type: string
+      description: >
+        Identifier vocabulary enforced by the Party expert. A request value is
+        trimmed and upper-cased before the membership check. The set is the
+        SPEC 11.1.4 technical and identity identifier list plus the implemented
+        `TAX_ID`, `REGISTRATION`, `LICENSE`, and `OTHER` values; SPEC does not
+        enumerate those four (MISMATCHES.md M-54).
+      enum:
+        - TAX_ID
+        - REGISTRATION
+        - LICENSE
+        - TIN
+        - EIN
+        - SSN
+        - ITIN
+        - DUNS
+        - LEI
+        - PASSPORT
+        - DRIVER_LICENSE
+        - STATE_ID
+        - MEDICARE_ID
+        - MEDICAID_ID
+        - NPI
+        - BAR_NUMBER
+        - ACORD_PARTY_ID
+        - ISO_PARTY_ID
+        - TRUST_CLAIM_NUMBER
+        - BANKRUPTCY_CASE_NUMBER
+        - OTHER
+    PartyAddressType:
+      type: string
+      description: >
+        Address vocabulary enforced by the Party expert. A request value is
+        trimmed and upper-cased before the membership check. The set is the
+        SPEC 11.1.4 address list plus the implemented `PRIMARY` value; SPEC
+        does not enumerate `PRIMARY` (MISMATCHES.md M-54).
+      enum:
+        - PRIMARY
+        - LEGAL
+        - PHYSICAL
+        - MAILING
+        - BILLING
+        - CLAIM_SITE
+        - EXPOSURE_SITE
+        - EMPLOYER
+        - PROVIDER
+        - BANK
+        - OTHER
+    PartyIdentifier:
+      type: object
+      description: >
+        One append-only identifier of a party. `issuingAuthority` and
+        `effectiveDate` are optional: the public domain omits a null member and
+        the expert serializes it, so a client must accept both the absence and
+        a null value. `createdBy` is the stored actor and is `system` in the
+        current slice.
+      required:
+        - id
+        - tenantId
+        - partyId
+        - identifierType
+        - identifierValue
+        - createdAt
+        - createdBy
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        partyId:
+          type: string
+          format: uuid
+        identifierType:
+          $ref: '#/components/schemas/PartyIdentifierType'
+        identifierValue:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: >
+            Trimmed value as supplied. The column is plaintext, not the
+            SPEC 11.1.4 `identifier_value_encrypted` bytea; M-54 records the
+            encryption and last-four projection gap.
+        issuingAuthority:
+          type: [string, 'null']
+          maxLength: 128
+          description: Optional issuing authority; null or absent when not supplied.
+        effectiveDate:
+          type: [string, 'null']
+          format: date
+          description: Optional date from which the identifier is effective.
+        createdAt:
+          type: string
+          format: date-time
+        createdBy:
+          type: string
+          maxLength: 128
+    PartyAddress:
+      type: object
+      description: >
+        One append-only address of a party. `line2`, `stateRegion`, and
+        `effectiveDate` are optional: the public domain omits a null member and
+        the expert serializes it. `stateRegion` keeps the caller's case after
+        trimming; `country` is normalized to two upper-case letters.
+      required:
+        - id
+        - tenantId
+        - partyId
+        - addressType
+        - line1
+        - city
+        - postalCode
+        - country
+        - createdAt
+        - createdBy
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenantId:
+          type: string
+          format: uuid
+        partyId:
+          type: string
+          format: uuid
+        addressType:
+          $ref: '#/components/schemas/PartyAddressType'
+        line1:
+          type: string
+          minLength: 1
+          maxLength: 128
+        line2:
+          type: [string, 'null']
+          maxLength: 128
+          description: Optional second line; null or absent when not supplied.
+        city:
+          type: string
+          minLength: 1
+          maxLength: 64
+        stateRegion:
+          type: [string, 'null']
+          maxLength: 64
+          description: >
+            Optional state, province, or region. Trimmed but not upper-cased.
+        postalCode:
+          type: string
+          minLength: 1
+          maxLength: 16
+        country:
+          type: string
+          pattern: '^[A-Z]{2}$'
+          description: >
+            ISO 3166-1 alpha-2 country code, stored and returned upper-case.
+            SPEC 11.1.4 uses a three-letter alpha-3 country; M-54 records the
+            narrower implemented code.
+        effectiveDate:
+          type: [string, 'null']
+          format: date
+          description: Optional date from which the address is effective.
+        createdAt:
+          type: string
+          format: date-time
+        createdBy:
+          type: string
+          maxLength: 128
+    CreatePartyIdentifierRequest:
+      type: object
+      description: >
+        Add-identifier command. `identifierType` and `identifierValue` are
+        required; `issuingAuthority` and `effectiveDate` are optional, and a
+        blank `issuingAuthority` is stored as null. The type is upper-cased and
+        trimmed and the value is trimmed before the duplicate check.
+      required:
+        - identifierType
+        - identifierValue
+      properties:
+        identifierType:
+          $ref: '#/components/schemas/PartyIdentifierType'
+        identifierValue:
+          type: string
+          minLength: 1
+          maxLength: 128
+        issuingAuthority:
+          type: string
+          maxLength: 128
+        effectiveDate:
+          type: string
+          format: date
+    CreatePartyAddressRequest:
+      type: object
+      description: >
+        Add-address command. `addressType`, `line1`, `city`, `postalCode`, and
+        `country` are required; `line2`, `stateRegion`, and `effectiveDate` are
+        optional. Every text field is trimmed, the type is upper-cased, and the
+        country accepts either case and is stored upper-case.
+      required:
+        - addressType
+        - line1
+        - city
+        - postalCode
+        - country
+      properties:
+        addressType:
+          $ref: '#/components/schemas/PartyAddressType'
+        line1:
+          type: string
+          minLength: 1
+          maxLength: 128
+        line2:
+          type: string
+          maxLength: 128
+        city:
+          type: string
+          minLength: 1
+          maxLength: 64
+        stateRegion:
+          type: string
+          maxLength: 64
+        postalCode:
+          type: string
+          minLength: 1
+          maxLength: 16
+        country:
+          type: string
+          pattern: '^[A-Za-z]{2}$'
+          description: >
+            Two-letter country code. Accepted in either case and normalized to
+            upper-case; a value that is not exactly two letters is 400.
+        effectiveDate:
+          type: string
+          format: date
 x-vertical: party
+x-compatibility:
+  contractVersion: 1.2.0
+  previousContractVersion: 1.1.0
+  breaking: []
+  compatible:
+    - Adds GET/POST /api/v1/parties/{partyId}/identifiers and /api/v1/parties/{partyId}/addresses.
+    - Adds the four matching /internal/v1 expert operations used by the Party domain.
+    - Adds the PartyIdentifier, PartyAddress, CreatePartyIdentifierRequest, and CreatePartyAddressRequest schemas.
+    - Adds the closed PartyIdentifierType (21 values) and PartyAddressType (11 values) enums.
+    - Documents 200/201/400/404/409 on the four public operations and the identifier duplicate guard.
+    - Documents the party.party.identifier-added and party.party.address-added facts and their payloads.
+  note: >
+    The reference-data slice is additive over 1.1.0: no existing path, request
+    field, response field, or event name is removed or changes meaning.
 x-implementation:
   status: implemented
-  verifiedAt: '2026-10-20'
+  verifiedAt: '2026-10-22'
   verifiedAgainst:
     - repos/eia-party-domain/src/main/java/com/eia/party/domain/PartyController.java
     - repos/eia-party-domain/src/main/java/com/eia/party/domain/PartySearchController.java
     - repos/eia-party-domain/src/main/java/com/eia/party/domain/PartySearchService.java
     - repos/eia-party-domain/src/main/java/com/eia/party/domain/PartySearchRepository.java
+    - repos/eia-party-domain/src/main/java/com/eia/party/domain/PartyIdentifierController.java
+    - repos/eia-party-domain/src/main/java/com/eia/party/domain/PartyIdentifierDto.java
+    - repos/eia-party-domain/src/main/java/com/eia/party/domain/PartyAddressController.java
+    - repos/eia-party-domain/src/main/java/com/eia/party/domain/PartyAddressDto.java
     - repos/eia-party-domain/src/main/java/com/eia/party/domain/PartyClient.java
+    - repos/eia-party-domain/src/main/java/com/eia/party/domain/ApiExceptionHandler.java
     - repos/eia-party-expert/src/main/java/com/eia/party/expert/PartyController.java
     - repos/eia-party-expert/src/main/java/com/eia/party/expert/ApiExceptionHandler.java
+    - repos/eia-party-expert/src/main/java/com/eia/party/expert/PartyReferenceDataController.java
+    - repos/eia-party-expert/src/main/java/com/eia/party/expert/PartyReferenceDataService.java
+    - repos/eia-party-expert/src/main/java/com/eia/party/expert/PartyIdentifier.java
+    - repos/eia-party-expert/src/main/java/com/eia/party/expert/PartyAddress.java
+    - repos/eia-party-expert/src/main/java/com/eia/party/expert/PartyIdentifierRepository.java
+    - repos/eia-party-expert/src/main/java/com/eia/party/expert/PartyAddressRepository.java
+    - repos/eia-party-expert/src/main/java/com/eia/party/expert/PartyEvents.java
+    - repos/eia-party-expert/src/main/resources/schema.sql
+    - repos/eia-party-expert/src/test/java/com/eia/party/expert/PartyReferenceDataApiTest.java
+    - repos/eia-party-expert/src/test/java/com/eia/party/expert/PartyReferenceDataOutboxIntegrationTest.java
+    - repos/eia-party-domain/src/test/java/com/eia/party/domain/PartyIdentifierControllerTest.java
+    - repos/eia-party-domain/src/test/java/com/eia/party/domain/PartyAddressControllerTest.java
   notes: >
-    The Party domain service has no ApiExceptionHandler, so downstream 404 and
-    expert failures are not translated into the canonical envelope. The Party
-    expert returns `{code, message}` for NOT_FOUND only.
+    The Party domain translates expert 404, 409, and other 4xx failures into its
+    `{code, message, details}` `ApiError` body; the expert returns `{code,
+    message}`. Neither uses the canonical `Problem` media type yet (M-02,
+    M-17). The identifier duplicate is enforced by the unique
+    `(tenant_id, party_id, identifier_type, identifier_value)` key and is 409;
+    the expert has no address uniqueness rule, so the documented
+    `DUPLICATE_PARTY_ADDRESS` guard is not implemented yet (M-54). The expert
+    route requires `tenantId` or `X-EIA-Tenant` and rejects a mismatch; the
+    public domain requires `X-EIA-Tenant` and forwards it on both.
 x-planned-operations:
   - method: PATCH
     path: /api/v1/parties/{partyId}

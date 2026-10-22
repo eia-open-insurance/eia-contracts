@@ -2422,6 +2422,40 @@ the tenant parameter, the 400 response, the both-or-neither wording, and the
 `INVALID_SOURCE_TYPE`/`INVALID_SOURCE_FILTER`/`EIA-NTF-9502` codes; it also
 rejects a `sourceReference` query parameter. The full run passes 14,947 checks.
 
+### Party identifier and address reference data (2026-10-22)
+
+Party 1.2.0 documents the identifier and address reference data of the Party
+aggregate. The change is additive: four new public operations, their four
+`/internal/v1` expert equivalents, six schemas, two closed type enums, and two
+implemented event names; no existing path, request field, response field, or
+event changes.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/party.yaml` | 1.2.0 | Additive | `GET/POST /api/v1/parties/{partyId}/identifiers`, `GET/POST /api/v1/parties/{partyId}/addresses`, their `/internal/v1` expert equivalents, the `PartyIdentifier`, `PartyAddress`, `CreatePartyIdentifierRequest`, and `CreatePartyAddressRequest` schemas, and the `PartyIdentifierType`/`PartyAddressType` enums. |
+| `asyncapi/party.yaml` | 1.2.0 | Additive | The implemented `party.party.identifier-added` and `party.party.address-added` channels, `send` operations, and `PartyIdentifierAddedData`/`PartyAddressAddedData` payloads. |
+| `asyncapi/event-catalog.yaml` | 1.35.0 | Additive | Both names are published and implemented (220 published and 101 implemented in total; Party 11 published and 4 implemented). |
+
+The operations, projections, request commands, type vocabularies, duplicate
+rules, and event payloads are under
+[Party identifiers and addresses](#party-identifiers-and-addresses). The
+identifier duplicate is enforced by the unique key and is 409; the address
+duplicate guard is documented as `DUPLICATE_PARTY_ADDRESS` but the expert has
+no address uniqueness rule yet. Both lists are bare oldest-first arrays, and the
+domain and expert keep their `{code, message, details}` `ApiError` bodies rather
+than the canonical `Problem` (M-02, M-17). `MISMATCHES.md` M-54 records the
+SPEC-less route and event names, the wider type sets, the plaintext identifier
+value, the alpha-2 country, and the missing address dedup key.
+
+The validator requires the four public and four expert operations, the shared
+tenant parameters, the `partyId` path parameter, the 200/201/400/404/409
+responses with `DUPLICATE_PARTY_IDENTIFIER` and `DUPLICATE_PARTY_ADDRESS`, the
+two exact type enums, the projection and command field sets and bounds, the
+`issuingAuthority`/`effectiveDate`/`line2`/`stateRegion` nullability, the
+identifier-value and country patterns, the two implemented channels with their
+exact payload members, and the two catalog entries. The full run passes 15,375
+checks.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -2647,6 +2681,75 @@ Rules:
   terminal `POSTED` allocation and the expert record-write failure and returns
   the pre-update allocation with 200; M-36 records the difference from the
   canonical 409 and the "recorded state" contract.
+
+### Party identifiers and addresses
+
+Party identifiers (`party_identifier`) and addresses (`party_address`) are
+append-only child records of the Party aggregate (SPEC 11.1.4). The public
+domain and the expert both serve them; the domain forwards the tenant and the
+caller's command body to the expert, which owns the type vocabulary, the
+normalization, the identifier duplicate detection, and the tenant wall.
+
+| Operation | Public path | Expert path | Success | Errors |
+|---|---|---|---|---|
+| List identifiers | `GET /api/v1/parties/{partyId}/identifiers` | `GET /internal/v1/parties/{partyId}/identifiers` | 200 `PartyIdentifier[]` | 400, 404 |
+| Add identifier | `POST /api/v1/parties/{partyId}/identifiers` | `POST /internal/v1/parties/{partyId}/identifiers` | 201 `PartyIdentifier` | 400, 404, 409 |
+| List addresses | `GET /api/v1/parties/{partyId}/addresses` | `GET /internal/v1/parties/{partyId}/addresses` | 200 `PartyAddress[]` | 400, 404 |
+| Add address | `POST /api/v1/parties/{partyId}/addresses` | `POST /internal/v1/parties/{partyId}/addresses` | 201 `PartyAddress` | 400, 404, 409 |
+
+Shapes:
+
+- `PartyIdentifier` is `{id, tenantId, partyId, identifierType,
+  identifierValue, issuingAuthority?, effectiveDate?, createdAt, createdBy}`.
+  `issuingAuthority` and `effectiveDate` are optional; the public domain omits a
+  null member and the expert serializes it.
+- `CreatePartyIdentifierRequest` is `{identifierType, identifierValue,
+  issuingAuthority?, effectiveDate?}`.
+- `PartyAddress` is `{id, tenantId, partyId, addressType, line1, line2?, city,
+  stateRegion?, postalCode, country, effectiveDate?, createdAt, createdBy}`.
+  `line2`, `stateRegion`, and `effectiveDate` are optional in the same sense.
+- `CreatePartyAddressRequest` is `{addressType, line1, line2?, city,
+  stateRegion?, postalCode, country, effectiveDate?}`.
+- `PartyIdentifierType` is the closed 21-value set: `TAX_ID`, `REGISTRATION`,
+  `LICENSE`, `TIN`, `EIN`, `SSN`, `ITIN`, `DUNS`, `LEI`, `PASSPORT`,
+  `DRIVER_LICENSE`, `STATE_ID`, `MEDICARE_ID`, `MEDICAID_ID`, `NPI`,
+  `BAR_NUMBER`, `ACORD_PARTY_ID`, `ISO_PARTY_ID`, `TRUST_CLAIM_NUMBER`,
+  `BANKRUPTCY_CASE_NUMBER`, and `OTHER`.
+- `PartyAddressType` is the closed 11-value set: `PRIMARY`, `LEGAL`, `PHYSICAL`,
+  `MAILING`, `BILLING`, `CLAIM_SITE`, `EXPOSURE_SITE`, `EMPLOYER`, `PROVIDER`,
+  `BANK`, and `OTHER`.
+
+Rules:
+
+- `identifierType` and `addressType` are trimmed and upper-cased before the
+  membership check, so `primary` is accepted as `PRIMARY`. Every text field is
+  trimmed; `identifierValue` is capped at 128 characters, address `line1` and
+  `line2` at 128, `city` at 64, `stateRegion` at 64, and `postalCode` at 16.
+  `stateRegion` keeps its case; `country` accepts either case and is stored as
+  two upper-case letters (ISO 3166-1 alpha-2).
+- The identifier unique key is the normalized `(tenantId, partyId,
+  identifierType, identifierValue)`, so a duplicate is 409. The canonical code
+  is `DUPLICATE_PARTY_IDENTIFIER`; the expert currently returns the generic
+  `CONFLICT` code and the domain preserves it (M-54).
+- Addresses have no uniqueness rule in the implemented expert: a party may hold
+  several addresses of the same type. The canonical contract documents a 409
+  `DUPLICATE_PARTY_ADDRESS` guard for a repeat of the same normalized address;
+  that guard is the agreed target and is not enforced yet (M-54).
+- An unknown party and another tenant's party are both 404, so the response
+  cannot confirm a foreign record. The public routes require `X-EIA-Tenant`; the
+  expert also accepts `?tenantId=` and rejects a mismatch or a missing tenant
+  with 400.
+- Adding one child bumps the Party row version and writes
+  `party.party.identifier-added` or `party.party.address-added` in the same
+  transaction as the child insert, so a rejected duplicate leaves no row, no
+  version bump, and no event. The payload carries the Party identity and row
+  `version`, the child id and normalized values, and `createdBy`/`createdAt`;
+  the envelope `aggregateVersion` is the row version plus one.
+- Both lists are bare arrays ordered by `createdAt`, then `id` (oldest first),
+  not the SPEC cursor envelope (M-04). The SPEC 11.1.10 route table has no
+  reference-data route and SPEC 11.1.9 publishes neither event; M-54 records the
+  wider type sets, the plaintext identifier value versus the SPEC encrypted
+  column, the alpha-2 versus alpha-3 country, and the missing address dedup key.
 
 ### Pagination and collections
 
@@ -3611,6 +3714,15 @@ missing directory.
    absence of the adjustment path from `x-planned-operations`, and agreement
    between
    `info.version` and `x-compatibility.contractVersion`. It also requires the
+   Party identifier and address operations on both the public and the expert
+   base, the shared tenant parameters and the uuid `partyId` path parameter,
+   the 200/201/400/404/409 responses with `DUPLICATE_PARTY_IDENTIFIER` and
+   `DUPLICATE_PARTY_ADDRESS`, the exact 21-value `PartyIdentifierType` and
+   11-value `PartyAddressType` enums, the `PartyIdentifier`, `PartyAddress`,
+   `CreatePartyIdentifierRequest`, and `CreatePartyAddressRequest` field sets
+   and bounds, the nullable `issuingAuthority`, `effectiveDate`, `line2`, and
+   `stateRegion` members, the identifier-value and country patterns, and the
+   documented address 409 target. It also requires the
    Notifications `NotificationType` member `DUNNING_NOTICE`, its position
    between `ESCHEATMENT_DUE` and `NEW_DOCUMENT_UPLOAD`, no repeated enum value,
    and the `NotificationType` reference on the `Notification` projection and on
@@ -3682,16 +3794,23 @@ missing directory.
    and the
    `NotificationTemplateData` payload with its template identity, code,
    template version, locale, status, and nullable approver members for the
-   created, approved, and retired facts, and the `NotificationCreatedData` and
+   created, approved, and retired facts, the `NotificationCreatedData` and
    `NotificationSentData` payloads with their optional `sourceType`,
-   `sourceId`, and `sourceReference` members on the two notification facts.
+   `sourceId`, and `sourceReference` members on the two notification facts, and
+   the `PartyIdentifierAddedData` and `PartyAddressAddedData` payloads with
+   their Party identity and row version, child id, normalized type and values,
+   optional authority, effective date, second line, and region, country, actor,
+   and instant members.
 5. **Event catalog cross-check.** The published set in `event-catalog.yaml`
    must equal the channel addresses in the matching vertical document, event
    names must be unique across the platform and must match
    `{vertical}.{aggregate}.{verb}`, every consumed event must have a publisher,
    and the catalog `implemented` list must equal the channels marked
    `x-status: implemented`. The implemented event names for all ten publishing
-   verticals are required explicitly, including `direct.claim.assigned`,
+   verticals are required explicitly, including
+   `party.party.identifier-added`,
+   `party.party.address-added`,
+   `direct.claim.assigned`,
    `direct.claim.allocation-created`, `direct.claim.settlement-payment-linked`,
    `direct.claim.litigation-created`, `direct.claim.litigation-updated`,
    `assumed.claim.assigned`,
@@ -3993,6 +4112,13 @@ missing directory.
   The slice has no cash-call limit or `cash_call_allowed` term check, no
   contract-window or contract-currency reconciliation, and no claim or Payment
   link; the domain also accepts an absent `X-EIA-Book` (M-22, M-34);
+- Party identifiers and addresses are append-only child routes with no SPEC
+  11.1.10 route and no SPEC 11.1.9 event. The enforced identifier vocabulary
+  adds `TAX_ID`, `REGISTRATION`, `LICENSE`, and `OTHER` beyond SPEC 11.1.4 and
+  the address vocabulary adds `PRIMARY`; the identifier value is stored
+  plaintext rather than encrypted, the country is alpha-2 rather than alpha-3,
+  both lists are bare arrays, and the documented address duplicate guard is not
+  implemented (M-22, M-54);
 - ten experts publish a subset of their events through the transactional
   outbox into the platform `event-ingest` inbox, but no vertical consumes
   another vertical's events, there is no subscription registry or gap

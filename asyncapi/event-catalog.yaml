@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.34.0
+  version: 1.35.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -184,6 +184,14 @@ info:
     name, and the moved name adds one implemented name, bringing the platform
     totals to 218 published and 99 implemented; Direct Claims becomes 28
     published and 15 implemented (M-22, M-52).
+    The 2026-10-22 Party identifier and address slice adds the two Party names
+    `party.party.identifier-added` and `party.party.address-added` with no SPEC
+    11.1.9 equivalent: SPEC publishes no reference-data fact for an appended
+    identifier or address. Both are child facts of the Party aggregate keyed by
+    the party id at the bumped aggregate version, and each payload names the
+    child id and the normalized values. They add two published and two
+    implemented names, bringing the platform totals to 220 published and 101
+    implemented; Party becomes 11 published and 4 implemented (M-22, M-54).
     The platform
     event-ingest service
     is the inbox:
@@ -271,6 +279,8 @@ x-event-catalog:
     published:
       - party.party.created
       - party.party.updated
+      - party.party.identifier-added
+      - party.party.address-added
       - party.party.status-changed
       - party.party.merged
       - party.role.added
@@ -281,6 +291,8 @@ x-event-catalog:
     implemented:
       - party.party.created
       - party.party.updated
+      - party.party.identifier-added
+      - party.party.address-added
     consumed:
       - policy.policy.issued
       - contract.contract.bound

@@ -59,9 +59,17 @@ REQUIRED_OPENAPI_PATHS = {
         ("/api/v1/parties", "get"),
         ("/api/v1/parties", "post"),
         ("/api/v1/parties/{partyId}", "get"),
+        ("/api/v1/parties/{partyId}/identifiers", "get"),
+        ("/api/v1/parties/{partyId}/identifiers", "post"),
+        ("/api/v1/parties/{partyId}/addresses", "get"),
+        ("/api/v1/parties/{partyId}/addresses", "post"),
         ("/internal/v1/parties", "get"),
         ("/internal/v1/parties", "post"),
         ("/internal/v1/parties/{partyId}", "get"),
+        ("/internal/v1/parties/{partyId}/identifiers", "get"),
+        ("/internal/v1/parties/{partyId}/identifiers", "post"),
+        ("/internal/v1/parties/{partyId}/addresses", "get"),
+        ("/internal/v1/parties/{partyId}/addresses", "post"),
     ],
     "policy": [
         ("/api/v1/policies", "get"),
@@ -1778,6 +1786,8 @@ IMPLEMENTED_EVENTS = {
     "party": [
         "party.party.created",
         "party.party.updated",
+        "party.party.identifier-added",
+        "party.party.address-added",
     ],
     "policy": [
         "policy.policy.created",
@@ -11822,6 +11832,676 @@ def check_direct_claim_list_filter(contracts: ContractSet, document, relative: s
 
 
 # ---------------------------------------------------------------------------
+# Party identifier and address reference data (SPEC 11.1.4)
+# ---------------------------------------------------------------------------
+
+# Each tuple is (public path, projection schema, request schema, duplicate
+# code, emitted event). The same four operations are implemented on the
+# /internal/v1 expert base; the domain calls them and the expert also serves
+# the public base. Adding a child bumps the Party row version and writes the
+# event in the same transaction.
+PARTY_REFERENCE_DATA_PATHS = [
+    (
+        "/api/v1/parties/{partyId}/identifiers",
+        "PartyIdentifier",
+        "CreatePartyIdentifierRequest",
+        "DUPLICATE_PARTY_IDENTIFIER",
+        "party.party.identifier-added",
+    ),
+    (
+        "/api/v1/parties/{partyId}/addresses",
+        "PartyAddress",
+        "CreatePartyAddressRequest",
+        "DUPLICATE_PARTY_ADDRESS",
+        "party.party.address-added",
+    ),
+]
+
+PARTY_REFERENCE_DATA_INTERNAL_PATHS = [
+    "/internal/v1/parties/{partyId}/identifiers",
+    "/internal/v1/parties/{partyId}/addresses",
+]
+
+# The expert's closed vocabularies. The identifier set is the SPEC 11.1.4 list
+# plus TAX_ID, REGISTRATION, LICENSE, and OTHER; the address set is the SPEC
+# list plus PRIMARY. A request value is trimmed and upper-cased before the
+# membership check.
+PARTY_IDENTIFIER_TYPES = (
+    "TAX_ID",
+    "REGISTRATION",
+    "LICENSE",
+    "TIN",
+    "EIN",
+    "SSN",
+    "ITIN",
+    "DUNS",
+    "LEI",
+    "PASSPORT",
+    "DRIVER_LICENSE",
+    "STATE_ID",
+    "MEDICARE_ID",
+    "MEDICAID_ID",
+    "NPI",
+    "BAR_NUMBER",
+    "ACORD_PARTY_ID",
+    "ISO_PARTY_ID",
+    "TRUST_CLAIM_NUMBER",
+    "BANKRUPTCY_CASE_NUMBER",
+    "OTHER",
+)
+
+PARTY_ADDRESS_TYPES = (
+    "PRIMARY",
+    "LEGAL",
+    "PHYSICAL",
+    "MAILING",
+    "BILLING",
+    "CLAIM_SITE",
+    "EXPOSURE_SITE",
+    "EMPLOYER",
+    "PROVIDER",
+    "BANK",
+    "OTHER",
+)
+
+PARTY_IDENTIFIER_PROJECTION_FIELDS = (
+    "id",
+    "tenantId",
+    "partyId",
+    "identifierType",
+    "identifierValue",
+    "issuingAuthority",
+    "effectiveDate",
+    "createdAt",
+    "createdBy",
+)
+
+PARTY_IDENTIFIER_PROJECTION_REQUIRED = (
+    "id",
+    "tenantId",
+    "partyId",
+    "identifierType",
+    "identifierValue",
+    "createdAt",
+    "createdBy",
+)
+
+PARTY_IDENTIFIER_REQUEST_FIELDS = (
+    "identifierType",
+    "identifierValue",
+    "issuingAuthority",
+    "effectiveDate",
+)
+
+PARTY_IDENTIFIER_REQUEST_REQUIRED = ("identifierType", "identifierValue")
+
+PARTY_ADDRESS_PROJECTION_FIELDS = (
+    "id",
+    "tenantId",
+    "partyId",
+    "addressType",
+    "line1",
+    "line2",
+    "city",
+    "stateRegion",
+    "postalCode",
+    "country",
+    "effectiveDate",
+    "createdAt",
+    "createdBy",
+)
+
+PARTY_ADDRESS_PROJECTION_REQUIRED = (
+    "id",
+    "tenantId",
+    "partyId",
+    "addressType",
+    "line1",
+    "city",
+    "postalCode",
+    "country",
+    "createdAt",
+    "createdBy",
+)
+
+PARTY_ADDRESS_REQUEST_FIELDS = (
+    "addressType",
+    "line1",
+    "line2",
+    "city",
+    "stateRegion",
+    "postalCode",
+    "country",
+    "effectiveDate",
+)
+
+PARTY_ADDRESS_REQUEST_REQUIRED = (
+    "addressType",
+    "line1",
+    "city",
+    "postalCode",
+    "country",
+)
+
+PARTY_REFERENCE_DATA_MAX_LENGTHS = {
+    "identifierValue": 128,
+    "issuingAuthority": 128,
+    "line1": 128,
+    "line2": 128,
+    "city": 64,
+    "stateRegion": 64,
+    "postalCode": 16,
+    "createdBy": 128,
+}
+
+PARTY_REFERENCE_DATA_EVENTS = (
+    "party.party.identifier-added",
+    "party.party.address-added",
+)
+
+PARTY_IDENTIFIER_EVENT_MESSAGE = "PartyIdentifierAddedData"
+PARTY_ADDRESS_EVENT_MESSAGE = "PartyAddressAddedData"
+
+PARTY_IDENTIFIER_EVENT_FIELDS = (
+    "partyId",
+    "partyNumber",
+    "version",
+    "identifierId",
+    "identifierType",
+    "identifierValue",
+    "issuingAuthority",
+    "effectiveDate",
+    "createdBy",
+    "createdAt",
+)
+
+PARTY_IDENTIFIER_EVENT_REQUIRED = (
+    "partyId",
+    "partyNumber",
+    "version",
+    "identifierId",
+    "identifierType",
+    "identifierValue",
+    "createdBy",
+    "createdAt",
+)
+
+PARTY_ADDRESS_EVENT_FIELDS = (
+    "partyId",
+    "partyNumber",
+    "version",
+    "addressId",
+    "addressType",
+    "line1",
+    "line2",
+    "city",
+    "stateRegion",
+    "postalCode",
+    "country",
+    "effectiveDate",
+    "createdBy",
+    "createdAt",
+)
+
+PARTY_ADDRESS_EVENT_REQUIRED = (
+    "partyId",
+    "partyNumber",
+    "version",
+    "addressId",
+    "addressType",
+    "line1",
+    "city",
+    "postalCode",
+    "country",
+    "createdBy",
+    "createdAt",
+)
+
+PARTY_EVENT_IMPLEMENTED_BY = "PartyEvents.java"
+
+
+def _check_party_reference_parameters(
+    contracts: ContractSet, operation, where: str, internal: bool
+):
+    """Require the tenant and partyId parameters and the internal markers."""
+    references, names = _parameter_names(operation)
+    parameter = _inline_parameter(operation, "partyId") or {}
+    schema = parameter.get("schema") or {}
+    contracts.check("partyId" in names, f"{where}: must declare the partyId path parameter")
+    contracts.check(
+        parameter.get("in") == "path" and parameter.get("required") is True,
+        f"{where}: partyId must be a required path parameter",
+    )
+    contracts.check(
+        (schema.get("type"), schema.get("format")) == ("string", "uuid"),
+        f"{where}: partyId must be a uuid string",
+    )
+    if internal:
+        contracts.check(
+            "TenantIdQuery" in references,
+            f"{where}: must document the shared TenantIdQuery parameter",
+        )
+        contracts.check(
+            operation.get("security") == [],
+            f"{where}: internal operations must declare security: []",
+        )
+        contracts.check(
+            operation.get("x-internal-api") is True,
+            f"{where}: internal operations must be marked x-internal-api: true",
+        )
+    else:
+        contracts.check(
+            "TenantHeader" in references,
+            f"{where}: must document the shared TenantHeader parameter",
+        )
+        contracts.check(
+            operation.get("security") != [],
+            f"{where}: public operations must keep the document-level security",
+        )
+
+
+def check_party_reference_data_openapi(contracts: ContractSet, document, relative: str):
+    """Require the party identifier and address operations, schemas, and codes.
+
+    The four public operations and their four /internal/v1 expert equivalents
+    are mandatory. The identifier type and address type vocabularies are closed
+    and exact, the projections and commands carry the documented bounds, the
+    identifier duplicate is a 409, and the address duplicate guard is documented
+    even though the expert does not enforce it yet.
+    """
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    for public_path, projection, request_schema, duplicate_code, event in (
+        PARTY_REFERENCE_DATA_PATHS
+    ):
+        internal_path = public_path.replace("/api/v1/", "/internal/v1/", 1)
+        contracts.check(
+            internal_path in PARTY_REFERENCE_DATA_INTERNAL_PATHS,
+            f"{relative}: no expert alias is declared for {public_path}",
+        )
+        for path, internal in ((public_path, False), (internal_path, True)):
+            path_item = paths.get(path) if isinstance(paths, dict) else None
+            contracts.check(
+                isinstance(path_item, dict),
+                f"{relative}: required path {path} is missing",
+            )
+            if not isinstance(path_item, dict):
+                continue
+            for method in ("get", "post"):
+                contracts.check(
+                    method in path_item,
+                    f"{relative}: {method.upper()} {path} is missing",
+                )
+
+            read = path_item.get("get")
+            where = f"{relative}: GET {path}"
+            contracts.check(isinstance(read, dict), f"{where}: operation must be a mapping")
+            if isinstance(read, dict):
+                _check_party_reference_parameters(contracts, read, where, internal)
+                ok_schema = _response_schema(read, "200")
+                contracts.check(
+                    isinstance(ok_schema, dict)
+                    and ok_schema.get("type") == "array"
+                    and str((ok_schema.get("items") or {}).get("$ref", "")).endswith(
+                        f"/schemas/{projection}"
+                    ),
+                    f"{where}: 200 must be a bare array of {projection}",
+                )
+                responses = read.get("responses") or {}
+                for code, suffix in (
+                    ("400", "/responses/BadRequest"),
+                    ("404", "/responses/NotFound"),
+                ):
+                    response = responses.get(code) if isinstance(responses, dict) else None
+                    contracts.check(
+                        isinstance(response, dict)
+                        and str(response.get("$ref", "")).endswith(suffix),
+                        f"{where}: {code} must reference the shared "
+                        f"{suffix.rsplit('/', 1)[-1]} response",
+                    )
+
+            write = path_item.get("post")
+            where = f"{relative}: POST {path}"
+            contracts.check(
+                isinstance(write, dict), f"{where}: operation must be a mapping"
+            )
+            if isinstance(write, dict):
+                _check_party_reference_parameters(contracts, write, where, internal)
+                request_body = write.get("requestBody") or {}
+                contracts.check(
+                    isinstance(request_body, dict)
+                    and request_body.get("required") is True,
+                    f"{where}: requestBody must be required",
+                )
+                body_schema = (
+                    ((request_body.get("content") or {}).get("application/json") or {})
+                    .get("schema")
+                    if isinstance(request_body, dict)
+                    else None
+                )
+                contracts.check(
+                    isinstance(body_schema, dict)
+                    and str(body_schema.get("$ref", "")).endswith(
+                        f"/schemas/{request_schema}"
+                    ),
+                    f"{where}: request body must use the {request_schema} schema",
+                )
+                created = _response_schema(write, "201")
+                contracts.check(
+                    isinstance(created, dict)
+                    and str(created.get("$ref", "")).endswith(f"/schemas/{projection}"),
+                    f"{where}: 201 must return the {projection} schema",
+                )
+                responses = write.get("responses") or {}
+                for code, suffix in (
+                    ("400", "/responses/BadRequest"),
+                    ("404", "/responses/NotFound"),
+                ):
+                    response = responses.get(code) if isinstance(responses, dict) else None
+                    contracts.check(
+                        isinstance(response, dict)
+                        and str(response.get("$ref", "")).endswith(suffix),
+                        f"{where}: {code} must reference the shared "
+                        f"{suffix.rsplit('/', 1)[-1]} response",
+                    )
+                conflict = responses.get("409") if isinstance(responses, dict) else None
+                conflict_text = (
+                    str(conflict.get("description") or "")
+                    if isinstance(conflict, dict)
+                    else ""
+                )
+                contracts.check(
+                    bool(conflict_text),
+                    f"{where}: 409 must be documented with a description",
+                )
+                contracts.check(
+                    duplicate_code in conflict_text,
+                    f"{where}: 409 must document {duplicate_code}",
+                )
+                problem_schema = (
+                    (((conflict or {}).get("content") or {})
+                     .get("application/problem+json") or {})
+                    .get("schema")
+                    if isinstance(conflict, dict)
+                    else None
+                )
+                contracts.check(
+                    isinstance(problem_schema, dict)
+                    and str(problem_schema.get("$ref", "")).endswith("/schemas/Problem"),
+                    f"{where}: 409 must document the shared Problem schema",
+                )
+                description = str(write.get("description") or "")
+                contracts.check(
+                    event in description,
+                    f"{where}: description must name the emitted {event} fact",
+                )
+
+    identifier_type = schemas.get("PartyIdentifierType") or {}
+    contracts.check(
+        identifier_type.get("type") == "string",
+        f"{relative}: PartyIdentifierType.type must be string",
+    )
+    contracts.check(
+        tuple(identifier_type.get("enum") or []) == PARTY_IDENTIFIER_TYPES,
+        f"{relative}: PartyIdentifierType.enum must be exactly "
+        f"{list(PARTY_IDENTIFIER_TYPES)}",
+    )
+
+    address_type = schemas.get("PartyAddressType") or {}
+    contracts.check(
+        address_type.get("type") == "string",
+        f"{relative}: PartyAddressType.type must be string",
+    )
+    contracts.check(
+        tuple(address_type.get("enum") or []) == PARTY_ADDRESS_TYPES,
+        f"{relative}: PartyAddressType.enum must be exactly "
+        f"{list(PARTY_ADDRESS_TYPES)}",
+    )
+
+    def check_projection(
+        name, fields, required, type_field, type_schema, nullable_fields, country
+    ):
+        schema = schemas.get(name) or {}
+        properties = schema.get("properties") or {}
+        contracts.check(schema.get("type") == "object", f"{relative}: {name}.type must be object")
+        contracts.check(
+            set(properties) == set(fields),
+            f"{relative}: {name} must declare exactly {list(fields)}",
+        )
+        contracts.check(
+            set(schema.get("required") or []) == set(required),
+            f"{relative}: {name}.required must be exactly {list(required)}",
+        )
+        for field in ("id", "tenantId", "partyId"):
+            contracts.check(
+                (properties.get(field) or {}).get("format") == "uuid",
+                f"{relative}: {name}.{field} must be a uuid",
+            )
+        contracts.check(
+            (properties.get(type_field) or {}).get("$ref")
+            == f"#/components/schemas/{type_schema}",
+            f"{relative}: {name}.{type_field} must reference {type_schema}",
+        )
+        contracts.check(
+            (properties.get("createdAt") or {}).get("format") == "date-time",
+            f"{relative}: {name}.createdAt must be a date-time",
+        )
+        for field, maximum in PARTY_REFERENCE_DATA_MAX_LENGTHS.items():
+            if field in properties:
+                contracts.check(
+                    (properties.get(field) or {}).get("maxLength") == maximum,
+                    f"{relative}: {name}.{field} maxLength must be {maximum}",
+                )
+        for field in nullable_fields:
+            contracts.check(
+                _schema_types(properties.get(field)) == {"string", "null"},
+                f"{relative}: {name}.{field} must be a nullable string",
+            )
+        if country is not None:
+            contracts.check(
+                (properties.get("country") or {}).get("pattern") == country,
+                f"{relative}: {name}.country pattern must be {country}",
+            )
+
+    def check_request(name, fields, required, type_field, type_schema, country):
+        schema = schemas.get(name) or {}
+        properties = schema.get("properties") or {}
+        contracts.check(schema.get("type") == "object", f"{relative}: {name}.type must be object")
+        contracts.check(
+            set(properties) == set(fields),
+            f"{relative}: {name} must declare exactly {list(fields)}",
+        )
+        contracts.check(
+            set(schema.get("required") or []) == set(required),
+            f"{relative}: {name}.required must be exactly {list(required)}",
+        )
+        contracts.check(
+            (properties.get(type_field) or {}).get("$ref")
+            == f"#/components/schemas/{type_schema}",
+            f"{relative}: {name}.{type_field} must reference {type_schema}",
+        )
+        for field, maximum in PARTY_REFERENCE_DATA_MAX_LENGTHS.items():
+            if field in properties:
+                contracts.check(
+                    (properties.get(field) or {}).get("maxLength") == maximum,
+                    f"{relative}: {name}.{field} maxLength must be {maximum}",
+                )
+        contracts.check(
+            (properties.get("effectiveDate") or {}).get("format") == "date",
+            f"{relative}: {name}.effectiveDate must be a date",
+        )
+        if country is not None:
+            contracts.check(
+                (properties.get("country") or {}).get("pattern") == country,
+                f"{relative}: {name}.country pattern must be {country}",
+            )
+
+    check_projection(
+        "PartyIdentifier",
+        PARTY_IDENTIFIER_PROJECTION_FIELDS,
+        PARTY_IDENTIFIER_PROJECTION_REQUIRED,
+        "identifierType",
+        "PartyIdentifierType",
+        ("issuingAuthority", "effectiveDate"),
+        None,
+    )
+    check_projection(
+        "PartyAddress",
+        PARTY_ADDRESS_PROJECTION_FIELDS,
+        PARTY_ADDRESS_PROJECTION_REQUIRED,
+        "addressType",
+        "PartyAddressType",
+        ("line2", "stateRegion", "effectiveDate"),
+        r"^[A-Z]{2}$",
+    )
+    check_request(
+        "CreatePartyIdentifierRequest",
+        PARTY_IDENTIFIER_REQUEST_FIELDS,
+        PARTY_IDENTIFIER_REQUEST_REQUIRED,
+        "identifierType",
+        "PartyIdentifierType",
+        None,
+    )
+    check_request(
+        "CreatePartyAddressRequest",
+        PARTY_ADDRESS_REQUEST_FIELDS,
+        PARTY_ADDRESS_REQUEST_REQUIRED,
+        "addressType",
+        "PartyAddressType",
+        r"^[A-Za-z]{2}$",
+    )
+
+
+def check_party_reference_data_asyncapi(contracts: ContractSet, document, relative: str):
+    """Require the two implemented party reference-data channels and payloads."""
+    channels = document.get("channels") or {}
+    operations = document.get("operations") or {}
+    messages = (document.get("components") or {}).get("messages") or {}
+    send_events = {
+        operation.get("x-event-type")
+        for operation in operations.values()
+        if isinstance(operation, dict) and operation.get("action") == "send"
+    }
+    channel_by_event = {
+        channel.get("address"): channel
+        for channel in channels.values()
+        if isinstance(channel, dict)
+    }
+
+    event_specs = (
+        (
+            "party.party.identifier-added",
+            PARTY_IDENTIFIER_EVENT_MESSAGE,
+            PARTY_IDENTIFIER_EVENT_FIELDS,
+            PARTY_IDENTIFIER_EVENT_REQUIRED,
+            "identifierType",
+            PARTY_IDENTIFIER_TYPES,
+            "identifierId",
+        ),
+        (
+            "party.party.address-added",
+            PARTY_ADDRESS_EVENT_MESSAGE,
+            PARTY_ADDRESS_EVENT_FIELDS,
+            PARTY_ADDRESS_EVENT_REQUIRED,
+            "addressType",
+            PARTY_ADDRESS_TYPES,
+            "addressId",
+        ),
+    )
+
+    contracts.check(
+        tuple(spec[0] for spec in event_specs) == PARTY_REFERENCE_DATA_EVENTS,
+        f"{relative}: the reference-data event specs are out of sync with "
+        "PARTY_REFERENCE_DATA_EVENTS",
+    )
+
+    for event, message_name, fields, required, type_field, types, child_id in event_specs:
+        where = f"{relative}: {event}"
+        channel = channel_by_event.get(event)
+        contracts.check(isinstance(channel, dict), f"{where}: channel is missing")
+        contracts.check(event in send_events, f"{where}: must have a send operation")
+        if not isinstance(channel, dict):
+            continue
+        contracts.check(
+            channel.get("x-event-type") == event,
+            f"{where}: x-event-type must equal the address",
+        )
+        contracts.check(
+            channel.get("x-status") == "implemented",
+            f"{where}: the channel must be implemented",
+        )
+        contracts.check(
+            str(channel.get("x-implemented-by", "")).endswith(PARTY_EVENT_IMPLEMENTED_BY),
+            f"{where}: x-implemented-by must name {PARTY_EVENT_IMPLEMENTED_BY}",
+        )
+        channel_messages = channel.get("messages") or {}
+        contracts.check(
+            "DomainEvent" in channel_messages,
+            f"{where}: the channel must reference the DomainEvent message",
+        )
+        contracts.check(
+            message_name in channel_messages,
+            f"{where}: the channel must reference {message_name}",
+        )
+
+        message = messages.get(message_name) or {}
+        payload = message.get("payload") or {}
+        properties = payload.get("properties") or {}
+        required_members = set(payload.get("required") or [])
+        contracts.check(
+            payload.get("type") == "object",
+            f"{where}: {message_name}.payload.type must be object",
+        )
+        contracts.check(
+            set(properties) == set(fields),
+            f"{where}: {message_name} must declare exactly {list(fields)}",
+        )
+        contracts.check(
+            required_members == set(required),
+            f"{where}: {message_name}.required must be exactly {list(required)}",
+        )
+        contracts.check(
+            tuple((properties.get(type_field) or {}).get("enum") or []) == types,
+            f"{where}: {message_name}.{type_field} must enumerate {list(types)}",
+        )
+        version = properties.get("version") or {}
+        contracts.check(
+            (version.get("type"), version.get("minimum")) == ("integer", 0),
+            f"{where}: {message_name}.version must be an integer >= 0",
+        )
+        for field in ("partyId", child_id):
+            contracts.check(
+                (properties.get(field) or {}).get("format") == "uuid",
+                f"{where}: {message_name}.{field} must be a uuid",
+            )
+        contracts.check(
+            (properties.get("createdAt") or {}).get("format") == "date-time",
+            f"{where}: {message_name}.createdAt must be a date-time",
+        )
+        contracts.check(
+            (properties.get("effectiveDate") or {}).get("format") == "date",
+            f"{where}: {message_name}.effectiveDate must be a date",
+        )
+        for field in set(fields) - set(required):
+            contracts.check(
+                field not in required_members,
+                f"{where}: {message_name}.{field} must stay optional",
+            )
+        for field, maximum in PARTY_REFERENCE_DATA_MAX_LENGTHS.items():
+            if field in properties:
+                contracts.check(
+                    (properties.get(field) or {}).get("maxLength") == maximum,
+                    f"{where}: {message_name}.{field} maxLength must be {maximum}",
+                )
+        if "country" in properties:
+            contracts.check(
+                (properties.get("country") or {}).get("pattern") == r"^[A-Z]{2}$",
+                f"{where}: {message_name}.country must be a two-letter upper-case code",
+            )
+
+
+# ---------------------------------------------------------------------------
 # Notifications NotificationType checks
 # ---------------------------------------------------------------------------
 
@@ -13106,6 +13786,8 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_notification_sources_openapi(contracts, document, relative)
             check_notification_source_filter(contracts, document, relative)
             check_notification_templates_openapi(contracts, document, relative)
+        if vertical == "party":
+            check_party_reference_data_openapi(contracts, document, relative)
         contracts.check_openapi_schemas(document, relative)
         if verbose:
             print(f"  OK {relative}  paths={len(paths)} operations={operation_count}")
@@ -14060,6 +14742,9 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
         if vertical == "notifications":
             check_notifications_asyncapi_sources(contracts, document, relative)
             check_notification_templates_asyncapi(contracts, document, relative)
+
+        if vertical == "party":
+            check_party_reference_data_asyncapi(contracts, document, relative)
 
         entry = catalog_entries.get(vertical) or {}
         published = entry.get("published") or []
