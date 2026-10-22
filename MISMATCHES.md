@@ -155,6 +155,10 @@ where the running code does not meet it yet.
   list controller, service, `NotificationSourceType.validateFilter`, the
   `findAllBySource` repository query, error codes, and the domain and expert
   source-filter tests.
+  The Notifications source-type pass re-reads the expert `NotificationSourceType`
+  enum and its `normalize` loop, the create and list service rules, the
+  `schema.sql` source columns, and the domain and expert source-linkage and
+  source-filter tests against the widened ten-value set.
   The Party reference-data pass reads the domain identifier and address
   controllers, DTOs, client, and exception handler plus the expert shared
   reference-data controller and service, the identifier and address records,
@@ -3639,14 +3643,14 @@ filter is likewise SPEC-less.
 | Aspect | Implemented | SPEC / gap |
 |---|---|---|
 | Fields | Optional nullable `sourceType`, `sourceId`, and `sourceReference` on `Notification`, `CreateNotificationRequest`, and `CreateNotificationRequestInternal` | `subject_vertical`, `subject_type`, and `subject_id` are required; the business key and display label are separate members |
-| Enum | `DIRECT_CLAIM`, `ASSUMED_CLAIM`, `POLICY`, `CONTRACT`, `PAYMENT`, `OTHER` | `subject_vertical` is the vertical slug (`policy`, `contract`, `direct`, `assumed`, `document`, `payment`, `notifications`, ...); there is no `OTHER` and no business-object type such as a claim |
-| Pair rule | `sourceType` and `sourceId` are both-or-neither; every one of the six types requires an id; a reference-only link needs neither | SPEC requires all three subject identity members, with only the business key and display label optional |
+| Enum | `DIRECT_CLAIM`, `ASSUMED_CLAIM`, `POLICY`, `CONTRACT`, `PAYMENT`, `CESSION`, `RETROCESSION`, `DOCUMENT`, `PARTY`, `OTHER` | `subject_vertical` is the vertical slug (`policy`, `contract`, `direct`, `assumed`, `document`, `payment`, `notifications`, ...); there is no `OTHER` and no business-object type such as a claim |
+| Pair rule | `sourceType` and `sourceId` are both-or-neither; every one of the ten types requires an id; a reference-only link needs neither | SPEC requires all three subject identity members, with only the business key and display label optional |
 | Reference | `sourceReference` is a trimmed, 64-character human label; a blank value is absent | `subject_business_key` is `varchar(64)` and `subject_display` is `varchar(300)`; neither is a substitute for the id |
 | Validation | The expert trims/upper-cases the type and rejects an unknown type with 400 `EIA-NTF-9409` `INVALID_SOURCE_TYPE`, half a pair with 400 `EIA-NTF-9410` `INVALID_SOURCE_LINKAGE`, and an over-long reference with 400 `EIA-NTF-9411` `INVALID_SOURCE_REFERENCE`; the domain forwards the link and preserves the expert problem | No SPEC error-code assignment and no SPEC source field |
 | List filter | `GET /api/v1/notifications` and `GET /internal/v1/notifications` accept an optional `sourceType` + `sourceId` query pair, normalized and matched exactly, tenant-scoped and newest-first; half a pair is 400 `EIA-NTF-9412` `INVALID_SOURCE_FILTER`, an unknown type is 400 `EIA-NTF-9409` `INVALID_SOURCE_TYPE`, and a non-UUID id is 400 `EIA-NTF-9502` (expert `INVALID_ARGUMENT`) | No SPEC list filter over the subject columns; the SPEC 11.8.10 inbox filters are a different surface |
-| Existence check | None: `sourceId` is a plain UUID with no foreign key and is not resolved against the claim, policy, contract, payment, or other source vertical | SPEC 8.3.7 models notification-subject links with typed endpoints and records `NOTIFICATION_ABOUT` |
+| Existence check | None: `sourceId` is a plain UUID with no foreign key and is not resolved against the claim, policy, contract, payment, cession, retrocession, document, party, or other source vertical | SPEC 8.3.7 models notification-subject links with typed endpoints and records `NOTIFICATION_ABOUT` |
 | Events | `notifications.notification.created` and `.sent` carry each present member in `data` and omit all three when unlinked; `eventVersion` stays 1 | SPEC 11.8.9 names `issued`/`delivered` and the remaining lifecycle verbs, not these implemented names, and defines no payload schema |
-| Version | `openapi/notifications.yaml` 1.5.0 and `asyncapi/notifications.yaml` 1.3.0 (additive) | No SPEC version defines the flat link |
+| Version | `openapi/notifications.yaml` 1.6.0 and `asyncapi/notifications.yaml` 1.4.0 (additive) | No SPEC version defines the flat link |
 
 Consequences:
 
@@ -3656,9 +3660,13 @@ Consequences:
   that omits the link sees no required-field break and a consumer that ignores
   the event members keeps working.
 - The flat type is a business-object classification, not a SPEC vertical slug:
-  there is no `PARTY` or `DOCUMENT` member, `DIRECT_CLAIM` and `ASSUMED_CLAIM`
-  replace the single `direct`/`assumed` vertical slugs, and `OTHER` is the
-  unclassified escape hatch that still requires an id.
+  the ten-value set names both claims, the policy, contract, and payment
+  aggregates, the two reinsurance cases, documents, parties, and the
+  unclassified `OTHER`, whereas the SPEC `subject_vertical` uses the vertical
+  slugs (`direct`, `assumed`, `policy`, `contract`, `cession`, `retrocession`,
+  `document`, `payment`, `party`, `notifications`, ...) and has no business-object
+  type such as a claim. `OTHER` is the escape hatch that still requires an id
+  and stays last in the enum.
 - `sourceReference` may stand alone, which has no direct SPEC counterpart: it
   records a human label without a typed subject. It never replaces `sourceId`
   for a typed source.
@@ -3709,13 +3717,13 @@ Evidence:
   `repos/eia-notifications-domain/src/test/java/com/eia/notifications/domain/NotificationControllerTest.java:56-123`
   and `NotificationExpertClientTest.java:62-132` (domain forwarding,
   blank-to-absent, and preserved 9412/9409 problems).
-- `openapi/notifications.yaml` 1.5.0 and `asyncapi/notifications.yaml` 1.3.0
-  record the implemented shape; `asyncapi/event-catalog.yaml` stays 1.34.0
-  because no event name changes.
+- `openapi/notifications.yaml` 1.6.0 and `asyncapi/notifications.yaml` 1.4.0
+  record the implemented ten-value shape; `asyncapi/event-catalog.yaml` stays
+  1.35.0 because no event name changes.
 
 Resolution: either model the SPEC `subject_*` columns (or the typed `subject`
 EntityRef) on the notification and reconcile them with the flat link, or amend
-SPEC 11.8.4/12.5.5 to add the optional flat source triple and the six-value
+SPEC 11.8.4/12.5.5 to add the optional flat source triple and the ten-value
 enum. Adding the subject columns is additive; the flat link is canonical for
 this release. The list filter needs the same reconciliation: if the subject
 columns are modelled, the filter can move to `subject_type`/`subject_id` while
@@ -3897,7 +3905,7 @@ overloading `party.party.updated`.
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-22
-Party status-transition contract:
+Notifications source-type contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -3936,7 +3944,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 15478 checks, 0 failures
+  PASS 15481 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -4277,7 +4285,14 @@ Additional checks and limits:
   `party.party.updated` channel fails with the missing payload-reference
   message. Each case backed up the mutated file, ran the validator, and restored
   the file; all five exited non-zero (exit 1) and the working copy was left
-  unchanged.
+  unchanged. The Notifications source-type pass added three more, each run on a
+  throwaway copy and exited non-zero (exit 1): removing `CESSION` from the
+  `NotificationSourceType` enum fails five checks with the exact-enum message on
+  the schema, the projection, both create requests, and the list filter; moving
+  `OTHER` before `PARTY` fails three checks with the exact-enum and
+  `OTHER`-last messages; and removing `DOCUMENT` from the sent payload enum
+  fails one check with the `NotificationSentData` enumeration message. The
+  working copy was left unchanged.
 
 ## Resolution policy
 

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Notifications API
-  version: 1.5.0
+  version: 1.6.0
   summary: Notification drafting, delivery, and template administration and the Notifications expert API.
   description: >
     This document describes the implemented public Notifications domain API and
@@ -87,7 +87,7 @@ paths:
             `sourceId`; half a pair is 400 `INVALID_SOURCE_FILTER`
             (`EIA-NTF-9412`). The value is trimmed and upper-cased before
             validation, so a lower-case value is accepted. A value outside the
-            six-value enum is 400 `INVALID_SOURCE_TYPE` (`EIA-NTF-9409`).
+            ten-value enum is 400 `INVALID_SOURCE_TYPE` (`EIA-NTF-9409`).
           schema:
             $ref: '#/components/schemas/NotificationSourceType'
         - name: sourceId
@@ -470,7 +470,7 @@ paths:
             Optional notification-source filter. Must be supplied with
             `sourceId`; half a pair is 400 `INVALID_SOURCE_FILTER`
             (`EIA-NTF-9412`). The value is trimmed and upper-cased before
-            validation. A value outside the six-value enum is 400
+            validation. A value outside the ten-value enum is 400
             `INVALID_SOURCE_TYPE` (`EIA-NTF-9409`).
           schema:
             $ref: '#/components/schemas/NotificationSourceType'
@@ -667,8 +667,9 @@ components:
           type: [string, 'null']
           format: uuid
           description: >
-            UUID of the source direct claim, assumed claim, policy, contract, or
-            payment when `sourceType` is present; null when there is no link.
+            UUID of the source direct claim, assumed claim, policy, contract,
+            payment, cession, retrocession, document, or party when `sourceType`
+            is present; null when there is no link.
         sourceReference:
           type: [string, 'null']
           maxLength: 64
@@ -681,16 +682,24 @@ components:
       description: >
         Source record type for the optional notification source link. Every
         non-null type requires a `sourceId`; the whole link is optional, so a
-        notification can exist with no source at all. The type is trimmed and
-        upper-cased before validation, and an unknown value is 400
-        `INVALID_SOURCE_TYPE` (`EIA-NTF-9409`). `OTHER` is the unclassified
-        escape hatch but still requires a `sourceId` when it is supplied.
+        notification can exist with no source at all. `DIRECT_CLAIM`,
+        `ASSUMED_CLAIM`, `POLICY`, `CONTRACT`, and `PAYMENT` classify the first
+        five implemented sources; `CESSION`, `RETROCESSION`, `DOCUMENT`, and
+        `PARTY` extend the set to the other implemented business records. The
+        type is trimmed and upper-cased before validation, and an unknown value
+        is 400 `INVALID_SOURCE_TYPE` (`EIA-NTF-9409`). `OTHER` is the
+        unclassified escape hatch and stays last, but it still requires a
+        `sourceId` when it is supplied.
       enum:
         - DIRECT_CLAIM
         - ASSUMED_CLAIM
         - POLICY
         - CONTRACT
         - PAYMENT
+        - CESSION
+        - RETROCESSION
+        - DOCUMENT
+        - PARTY
         - OTHER
     NotificationType:
       type: string
@@ -1203,18 +1212,19 @@ x-planned-operations:
     spec: SPEC 11.8.10
     note: Issue a notification from an event or a direct call.
 x-compatibility:
-  contractVersion: 1.5.0
-  previousContractVersion: 1.4.0
+  contractVersion: 1.6.0
+  previousContractVersion: 1.5.0
   breaking: []
   compatible:
-    - Adds optional sourceType and sourceId query filters to GET /api/v1/notifications and GET /internal/v1/notifications, with the both-or-neither 400 INVALID_SOURCE_FILTER (EIA-NTF-9412), the unknown-type 400 INVALID_SOURCE_TYPE (EIA-NTF-9409), and the malformed-sourceId 400 INVALID_ARGUMENT (EIA-NTF-9502) behaviour.
-    - The 200 response stays a bare JSON array of the unchanged Notification projection; a caller that omits both parameters keeps the unfiltered list.
+    - Adds CESSION, RETROCESSION, DOCUMENT, and PARTY to the NotificationSourceType enum before OTHER, so a notification can link a cession, retrocession, document, or party record as well as the original six source types.
+    - The existing source-linkage members, the both-or-neither rule, and the optional sourceType/sourceId list filters are unchanged.
   note: >
-    The list source filter is additive over 1.4.0: two optional query parameters
-    on an existing operation, no new path, required field, response member, or
-    event name. The HTTP API version stays /api/v1, asyncapi/notifications.yaml
-    stays 1.3.0, and the event catalog stays at 218 published and 99 implemented
-    names, with Notifications at 15 published and 5 implemented, because no
-    event name changes. MISMATCHES.md M-53 records the flat source link, the
-    exact-pair filter, and the malformed-sourceId code against the SPEC 12.5.5
+    The four new source types are additive over 1.5.0: a consumer that already
+    tolerates unknown enum values keeps working, and no path, required field,
+    response member, or event name changes. The HTTP API version stays /api/v1,
+    asyncapi/notifications.yaml moves to 1.4.0 with the same enum, and the event
+    catalog stays at 220 published and 101 implemented names, with Notifications
+    at 15 published and 5 implemented, because no event name changes.
+    MISMATCHES.md M-53 records the flat source link, the exact-pair filter, the
+    wider ten-value enum, and the malformed-sourceId code against the SPEC 12.5.5
     subject EntityRef.

@@ -1877,6 +1877,37 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   divergence, and the unenforced headers.
 - `python scripts/validate_contracts.py` passes 15,478 checks with 0 failures.
 
+### Added in the Notifications source-type contract (2026-10-22)
+
+- `openapi/notifications.yaml` is 1.6.0: `NotificationSourceType` adds
+  `CESSION`, `RETROCESSION`, `DOCUMENT`, and `PARTY` before `OTHER`, for the
+  ten-value closed set (`DIRECT_CLAIM`, `ASSUMED_CLAIM`, `POLICY`, `CONTRACT`,
+  `PAYMENT`, `CESSION`, `RETROCESSION`, `DOCUMENT`, `PARTY`, `OTHER`). The
+  `NotificationSourceType` description names the new record types and keeps
+  `OTHER` last; the `sourceId` description names cessions, retrocessions,
+  documents, and parties; both list-filter parameter descriptions now say
+  ten-value. `x-compatibility` moves to 1.6.0 over 1.5.0 with the enum addition
+  as the only wire change.
+- `asyncapi/notifications.yaml` is 1.4.0: the `NotificationCreatedData` and
+  `NotificationSentData` `sourceType` enums add the same four members before
+  `OTHER`, and the document and channel descriptions name the wider source set.
+  `eventVersion` stays 1; no channel or event name is added or renamed.
+- `asyncapi/event-catalog.yaml` is unchanged at 1.35.0 because no event name
+  changes; the catalog stays at 220 published and 101 implemented names
+  (Notifications 15 published and 5 implemented).
+- `scripts/validate_contracts.py` requires the exact ten-value
+  `NotificationSourceType` tuple in wire order on the OpenAPI schema, the
+  projection, both create requests, both list filters, and both AsyncAPI payload
+  enums, and explicitly keeps `OTHER` last in the OpenAPI schema and the two
+  payload enums. The nullable source members, both-or-neither rules, UUID
+  `sourceId`, 64-character `sourceReference`, and documented 400 codes stay
+  mandatory.
+- `README.md` records the additive versions, the ten-value enum, the four new
+  classifications, the unchanged event catalog, and the validation count;
+  `MISMATCHES.md` extends M-53 with the wider vocabulary and refreshes the
+  scope, version, evidence, and validation notes.
+- `python scripts/validate_contracts.py` passes 15,481 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

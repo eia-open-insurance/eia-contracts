@@ -2333,21 +2333,31 @@ NOTIFICATION_TYPE_REFERENCES = (
 )
 
 # Notification source linkage. The optional flat link names the business record
-# that caused the notification. Unlike Payment, there is no reference-only
-# classified escape: every supplied sourceType requires a sourceId, and a
-# sourceReference may accompany the pair or stand alone. The three fields are
-# optional on the projection and both create commands, and the two implemented
-# notification facts carry each present field. See MISMATCHES.md M-53.
+# that caused the notification. The closed type set covers the two claims, the
+# policy, contract, and payment aggregates, the cession and retrocession cases,
+# documents, parties, and the unclassified OTHER escape hatch. Unlike Payment,
+# there is no reference-only classified escape: every supplied sourceType
+# requires a sourceId, and a sourceReference may accompany the pair or stand
+# alone. The three fields are optional on the projection and both create
+# commands, and the two implemented notification facts carry each present field.
+# See MISMATCHES.md M-53.
 NOTIFICATION_SOURCE_SCHEMA = "NotificationSourceType"
 NOTIFICATION_SOURCE_FIELDS = ("sourceType", "sourceId", "sourceReference")
+# Closed source vocabulary, in wire order. The four record types added on
+# 2026-10-22 stay before the unclassified OTHER escape hatch.
 NOTIFICATION_SOURCE_TYPES = (
     "DIRECT_CLAIM",
     "ASSUMED_CLAIM",
     "POLICY",
     "CONTRACT",
     "PAYMENT",
+    "CESSION",
+    "RETROCESSION",
+    "DOCUMENT",
+    "PARTY",
     "OTHER",
 )
+NOTIFICATION_SOURCE_UNCLASSIFIED_TYPE = "OTHER"
 NOTIFICATION_SOURCE_REFERENCE_MAX_LENGTH = 64
 NOTIFICATION_SOURCE_REQUEST_SCHEMAS = (
     "CreateNotificationRequest",
@@ -13002,6 +13012,14 @@ def check_notification_sources_openapi(contracts: ContractSet, document, relativ
         f"{relative}: {NOTIFICATION_SOURCE_SCHEMA} must enumerate "
         f"{list(NOTIFICATION_SOURCE_TYPES)}",
     )
+    source_enum = source_type.get("enum")
+    contracts.check(
+        isinstance(source_enum, list)
+        and bool(source_enum)
+        and source_enum[-1] == NOTIFICATION_SOURCE_UNCLASSIFIED_TYPE,
+        f"{relative}: {NOTIFICATION_SOURCE_SCHEMA}.enum must keep "
+        f"{NOTIFICATION_SOURCE_UNCLASSIFIED_TYPE} last",
+    )
 
     notification = schemas.get("Notification") or {}
     notification_properties = notification.get("properties") or {}
@@ -14175,7 +14193,7 @@ def check_notifications_asyncapi_sources(contracts: ContractSet, document, relat
 
     The expert emits each present field and omits all three for an unlinked
     notification, so every source member stays optional and nullable. The
-    source type is the six-value notification set; ``sourceId`` is a UUID and
+    source type is the ten-value notification set; ``sourceId`` is a UUID and
     ``sourceReference`` is capped at 64 characters.
     """
     channels = document.get("channels") or {}
@@ -14234,6 +14252,18 @@ def check_notifications_asyncapi_sources(contracts: ContractSet, document, relat
             == set(NOTIFICATION_SOURCE_TYPES),
             f"{relative}: {message_name}.sourceType must enumerate "
             f"{list(NOTIFICATION_SOURCE_TYPES)}",
+        )
+        payload_source_enum = None
+        for option in (properties.get("sourceType") or {}).get("oneOf") or []:
+            if isinstance(option, dict) and isinstance(option.get("enum"), list):
+                payload_source_enum = option["enum"]
+                break
+        contracts.check(
+            isinstance(payload_source_enum, list)
+            and bool(payload_source_enum)
+            and payload_source_enum[-1] == NOTIFICATION_SOURCE_UNCLASSIFIED_TYPE,
+            f"{relative}: {message_name}.sourceType must keep "
+            f"{NOTIFICATION_SOURCE_UNCLASSIFIED_TYPE} last",
         )
         contracts.check(
             any(

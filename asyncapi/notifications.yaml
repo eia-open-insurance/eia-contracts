@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:notifications
 info:
   title: EIA Notifications events
-  version: 1.3.0
+  version: 1.4.0
   summary: Published domain event names for the Notifications vertical.
   description: >
     Event contract for the Notifications vertical. The authoritative event names
@@ -26,7 +26,8 @@ info:
 
     The created and sent payloads also carry the optional flat source link
     (`sourceType`, `sourceId`, `sourceReference`) when the notification was
-    drafted from a claim, policy, contract, payment, or other source record.
+    drafted from a claim, policy, contract, payment, cession, retrocession,
+    document, party, or other source record.
     `sourceType` and `sourceId` are emitted together; `sourceReference` is
     optional metadata of at most 64 characters. An unlinked notification omits
     all three members, so `eventVersion` stays 1.
@@ -537,12 +538,17 @@ components:
                   - POLICY
                   - CONTRACT
                   - PAYMENT
+                  - CESSION
+                  - RETROCESSION
+                  - DOCUMENT
+                  - PARTY
                   - OTHER
               - type: 'null'
             description: >
               Optional source classification. Emitted together with `sourceId`
               when the notification is linked to a business record; omitted
-              when the notification has no source link.
+              when the notification has no source link. One of the ten closed
+              `NotificationSourceType` values, with `OTHER` last.
           sourceId:
             type: [string, 'null']
             format: uuid
@@ -628,12 +634,17 @@ components:
                   - POLICY
                   - CONTRACT
                   - PAYMENT
+                  - CESSION
+                  - RETROCESSION
+                  - DOCUMENT
+                  - PARTY
                   - OTHER
               - type: 'null'
             description: >
               Optional source classification. Emitted together with `sourceId`
               when the notification is linked to a business record; omitted
-              when the notification has no source link.
+              when the notification has no source link. One of the ten closed
+              `NotificationSourceType` values, with `OTHER` last.
           sourceId:
             type: [string, 'null']
             format: uuid
@@ -715,9 +726,10 @@ x-implementation:
     (created, approved, retired). Both notification facts carry the optional
     flat source link (`sourceType`, `sourceId`, `sourceReference`) in their
     `data` object, emitted only for a linked notification, so `eventVersion`
-    stays 1. The SPEC 11.8.9 notification names remain planned and the template
-    facts have no SPEC name. There is no subscriber, inbox, or subscription
-    registry yet.
+    stays 1. The link type is the ten-value `NotificationSourceType` set, with
+    `OTHER` last. The SPEC 11.8.9 notification names remain planned and the
+    template facts have no SPEC name. There is no subscriber, inbox, or
+    subscription registry yet.
 
 x-consumed-events: []
 x-consumed-events-note: >

@@ -2486,6 +2486,39 @@ identifier-value and country patterns, the two implemented channels with their
 exact payload members, and the two catalog entries. The full run passes 15,375
 checks.
 
+### Notifications source types (2026-10-22)
+
+Notifications 1.6.0 adds four record types to the optional source link:
+`CESSION`, `RETROCESSION`, `DOCUMENT`, and `PARTY`. The change is additive: the
+`NotificationSourceType` enum grows from six to ten members before the
+unclassified `OTHER`, the two event payload enums gain the same members, and no
+path, request field, response field, or event name changes.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/notifications.yaml` | 1.6.0 | Additive | `NotificationSourceType` adds `CESSION`, `RETROCESSION`, `DOCUMENT`, and `PARTY` before `OTHER`; the projection, both create commands, both list filters, and the source-id description document the wider set. |
+| `asyncapi/notifications.yaml` | 1.4.0 | Additive | The `NotificationCreatedData` and `NotificationSentData` `sourceType` enums add the same four members before `OTHER`; `eventVersion` stays 1. |
+| `asyncapi/event-catalog.yaml` | 1.35.0 | Unchanged | No event name changes; the catalog stays at 220 published and 101 implemented names (Notifications 15 published and 5 implemented). |
+
+The new members classify the cession and retrocession cases and the document and
+party aggregates, which the implementation already accepts. They follow every
+existing rule: `sourceType` and `sourceId` are supplied together or not at all,
+`OTHER` stays last and still requires an id, and `sourceReference` remains
+optional metadata capped at 64 characters. Adding an enum value is compatible
+only for a consumer that tolerates unknown values, as the
+[Compatibility matrix](#compatibility-matrix) states; the full source-linkage
+semantics are under
+[Notification source linkage](#notification-source-linkage) and the filter
+semantics under
+[Notification source filter semantics](#notification-source-filter-semantics).
+`MISMATCHES.md` M-53 records the SPEC-less flat link and the wider ten-value
+vocabulary.
+
+The validator requires the exact ten-value enum in wire order, keeps `OTHER`
+last in the OpenAPI schema and in both AsyncAPI payload enums, and still
+requires the nullable source members, the pairing rules, both list filters, and
+the documented 400 codes. The full run passes 15,481 checks.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -3069,7 +3102,7 @@ that caused it:
 
 | Field | Type | Rule |
 |---|---|---|
-| `sourceType` | enum | `DIRECT_CLAIM`, `ASSUMED_CLAIM`, `POLICY`, `CONTRACT`, `PAYMENT`, or `OTHER`. Required whenever `sourceId` is supplied. |
+| `sourceType` | enum | `DIRECT_CLAIM`, `ASSUMED_CLAIM`, `POLICY`, `CONTRACT`, `PAYMENT`, `CESSION`, `RETROCESSION`, `DOCUMENT`, `PARTY`, or `OTHER`. Required whenever `sourceId` is supplied; `OTHER` stays last. |
 | `sourceId` | UUID | UUID of the source record. Required for every `sourceType`; null when there is no source link. |
 | `sourceReference` | string, max 64 | Human-readable reference, for example `CLM-2026-0000001`. Optional metadata; it never replaces `sourceId`. |
 
@@ -3077,8 +3110,13 @@ Rules and semantics:
 
 - Both or neither. A supplied `sourceType` without `sourceId` is 400
   `INVALID_SOURCE_LINKAGE` (`EIA-NTF-9410`), and a supplied `sourceId` without
-  `sourceType` is the same 400. All six types require an id; `OTHER` is the
+  `sourceType` is the same 400. All ten types require an id; `OTHER` is the
   unclassified type but still needs one.
+- The four later record types are additive and keep the same rules:
+  `CESSION` and `RETROCESSION` classify the reinsurance cases, `DOCUMENT`
+  classifies a document record, and `PARTY` classifies a party record. They sit
+  before `OTHER`, which remains the last enum member and the unclassified
+  escape hatch.
 - `sourceType` is trimmed and upper-cased before validation, so
   `direct_claim` selects `DIRECT_CLAIM`. An unknown value is 400
   `INVALID_SOURCE_TYPE` (`EIA-NTF-9409`).
@@ -3104,7 +3142,7 @@ The tenant-scoped list accepts an optional `sourceType` + `sourceId` pair:
 
 | Parameter | Type | Rule |
 |---|---|---|
-| `sourceType` | enum | `DIRECT_CLAIM`, `ASSUMED_CLAIM`, `POLICY`, `CONTRACT`, `PAYMENT`, or `OTHER`. Must be supplied with `sourceId`. The value is trimmed and upper-cased, so a lower-case value selects the canonical value. |
+| `sourceType` | enum | `DIRECT_CLAIM`, `ASSUMED_CLAIM`, `POLICY`, `CONTRACT`, `PAYMENT`, `CESSION`, `RETROCESSION`, `DOCUMENT`, `PARTY`, or `OTHER`. Must be supplied with `sourceId`. The value is trimmed and upper-cased, so a lower-case value selects the canonical value. |
 | `sourceId` | UUID | Must be supplied with `sourceType`; a value that is not a UUID is 400 `INVALID_ARGUMENT` (`EIA-NTF-9502`). |
 
 Rules and semantics:
@@ -3829,11 +3867,14 @@ missing directory.
    documentation, and the absence of the implemented routes from
    `x-planned-operations`. It also requires the optional nullable notification
    source fields on `Notification`, `CreateNotificationRequest`, and
-   `CreateNotificationRequestInternal`, the ordered six-value
-   `NotificationSourceType` enum, the nullable UUID `sourceId`, the
+   `CreateNotificationRequestInternal`, the ordered ten-value
+   `NotificationSourceType` enum with `OTHER` last, the nullable UUID
+   `sourceId`, the
    nullable 64-character `sourceReference`, the both-or-neither conditional
    rules, and the `INVALID_SOURCE_TYPE`/`INVALID_SOURCE_LINKAGE`/
-   `INVALID_SOURCE_REFERENCE` documentation on both create operations.
+   `INVALID_SOURCE_REFERENCE` documentation on both create operations. It also
+   requires the new `CESSION`, `RETROCESSION`, `DOCUMENT`, and `PARTY` members on
+   both notification payload enums.
 4. **AsyncAPI structure.** `asyncapi: 3.0.0`, channel addresses, `x-event-type`,
    `x-status: planned|implemented`, `x-implemented-by` on every implemented
    channel, one `send` operation per channel, a `DomainEvent` message on
