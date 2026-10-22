@@ -185,7 +185,7 @@ removed per the resolution policy.
 | M-32 | Policy mass tort profile is a narrow DRAFT/COMPLETE upsert with different vocabularies and route | L |
 | M-33 | Direct Claims list claimant filter is exact-match with no party reference check | L |
 | M-34 | Contract cash calls add a SPEC-less route, lifecycle, and event names and omit the cash-call limit gate | L |
-| M-35 | Payment allocations add a SPEC-less POST route and event name | L |
+| M-35 | Payment allocations add a SPEC-less create/reverse route pair and event names | L |
 | M-36 | Direct Claims allocation erosion retry swallows the expert conflict and record failure | M |
 | M-37 | Contract security/collateral uses a narrow derived-status projection and a wider legacy status vocabulary | L |
 | M-38 | Policy installment dunning adds a SPEC-less route and event name and a different level vocabulary and book rule | L |
@@ -788,7 +788,7 @@ ten publishing verticals now emit a subset:
 | Cession | `cession.cession.created`, `cession.cession.updated`, `cession.cession.handed-off` | `repos/eia-cession-expert/.../CessionEvents.java` |
 | Retrocession | `retrocession.retrocession.created`, `retrocession.retrocession.updated`, `retrocession.retrocession.handed-off` | `repos/eia-retrocession-expert/.../RetrocessionEvents.java` |
 | Document | `document.document.created`, `document.document.updated`, `document.document.status-changed`, `document.link.added`, `document.link.removed`, `document.content.uploaded`, `document.content.deleted`, `document.legal-hold.placed`, `document.legal-hold.released`, `document.document.disposed` | `repos/eia-document-expert/.../DocumentEvents.java`, `DocumentLinkEvents.java`, `DocumentContentEvents.java` |
-| Payment | `payment.payment.created`, `payment.payment.updated`, `payment.payment.status-changed` | `repos/eia-payment-expert/.../PaymentEvents.java` |
+| Payment | `payment.payment.created`, `payment.payment.updated`, `payment.payment.status-changed`, `payment.allocation.created`, `payment.allocation.reversed` | `repos/eia-payment-expert/.../PaymentEvents.java` |
 | Notifications | `notifications.notification.created`, `notifications.notification.sent` | `repos/eia-notifications-expert/.../NotificationEvents.java` |
 
 The Payment `payment.payment.created` payload now also carries the optional
@@ -796,6 +796,16 @@ The Payment `payment.payment.created` payload now also carries the optional
 They are additive: `eventVersion` stays 1, the fields are absent or null on an
 unlinked payment, and `payment.payment.updated` and `.status-changed` keep their
 existing identity-only payloads.
+
+The two allocation facts are child-aggregate events.
+`PaymentEvents.allocationCreated` writes `payment.allocation.created` against
+the allocation id at version 1, with the parent payment identity, the allocation
+fields, and the net `totalAllocated`/`paymentAmount` totals.
+`PaymentEvents.allocationReversed` writes `payment.allocation.reversed` against
+the same allocation id at version 2, with the parent payment, the allocation
+fields, the released amount, the required reason, and the reversal instant.
+Neither bumps the payment row version, and a repeat reversal writes no event.
+Both names have no SPEC 11.7.10 equivalent (M-22, M-35).
 
 The Document expert's link writes append `document.link.added` or
 `document.link.removed` from `DocumentLinkEvents.java` in the same transaction
@@ -1019,7 +1029,7 @@ planned name |
 | Cession | `cession.cession.created` / `.updated` / `.handed-off` | `cession.case.created`, `cession.handoff.sent`/`.acknowledged` |
 | Retrocession | `retrocession.retrocession.created` / `.updated` / `.handed-off` | `retrocession.case.created`, `retrocession.handoff.sent`/`.acknowledged` |
 | Document | `document.document.created` / `.updated` / `.status-changed`; `document.link.added` / `.removed`; `document.content.uploaded` / `.deleted`; `document.legal-hold.placed` / `.released` | `document.document.registered`, `document.document.associated`, plus the SPEC lifecycle verbs; no SPEC content-upload or content-tombstone fact (SPEC 11.6.8 deletes content only inside the approved disposition job, whose deletion step the disposition now performs without its approval or certificate); the SPEC hold facts are `document.document.held` / `.hold-released`. `document.document.disposed` matches SPEC and is implemented. |
-| Payment | `payment.payment.updated` / `.status-changed` | the SPEC per-verb names such as `payment.payment.authorized` |
+| Payment | `payment.payment.updated` / `.status-changed`; `payment.allocation.created` / `.reversed` | the SPEC per-verb names such as `payment.payment.authorized`; SPEC 11.7.10 publishes no allocation fact, so both allocation names are new (M-35) |
 | Notifications | `notifications.notification.created` / `.sent` | `notifications.notification.issued` / `.delivered` |
 
 The catalog lists both sets and marks only the implemented ones. The names
@@ -1041,7 +1051,7 @@ Evidence:
 - `repos/eia-document-expert/.../DocumentEvents.java:29-40`
 - `repos/eia-document-expert/.../DocumentLinkEvents.java:26-28`
 - `repos/eia-document-expert/.../DocumentContentEvents.java:26-27`
-- `repos/eia-payment-expert/.../PaymentEvents.java:31-33`
+- `repos/eia-payment-expert/.../PaymentEvents.java:31-39,103-190`
 - `repos/eia-notifications-expert/.../NotificationEvents.java:36-37`
 
 Resolution: either align the implemented names with the SPEC (with a
@@ -1937,69 +1947,82 @@ dual-publish window before a SPEC name is introduced; renaming the route,
 statuses, or event names is breaking and needs an ADR and a `/v2` or dual-mount
 period.
 
-## M-35 Payment allocations add a SPEC-less POST route and event name
+## M-35 Payment allocations add SPEC-less create/reverse routes and event names
 
 SPEC 11.7.11 lists only `GET
 /api/v1/payment/payments/{paymentId}/allocations`; it defines no allocation
-create operation. SPEC 11.7.10 publishes no allocation event. The 2026-10-20
-slice implements a standalone allocation child aggregate:
+create or reversal operation. SPEC 11.7.10 publishes no allocation event. The
+2026-10-20 slice implements a standalone allocation child aggregate, and the
+2026-10-22 slice adds its reversal:
 
 | Area | Implemented | SPEC / gap |
 |---|---|---|
-| Routes | `GET/POST /api/v1/payments/{paymentId}/allocations` (the M-01 short form) | SPEC 11.7.11 lists only the GET, under the longer `/api/v1/payment/payments` base. |
-| Projection | `PaymentAllocation` `{allocationId, paymentId, targetType, targetId, component, amount, currency, createdAt}` and `PaymentAllocationSummary` `{items, paymentAmount, totalAllocated, unallocated, currency}`; the expert row id is remapped to `allocationId` and `tenantId` is not exposed | SPEC 11.7.4 defines `claim_id`, `policy_id`, `policy_year`, `contract_id`, `layer_id`, `reserve_component`, `gl_account`, `company_code`, `cost_center`, `profit_center`, `business_area`, `tax_code`, and `allocation_pct`; the flat `targetType`/`targetId`/`component` trio replaces those columns, and the summary envelope is not in SPEC. |
+| Routes | `GET/POST /api/v1/payments/{paymentId}/allocations` and `POST /api/v1/payments/{paymentId}/allocations/{allocationId}/reverse` (the M-01 short form) | SPEC 11.7.11 lists only the GET, under the longer `/api/v1/payment/payments` base, and defines no reverse route. |
+| Projection | `PaymentAllocation` `{allocationId, paymentId, targetType, targetId, component, amount, currency, createdAt, reversedAt, reversalReason}` and `PaymentAllocationSummary` `{items, paymentAmount, totalAllocated, reversedTotal, net, unallocated, currency}`; the expert row id is remapped to `allocationId` and `tenantId` is not exposed. `reversedAt`/`reversalReason` are null until the allocation is reversed | SPEC 11.7.4 defines `claim_id`, `policy_id`, `policy_year`, `contract_id`, `layer_id`, `reserve_component`, `gl_account`, `company_code`, `cost_center`, `profit_center`, `business_area`, `tax_code`, and `allocation_pct`; the flat `targetType`/`targetId`/`component` trio replaces those columns, and neither the summary envelope nor the reversal stamp is in SPEC. |
 | Command | `CreatePaymentAllocationRequest` with `targetType` DIRECT_CLAIM/ASSUMED_CLAIM/POLICY, `targetId` UUID, `component` INDEMNITY/DEFENSE_COST/ALAE/EXPENSE/COMMISSION/OTHER, and `amount` greater than zero at numeric(19,4); the currency always comes from the payment | The target record is not resolved or validated against the Direct Claims, Assumed Claims, or Policy API; there is no policy-year, layer, contract, reserve-component, allocation-percentage, or SAP GL coding input. |
+| Reversal | `ReversePaymentAllocationRequest` `{reason}`: `reason` is required, trimmed, non-blank, and at most 200 characters. The accepted call stamps `reversedAt`/`reversalReason`, keeps the append-only row and its original facts, releases the amount from the active allocated total, and answers 200 with the stamped allocation | SPEC defines no allocation reversal command, no `reversedAt`/`reversalReason`, and no `ALLOCATION_ALREADY_REVERSED` conflict. A repeat, including a concurrent repeat, is 409 with no second write and no second event; an unknown or foreign payment is 404 `PAYMENT_NOT_FOUND`, and an unknown allocation or one under another payment/tenant is 404 `ALLOCATION_NOT_FOUND`. The payment lifecycle status does not gate a reversal. |
+| Totals | The expert stores the active (net) allocated total and the reversed total; the domain presents the gross `totalAllocated`, `reversedTotal`, the net `net`, and the net-based `unallocated` | The SPEC 11.7.7 PAY-06 exact-sum rule has no reversal concept, and the public gross/reversed/net split is an implementation shape. |
 | Status gate | 409 `PAYMENT_NOT_ALLOCATABLE` when the payment is CANCELLED, REVERSED, or FAILED | The SPEC lifecycle names the allocatable and terminal states but defines no error code. |
-| Overallocation | 409 `ALLOCATION_EXCEEDS_PAYMENT` when `totalAllocated + amount` exceeds the payment amount; zero or partial allocations are accepted | SPEC 11.7.7 PAY-06 requires at least one allocation and a total equal to the payment amount within 0.01. The implemented slice does not gate issue on an allocation or require the sum to reach the payment, and the error code is an implementation name. |
-| Event | `payment.allocation.created`; envelope aggregate is the allocation id at version 1, the payload carries the parent payment identity, allocation fields, and `totalAllocated`/`paymentAmount` | SPEC 11.7.10 publishes no allocation event, so the name is new (M-22). The outbox partition key stays the payment id. |
-| Book | Not book-scoped; `payment_allocation` has no book column and the routes require only `X-EIA-Tenant`; the event is stamped DIRECT | SPEC 3.6.1 says every payment and allocation carries the book. The implemented payment and allocation rows carry no book (M-08, M-12). |
+| Overallocation | 409 `ALLOCATION_EXCEEDS_PAYMENT` when the active allocated total plus `amount` exceeds the payment amount; zero or partial allocations are accepted, and a reversed amount is available again | SPEC 11.7.7 PAY-06 requires at least one allocation and a total equal to the payment amount within 0.01. The implemented slice does not gate issue on an allocation or require the sum to reach the payment, and the error code is an implementation name. |
+| Event | `payment.allocation.created` at allocation version 1 and `payment.allocation.reversed` at version 2. The created payload is `{paymentId, paymentNumber, targetType, targetId, component, amount, currency, totalAllocated, paymentAmount}`; the reversed payload is `{paymentId, allocationId, targetType, targetId, component, amount, reason, reversedAt}` | SPEC 11.7.10 publishes no allocation event, so both names are new (M-22). The outbox partition key stays the payment id. |
+| Book | Not book-scoped; `payment_allocation` has no book column and the routes require only `X-EIA-Tenant`; the events are stamped DIRECT | SPEC 3.6.1 says every payment and allocation carries the book. The implemented payment and allocation rows carry no book (M-08, M-12). |
 
 Evidence:
 
-- `repos/eia-payment-domain/.../PaymentController.java:73-85` (public GET/POST
-  allocation routes) and `PaymentService.java:122-139` (proxy and command
-  normalization).
+- `repos/eia-payment-domain/.../PaymentController.java:73-101` (public GET/POST
+  allocation routes and the reverse POST) and `PaymentService.java:122-160`
+  (proxy, command normalization, and reversal forwarding).
 - `repos/eia-payment-domain/.../PaymentAllocationRules.java:29-102` (target,
-  component, and amount validation), `PaymentAllocation.java:20-29`,
-  `PaymentAllocationSummary.java:17-23`, and
-  `CreatePaymentAllocationCommand.java:11-16` (flat public projection).
-- `repos/eia-payment-domain/.../PaymentClient.java:121-168` (expert
-  `/internal/v1` calls, missing-total normalization, and upstream-error
-  translation).
-- `repos/eia-payment-expert/.../PaymentAllocationController.java:26-62` (same
-  public path plus the internal alias, tenant resolution, 201 create) and
-  `PaymentAllocationService.java:38-87` (tenant wall, status gate,
-  overallocation guard, allocation insert, and outbox write in one
-  transaction).
-- `repos/eia-payment-expert/.../PaymentAllocationRules.java:22-114` (closed
-  target and component sets, amount normalization, non-allocatable statuses),
-  `PaymentAllocationRepository.java:46-93` (oldest-first list and allocated
-  total), `PaymentAllocationItem.java:15-35`, and
-  `PaymentAllocationSummary.java:13-20` (public field names).
-- `repos/eia-payment-expert/.../PaymentEvents.java:37,101-136`
-  (`payment.allocation.created`, `PaymentAllocation` aggregate at version 1,
-  parent payment partition key) and `schema.sql:44-68` (`payment_allocation`
-  columns and the positive-amount, target-type, and component checks).
-- Tests: `PaymentAllocationControllerTest` (list totals, create, internal
-  alias, `TENANT_REQUIRED`, `VALIDATION_ERROR`, both 409 codes, 404),
+  component, and amount validation), `PaymentAllocation.java:20-42`,
+  `PaymentAllocationSummary.java:10-39`,
+  `CreatePaymentAllocationCommand.java:11-16`, and
+  `ReversePaymentAllocationCommand.java:5-18` (flat public projection and the
+  reversal command).
+- `repos/eia-payment-domain/.../PaymentClient.java:121-229` (expert
+  `/internal/v1` calls, missing-total normalization, gross/reversed/net
+  conversion, reverse call, and upstream-error translation that preserves the
+  404 code).
+- `repos/eia-payment-expert/.../PaymentAllocationController.java:26-66` (same
+  public paths plus the internal alias, tenant resolution, 201 create, and the
+  reverse POST) and `PaymentAllocationService.java:44-148` (tenant wall,
+  status gate, overallocation guard, allocation insert, reversal, and outbox
+  writes in one transaction).
+- `repos/eia-payment-expert/.../PaymentAllocationRules.java:35-96` (closed
+  target and component sets, amount normalization, non-allocatable statuses,
+  and the 200-character trimmed reversal reason),
+  `PaymentAllocationRepository.java:46-130` (oldest-first list, active and
+  reversed totals, conditional reversal update), `PaymentAllocationItem.java:15-41`,
+  and `PaymentAllocationSummary.java:10-24` (public field names).
+- `repos/eia-payment-expert/.../PaymentEvents.java:31-39,103-190`
+  (`payment.allocation.created` at version 1 and `payment.allocation.reversed`
+  at version 2, parent payment partition key) and `schema.sql:46-77`
+  (`payment_allocation` columns, the positive-amount/target/component checks,
+  and the additive `reversed_at`/`reversal_reason` columns).
+- Tests: `PaymentAllocationControllerTest` (list totals, create, reverse,
+  internal alias, `TENANT_REQUIRED`, `VALIDATION_ERROR`, 409/404),
   `PaymentAllocationIntegrationTest` (oldest-first ordering, empty summary,
   over-allocation and status guards, tenant wall, field validation, event
-  payload, rollback), and `PaymentAllocationRulesTest`.
-- `openapi/payment.yaml` 1.4.0, `asyncapi/payment.yaml` 1.3.0,
-  `asyncapi/event-catalog.yaml` 1.14.0, and the README payment allocation
-  section record the implemented shape.
+  payload, rollback), `PaymentAllocationReversalIntegrationTest` (reversal,
+  repeat, missing/blank/over-long reason, tenant/payment/allocation wall,
+  net/reversed totals, event), `PaymentAllocationRulesTest`, and the domain
+  `PaymentClientTest`/`PaymentControllerTest` reversal cases.
+- `openapi/payment.yaml` 1.7.0, `asyncapi/payment.yaml` 1.4.0,
+  `asyncapi/event-catalog.yaml` 1.30.0, and the README payment allocation
+  sections record the implemented shape.
 
 Resolution: the implemented slice is documented as canonical for now. Closing
-the gap means adding the SPEC allocation create operation and the
-`payment.allocation.created` event name (or recording the GET-only contract),
-enforcing PAY-06 (at least one allocation per payment and the exact
-payment-amount sum within 0.01), resolving and validating the target against
-the owning claim or policy API, adding the policy-year, layer, contract,
-reserve-component, allocation-percentage, and SAP GL coding fields, and
-carrying the book on the payment and allocation. A new event name needs an
-EV-05 dual-publish window before it can replace a SPEC name; renaming the route
-or event is breaking and needs an ADR and a `/v2` or dual-mount period. A
-`paymentId` outside the caller's tenant stays 404 `PAYMENT_NOT_FOUND`.
+the gap means adding the SPEC allocation create and reverse operations and the
+`payment.allocation.created`/`payment.allocation.reversed` event names (or
+recording the GET-only contract), enforcing PAY-06 (at least one allocation per
+payment and the exact payment-amount sum within 0.01), resolving and validating
+the target against the owning claim or policy API, adding the policy-year,
+layer, contract, reserve-component, allocation-percentage, and SAP GL coding
+fields, and carrying the book on the payment and allocation. A new event name
+needs an EV-05 dual-publish window before it can replace a SPEC name; renaming
+the route or event is breaking and needs an ADR and a `/v2` or dual-mount
+period. A `paymentId` outside the caller's tenant stays 404
+`PAYMENT_NOT_FOUND`, and an `allocationId` outside the payment stays 404
+`ALLOCATION_NOT_FOUND`.
 
 ## M-36 Direct Claims allocation erosion retry swallows the expert conflict and record failure
 
@@ -3188,7 +3211,7 @@ be breaking under SPEC 10.4.
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-22
-Notifications DUNNING_NOTICE contract:
+payment allocation reversal contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -3205,7 +3228,7 @@ OpenAPI 3.1 documents
   OK openapi/cession.yaml  9 paths, 11 operations
   OK openapi/retrocession.yaml  9 paths, 11 operations
   OK openapi/document.yaml  18 paths, 24 operations
-  OK openapi/payment.yaml  12 paths, 15 operations
+  OK openapi/payment.yaml  13 paths, 16 operations
   OK openapi/notifications.yaml  7 paths, 9 operations
 
 AsyncAPI 3 documents
@@ -3217,9 +3240,9 @@ AsyncAPI 3 documents
   OK asyncapi/cession.yaml  17 event channels
   OK asyncapi/retrocession.yaml  17 event channels
   OK asyncapi/document.yaml  24 event channels
-  OK asyncapi/payment.yaml  19 event channels
+  OK asyncapi/payment.yaml  20 event channels
   OK asyncapi/notifications.yaml  12 event channels
-  OK catalog: 211 unique published events across 10 verticals
+  OK catalog: 212 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -3227,7 +3250,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 14069 checks, 0 failures
+  PASS 14205 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -3492,7 +3515,14 @@ Additional checks and limits:
   `CreateNotificationRequest.notificationType` at another schema each fail with
   the specific missing-member, position, or reference message. All three were
   run on a throwaway copy and exited non-zero (exit 1); the working copy was
-  left unchanged.
+  left unchanged. The payment allocation-reversal pass added four more:
+  renaming the `/api/v1/payments/{paymentId}/allocations/{allocationId}/reverse`
+  path, removing `ALLOCATION_ALREADY_REVERSED` from the reverse description,
+  making `PaymentAllocation.reversedAt` non-nullable, and dropping
+  `payment.allocation.reversed` from the Payment catalog `implemented` list
+  each fail with the specific missing-operation, conflict-code, nullability, or
+  implemented-event message. All four were run on a throwaway copy and exited
+  non-zero (exit 1); the working copy was left unchanged.
 
 ## Resolution policy
 

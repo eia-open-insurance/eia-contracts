@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.29.0
+  version: 1.30.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -141,6 +141,13 @@ info:
     `document.document.disposed`. The totals therefore stay 211 published and
     91 implemented, with Document at 24 published and 10 implemented (M-44,
     M-47).
+    The 2026-10-22 Payment allocation reversal slice adds one Payment name,
+    `payment.allocation.reversed`, with no SPEC 11.7.10 equivalent: SPEC
+    publishes no allocation event at all. It is a child-aggregate fact that
+    stamps an existing allocation reversed instead of deleting it. It adds one
+    published and one implemented name, bringing the platform totals to 212
+    published and 92 implemented; Payment becomes 20 published and 5 implemented
+    (M-22, M-35).
     The platform
     event-ingest service
     is the inbox:
@@ -562,11 +569,13 @@ x-event-catalog:
       - payment.payment.updated
       - payment.payment.status-changed
       - payment.allocation.created
+      - payment.allocation.reversed
     implemented:
       - payment.payment.created
       - payment.payment.updated
       - payment.payment.status-changed
       - payment.allocation.created
+      - payment.allocation.reversed
     consumed:
       - direct.claim.settlement-authorized
       - direct.claim.reserve-changed

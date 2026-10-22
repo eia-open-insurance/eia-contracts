@@ -393,6 +393,46 @@ expert rejects a longer request reason with 400 `VALIDATION_ERROR` before any
 write. `MISMATCHES.md` M-46 records the SPEC-less route and graph and the closed
 reason-validation and projection gaps. The full run passes 14,098 checks.
 
+### Payment allocation reversal (2026-10-22)
+
+Payment 1.7.0 documents the reversal of an allocation. The change is additive:
+one route, one request schema, two nullable allocation members, two summary
+money members, and a new event name; no existing path, request field, response
+field, or event changes.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/payment.yaml` | 1.7.0 | Additive | `POST /api/v1/payments/{paymentId}/allocations/{allocationId}/reverse` with `ReversePaymentAllocationRequest` (`reason`, required, 1-200 characters); `PaymentAllocation` adds the required-but-nullable `reversedAt` and 200-character `reversalReason`; `PaymentAllocationSummary` adds `reversedTotal` and `net` and documents the gross `totalAllocated` and net-based `unallocated`. |
+| `asyncapi/payment.yaml` | 1.4.0 | Additive | The implemented `payment.allocation.reversed` channel, `send` operation, and `PaymentAllocationReversedData` payload. |
+| `asyncapi/event-catalog.yaml` | 1.30.0 | Additive | `payment.allocation.reversed` is published and implemented (212 published and 92 implemented in total; Payment 20 published and 5 implemented). |
+
+The reversal keeps the append-only allocation row: `{reason}` is required,
+trimmed, non-blank, and at most 200 characters; the accepted call stamps
+`reversedAt`/`reversalReason` and leaves the amount, target, component, and
+`createdAt` unchanged. A reversed allocation no longer counts toward the active
+allocated total, so its amount can fund a later create. The summary keeps every
+row in `items` and splits the reconciliation: `totalAllocated` is the gross sum
+of all rows, `reversedTotal` is the sum of the reversed rows, `net` is
+`totalAllocated - reversedTotal`, and `unallocated` is `paymentAmount - net`.
+The expert owns the totals and the reversal guard; the domain forwards the
+tenant, payment, allocation, and reason and preserves the expert's 404 code.
+
+An unknown or foreign payment is 404 `PAYMENT_NOT_FOUND`; an unknown
+allocation, an allocation under another payment, or another tenant's allocation
+is 404 `ALLOCATION_NOT_FOUND`. A missing, blank, or over-long `reason` is 400
+`VALIDATION_ERROR`. Repeating a reversal, including a concurrent repeat, is 409
+`ALLOCATION_ALREADY_REVERSED` with no second write and no second event; the
+payment lifecycle status does not gate a reversal. An accepted reversal writes
+`payment.allocation.reversed` in the same transaction as the stamp: the
+`PaymentAllocation` child aggregate moves to version 2 and the payload is
+`{paymentId, allocationId, targetType, targetId, component, amount, reason,
+reversedAt}`.
+
+The reverse route and event are SPEC-less: SPEC 11.7.11 lists only the
+allocation GET and no reversal, and SPEC 11.7.10 publishes no allocation fact.
+`MISMATCHES.md` M-22 and M-35 record the extension. The full run passes 14,205
+checks.
+
 ### Claim task and note idempotency (2026-10-20)
 
 Direct Claims and Assumed Claims 1.4.0 make task and note creation retry-safe
@@ -2376,13 +2416,18 @@ it settles:
 |---|---|---|---|
 | List allocations | `GET /api/v1/payments/{paymentId}/allocations` | 200 `PaymentAllocationSummary` | 400, 404 |
 | Record allocation | `POST /api/v1/payments/{paymentId}/allocations` | 201 `PaymentAllocation` | 400, 404, 409 |
+| Reverse allocation | `POST /api/v1/payments/{paymentId}/allocations/{allocationId}/reverse` | 200 `PaymentAllocation` | 400, 404, 409 |
 
-The summary is `{items, paymentAmount, totalAllocated, unallocated, currency}`;
-`items` is ordered oldest first (`createdAt` ascending, allocation id as the
-tie-break), and `totalAllocated`/`unallocated` are derived from the payment
-amount. An allocation is `{allocationId, paymentId, targetType, targetId,
-component, amount, currency, createdAt}`. Amounts are decimal strings in the
-payment currency; the tenant is implied and is not part of the projection.
+The summary is `{items, paymentAmount, totalAllocated, reversedTotal, net,
+unallocated, currency}`; `items` is ordered oldest first (`createdAt` ascending,
+allocation id as the tie-break) and keeps reversed rows for audit.
+`totalAllocated` is the gross sum of every recorded split, `reversedTotal` is the
+sum of the reversed rows, `net` is `totalAllocated - reversedTotal`, and
+`unallocated` is the payment amount minus `net`. An allocation is `{allocationId,
+paymentId, targetType, targetId, component, amount, currency, createdAt,
+reversedAt, reversalReason}`; `reversedAt` and `reversalReason` are null until
+the allocation is reversed. Amounts are decimal strings in the payment currency;
+the tenant is implied and is not part of the projection.
 
 Rules:
 
@@ -2400,11 +2445,21 @@ Rules:
   are accepted and normalized. `amount` must be greater than zero with at most
   four fraction digits; the currency is never accepted from the caller because
   an allocation always uses the payment's currency.
-- An allocation is append-only. The accumulated allocations plus the new amount
-  may not exceed the payment amount; an excess is 409
+- An allocation is append-only. The accumulated active allocations plus the new
+  amount may not exceed the payment amount; an excess is 409
   `ALLOCATION_EXCEEDS_PAYMENT` and writes no row and no event. A `CANCELLED`,
   `REVERSED`, or `FAILED` payment is 409 `PAYMENT_NOT_ALLOCATABLE` and likewise
   writes nothing.
+- A reversal is a stamp, not a delete. The body is `{reason}`: `reason` is
+  required, trimmed, non-blank, and at most 200 characters, and a missing, blank,
+  or over-long value is 400 `VALIDATION_ERROR`. The row keeps its amount,
+  target, component, and `createdAt` and gains `reversedAt`/`reversalReason`; the
+  released amount no longer counts toward the active allocated total and can
+  fund a later create. The payment status does not gate a reversal. An unknown
+  or foreign payment is 404 `PAYMENT_NOT_FOUND`; an unknown allocation, an
+  allocation under another payment, or another tenant's allocation is 404
+  `ALLOCATION_NOT_FOUND`; a repeat, including a concurrent repeat, is 409
+  `ALLOCATION_ALREADY_REVERSED` with no second write and no second event.
 - A missing or unknown body member is 400 `VALIDATION_ERROR` with per-field
   details. A missing tenant is 400 `MISSING_TENANT_HEADER`; a malformed tenant
   or `paymentId` is 400 `INVALID_PARAMETER`.
@@ -2415,12 +2470,15 @@ Rules:
   and the payment-level `totalAllocated`/`paymentAmount` totals. Because an
   allocation never bumps the payment row version, using the allocation id keeps
   the outbox aggregate-version key unique when one payment receives several
-  allocations.
-- The expert serves the same public path and an `/internal/v1` alias that the
+  allocations. The accepted reversal writes `payment.allocation.reversed` in the
+  same transaction, advancing the same `PaymentAllocation` aggregate to version
+  2; its payload is `{paymentId, allocationId, targetType, targetId, component,
+  amount, reason, reversedAt}`.
+- The expert serves the same public paths and an `/internal/v1` alias that the
   domain calls; the alias is an implementation detail and is not part of the
   public contract. The SPEC 11.7.11 table lists only the GET, and SPEC 11.7.10
-  has no `payment.allocation.created` name; the POST and the event are new
-  names recorded in M-22 and M-35.
+  has no allocation event name; the POST, the reverse POST, and the two
+  `payment.allocation.*` events are new names recorded in M-22 and M-35.
 
 ### Payment status transitions
 
@@ -2992,12 +3050,22 @@ missing directory.
    codes on the Round 5 mutations, the payment source fields and their create
    rules, the optional `sourceType` + `sourceId` list filter on the public and
    expert payment lists with its enum, UUID, tenant parameter, 400 response, and
-   `INVALID_SOURCE_TYPE`/`INVALID_SOURCE_FILTER` documentation, the two payment
+   `INVALID_SOURCE_TYPE`/`INVALID_SOURCE_FILTER` documentation, the three payment
    allocation operations with their 200/201 successes, the `PaymentAllocation`,
    `PaymentAllocationSummary`, and `CreatePaymentAllocationRequest` schemas and
-   their field bounds and enums, the 400/404/409 responses, the 409
+   their field bounds and enums, the required-but-nullable
+   `PaymentAllocation.reversedAt` and 200-character `reversalReason`, the
+   `PaymentAllocationSummary.reversedTotal`/`net` members with the gross and net
+   wording, the 400/404/409 responses, the 409
    `ALLOCATION_EXCEEDS_PAYMENT`/`PAYMENT_NOT_ALLOCATABLE` documentation, the
-   absence of the implemented path from `x-planned-operations`, the public
+   `POST .../allocations/{allocationId}/reverse` operation with its shared
+   `TenantHeader` and `paymentId`/`allocationId` parameters, the required
+   `ReversePaymentAllocationRequest.reason` with its 200-character cap and trim
+   rule, the 200 `PaymentAllocation` and 400/404/409 responses, the 404
+   `PAYMENT_NOT_FOUND`/`ALLOCATION_NOT_FOUND`, 400 `VALIDATION_ERROR`/
+   `MISSING_TENANT_HEADER`, and 409 `ALLOCATION_ALREADY_REVERSED` documentation,
+   the `payment.allocation.reversed` event wording, and the absence of the
+   implemented paths from `x-planned-operations`, the public
    payment status PATCH with its shared `TenantHeader` and `paymentId` path
    parameter, the required `UpdatePaymentStatusRequest`, the 200 `Payment` and
    400/404/409 responses, the required-but-nullable 200-character
@@ -3007,7 +3075,8 @@ missing directory.
    and 200-character `reason` on both transition schemas, the error-code and
    event documentation, and the absence of the status path from
    `x-planned-operations`, the implemented
-   `payment.allocation.created` channel and payload, the three
+   `payment.allocation.created` and `payment.allocation.reversed` channels and
+   payloads, the three
    Policy billing operations, the optional shared
    `BookHeaderDirectOptional` parameter, the `BillingPlan`, `Installment`,
    `CreateBillingPlanRequest`, and `UpdateInstallmentRequest` schemas and their
@@ -3115,6 +3184,9 @@ missing directory.
    optional source fields on the payment created payload,
    the `PaymentAllocationCreatedData` payload with its required payment
    identity, target, component, money, and allocation-total members, the
+   `PaymentAllocationReversedData` payload with its required parent payment and
+   allocation identity, target, component, released amount, 200-character
+   reason, and reversal instant, the
    `PolicyDunningSentData` payload with its required policy, installment,
    level, channel, sent-at, and status members, the
    `PolicyMassTortProfileUpdatedData` payload with its required
@@ -3167,6 +3239,7 @@ missing directory.
    `policy.installment.waived`, `policy.dunning.sent`,
    `policy.mass-tort-profile.updated`,
    `payment.allocation.created`,
+   `payment.allocation.reversed`,
    `contract.bordereau.received`, `contract.bordereau.processed`,
    `contract.bordereau.failed`, the four `contract.cash-call.*` facts
    (`requested`, `issued`, `settled`, and `cancelled`),
@@ -3242,12 +3315,16 @@ missing directory.
   than the SPEC 11.7.4 `claim_vertical`/`claim_id`/`claim_number` projection, and
   the source is neither resolved nor checked for existence (M-12, M-24);
 - a payment can be split through the flat allocation surface
-  `GET/POST /api/v1/payments/{paymentId}/allocations`. The allocation records a
-  target type and component but does not resolve or validate the target record,
-  accepts zero or partial allocations instead of enforcing PAY-06's exact-sum
-  rule, and carries no book; it publishes the new `payment.allocation.created`
-  name. SPEC 11.7.11 lists only the GET, SPEC 11.7.10 has no allocation event,
-  and SPEC 3.6.1 requires the book on every allocation (M-22, M-35);
+  `GET/POST /api/v1/payments/{paymentId}/allocations` and a split can be
+  reversed through `POST .../allocations/{allocationId}/reverse`. The
+  allocation records a target type and component but does not resolve or
+  validate the target record, accepts zero or partial allocations instead of
+  enforcing PAY-06's exact-sum rule, and carries no book. A reversal stamps the
+  row instead of deleting it and reports the gross `totalAllocated`, the
+  `reversedTotal`, and the net `net`/`unallocated`; the slice publishes the new
+  `payment.allocation.created` and `payment.allocation.reversed` names. SPEC
+  11.7.11 lists only the GET, SPEC 11.7.10 has no allocation event, and SPEC
+  3.6.1 requires the book on every allocation (M-22, M-35);
 - the public payment status command is a SPEC-less `PATCH /{id}/status` route
   (SPEC 11.7.11 lists only named actions). The implemented graph is wider than
   the SPEC 11.7.6 mermaid (CANCELLED/VOID escape edges, `SUBMITTED`/`ACCEPTED`

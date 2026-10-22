@@ -1729,6 +1729,7 @@ IMPLEMENTED_EVENTS = {
         "payment.payment.updated",
         "payment.payment.status-changed",
         "payment.allocation.created",
+        "payment.allocation.reversed",
     ],
     "notifications": [
         "notifications.notification.created",
@@ -1896,11 +1897,13 @@ PAYMENT_STATUS_EVENTS = (
 
 
 # Payment allocations (SPEC 11.7.11). The public domain exposes GET/POST
-# /api/v1/payments/{paymentId}/allocations; the expert serves the same path and
-# an /internal/v1 alias that the domain calls, but the alias is an
-# implementation detail and is not part of the public contract. An allocation
-# is append-only, always uses the payment currency, and may not take the
-# payment's allocated total above the payment amount.
+# /api/v1/payments/{paymentId}/allocations plus the allocation reversal under
+# .../{allocationId}/reverse; the expert serves the same paths and an
+# /internal/v1 alias that the domain calls, but the alias is an implementation
+# detail and is not part of the public contract. An allocation is append-only,
+# always uses the payment currency, and may not take the payment's active
+# allocated total above the payment amount. A reversal stamps the row, releases
+# the amount, and reports the gross/reversed/net summary totals.
 PAYMENT_ALLOCATION_OPENAPI_PATHS = [
     (
         "get",
@@ -1918,6 +1921,10 @@ PAYMENT_ALLOCATION_OPENAPI_PATHS = [
     ),
 ]
 
+PAYMENT_ALLOCATION_REVERSE_OPENAPI_PATH = (
+    "/api/v1/payments/{paymentId}/allocations/{allocationId}/reverse"
+)
+
 PAYMENT_ALLOCATION_FIELDS = (
     "allocationId",
     "paymentId",
@@ -1927,12 +1934,16 @@ PAYMENT_ALLOCATION_FIELDS = (
     "amount",
     "currency",
     "createdAt",
+    "reversedAt",
+    "reversalReason",
 )
 
 PAYMENT_ALLOCATION_SUMMARY_FIELDS = (
     "items",
     "paymentAmount",
     "totalAllocated",
+    "reversedTotal",
+    "net",
     "unallocated",
     "currency",
 )
@@ -1943,6 +1954,9 @@ PAYMENT_ALLOCATION_REQUEST_FIELDS = (
     "component",
     "amount",
 )
+
+PAYMENT_ALLOCATION_REVERSE_REQUEST_FIELDS = ("reason",)
+PAYMENT_ALLOCATION_REVERSAL_REASON_MAX_LENGTH = 200
 
 PAYMENT_ALLOCATION_TARGET_TYPES = ("DIRECT_CLAIM", "ASSUMED_CLAIM", "POLICY")
 PAYMENT_ALLOCATION_COMPONENTS = (
@@ -1957,6 +1971,8 @@ PAYMENT_ALLOCATION_CONFLICT_CODES = (
     "ALLOCATION_EXCEEDS_PAYMENT",
     "PAYMENT_NOT_ALLOCATABLE",
 )
+PAYMENT_ALLOCATION_REVERSE_CONFLICT_CODES = ("ALLOCATION_ALREADY_REVERSED",)
+PAYMENT_ALLOCATION_NOT_FOUND_CODES = ("PAYMENT_NOT_FOUND", "ALLOCATION_NOT_FOUND")
 PAYMENT_ALLOCATION_EVENT = "payment.allocation.created"
 PAYMENT_ALLOCATION_EVENT_FIELDS = (
     "paymentId",
@@ -1968,6 +1984,17 @@ PAYMENT_ALLOCATION_EVENT_FIELDS = (
     "currency",
     "totalAllocated",
     "paymentAmount",
+)
+PAYMENT_ALLOCATION_REVERSE_EVENT = "payment.allocation.reversed"
+PAYMENT_ALLOCATION_REVERSE_EVENT_FIELDS = (
+    "paymentId",
+    "allocationId",
+    "targetType",
+    "targetId",
+    "component",
+    "amount",
+    "reason",
+    "reversedAt",
 )
 
 # Document association links. The three public routes are mirrored on the
@@ -3071,6 +3098,20 @@ def check_payment_allocations(contracts: ContractSet, document, relative: str):
         (allocation_properties.get("createdAt") or {}).get("format") == "date-time",
         f"{relative}: PaymentAllocation.createdAt must be a date-time",
     )
+    reversed_at = allocation_properties.get("reversedAt") or {}
+    contracts.check(
+        _schema_types(reversed_at) == {"string", "null"}
+        and reversed_at.get("format") == "date-time",
+        f"{relative}: PaymentAllocation.reversedAt must be a nullable date-time",
+    )
+    reversal_reason = allocation_properties.get("reversalReason") or {}
+    contracts.check(
+        _schema_types(reversal_reason) == {"string", "null"}
+        and reversal_reason.get("maxLength")
+        == PAYMENT_ALLOCATION_REVERSAL_REASON_MAX_LENGTH,
+        f"{relative}: PaymentAllocation.reversalReason must be a nullable string of "
+        f"at most {PAYMENT_ALLOCATION_REVERSAL_REASON_MAX_LENGTH} characters",
+    )
 
     for schema_name, expected in (
         ("PaymentAllocationTargetType", PAYMENT_ALLOCATION_TARGET_TYPES),
@@ -3110,7 +3151,7 @@ def check_payment_allocations(contracts: ContractSet, document, relative: str):
         ),
         f"{relative}: PaymentAllocationSummary.items must be an array of PaymentAllocation",
     )
-    for field in ("paymentAmount", "totalAllocated", "unallocated"):
+    for field in ("paymentAmount", "totalAllocated", "reversedTotal", "net", "unallocated"):
         contracts.check(
             str((summary_properties.get(field) or {}).get("$ref", "")).endswith(
                 "/schemas/MoneyAmount"
@@ -3124,6 +3165,31 @@ def check_payment_allocations(contracts: ContractSet, document, relative: str):
         ),
         f"{relative}: PaymentAllocationSummary.currency must use the shared "
         "CurrencyCode schema",
+    )
+    summary_description = str(summary.get("description") or "")
+    contracts.check(
+        "gross" in summary_description,
+        f"{relative}: PaymentAllocationSummary must document the gross "
+        "totalAllocated",
+    )
+    contracts.check(
+        "net" in summary_description,
+        f"{relative}: PaymentAllocationSummary must document the net allocated "
+        "and unallocated figures",
+    )
+    contracts.check(
+        "gross" in str((summary_properties.get("totalAllocated") or {}).get(
+            "description", ""
+        )).lower(),
+        f"{relative}: PaymentAllocationSummary.totalAllocated must document the "
+        "gross sum",
+    )
+    contracts.check(
+        "net" in str((summary_properties.get("unallocated") or {}).get(
+            "description", ""
+        )).lower(),
+        f"{relative}: PaymentAllocationSummary.unallocated must document the net "
+        "basis",
     )
 
     request = schemas.get("CreatePaymentAllocationRequest") or {}
@@ -3277,6 +3343,157 @@ def check_payment_allocations(contracts: ContractSet, document, relative: str):
         ),
         f"{relative}: x-planned-operations must not list the implemented payment "
         "allocations path",
+    )
+
+
+def check_payment_allocation_reversal(contracts: ContractSet, document, relative: str):
+    """Require the public allocation-reversal route, request, and error codes.
+
+    The reversal is a stamp on the append-only allocation. The operation must
+    document the required 200-character reason, the 200 ``PaymentAllocation``
+    response, both tenant-scoped 404 codes, the 400 validation and tenant
+    errors, the ``ALLOCATION_ALREADY_REVERSED`` conflict, and the
+    ``payment.allocation.reversed`` event. The implemented path must not remain
+    in ``x-planned-operations``.
+    """
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+    path = PAYMENT_ALLOCATION_REVERSE_OPENAPI_PATH
+    path_item = paths.get(path) if isinstance(paths, dict) else None
+    operation = path_item.get("post") if isinstance(path_item, dict) else None
+    where = f"{relative}: POST {path}"
+    contracts.check(
+        isinstance(operation, dict),
+        f"{where}: required payment allocation reversal operation is missing",
+    )
+    if not isinstance(operation, dict):
+        return
+    parameter_refs, inline_names = _parameter_names(operation)
+    contracts.check(
+        "TenantHeader" in parameter_refs,
+        f"{where}: must document the shared TenantHeader parameter",
+    )
+    for name in ("paymentId", "allocationId"):
+        contracts.check(
+            name in inline_names,
+            f"{where}: must declare the {name} path parameter",
+        )
+    contracts.check(
+        not ({"BookHeaderDirect", "BookHeaderAssumed"} & set(parameter_refs)),
+        f"{where}: payment allocations are not book-scoped and must not "
+        "declare a book header",
+    )
+    description = str(operation.get("description") or "")
+    for code in PAYMENT_ALLOCATION_NOT_FOUND_CODES:
+        contracts.check(
+            code in description,
+            f"{where}: description must document 404 {code}",
+        )
+    for code in ("VALIDATION_ERROR", "MISSING_TENANT_HEADER"):
+        contracts.check(
+            code in description,
+            f"{where}: description must document 400 {code}",
+        )
+    for code in PAYMENT_ALLOCATION_REVERSE_CONFLICT_CODES:
+        contracts.check(
+            code in description,
+            f"{where}: description must document 409 {code}",
+        )
+    contracts.check(
+        PAYMENT_ALLOCATION_REVERSE_EVENT in description,
+        f"{where}: description must document the "
+        f"{PAYMENT_ALLOCATION_REVERSE_EVENT} event",
+    )
+    contracts.check(
+        "trim" in description.lower(),
+        f"{where}: description must document the trimmed reversal reason",
+    )
+
+    request_body = operation.get("requestBody") or {}
+    body_schema = (
+        ((request_body.get("content") or {}).get("application/json") or {}).get(
+            "schema"
+        )
+        if isinstance(request_body, dict)
+        else None
+    )
+    contracts.check(
+        isinstance(request_body, dict) and request_body.get("required") is True,
+        f"{where}: requestBody must be required",
+    )
+    contracts.check(
+        isinstance(body_schema, dict)
+        and str(body_schema.get("$ref", "")).endswith(
+            "/schemas/ReversePaymentAllocationRequest"
+        ),
+        f"{where}: request body must use the ReversePaymentAllocationRequest "
+        "schema",
+    )
+
+    request = schemas.get("ReversePaymentAllocationRequest") or {}
+    request_properties = request.get("properties") or {}
+    request_required = request.get("required") or []
+    contracts.check(
+        isinstance(request, dict) and request.get("type") == "object",
+        f"{relative}: ReversePaymentAllocationRequest must be an object schema",
+    )
+    for field in PAYMENT_ALLOCATION_REVERSE_REQUEST_FIELDS:
+        contracts.check(
+            isinstance(request_properties.get(field), dict),
+            f"{relative}: ReversePaymentAllocationRequest.{field} is required",
+        )
+        contracts.check(
+            field in request_required,
+            f"{relative}: ReversePaymentAllocationRequest.required must list {field}",
+        )
+    reason = request_properties.get("reason") or {}
+    contracts.check(
+        reason.get("type") == "string",
+        f"{relative}: ReversePaymentAllocationRequest.reason must be a string",
+    )
+    contracts.check(
+        reason.get("maxLength") == PAYMENT_ALLOCATION_REVERSAL_REASON_MAX_LENGTH,
+        f"{relative}: ReversePaymentAllocationRequest.reason maxLength must be "
+        f"{PAYMENT_ALLOCATION_REVERSAL_REASON_MAX_LENGTH}",
+    )
+    contracts.check(
+        reason.get("minLength") == 1,
+        f"{relative}: ReversePaymentAllocationRequest.reason must be non-empty",
+    )
+    contracts.check(
+        "trim" in str(reason.get("description") or "").lower(),
+        f"{relative}: ReversePaymentAllocationRequest.reason must document the "
+        "trim rule",
+    )
+
+    success_body = _response_schema(operation, "200")
+    contracts.check(
+        isinstance(success_body, dict)
+        and str(success_body.get("$ref", "")).endswith("/schemas/PaymentAllocation"),
+        f"{where}: 200 must return the PaymentAllocation schema",
+    )
+    responses = operation.get("responses") or {}
+    for code, suffix in (
+        ("400", "/responses/BadRequest"),
+        ("404", "/responses/NotFound"),
+        ("409", "/responses/Conflict"),
+    ):
+        response = responses.get(code) if isinstance(responses, dict) else None
+        contracts.check(
+            isinstance(response, dict)
+            and str(response.get("$ref", "")).endswith(suffix),
+            f"{where}: {code} must reference the shared "
+            f"{suffix.rsplit('/', 1)[-1]} response",
+        )
+
+    planned = document.get("x-planned-operations") or []
+    contracts.check(
+        not any(
+            isinstance(entry, dict) and entry.get("path") == path
+            for entry in planned
+        ),
+        f"{relative}: x-planned-operations must not list the implemented payment "
+        "allocation reversal path",
     )
 
 
@@ -3618,6 +3835,88 @@ def check_payment_allocation_asyncapi(contracts: ContractSet, document, relative
     contracts.check(
         (properties.get("currency") or {}).get("pattern") == "^[A-Z]{3}$",
         f"{relative}: PaymentAllocationCreatedData.currency must be an ISO 4217 code",
+    )
+
+
+def check_payment_allocation_reversed_asyncapi(
+    contracts: ContractSet, document, relative: str
+):
+    """Require the implemented payment.allocation.reversed channel and payload."""
+    channels = document.get("channels") or {}
+    channel = channels.get("PaymentAllocationReversed") or {}
+    contracts.check(
+        channel.get("address") == PAYMENT_ALLOCATION_REVERSE_EVENT,
+        f"{relative}: payment allocation reversal channel must address "
+        f"{PAYMENT_ALLOCATION_REVERSE_EVENT}",
+    )
+    contracts.check(
+        channel.get("x-status") == "implemented",
+        f"{relative}: {PAYMENT_ALLOCATION_REVERSE_EVENT} channel must be "
+        "implemented",
+    )
+    contracts.check(
+        bool(channel.get("x-implemented-by")),
+        f"{relative}: {PAYMENT_ALLOCATION_REVERSE_EVENT} must name the emitting "
+        "source",
+    )
+    messages = channel.get("messages") or {}
+    contracts.check(
+        (messages.get("PaymentAllocationReversedData") or {}).get("$ref")
+        == "#/components/messages/PaymentAllocationReversedData",
+        f"{relative}: {PAYMENT_ALLOCATION_REVERSE_EVENT} must reference "
+        "PaymentAllocationReversedData",
+    )
+    send_events = {
+        operation.get("x-event-type")
+        for operation in (document.get("operations") or {}).values()
+        if isinstance(operation, dict) and operation.get("action") == "send"
+    }
+    contracts.check(
+        PAYMENT_ALLOCATION_REVERSE_EVENT in send_events,
+        f"{relative}: {PAYMENT_ALLOCATION_REVERSE_EVENT} must have a send "
+        "operation",
+    )
+    message = (
+        ((document.get("components") or {}).get("messages") or {}).get(
+            "PaymentAllocationReversedData"
+        )
+        or {}
+    )
+    payload = message.get("payload") or {}
+    properties = payload.get("properties") or {}
+    required = set(payload.get("required") or [])
+    for field in PAYMENT_ALLOCATION_REVERSE_EVENT_FIELDS:
+        contracts.check(
+            field in properties,
+            f"{relative}: PaymentAllocationReversedData.properties.{field} "
+            "is required",
+        )
+        contracts.check(
+            field in required,
+            f"{relative}: PaymentAllocationReversedData.required must list {field}",
+        )
+    contracts.check(
+        set((properties.get("targetType") or {}).get("enum") or [])
+        == set(PAYMENT_ALLOCATION_TARGET_TYPES),
+        f"{relative}: PaymentAllocationReversedData.targetType must enumerate "
+        f"{list(PAYMENT_ALLOCATION_TARGET_TYPES)}",
+    )
+    contracts.check(
+        set((properties.get("component") or {}).get("enum") or [])
+        == set(PAYMENT_ALLOCATION_COMPONENTS),
+        f"{relative}: PaymentAllocationReversedData.component must enumerate "
+        f"{list(PAYMENT_ALLOCATION_COMPONENTS)}",
+    )
+    reason = properties.get("reason") or {}
+    contracts.check(
+        reason.get("maxLength") == PAYMENT_ALLOCATION_REVERSAL_REASON_MAX_LENGTH,
+        f"{relative}: PaymentAllocationReversedData.reason maxLength must be "
+        f"{PAYMENT_ALLOCATION_REVERSAL_REASON_MAX_LENGTH}",
+    )
+    contracts.check(
+        (properties.get("reversedAt") or {}).get("format") == "date-time",
+        f"{relative}: PaymentAllocationReversedData.reversedAt must be a "
+        "date-time",
     )
 
 
@@ -11124,6 +11423,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_payment_openapi_sources(contracts, document, relative)
             check_payment_source_filter(contracts, document, relative)
             check_payment_allocations(contracts, document, relative)
+            check_payment_allocation_reversal(contracts, document, relative)
             check_payment_status(contracts, document, relative)
         if vertical == "document":
             check_document_links_openapi(contracts, document, relative)
@@ -11917,6 +12217,9 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
         if vertical == "payment":
             check_payment_asyncapi_sources(contracts, document, relative)
             check_payment_allocation_asyncapi(contracts, document, relative)
+            check_payment_allocation_reversed_asyncapi(
+                contracts, document, relative
+            )
         published_by_vertical[vertical] = set(published)
         if verbose:
             print(f"  OK {relative}  channels={len(channels)} operations={len(operations)}")

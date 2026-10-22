@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Payment API
-  version: 1.6.0
+  version: 1.7.0
   summary: Payment instruction administration and the Payment expert API.
   description: >
     This document describes the implemented public Payment domain API and the
@@ -41,9 +41,13 @@ info:
 
     A payment may be split across the claim or policy target and financial
     component it settles. The allocation routes list the split rows with the
-    payment reconciliation totals and append a new split. An allocation is
-    always in the payment's own currency, is append-only, and may not take the
-    sum of a payment's allocations above the payment amount.
+    payment reconciliation totals, append a new split, and reverse a recorded
+    split. An allocation is always in the payment's own currency and is
+    append-only: a reversal never deletes the row, it stamps `reversedAt` and
+    `reversalReason` and releases the amount. The summary reports the gross
+    `totalAllocated`, the `reversedTotal`, the net `net`, and the amount still
+    `unallocated` from the net figure. A create may not take the sum of a
+    payment's active allocations above the payment amount.
 
     Amounts are decimal strings (SPEC 10.3) on this vertical, but they are flat
     `amount`/`currency` fields rather than the canonical Money object; see
@@ -549,6 +553,80 @@ paths:
           $ref: './components.yaml#/components/responses/Conflict'
         default:
           $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/payments/{paymentId}/allocations/{allocationId}/reverse:
+    post:
+      operationId: reversePaymentAllocation
+      tags:
+        - Payment
+      summary: Reverse a recorded allocation.
+      description: >
+        Reverses one allocation of the payment. The allocation row is preserved
+        for audit: its amount, target, component, and `createdAt` stay unchanged
+        and only `reversedAt` and `reversalReason` are stamped. A reversed
+        allocation no longer counts toward the payment's active allocated total,
+        so its amount becomes available to a later create; the summary continues
+        to list the row in `items`, reports the released amount as
+        `reversedTotal`, and derives `net` and `unallocated` from the active
+        rows.
+
+        The body is `{reason}`. `reason` is required, trimmed, non-blank, and at
+        most 200 characters; a missing or blank value is 400 `VALIDATION_ERROR`
+        with a `reason` field detail, and a value longer than 200 characters is
+        400 `VALIDATION_ERROR` before any write. The domain rejects a blank or
+        over-long value before it calls the expert, and the expert repeats the
+        check as the internal backstop.
+
+        The payment and the allocation are looked up inside the caller's tenant
+        and within that payment. An unknown or foreign payment is 404
+        `PAYMENT_NOT_FOUND`; an allocation that is unknown, belongs to another
+        payment, or belongs to another tenant is 404 `ALLOCATION_NOT_FOUND`. The
+        payment lifecycle status does not gate a reversal. An allocation that is
+        already reversed is 409 `ALLOCATION_ALREADY_REVERSED`, including a
+        concurrent repeat, with no second write and no second event.
+
+        An accepted reversal returns 200 with the stamped `PaymentAllocation`
+        and writes `payment.allocation.reversed` to the transactional outbox in
+        the same transaction. The event is the `PaymentAllocation` child
+        aggregate at version 2 (create is version 1) and carries `{paymentId,
+        allocationId, targetType, targetId, component, amount, reason,
+        reversedAt}`. A missing `X-EIA-Tenant` is 400 `MISSING_TENANT_HEADER`; a
+        malformed tenant, `paymentId`, or `allocationId` is 400
+        `INVALID_PARAMETER`.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: paymentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: allocationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReversePaymentAllocationRequest'
+      responses:
+        '200':
+          description: Allocation after the reversal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentAllocation'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
   /internal/v1/payments:
     get:
       operationId: expertListPayments
@@ -883,7 +961,10 @@ components:
         financial component it settles. The tenant is implied by the request
         context and is not part of the public projection. An allocation is
         append-only and its currency is always the parent payment's currency.
-        Money is a decimal string (SPEC 10.3).
+        A reversal keeps the row and its original facts and only stamps
+        `reversedAt` and `reversalReason`, so a reversed split stays visible for
+        audit and no longer counts toward the active allocated total. Money is a
+        decimal string (SPEC 10.3).
       required:
         - allocationId
         - paymentId
@@ -893,6 +974,8 @@ components:
         - amount
         - currency
         - createdAt
+        - reversedAt
+        - reversalReason
       properties:
         allocationId:
           type: string
@@ -914,19 +997,39 @@ components:
         createdAt:
           type: string
           format: date-time
+        reversedAt:
+          type: [string, 'null']
+          format: date-time
+          description: >
+            Instant of the accepted reversal; null for an active allocation.
+            The row is never deleted, so a reversed allocation stays in the
+            list with its original amount, target, component, and `createdAt`.
+        reversalReason:
+          type: [string, 'null']
+          maxLength: 200
+          description: >
+            Required, trimmed, non-blank explanation supplied with the reversal;
+            null for an active allocation.
     PaymentAllocationSummary:
       type: object
       description: >
         A payment's allocations plus the reconciliation view of its amount: the
-        payment total, the sum already allocated, and the amount still
-        unallocated. `items` is oldest first. The expert owns the persisted
-        totals and the overallocation guard; the domain proxies and normalizes
-        the read model. All money values are decimal strings in the payment's
-        currency.
+        gross total recorded, the total released by reversals, the net amount
+        still allocated, and the amount still unallocated. `items` is oldest
+        first and keeps reversed rows for audit. `totalAllocated` is the gross
+        sum of every recorded split, including reversed rows; `reversedTotal`
+        is the sum of the reversed rows; `net` is `totalAllocated` minus
+        `reversedTotal`; and `unallocated` is the payment amount minus `net`,
+        never negative. The expert owns the persisted totals and the
+        overallocation guard on the active total; the domain proxies and
+        normalizes the read model. All money values are decimal strings in the
+        payment's currency.
       required:
         - items
         - paymentAmount
         - totalAllocated
+        - reversedTotal
+        - net
         - unallocated
         - currency
       properties:
@@ -938,8 +1041,22 @@ components:
           $ref: './components.yaml#/components/schemas/MoneyAmount'
         totalAllocated:
           $ref: './components.yaml#/components/schemas/MoneyAmount'
+          description: >
+            Gross sum of every recorded allocation, including rows that were
+            later reversed.
+        reversedTotal:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+          description: >
+            Sum of the amounts released by reversals; zero when no allocation
+            has been reversed.
+        net:
+          $ref: './components.yaml#/components/schemas/MoneyAmount'
+          description: >
+            Amount still allocated, `totalAllocated` minus `reversedTotal`.
         unallocated:
           $ref: './components.yaml#/components/schemas/MoneyAmount'
+          description: >
+            Payment amount minus `net`; never negative.
         currency:
           $ref: './components.yaml#/components/schemas/CurrencyCode'
     CreatePaymentAllocationRequest:
@@ -966,6 +1083,25 @@ components:
         amount:
           $ref: './components.yaml#/components/schemas/MoneyAmount'
           description: Greater than zero with at most four fraction digits (SPEC 10.3).
+    ReversePaymentAllocationRequest:
+      type: object
+      description: >
+        Command that reverses one recorded allocation. The allocation row is
+        preserved and only gains the reversal stamp. `reason` is required,
+        trimmed, non-blank, and capped at the 200-character reversal reason
+        column width.
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: >
+            Required explanation of the reversal. The value is trimmed and must
+            remain non-blank. A missing or blank value is 400
+            `VALIDATION_ERROR`, and a value longer than 200 characters is 400
+            `VALIDATION_ERROR` before any write.
     CreatePaymentRequest:
       type: object
       description: >
@@ -1209,6 +1345,7 @@ x-implementation:
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentAllocationSummary.java
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentAllocationRules.java
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/CreatePaymentAllocationCommand.java
+    - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/ReversePaymentAllocationCommand.java
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/ApiExceptionHandler.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentController.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/Payment.java
@@ -1221,6 +1358,7 @@ x-implementation:
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentAllocationItem.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentAllocationSummary.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/CreatePaymentAllocationRequest.java
+    - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/ReversePaymentAllocationRequest.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentAllocationRules.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentAllocationService.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentEvents.java
@@ -1229,7 +1367,10 @@ x-implementation:
     - repos/eia-payment-expert/src/test/java/com/eia/payment/expert/PaymentStatusReasonIntegrationTest.java
     - repos/eia-payment-expert/src/test/java/com/eia/payment/expert/PaymentAllocationControllerTest.java
     - repos/eia-payment-expert/src/test/java/com/eia/payment/expert/PaymentAllocationIntegrationTest.java
+    - repos/eia-payment-expert/src/test/java/com/eia/payment/expert/PaymentAllocationReversalIntegrationTest.java
     - repos/eia-payment-domain/src/test/java/com/eia/payment/domain/PaymentAllocationRulesTest.java
+    - repos/eia-payment-domain/src/test/java/com/eia/payment/domain/PaymentClientTest.java
+    - repos/eia-payment-domain/src/test/java/com/eia/payment/domain/PaymentControllerTest.java
   errorEnvelope: >
     Vertical-specific ApiError {timestamp, status, code, message, path,
     details[{field, message}]}. Not the canonical Problem envelope yet.
@@ -1252,23 +1393,39 @@ x-implementation:
     append-only child rows owned by the expert: the domain forwards the tenant
     and normalizes the read model, the expert enforces the payment currency, the
     status gate (CANCELLED/REVERSED/FAILED are 409 PAYMENT_NOT_ALLOCATABLE), and
-    the overallocation guard (409 ALLOCATION_EXCEEDS_PAYMENT). The expert also
-    serves the same allocation path plus an /internal/v1 alias that the domain
-    calls; the alias is an implementation detail and is not part of this public
-    contract. See MISMATCHES.md M-12, M-24, M-35, and M-46.
+    the overallocation guard (409 ALLOCATION_EXCEEDS_PAYMENT). A reversal is a
+    stamp on the existing row, not a delete: the expert keeps the append-only
+    row, requires a trimmed non-blank reason of at most 200 characters, rejects
+    an already reversed allocation with 409 ALLOCATION_ALREADY_REVERSED, and
+    writes payment.allocation.reversed in the same transaction. The domain
+    forwards the tenant, payment, allocation, and reason and preserves the
+    expert's 404 ALLOCATION_NOT_FOUND, then presents the public summary as the
+    gross totalAllocated plus reversedTotal, net, and net-based unallocated.
+    The expert also serves the same allocation paths plus an /internal/v1 alias
+    that the domain calls; the alias is an implementation detail and is not part
+    of this public contract. See MISMATCHES.md M-12, M-24, M-35, and M-46.
 x-compatibility:
-  contractVersion: 1.6.0
-  previousContractVersion: 1.5.0
+  contractVersion: 1.7.0
+  previousContractVersion: 1.6.0
   breaking: []
   compatible:
-    - Adds the required-but-nullable 200-character Payment.statusReason.
-    - Documents the latest status reason semantics, including the trim, replace, clear, and named-action behaviour.
+    - Adds POST /api/v1/payments/{paymentId}/allocations/{allocationId}/reverse with a required reason of at most 200 characters.
+    - Adds the required-but-nullable PaymentAllocation.reversedAt and PaymentAllocation.reversalReason response properties.
+    - Adds the required PaymentAllocationSummary.reversedTotal and net response properties and documents the gross allocated total and net-based unallocated figure.
+    - Documents the payment.allocation.reversed event and its eight-member payload.
   note: >
-    Status reason is additive over 1.5.0: the Payment projection gains one
-    always-present member, and no path, request field, event, or existing
-    response field changes. A caller that ignores unknown response members is
-    unaffected. The member is null for a payment that has never changed status
-    and after a change without a reason.
+    Allocation reversal is additive over 1.6.0: one new route, one request
+    schema, two nullable response members on the allocation, and two money
+    members on the summary. No existing path, request field, event name, or
+    field meaning changes; a client that never calls the reverse route still
+    receives the same allocations, with `reversedAt` and `reversalReason` null
+    and `reversedTotal` zero. A consumer that reads the summary must tolerate
+    the two new members, and the event is a new name at eventVersion 1. The
+    HTTP API version stays /api/v1. The new fact brings the catalog to 212
+    published and 92 implemented names, with Payment at 20 published and 5
+    implemented. The SPEC-less reverse route, the stamp instead of a delete,
+    and the gross/net summary split are recorded in MISMATCHES.md M-22 and
+    M-35.
 x-planned-operations:
   - method: POST
     path: /api/v1/payments/{paymentId}/void

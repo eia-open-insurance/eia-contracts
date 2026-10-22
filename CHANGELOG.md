@@ -1547,6 +1547,43 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   status history.
 - `python scripts/validate_contracts.py` passes 14,098 checks with 0 failures.
 
+### Added in the payment allocation reversal contract (2026-10-22)
+
+- `openapi/payment.yaml` is 1.7.0: adds
+  `POST /api/v1/payments/{paymentId}/allocations/{allocationId}/reverse` with
+  the required `ReversePaymentAllocationRequest` `{reason}` (trimmed,
+  non-blank, at most 200 characters) and the 200 `PaymentAllocation`,
+  400/404/409 responses. The operation documents the append-only stamp, the
+  released amount, the tenant/payment/allocation-scoped 404
+  `PAYMENT_NOT_FOUND`/`ALLOCATION_NOT_FOUND`, 400 `VALIDATION_ERROR`, and 409
+  `ALLOCATION_ALREADY_REVERSED`. `PaymentAllocation` adds the
+  required-but-nullable `reversedAt` and `reversalReason`; the summary adds the
+  required `reversedTotal` and `net`, documents the gross `totalAllocated`, and
+  derives `unallocated` from `net`. `x-compatibility` moves to 1.7.0 over
+  1.6.0.
+- `asyncapi/payment.yaml` is 1.4.0: the implemented
+  `payment.allocation.reversed` channel and `send` operation with a dedicated
+  `PaymentAllocationReversedData` payload (`paymentId`, `allocationId`,
+  `targetType`, `targetId`, `component`, `amount`, `reason`, and `reversedAt`).
+  The aggregate is the `PaymentAllocation` child at version 2 and `eventVersion`
+  stays 1.
+- `asyncapi/event-catalog.yaml` is 1.30.0: `payment.allocation.reversed` is
+  published and implemented, for 212 published and 92 implemented names
+  (Payment 20 published and 5 implemented).
+- `scripts/validate_contracts.py` requires the reverse route with the shared
+  tenant and payment/allocation parameters, the required 200-character
+  `reason`, the 200 `PaymentAllocation` and 400/404/409 responses, the 404
+  `PAYMENT_NOT_FOUND`/`ALLOCATION_NOT_FOUND`, 400 `VALIDATION_ERROR`, 409
+  `ALLOCATION_ALREADY_REVERSED`, and `payment.allocation.reversed` event
+  documentation, the reversal members on `PaymentAllocation`, the
+  `reversedTotal`/`net` summary members, the implemented reversed channel and
+  its eight-member payload, and the catalog entry.
+- `README.md` records the additive version, the stamp/release semantics, the
+  gross/reversed/net reconciliation, the 400/404/409 responses, the SPEC-less
+  route and event, and the validation count; `MISMATCHES.md` updates M-14, M-22,
+  and M-35 for the reversal and refreshes the validation evidence.
+- `python scripts/validate_contracts.py` passes 14,205 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was
