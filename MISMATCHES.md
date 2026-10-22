@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-21 (Direct Claims settlement payment links).
+Status: open, reviewed 2026-10-21 (Payment status transitions).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -34,7 +34,11 @@ where the running code does not meet it yet.
   controller, service, command, projection, client, and exception mapping plus
   the expert settlement controller, request, service, repository, projection,
   not-linkable exception, event factory, `schema.sql`, and the domain and expert
-  tests. The Contract period-bordereau pass reads the
+  tests. The 2026-10-21 Payment status pass reads the domain status controller,
+  command, service, client, projection, and exception mapping plus the expert
+  status controller, request, service, rules, repository, event factory,
+  `schema.sql`, and the status and outbox tests. The Contract period-bordereau
+  pass reads the
   domain controller, service, client, projection, and command rules plus the
   expert period controller, legacy header controller, rules, repositories,
   status enum, event factory, and `schema.sql`. The Direct Claims allocation
@@ -178,6 +182,7 @@ removed per the resolution policy.
 | M-43 | Policy legal entity catalog is a narrow five-type slice with a nullable issuing-entity link | M |
 | M-44 | Document legal holds and disposition are a per-document, synchronous slice without the SPEC hold collection or the approval/certificate workflow | L |
 | M-45 | Direct Claims settlement payment links are a SPEC-less route and event over one stored Payment id | L |
+| M-46 | Payment public status PATCH is SPEC-less, its graph is wider than SPEC 11.7.6, and the 200-character reason is not pre-validated | L |
 
 ## M-01 Public base paths
 
@@ -400,6 +405,7 @@ Policy now implements the SPEC 12.6 concurrency mechanism:
 | Cession/Retrocession expert PUT status | Required `version` |
 | Document public POST status | Not accepted; the domain forwards the current version |
 | Document expert POST status | Optional `expectedVersion` |
+| Payment public PATCH status | Optional body `expectedVersion`; a stale value is 409 `CONCURRENT_MODIFICATION` with no ETag, and an omitted value is not version-checked |
 | Payment public actions | Not accepted; the domain reads and forwards the current version |
 
 Policy nuances:
@@ -589,14 +595,16 @@ internal tenant a header only, and remove `tenantId` from request bodies.
 
 The same conceptual operation is exposed with four shapes:
 
-- `PATCH /{id}/status` - Policy, Contract, Direct Claims, Payment expert.
+- `PATCH /{id}/status` - Policy, Contract, Direct Claims, Payment public and
+  expert.
 - `POST /{id}/status` - Assumed Claims, Document.
 - `PUT /{id}/status` - Cession, Retrocession expert.
 - `POST /{id}/transition` - Cession, Retrocession public.
 - Named action POSTs - Payment public `/submit`, `/authorize`, `/approve`,
-  `/issue`; Policy second-slice `/cancel`, `/reinstate`, `/erosion`; Contract
-  `/bind`, `/approve`, `/execute`; Direct Claims `/close`, `/approve`,
-  `/execute`; Assumed Claims `/accept`, `/resolve`, `/commute`, `/close`.
+  `/issue` (the public PATCH status route is also implemented); Policy
+  second-slice `/cancel`, `/reinstate`, `/erosion`; Contract `/bind`,
+  `/approve`, `/execute`; Direct Claims `/close`, `/approve`, `/execute`;
+  Assumed Claims `/accept`, `/resolve`, `/commute`, `/close`.
 
 Contract `BOUND` and Assumed Claims `COMMUTED` are intentionally not reachable
 through the generic status endpoint: they are commands with preconditions
@@ -699,8 +707,8 @@ unimplemented fields and list the missing operations under
 - Document: no content, versions, associations, hashes, page count, OCR status,
   tags, holds, packages, requests, or retention class.
 - Payment: no embedded `claim` object, `payee` object, `netAmount`, `method`,
-  `dueDate`, `authority`, SAP postings, allocations, requests, batches,
-  reconciliations, or escheatment. The implemented source link
+  `dueDate`, `authority`, SAP postings, requests, batches, reconciliations, or
+  escheatment. The implemented source link
   (`sourceType`/`sourceId`/`sourceReference`) is a flat denormalized reference,
   not the SPEC 11.7.4 `claim_vertical`/`claim_id`/`claim_number` projection, and
   there is no referential-integrity check that `sourceId` exists in the source
@@ -708,7 +716,10 @@ unimplemented fields and list the missing operations under
   record views can render and link the source without an N+1 lookup. The list
   also accepts a complete `sourceType` + `sourceId` pair to return the payments
   linked to one source; that filter is documented in `openapi/payment.yaml`
-  1.3.0 and M-24.
+  1.3.0 and M-24. The generic lifecycle command is implemented at
+  `PATCH /api/v1/payments/{paymentId}/status` (M-46); the projection still
+  omits the status reason and any status history, and the `/history` read
+  remains planned.
 - Notifications: no `category`, `severity`, `subject` reference,
   `requiresAction`, `dueAt`, `actions[]`, inbox, read/acknowledge, stream,
   subscriptions, preferences, or admin surfaces.
@@ -1132,6 +1143,9 @@ Consequences:
   keeps the newest-first order. Both values are required together, so `OTHER`
   cannot be listed by type alone, and `sourceReference` is not a filter
   parameter (global search matches it).
+- The generic status command (`PATCH /api/v1/payments/{paymentId}/status`,
+  M-46) does not change the source link: the implemented API still has no
+  command that adds or edits a source after create.
 
 Evidence:
 
@@ -2905,10 +2919,59 @@ breaking and needs an ADR and a `/v2` or dual-publish period. Aligning the
 public error code with the expert's `SETTLEMENT_NOT_LINKABLE` is a service fix
 that does not need a contract change.
 
+## M-46 Payment public status command is SPEC-less and its graph is wider than SPEC 11.7.6
+
+SPEC 11.7.11 lists named payment actions (`authorize`, `issue`, `confirm`,
+`void`, `stop`, `reissue`, `reverse`) and no generic status route. The
+2026-10-21 contract documents the implemented public
+`PATCH /api/v1/payments/{paymentId}/status`, which forwards
+`{status, expectedVersion?, reason?}` to the expert.
+
+| Aspect | Implemented | SPEC / gap |
+|---|---|---|
+| Route | `PATCH /api/v1/payments/{paymentId}/status` (the M-01 short form) | SPEC 11.7.11 has no status route; its named actions are partly unimplemented (`confirm`, `void`, `stop`, `reissue`, and `reverse` remain planned). |
+| Body | `UpdatePaymentStatusRequest` `{status, expectedVersion?, reason?}`; `status` is a `PaymentStatus`, `expectedVersion` an optional non-negative integer, and `reason` is optional at 200 characters | SPEC defines no generic transition body; the SPEC 11.7.6 lifecycle is a mermaid graph and the named actions carry no body in the SPEC table. |
+| Graph | 34 edges from `DRAFT` through `RECONCILED`, with `CANCELLED`, `STOPPED`, `REJECTED`, `VOID`, `REVERSED`, and `ESCHEATED` terminal | The SPEC mermaid omits the CANCELLED/VOID escape edges, `SUBMITTED`/`ACCEPTED` -> `FAILED`, `PROCESSING` -> `PARTIALLY_PAID`, and the `PARTIALLY_PAID` edges; it also has no `VOID` state. The contract documents the implemented graph. |
+| Approval gate | `DRAFT`, `PENDING_AUTHORITY`, and `AUTHORIZED` -> an execution status is 400 `PAYMENT_NOT_APPROVED` | SPEC 11.7.7 PAY-04 and PAY-18 require approval and no active hold; the implemented gate only checks the pre-approval source status and does not evaluate authority, SoD, sanctions, duplicate, or holds. |
+| Concurrency | Optional `expectedVersion`; a stale value is 409 `CONCURRENT_MODIFICATION`; omitted means unchecked | SPEC 12.6 expects a version token on writes. The named payment actions send the version the domain read; the generic route is the only Payment command that accepts a caller version. |
+| Reason | Optional, trimmed, stored in `payment.status_reason` (`varchar(200)`), and emitted in `payment.payment.status-changed` | The contract caps it at 200 characters, but neither the domain nor the expert rejects a longer value with a 400: the update fails at the database and the public call surfaces 502 `EXPERT_UNAVAILABLE`. The projection does not return the reason. |
+| Events | `payment.payment.updated` and `payment.payment.status-changed` at the new row version | SPEC 11.7.10 publishes per-verb names such as `payment.payment.authorized` and `payment.payment.paid`; the two generic names are recorded in M-22. |
+| Book | Not book-scoped; only `X-EIA-Tenant`; the event is stamped DIRECT | SPEC 3.6.1 requires the book on every payment; the payment row carries no book (M-08, M-12). |
+
+Evidence:
+
+- `repos/eia-payment-domain/.../PaymentController.java:74-79` (the public PATCH
+  mapping) and `PaymentService.java:122-130` (forwarding without re-deriving the
+  graph), plus `UpdatePaymentStatusCommand.java:5-13` (the body record) and
+  `PaymentClient.java:103-120,176-202` (the expert call and the preserved
+  400/404/409 translation).
+- `repos/eia-payment-expert/.../PaymentController.java:45-50` (the internal
+  PATCH), `UpdatePaymentStatusRequest.java:5-9`, `PaymentService.java:65-81`
+  (transition, version check, row update, and the two outbox writes),
+  `PaymentRules.java:54-78,303-323` (`TRANSITIONS`, the execution statuses, and
+  `validateTransition`), and `PaymentRepository.java:106-122` (the
+  `status_reason` write, the version bump, and `CONCURRENT_MODIFICATION`),
+  plus `schema.sql:14` (`status_reason VARCHAR(200)`).
+- `repos/eia-payment-expert/.../PaymentEvents.java:68-89`
+  (`payment.payment.updated` and `payment.payment.status-changed`, with the
+  optional trimmed `reason`).
+- `openapi/payment.yaml` 1.5.0, the README payment status section, and the
+  validator checks record the implemented shape.
+
+Resolution: either add the generic status route and the widened graph to SPEC
+11.7.6/11.7.11 (or record them as an agreed extension) or restrict the contract
+to the SPEC mermaid and implement the remaining named actions. The approval
+gate needs the authority, SoD, sanctions, duplicate, and hold checks from
+SPEC 11.7.7. The reason should be rejected with 400 `VALIDATION_ERROR` at the
+public boundary before the version check, and the payment projection needs the
+status reason plus a status-history read (the SPEC 11.7.11 `/history` read
+remains planned). A future `/v2` or an EV-05 dual-publish window applies if a
+route or event name is renamed.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-21
-Direct Claims settlement-payment-link contract:
+payment status-transition contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -2925,7 +2988,7 @@ OpenAPI 3.1 documents
   OK openapi/cession.yaml  9 paths, 11 operations
   OK openapi/retrocession.yaml  9 paths, 11 operations
   OK openapi/document.yaml  18 paths, 23 operations
-  OK openapi/payment.yaml  11 paths, 14 operations
+  OK openapi/payment.yaml  12 paths, 15 operations
   OK openapi/notifications.yaml  7 paths, 9 operations
 
 AsyncAPI 3 documents
@@ -2947,7 +3010,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 13815 checks, 0 failures
+  PASS 13978 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -3192,6 +3255,14 @@ Additional checks and limits:
   and removing the `DirectClaimSettlementPaymentLinked` channel each fail with
   the specific missing-operation, nullable-uuid, implemented-event, or
   missing-channel message. All five were run on a throwaway copy and exited
+  non-zero (exit 1); the working copy was left unchanged. The payment
+  status-transition pass added five more: renaming the
+  `/api/v1/payments/{paymentId}/status` path, removing one documented edge
+  (`` `DRAFT` -> `CANCELLED` ``), making `expectedVersion` required in
+  `UpdatePaymentStatusRequest`, widening `reason` from 200 to 400 characters,
+  and re-adding the implemented status path to `x-planned-operations` each fail
+  with the specific missing-operation, missing-edge, required-field, bounds, or
+  planned-route message. All five were run on a throwaway copy and exited
   non-zero (exit 1); the working copy was left unchanged.
 
 ## Resolution policy

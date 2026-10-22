@@ -321,6 +321,24 @@ no allocation-created name; the implemented POST and
 `payment.allocation.created` event are new names with no SPEC equivalent
 (`MISMATCHES.md` M-22 and M-35).
 
+### Payment status transitions (2026-10-21)
+
+Payment 1.5.0 adds the public generic lifecycle command. The change is
+additive: the route and the request schema are new, no existing path, request
+field, response field, or event changes, and the four named actions remain.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/payment.yaml` | 1.5.0 | Additive | `PATCH /api/v1/payments/{paymentId}/status` and the `UpdatePaymentStatusRequest` schema; the implemented transition graph, terminal statuses, approval gate, optional `expectedVersion`, and optional 200-character `reason`. |
+
+The route forwards `{status, expectedVersion?, reason?}` to the expert and
+returns the updated `Payment`. The expert owns the graph, the approval gate,
+and the concurrency check, and the public API preserves its 400/404/409 codes
+(`INVALID_STATUS`, `INVALID_STATUS_TRANSITION`, `PAYMENT_NOT_APPROVED`,
+`CONCURRENT_MODIFICATION`, `PAYMENT_NOT_FOUND`). The graph and its widening
+over SPEC 11.7.6, plus the reason-length enforcement gap, are recorded in
+`MISMATCHES.md` M-46. The full validation run passes 13,978 checks.
+
 ### Claim task and note idempotency (2026-10-20)
 
 Direct Claims and Assumed Claims 1.4.0 make task and note creation retry-safe
@@ -2242,6 +2260,69 @@ Rules:
   has no `payment.allocation.created` name; the POST and the event are new
   names recorded in M-22 and M-35.
 
+### Payment status transitions
+
+`PATCH /api/v1/payments/{paymentId}/status` is the public generic lifecycle
+command. The body is `{status, expectedVersion?, reason?}`. `X-EIA-Tenant` is
+required and the route is tenant-scoped but not book-scoped, like the rest of
+the Payment slice (M-08, M-12). The four named actions (`/submit`,
+`/authorize`, `/approve`, and `/issue`) remain available; the PATCH route is
+the expert's general transition command.
+
+| Response | When |
+|---|---|
+| 200 `Payment` | The transition is accepted. The payment `version` is bumped and `payment.payment.updated` and `payment.payment.status-changed` are written in the same transaction. |
+| 400 `INVALID_STATUS` | `status` is unknown after trimming and upper-casing. |
+| 400 `INVALID_STATUS_TRANSITION` | The edge is not in the graph, or it repeats the current or a terminal status. |
+| 400 `PAYMENT_NOT_APPROVED` | A pre-approval status requests an execution status. |
+| 400 `VALIDATION_ERROR` | `status` is missing or blank, or the body is malformed. |
+| 404 `PAYMENT_NOT_FOUND` | The payment does not exist in the caller's tenant. |
+| 409 `CONCURRENT_MODIFICATION` | The supplied `expectedVersion` does not match the payment `version`. |
+| 400 `MISSING_TENANT_HEADER` / `INVALID_PARAMETER` | The tenant header is missing or malformed. |
+| 502 `EXPERT_UNAVAILABLE` | The domain cannot reach the expert. |
+
+The implemented graph:
+
+| From | Allowed to |
+|---|---|
+| `DRAFT` | `PENDING_AUTHORITY`, `CANCELLED`, `VOID` |
+| `PENDING_AUTHORITY` | `AUTHORIZED`, `REJECTED`, `CANCELLED`, `VOID` |
+| `AUTHORIZED` | `APPROVED`, `CANCELLED`, `VOID` |
+| `APPROVED` | `SCHEDULED`, `STOPPED`, `VOID` |
+| `SCHEDULED` | `SUBMITTED`, `CANCELLED`, `VOID` |
+| `SUBMITTED` | `ACCEPTED`, `FAILED` |
+| `ACCEPTED` | `PROCESSING`, `FAILED` |
+| `PROCESSING` | `PAID`, `PARTIALLY_PAID`, `FAILED` |
+| `PARTIALLY_PAID` | `PAID`, `RETURNED`, `REVERSED` |
+| `PAID` | `RECONCILED`, `RETURNED`, `REVERSED` |
+| `RETURNED` | `SCHEDULED`, `CANCELLED` |
+| `FAILED` | `SCHEDULED`, `CANCELLED` |
+| `RECONCILED` | `ESCHEATED` |
+
+`CANCELLED`, `STOPPED`, `REJECTED`, `VOID`, `REVERSED`, and `ESCHEATED` are
+terminal: no outgoing edge exists, so any later command, including a replay of
+the same terminal status, is 400 `INVALID_STATUS_TRANSITION`. `PARTIALLY_PAID`
+is not terminal and can still move to `PAID`, `RETURNED`, or `REVERSED`.
+
+`status` is required, trimmed, and upper-cased. The approval gate runs before
+the graph: `DRAFT`, `PENDING_AUTHORITY`, and `AUTHORIZED` may not jump directly
+to an execution status (`SUBMITTED`, `ACCEPTED`, `PROCESSING`, `PAID`,
+`PARTIALLY_PAID`, `RECONCILED`, or `ESCHEATED`), and such a request is 400
+`PAYMENT_NOT_APPROVED`. `expectedVersion` is optional: when supplied, a stale
+value is 409 `CONCURRENT_MODIFICATION` and writes nothing; when omitted, the
+transition is not version-checked. `reason` is optional and capped at 200
+characters by the contract, trimmed, and stored as the status reason; it is not
+returned in the `Payment` projection. The expert does not pre-validate the
+reason length, so an over-long value currently fails at persistence rather than
+with a 400 (M-46).
+
+The graph is wider than the SPEC 11.7.6 mermaid: it adds the CANCELLED/VOID
+escape edges, `SUBMITTED`/`ACCEPTED` -> `FAILED`, `PROCESSING` ->
+`PARTIALLY_PAID`, and the `PARTIALLY_PAID` edges. SPEC 11.7.11 also lists only
+named actions and no generic status route, and the status write publishes the
+generic `payment.payment.updated`/`.status-changed` names rather than the SPEC
+per-verb facts; M-22 and M-46 record the differences.
+
 ### Policy billing
 
 Policy owns the premium installment plan (SPEC 11.2.13). The public billing
@@ -2741,8 +2822,15 @@ missing directory.
    `PaymentAllocationSummary`, and `CreatePaymentAllocationRequest` schemas and
    their field bounds and enums, the 400/404/409 responses, the 409
    `ALLOCATION_EXCEEDS_PAYMENT`/`PAYMENT_NOT_ALLOCATABLE` documentation, the
-   absence of the implemented path from `x-planned-operations`, and the
-   implemented `payment.allocation.created` channel and payload, the three
+   absence of the implemented path from `x-planned-operations`, the public
+   payment status PATCH with its shared `TenantHeader` and `paymentId` path
+   parameter, the required `UpdatePaymentStatusRequest`, the 200 `Payment` and
+   400/404/409 responses, the 34 documented edges and terminal statuses, the
+   `PaymentStatus` enum coverage, the optional `expectedVersion` and
+   200-character `reason` on both transition schemas, the error-code and event
+   documentation, and the absence of the status path from
+   `x-planned-operations`, the implemented
+   `payment.allocation.created` channel and payload, the three
    Policy billing operations, the optional shared
    `BookHeaderDirectOptional` parameter, the `BillingPlan`, `Installment`,
    `CreateBillingPlanRequest`, and `UpdateInstallmentRequest` schemas and their
@@ -2974,6 +3062,14 @@ missing directory.
   rule, and carries no book; it publishes the new `payment.allocation.created`
   name. SPEC 11.7.11 lists only the GET, SPEC 11.7.10 has no allocation event,
   and SPEC 3.6.1 requires the book on every allocation (M-22, M-35);
+- the public payment status command is a SPEC-less `PATCH /{id}/status` route
+  (SPEC 11.7.11 lists only named actions). The implemented graph is wider than
+  the SPEC 11.7.6 mermaid (CANCELLED/VOID escape edges, `SUBMITTED`/`ACCEPTED`
+  -> `FAILED`, `PROCESSING` -> `PARTIALLY_PAID`, and the `PARTIALLY_PAID`
+  edges), the contract caps `reason` at the 200-character column width but the
+  expert does not pre-validate the length, and a status write publishes the
+  generic `payment.payment.updated`/`.status-changed` names rather than the
+  SPEC per-verb facts (M-22, M-46);
 - document associations are implemented as tenant-scoped `/links` with a flat
   `linkedType`/`linkedId` target and no role, book, or DOC-09 target-existence
   check, and publish `document.link.added`/`.removed` rather than the SPEC

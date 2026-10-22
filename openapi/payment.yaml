@@ -1,17 +1,20 @@
 openapi: 3.1.0
 info:
   title: EIA Payment API
-  version: 1.4.0
+  version: 1.5.0
   summary: Payment instruction administration and the Payment expert API.
   description: >
     This document describes the implemented public Payment domain API and the
     internal Payment expert API. The authoritative requirement is SPEC 11.7
     and SPEC 12; the implemented surface is the first vertical slice.
 
-    The public slice exposes create, read, and four lifecycle actions: submit,
-    authorize, approve, and issue. The internal route exposes a general status
-    transition. The approval gate from SPEC 11.7.7 is enforced: SUBMITTED and
-    later execution states are unreachable before APPROVED.
+    The public slice exposes create, read, the generic lifecycle transition at
+    `PATCH /api/v1/payments/{paymentId}/status`, and four lifecycle actions:
+    submit, authorize, approve, and issue. The internal route exposes the same
+    general status transition. The approval gate from SPEC 11.7.7 is enforced:
+    SUBMITTED and later execution states are unreachable before APPROVED. The
+    status operation lists the implemented transition graph and its terminal
+    statuses.
 
     A payment may optionally link to the business record it disburses through
     `sourceType`/`sourceId`/`sourceReference`. `sourceType` is DIRECT_CLAIM,
@@ -330,6 +333,101 @@ paths:
       responses:
         '200':
           description: Payment after the transitions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './components.yaml#/components/responses/Conflict'
+        '502':
+          $ref: './components.yaml#/components/responses/BadGateway'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/payments/{paymentId}/status:
+    patch:
+      operationId: updatePaymentStatus
+      tags:
+        - Payment
+      summary: Advance a payment through its lifecycle.
+      description: >
+        Applies one generic lifecycle transition and returns the payment after
+        the change. The body is `{status, expectedVersion?, reason?}`. The
+        named `/submit`, `/authorize`, `/approve`, and `/issue` actions remain
+        available; this route is the generic command the Payment expert owns.
+
+        The only allowed edges are `DRAFT` -> `PENDING_AUTHORITY`,
+        `DRAFT` -> `CANCELLED`, `DRAFT` -> `VOID`,
+        `PENDING_AUTHORITY` -> `AUTHORIZED`,
+        `PENDING_AUTHORITY` -> `REJECTED`,
+        `PENDING_AUTHORITY` -> `CANCELLED`,
+        `PENDING_AUTHORITY` -> `VOID`,
+        `AUTHORIZED` -> `APPROVED`, `AUTHORIZED` -> `CANCELLED`,
+        `AUTHORIZED` -> `VOID`, `APPROVED` -> `SCHEDULED`,
+        `APPROVED` -> `STOPPED`, `APPROVED` -> `VOID`,
+        `SCHEDULED` -> `SUBMITTED`, `SCHEDULED` -> `CANCELLED`,
+        `SCHEDULED` -> `VOID`, `SUBMITTED` -> `ACCEPTED`,
+        `SUBMITTED` -> `FAILED`, `ACCEPTED` -> `PROCESSING`,
+        `ACCEPTED` -> `FAILED`, `PROCESSING` -> `PAID`,
+        `PROCESSING` -> `PARTIALLY_PAID`, `PROCESSING` -> `FAILED`,
+        `PARTIALLY_PAID` -> `PAID`, `PARTIALLY_PAID` -> `RETURNED`,
+        `PARTIALLY_PAID` -> `REVERSED`, `PAID` -> `RECONCILED`,
+        `PAID` -> `RETURNED`, `PAID` -> `REVERSED`,
+        `RETURNED` -> `SCHEDULED`, `RETURNED` -> `CANCELLED`,
+        `FAILED` -> `SCHEDULED`, `FAILED` -> `CANCELLED`, and
+        `RECONCILED` -> `ESCHEATED`.
+
+        `CANCELLED`, `STOPPED`, `REJECTED`, `VOID`, `REVERSED`, and
+        `ESCHEATED` are terminal: no outgoing edge exists, so any later
+        command, including a replay of the same terminal status, is 400
+        `INVALID_STATUS_TRANSITION`. `PARTIALLY_PAID` is not terminal and can
+        still move to `PAID`, `RETURNED`, or `REVERSED`. Repeating the current
+        status is likewise 400 `INVALID_STATUS_TRANSITION`.
+
+        `status` is trimmed and upper-cased; an unknown value is 400
+        `INVALID_STATUS`, and a missing or blank value is 400
+        `VALIDATION_ERROR`. The approval gate is checked before the graph:
+        `DRAFT`, `PENDING_AUTHORITY`, and `AUTHORIZED` may not jump directly to
+        an execution status (`SUBMITTED`, `ACCEPTED`, `PROCESSING`, `PAID`,
+        `PARTIALLY_PAID`, `RECONCILED`, or `ESCHEATED`), and such a request is
+        400 `PAYMENT_NOT_APPROVED`; every other undeclared edge is 400
+        `INVALID_STATUS_TRANSITION`.
+
+        `expectedVersion` is optional. When supplied it is compared with the
+        payment `version`; a stale value is 409 `CONCURRENT_MODIFICATION` with
+        no row change and no event. When it is omitted the transition is not
+        version-checked. `reason` is optional and at most 200 characters; it is
+        trimmed and stored as the status reason, and it is not returned in the
+        `Payment` projection. An accepted transition bumps the payment
+        `version` and writes `payment.payment.updated` and
+        `payment.payment.status-changed` in the same transaction. An unknown
+        payment, including another tenant's payment, is 404
+        `PAYMENT_NOT_FOUND`.
+
+        `X-EIA-Tenant` is required; a missing header is 400
+        `MISSING_TENANT_HEADER` and a malformed tenant or `paymentId` is 400
+        `INVALID_PARAMETER`. The route is tenant-scoped and not book-scoped
+        (M-08, M-12).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: paymentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePaymentStatusRequest'
+      responses:
+        '200':
+          description: Payment after the transition.
           content:
             application/json:
               schema:
@@ -706,7 +804,11 @@ components:
         - FEE
     PaymentStatus:
       type: string
-      description: Payment lifecycle status from SPEC 11.7.6.
+      description: >
+        Payment lifecycle status from SPEC 11.7.6. The implemented transition
+        graph and the terminal statuses are documented on
+        `PATCH /api/v1/payments/{paymentId}/status`. `CANCELLED`, `STOPPED`,
+        `REJECTED`, `VOID`, `REVERSED`, and `ESCHEATED` are terminal.
       enum:
         - DRAFT
         - PENDING_AUTHORITY
@@ -1009,6 +1111,35 @@ components:
             properties:
               sourceType:
                 $ref: '#/components/schemas/PaymentSourceType'
+    UpdatePaymentStatusRequest:
+      type: object
+      description: >
+        Lifecycle transition command used by the public Payment API. The expert
+        owns the transition graph, the approval gate, and the optimistic
+        concurrency check. `status` is trimmed and upper-cased; an unknown
+        value is 400 `INVALID_STATUS`, a repeated or undeclared edge is 400
+        `INVALID_STATUS_TRANSITION`, and a pre-approval state that requests an
+        execution status is 400 `PAYMENT_NOT_APPROVED`. `expectedVersion` is
+        optional and a stale value is 409 `CONCURRENT_MODIFICATION`;
+        `reason` is optional, trimmed, and stored as the status reason.
+      required:
+        - status
+      properties:
+        status:
+          $ref: '#/components/schemas/PaymentStatus'
+        expectedVersion:
+          type: integer
+          minimum: 0
+          description: >
+            Optional payment version the caller observed. When supplied, a
+            mismatch is 409 `CONCURRENT_MODIFICATION`; when omitted the
+            transition is not version-checked.
+        reason:
+          type: string
+          maxLength: 200
+          description: >
+            Optional status reason. It is trimmed and stored with the payment
+            but is not returned in the `Payment` projection.
     UpdatePaymentStatusRequestInternal:
       type: object
       description: Internal lifecycle transition command accepted by the Payment expert.
@@ -1026,7 +1157,7 @@ components:
 x-vertical: payment
 x-implementation:
   status: implemented
-  verifiedAt: '2026-10-20'
+  verifiedAt: '2026-10-21'
   verifiedAgainst:
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentController.java
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentSearchResponse.java
@@ -1035,6 +1166,7 @@ x-implementation:
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentClient.java
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentDto.java
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/CreatePaymentCommand.java
+    - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/UpdatePaymentStatusCommand.java
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentRules.java
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentAllocation.java
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentAllocationSummary.java
@@ -1044,6 +1176,7 @@ x-implementation:
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentController.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/Payment.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/CreatePaymentRequest.java
+    - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/UpdatePaymentStatusRequest.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentRules.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentAllocationController.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentAllocation.java
@@ -1062,8 +1195,13 @@ x-implementation:
     Vertical-specific ApiError {timestamp, status, code, message, path,
     details[{field, message}]}. Not the canonical Problem envelope yet.
   notes: >
-    The public API exposes four named actions rather than the PATCH status route
-    of the expert. Amount is a decimal string but not yet the Money object.
+    The public API exposes the generic PATCH /api/v1/payments/{paymentId}/status
+    route in addition to the four named actions (submit, authorize, approve,
+    and issue). Both surfaces forward to the expert's status command and keep
+    its 400/404/409 problems; the expert owns the transition graph (including
+    the SUBMITTED/ACCEPTED -> FAILED retries, PROCESSING -> PARTIALLY_PAID, and
+    the CANCELLED/VOID escape edges), the approval gate, and the version check.
+    Amount is a decimal string but not yet the Money object.
     Source linkage is optional and denormalized: the payment stores a classified
     source type, its UUID, and a human reference instead of embedding the claim
     or policy. The tenant-scoped list forwards an optional sourceType + sourceId
@@ -1075,22 +1213,23 @@ x-implementation:
     the overallocation guard (409 ALLOCATION_EXCEEDS_PAYMENT). The expert also
     serves the same allocation path plus an /internal/v1 alias that the domain
     calls; the alias is an implementation detail and is not part of this public
-    contract. See MISMATCHES.md M-12, M-24, and M-35.
+    contract. See MISMATCHES.md M-12, M-24, M-35, and M-46.
 x-compatibility:
-  contractVersion: 1.4.0
-  previousContractVersion: 1.3.0
+  contractVersion: 1.5.0
+  previousContractVersion: 1.4.0
   breaking: []
   compatible:
-    - Adds GET and POST /api/v1/payments/{paymentId}/allocations.
-    - Adds the PaymentAllocation, PaymentAllocationSummary, CreatePaymentAllocationRequest, PaymentAllocationTargetType, and PaymentAllocationComponent schemas.
-    - Documents the append-only overallocation guard (409 ALLOCATION_EXCEEDS_PAYMENT) and the payment-status gate (409 PAYMENT_NOT_ALLOCATABLE).
-    - Removes the implemented allocations path from x-planned-operations.
+    - Adds PATCH /api/v1/payments/{paymentId}/status.
+    - Adds the UpdatePaymentStatusRequest schema.
+    - Documents the implemented DRAFT -> PENDING_AUTHORITY -> AUTHORIZED -> APPROVED -> SCHEDULED -> SUBMITTED -> ACCEPTED -> PROCESSING -> PAID -> RECONCILED lifecycle and its other edges.
+    - Documents the terminal statuses CANCELLED, STOPPED, REJECTED, VOID, REVERSED, and ESCHEATED.
+    - Documents the optional expectedVersion concurrency check (409 CONCURRENT_MODIFICATION) and the optional 200-character reason.
   note: >
-    The allocation surface is additive over 1.3.0: no existing path, request
-    field, response field, or event changes. A caller that never uses the new
-    routes is unaffected. The public routes require X-EIA-Tenant and are
-    tenant-scoped; the expert's /internal/v1 alias is not part of this public
-    contract.
+    The status route is additive over 1.4.0: no existing path, request field,
+    response field, or event changes. A caller that keeps using the four named
+    actions is unaffected. The public route requires X-EIA-Tenant and is
+    tenant-scoped but not book-scoped; the expert's /internal/v1 alias is not
+    part of this public contract.
 x-planned-operations:
   - method: POST
     path: /api/v1/payments/{paymentId}/void

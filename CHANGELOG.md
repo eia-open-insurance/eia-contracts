@@ -1413,6 +1413,35 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   and refreshes the validation evidence.
 - `python scripts/validate_contracts.py` passes 13,815 checks with 0 failures.
 
+### Added in the payment status-transition contract (2026-10-21)
+
+- `openapi/payment.yaml` is 1.5.0: adds the public
+  `PATCH /api/v1/payments/{paymentId}/status` operation with the required
+  `UpdatePaymentStatusRequest` `{status, expectedVersion?, reason?}`, the 200
+  `Payment` and 400/404/409 responses. The operation documents the implemented
+  expert graph from `DRAFT` through `RECONCILED` (34 edges), the six terminal
+  statuses (`CANCELLED`, `STOPPED`, `REJECTED`, `VOID`, `REVERSED`,
+  `ESCHEATED`), the approval gate (400 `PAYMENT_NOT_APPROVED`), the optional
+  `expectedVersion` (409 `CONCURRENT_MODIFICATION`), the optional 200-character
+  `reason`, and the `payment.payment.updated`/`.status-changed` events.
+  `PaymentStatus` names the terminal statuses and `x-compatibility` moves to
+  1.5.0 over 1.4.0.
+- `scripts/validate_contracts.py` requires the public status PATCH with its
+  shared `TenantHeader` and `paymentId` parameter, the
+  `UpdatePaymentStatusRequest` schema (only `status` required; the
+  `PaymentStatus` reference; an integer `minimum: 0` `expectedVersion`; a
+  200-character `reason`) on both the public and internal schemas, the
+  200/400/404/409 responses, all 34 documented `from -> to` edges, the
+  terminal-status set, the approval-gate, error-code, event, and
+  version/reason documentation, and the absence of the implemented path from
+  `x-planned-operations`.
+- `README.md` records the new slice, the response table, the graph, the
+  terminal and approval rules, the version/reason semantics, the SPEC-less
+  route and graph widening, and the validation count; `MISMATCHES.md` adds
+  M-46, updates M-06, M-10, M-12, and M-24 for the new public command, and
+  refreshes the validation evidence.
+- `python scripts/validate_contracts.py` passes 13,978 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

@@ -148,6 +148,7 @@ REQUIRED_OPENAPI_PATHS = {
         ("/api/v1/payments/{paymentId}/authorize", "post"),
         ("/api/v1/payments/{paymentId}/approve", "post"),
         ("/api/v1/payments/{paymentId}/issue", "post"),
+        ("/api/v1/payments/{paymentId}/status", "patch"),
         ("/internal/v1/payments", "get"),
         ("/internal/v1/payments", "post"),
         ("/internal/v1/payments/{paymentId}", "get"),
@@ -1807,6 +1808,92 @@ PAYMENT_SOURCE_FILTER_PARAMETERS = ("sourceType", "sourceId")
 PAYMENT_SOURCE_FILTER_ERRORS = ("INVALID_SOURCE_TYPE", "INVALID_SOURCE_FILTER")
 
 
+# Payment lifecycle (SPEC 11.7.6). The public domain exposes PATCH
+# /api/v1/payments/{paymentId}/status; the expert serves the same command under
+# /internal/v1. The expert owns the graph, the approval gate, and the optional
+# optimistic version check. The implemented graph is wider than the SPEC 11.7.6
+# mermaid: it adds the CANCELLED/VOID escape edges, SUBMITTED/ACCEPTED ->
+# FAILED, PROCESSING -> PARTIALLY_PAID, and the PARTIALLY_PAID edges (M-46).
+PAYMENT_STATUS_OPENAPI_PATH = "/api/v1/payments/{paymentId}/status"
+PAYMENT_STATUS_REQUEST_SCHEMA = "UpdatePaymentStatusRequest"
+PAYMENT_STATUS_REQUEST_INTERNAL_SCHEMA = "UpdatePaymentStatusRequestInternal"
+PAYMENT_STATUSES = (
+    "DRAFT",
+    "PENDING_AUTHORITY",
+    "AUTHORIZED",
+    "APPROVED",
+    "SCHEDULED",
+    "SUBMITTED",
+    "ACCEPTED",
+    "PROCESSING",
+    "PAID",
+    "PARTIALLY_PAID",
+    "FAILED",
+    "REJECTED",
+    "CANCELLED",
+    "STOPPED",
+    "RETURNED",
+    "REVERSED",
+    "RECONCILED",
+    "ESCHEATED",
+    "VOID",
+)
+PAYMENT_STATUS_TRANSITIONS = {
+    "DRAFT": ("PENDING_AUTHORITY", "CANCELLED", "VOID"),
+    "PENDING_AUTHORITY": ("AUTHORIZED", "REJECTED", "CANCELLED", "VOID"),
+    "AUTHORIZED": ("APPROVED", "CANCELLED", "VOID"),
+    "APPROVED": ("SCHEDULED", "STOPPED", "VOID"),
+    "SCHEDULED": ("SUBMITTED", "CANCELLED", "VOID"),
+    "SUBMITTED": ("ACCEPTED", "FAILED"),
+    "ACCEPTED": ("PROCESSING", "FAILED"),
+    "PROCESSING": ("PAID", "PARTIALLY_PAID", "FAILED"),
+    "PARTIALLY_PAID": ("PAID", "RETURNED", "REVERSED"),
+    "PAID": ("RECONCILED", "RETURNED", "REVERSED"),
+    "RETURNED": ("SCHEDULED", "CANCELLED"),
+    "FAILED": ("SCHEDULED", "CANCELLED"),
+    "RECONCILED": ("ESCHEATED",),
+    "REVERSED": (),
+    "ESCHEATED": (),
+    "CANCELLED": (),
+    "STOPPED": (),
+    "REJECTED": (),
+    "VOID": (),
+}
+PAYMENT_TERMINAL_STATUSES = (
+    "CANCELLED",
+    "STOPPED",
+    "REJECTED",
+    "VOID",
+    "REVERSED",
+    "ESCHEATED",
+)
+PAYMENT_PRE_APPROVAL_STATUSES = ("DRAFT", "PENDING_AUTHORITY", "AUTHORIZED")
+PAYMENT_EXECUTION_STATUSES = (
+    "SUBMITTED",
+    "ACCEPTED",
+    "PROCESSING",
+    "PAID",
+    "PARTIALLY_PAID",
+    "RECONCILED",
+    "ESCHEATED",
+)
+PAYMENT_STATUS_REASON_MAX_LENGTH = 200
+PAYMENT_STATUS_ERROR_CODES = (
+    "VALIDATION_ERROR",
+    "INVALID_STATUS",
+    "INVALID_STATUS_TRANSITION",
+    "PAYMENT_NOT_APPROVED",
+    "CONCURRENT_MODIFICATION",
+    "PAYMENT_NOT_FOUND",
+    "MISSING_TENANT_HEADER",
+    "INVALID_PARAMETER",
+)
+PAYMENT_STATUS_EVENTS = (
+    "payment.payment.updated",
+    "payment.payment.status-changed",
+)
+
+
 # Payment allocations (SPEC 11.7.11). The public domain exposes GET/POST
 # /api/v1/payments/{paymentId}/allocations; the expert serves the same path and
 # an /internal/v1 alias that the domain calls, but the alias is an
@@ -3140,6 +3227,238 @@ def check_payment_allocations(contracts: ContractSet, document, relative: str):
         ),
         f"{relative}: x-planned-operations must not list the implemented payment "
         "allocations path",
+    )
+
+
+def check_payment_status(contracts: ContractSet, document, relative: str):
+    """Require the public payment status route, request schema, and graph.
+
+    The public PATCH operation is mandatory and returns the updated ``Payment``.
+    The contract must document every edge of the implemented expert graph, all
+    terminal statuses, the approval gate, and the optional ``expectedVersion``
+    and ``reason`` semantics. The public request and the internal command must
+    describe the same wire shape because the domain forwards the public body
+    unchanged.
+    """
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    status_schema = schemas.get("PaymentStatus") or {}
+    contracts.check(
+        status_schema.get("type") == "string",
+        f"{relative}: PaymentStatus must be a string enum",
+    )
+    contracts.check(
+        set(status_schema.get("enum") or []) == set(PAYMENT_STATUSES),
+        f"{relative}: PaymentStatus must enumerate {list(PAYMENT_STATUSES)}",
+    )
+    status_description = str(status_schema.get("description") or "")
+    contracts.check(
+        "terminal" in status_description,
+        f"{relative}: PaymentStatus must document the terminal statuses",
+    )
+    for terminal in PAYMENT_TERMINAL_STATUSES:
+        contracts.check(
+            terminal in status_description,
+            f"{relative}: PaymentStatus must name the terminal {terminal} status",
+        )
+
+    # The transition table is the machine-checkable form of the graph: a
+    # terminal status has no outgoing edge and every other status has at least
+    # one.
+    contracts.check(
+        set(PAYMENT_STATUS_TRANSITIONS) == set(PAYMENT_STATUSES),
+        f"{relative}: the transition table must cover every PaymentStatus",
+    )
+    contracts.check(
+        set(PAYMENT_PRE_APPROVAL_STATUSES) <= set(PAYMENT_STATUSES)
+        and set(PAYMENT_EXECUTION_STATUSES) <= set(PAYMENT_STATUSES),
+        f"{relative}: the approval-gate status sets must be PaymentStatus values",
+    )
+    for status, targets in PAYMENT_STATUS_TRANSITIONS.items():
+        edge_where = f"{relative}: PaymentStatus transition"
+        contracts.check(
+            status in PAYMENT_STATUSES,
+            f"{edge_where} source {status} is not a PaymentStatus",
+        )
+        for target in targets:
+            contracts.check(
+                target in PAYMENT_STATUSES,
+                f"{edge_where} target {target} is not a PaymentStatus",
+            )
+    for source in PAYMENT_PRE_APPROVAL_STATUSES:
+        contracts.check(
+            not (
+                set(PAYMENT_STATUS_TRANSITIONS[source])
+                & set(PAYMENT_EXECUTION_STATUSES)
+            ),
+            f"{relative}: a pre-approval status must not have a direct execution "
+            "edge",
+        )
+    contracts.check(
+        {
+            status
+            for status, targets in PAYMENT_STATUS_TRANSITIONS.items()
+            if not targets
+        }
+        == set(PAYMENT_TERMINAL_STATUSES),
+        f"{relative}: terminal statuses must match the statuses without an "
+        "outgoing transition",
+    )
+
+    path_item = (
+        paths.get(PAYMENT_STATUS_OPENAPI_PATH) if isinstance(paths, dict) else None
+    )
+    operation = path_item.get("patch") if isinstance(path_item, dict) else None
+    where = f"{relative}: PATCH {PAYMENT_STATUS_OPENAPI_PATH}"
+    contracts.check(
+        isinstance(operation, dict),
+        f"{where}: required payment status operation is missing",
+    )
+    if not isinstance(operation, dict):
+        return
+
+    parameter_refs, inline_names = _parameter_names(operation)
+    contracts.check(
+        "TenantHeader" in parameter_refs,
+        f"{where}: must document the shared TenantHeader parameter",
+    )
+    contracts.check(
+        "paymentId" in inline_names,
+        f"{where}: must declare the paymentId path parameter",
+    )
+    contracts.check(
+        not ({"BookHeaderDirect", "BookHeaderAssumed"} & set(parameter_refs)),
+        f"{where}: payments are not book-scoped and must not declare a book header",
+    )
+
+    request_body = operation.get("requestBody") or {}
+    body_schema = (
+        ((request_body.get("content") or {}).get("application/json") or {}).get(
+            "schema"
+        )
+        if isinstance(request_body, dict)
+        else None
+    )
+    contracts.check(
+        isinstance(request_body, dict) and request_body.get("required") is True,
+        f"{where}: requestBody must be required",
+    )
+    contracts.check(
+        isinstance(body_schema, dict)
+        and str(body_schema.get("$ref", "")).endswith(
+            f"/schemas/{PAYMENT_STATUS_REQUEST_SCHEMA}"
+        ),
+        f"{where}: request body must use the {PAYMENT_STATUS_REQUEST_SCHEMA} schema",
+    )
+
+    success_body = _response_schema(operation, "200")
+    contracts.check(
+        isinstance(success_body, dict)
+        and str(success_body.get("$ref", "")).endswith("/schemas/Payment"),
+        f"{where}: 200 must return the Payment schema",
+    )
+    responses = operation.get("responses") or {}
+    for code, suffix in (
+        ("400", "/responses/BadRequest"),
+        ("404", "/responses/NotFound"),
+        ("409", "/responses/Conflict"),
+    ):
+        response = responses.get(code) if isinstance(responses, dict) else None
+        contracts.check(
+            isinstance(response, dict)
+            and str(response.get("$ref", "")).endswith(suffix),
+            f"{where}: {code} must reference the shared {suffix.rsplit('/', 1)[-1]} "
+            "response",
+        )
+
+    description = str(operation.get("description") or "")
+    for source, targets in PAYMENT_STATUS_TRANSITIONS.items():
+        for target in targets:
+            edge = f"`{source}` -> `{target}`"
+            contracts.check(
+                edge in description,
+                f"{where}: description must document the {edge} transition",
+            )
+    contracts.check(
+        "are terminal" in description,
+        f"{where}: description must state which statuses are terminal",
+    )
+    contracts.check(
+        "is not terminal" in description,
+        f"{where}: description must state that PARTIALLY_PAID is not terminal",
+    )
+    for code in PAYMENT_STATUS_ERROR_CODES:
+        contracts.check(
+            code in description,
+            f"{where}: description must document the {code} error code",
+        )
+    for event in PAYMENT_STATUS_EVENTS:
+        contracts.check(
+            event in description,
+            f"{where}: description must document the {event} event",
+        )
+    for term in ("expectedVersion", "reason", "approval gate"):
+        contracts.check(
+            term in description,
+            f"{where}: description must document {term}",
+        )
+
+    # The public request and the internal command must describe the same wire
+    # shape: only status is required, status is the shared PaymentStatus enum,
+    # expectedVersion is a non-negative integer, and reason is capped at 200.
+    for schema_name in (
+        PAYMENT_STATUS_REQUEST_SCHEMA,
+        PAYMENT_STATUS_REQUEST_INTERNAL_SCHEMA,
+    ):
+        request = schemas.get(schema_name) or {}
+        properties = request.get("properties") or {}
+        request_required = set(request.get("required") or [])
+        contracts.check(
+            isinstance(request, dict) and request.get("type") == "object",
+            f"{relative}: {schema_name} must be an object schema",
+        )
+        contracts.check(
+            request_required == {"status"},
+            f"{relative}: {schema_name} must require only status",
+        )
+        status = properties.get("status") or {}
+        contracts.check(
+            str(status.get("$ref", "")).endswith("/schemas/PaymentStatus"),
+            f"{relative}: {schema_name}.status must reference PaymentStatus",
+        )
+        expected_version = properties.get("expectedVersion") or {}
+        contracts.check(
+            expected_version.get("type") == "integer"
+            and expected_version.get("minimum") == 0,
+            f"{relative}: {schema_name}.expectedVersion must be an integer with "
+            "minimum 0",
+        )
+        reason = properties.get("reason") or {}
+        contracts.check(
+            reason.get("type") == "string"
+            and reason.get("maxLength") == PAYMENT_STATUS_REASON_MAX_LENGTH,
+            f"{relative}: {schema_name}.reason must be a string capped at "
+            f"{PAYMENT_STATUS_REASON_MAX_LENGTH} characters",
+        )
+        contracts.check(
+            "expectedVersion" not in request_required,
+            f"{relative}: {schema_name}.expectedVersion must stay optional",
+        )
+        contracts.check(
+            "reason" not in request_required,
+            f"{relative}: {schema_name}.reason must stay optional",
+        )
+
+    planned = document.get("x-planned-operations") or []
+    contracts.check(
+        not any(
+            isinstance(entry, dict)
+            and entry.get("path") == PAYMENT_STATUS_OPENAPI_PATH
+            for entry in planned
+        ),
+        f"{relative}: x-planned-operations must not list the implemented payment "
+        "status path",
     )
 
 
@@ -10483,6 +10802,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_payment_openapi_sources(contracts, document, relative)
             check_payment_source_filter(contracts, document, relative)
             check_payment_allocations(contracts, document, relative)
+            check_payment_status(contracts, document, relative)
         if vertical == "document":
             check_document_links_openapi(contracts, document, relative)
             check_document_content_openapi(contracts, document, relative)
