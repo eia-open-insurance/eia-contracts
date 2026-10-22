@@ -644,6 +644,7 @@ CONTRACT_CASH_CALL_FIELDS = (
     "currency",
     "dueDate",
     "status",
+    "settlementReference",
     "notes",
     "createdAt",
 )
@@ -659,6 +660,10 @@ CONTRACT_CASH_CALL_CREATE_FIELDS = (
 CONTRACT_CASH_CALL_STATUSES = ("REQUESTED", "ISSUED", "SETTLED", "CANCELLED")
 CONTRACT_CASH_CALL_REQUEST_STATUSES = ("ISSUED", "SETTLED", "CANCELLED")
 CONTRACT_CASH_CALL_NOTES_MAX_LENGTH = 4000
+CONTRACT_CASH_CALL_SETTLEMENT_REFERENCE_MAX_LENGTH = 120
+CONTRACT_CASH_CALL_SETTLEMENT_REFERENCE_FIELD = "settlementReference"
+CONTRACT_CASH_CALL_STATUS_REFERENCE_FIELD = "reference"
+CONTRACT_CASH_CALL_INVALID_REFERENCE = "INVALID_REFERENCE"
 CONTRACT_CASH_CALL_EVENTS = (
     "contract.cash-call.requested",
     "contract.cash-call.issued",
@@ -8050,6 +8055,26 @@ def check_contract_cash_calls(contracts: ContractSet, document, relative: str):
                 "409" in responses,
                 f"{where}: must document the 409 response",
             )
+        if method == "patch":
+            description = str(operation.get("description") or "")
+            contracts.check(
+                CONTRACT_CASH_CALL_STATUS_REFERENCE_FIELD in description
+                and CONTRACT_CASH_CALL_INVALID_REFERENCE in description,
+                f"{where}: must document the settlement reference and "
+                f"{CONTRACT_CASH_CALL_INVALID_REFERENCE}",
+            )
+            bad_request = responses.get("400") or {}
+            bad_request_description = (
+                bad_request.get("description")
+                if isinstance(bad_request, dict)
+                else ""
+            ) or ""
+            contracts.check(
+                CONTRACT_CASH_CALL_INVALID_REFERENCE
+                in str(bad_request_description),
+                f"{where}: 400 must document "
+                f"{CONTRACT_CASH_CALL_INVALID_REFERENCE}",
+            )
 
         if method == "get":
             ok_schema = _response_schema(operation, "200")
@@ -8140,6 +8165,17 @@ def check_contract_cash_calls(contracts: ContractSet, document, relative: str):
         f"{relative}: CashCall.notes must be a nullable string of at most "
         f"{CONTRACT_CASH_CALL_NOTES_MAX_LENGTH} characters",
     )
+    settlement_reference = properties.get(
+        CONTRACT_CASH_CALL_SETTLEMENT_REFERENCE_FIELD
+    ) or {}
+    contracts.check(
+        _schema_types(settlement_reference) == {"string", "null"}
+        and settlement_reference.get("maxLength")
+        == CONTRACT_CASH_CALL_SETTLEMENT_REFERENCE_MAX_LENGTH,
+        f"{relative}: CashCall.settlementReference must be a nullable string of "
+        f"at most {CONTRACT_CASH_CALL_SETTLEMENT_REFERENCE_MAX_LENGTH} "
+        "characters",
+    )
     contracts.check(
         (properties.get("createdAt") or {}).get("format") == "date-time",
         f"{relative}: CashCall.createdAt must be a date-time",
@@ -8209,6 +8245,61 @@ def check_contract_cash_calls(contracts: ContractSet, document, relative: str):
         == set(CONTRACT_CASH_CALL_REQUEST_STATUSES),
         f"{relative}: UpdateCashCallStatusRequest.status must enumerate "
         f"{list(CONTRACT_CASH_CALL_REQUEST_STATUSES)}",
+    )
+    status_reference = update_properties.get(
+        CONTRACT_CASH_CALL_STATUS_REFERENCE_FIELD
+    ) or {}
+    contracts.check(
+        CONTRACT_CASH_CALL_STATUS_REFERENCE_FIELD in update_properties
+        and CONTRACT_CASH_CALL_STATUS_REFERENCE_FIELD not in update_required,
+        f"{relative}: UpdateCashCallStatusRequest.reference must be optional",
+    )
+    contracts.check(
+        _schema_types(status_reference) == {"string", "null"}
+        and status_reference.get("maxLength")
+        == CONTRACT_CASH_CALL_SETTLEMENT_REFERENCE_MAX_LENGTH,
+        f"{relative}: UpdateCashCallStatusRequest.reference must be a nullable "
+        f"string of at most {CONTRACT_CASH_CALL_SETTLEMENT_REFERENCE_MAX_LENGTH} "
+        "characters",
+    )
+    settled_condition = next(
+        (
+            entry
+            for entry in update.get("allOf") or []
+            if isinstance(entry, dict)
+            and ((entry.get("if") or {}).get("properties") or {})
+            .get("status", {})
+            .get("const")
+            == "SETTLED"
+        ),
+        None,
+    )
+    contracts.check(
+        isinstance(settled_condition, dict),
+        f"{relative}: UpdateCashCallStatusRequest must conditionally require "
+        "reference for SETTLED",
+    )
+    settled_then = (settled_condition or {}).get("then") or {}
+    contracts.check(
+        set(settled_then.get("required") or [])
+        == {CONTRACT_CASH_CALL_STATUS_REFERENCE_FIELD},
+        f"{relative}: UpdateCashCallStatusRequest must require reference when "
+        "status is SETTLED",
+    )
+    settled_reference = (
+        (settled_then.get("properties") or {}).get(
+            CONTRACT_CASH_CALL_STATUS_REFERENCE_FIELD
+        )
+        or {}
+    )
+    contracts.check(
+        settled_reference.get("type") == "string"
+        and settled_reference.get("minLength") == 1
+        and settled_reference.get("maxLength")
+        == CONTRACT_CASH_CALL_SETTLEMENT_REFERENCE_MAX_LENGTH
+        and "\\S" in str(settled_reference.get("pattern") or ""),
+        f"{relative}: a SETTLED reference must be a non-blank string of at most "
+        f"{CONTRACT_CASH_CALL_SETTLEMENT_REFERENCE_MAX_LENGTH} characters",
     )
 
 
@@ -10033,6 +10124,44 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
                 == set(CONTRACT_CASH_CALL_STATUSES),
                 f"{relative}: ContractCashCallData.status must enumerate "
                 f"{list(CONTRACT_CASH_CALL_STATUSES)}",
+            )
+            settlement_reference = payload_properties.get(
+                CONTRACT_CASH_CALL_SETTLEMENT_REFERENCE_FIELD
+            ) or {}
+            contracts.check(
+                CONTRACT_CASH_CALL_SETTLEMENT_REFERENCE_FIELD
+                in payload_properties,
+                f"{relative}: ContractCashCallData.properties."
+                "settlementReference is required for the settled event",
+            )
+            contracts.check(
+                CONTRACT_CASH_CALL_SETTLEMENT_REFERENCE_FIELD
+                not in payload_required,
+                f"{relative}: ContractCashCallData.settlementReference must stay "
+                "optional because requested, issued, and cancelled omit it",
+            )
+            contracts.check(
+                settlement_reference.get("type") == "string"
+                and settlement_reference.get("maxLength")
+                == CONTRACT_CASH_CALL_SETTLEMENT_REFERENCE_MAX_LENGTH,
+                f"{relative}: ContractCashCallData.settlementReference must be a "
+                f"string of at most "
+                f"{CONTRACT_CASH_CALL_SETTLEMENT_REFERENCE_MAX_LENGTH} characters",
+            )
+            settled_channel = next(
+                (
+                    channel
+                    for channel in channels.values()
+                    if isinstance(channel, dict)
+                    and channel.get("address") == "contract.cash-call.settled"
+                ),
+                None,
+            )
+            contracts.check(
+                CONTRACT_CASH_CALL_SETTLEMENT_REFERENCE_FIELD
+                in str((settled_channel or {}).get("description") or ""),
+                f"{relative}: contract.cash-call.settled must document "
+                "settlementReference",
             )
 
             contracts.check(

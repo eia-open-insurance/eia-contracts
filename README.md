@@ -1062,7 +1062,8 @@ Cash-call semantics:
   periodEnd, amount, currency, dueDate, status, notes, createdAt}`. The expert
   row id is serialized as `id` internally and remapped to `cashCallId` by the
   domain; `tenantId` is not part of the public projection. Money is a decimal
-  string (SPEC 10.3).
+  string (SPEC 10.3). Settlement references extend this projection from 4.4.0;
+  see Contract cash-call settlement references.
 - `X-EIA-Tenant` is required. The canonical contract requires
   `X-EIA-Book: ASSUMED`; another book is hidden as 404
   `BOOK_SCOPE_VIOLATION`. The domain currently accepts an absent header for
@@ -1080,6 +1081,42 @@ Cash-call semantics:
   `cash_call_allowed` term check, no contract-window or contract-currency
   reconciliation, and no claim/Payment link, so the SPEC "large loss above the
   cash-loss limit" gate and the SPEC 11.3.10 routes remain gaps (M-34).
+
+### Contract cash-call settlement references (2026-10-21)
+
+Contract 4.4.0 documents the settlement reference that closes a cash call. The
+change is additive: the status PATCH body gains an optional `reference`, the
+`CashCall` projection gains a nullable `settlementReference`, and the settled
+event payload gains the recorded reference. No route, schema name, response
+status, or event name changes.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/contract.yaml` | 4.4.0 | Additive | `UpdateCashCallStatusRequest` adds optional nullable `reference`; `CashCall` adds the required-but-nullable `settlementReference`; the status PATCH documents the SETTLED reference gate and 400 `INVALID_REFERENCE`. |
+| `asyncapi/contract.yaml` | 1.9.0 | Additive | `ContractCashCallData` adds the optional `settlementReference` property, present only on `contract.cash-call.settled`; `eventVersion` stays 1. |
+| `asyncapi/event-catalog.yaml` | 1.25.0 | No change | No event name, channel, or count changes. |
+
+Settlement-reference semantics:
+
+- `PATCH .../{cashCallId}/status` takes `{status, reference?}`. `reference` is
+  meaningful only for `SETTLED`: the expert trims it, requires at least one
+  non-whitespace character, and caps it at 120 characters. A missing, blank, or
+  over-long reference is 400 `INVALID_REFERENCE`; the row stays ISSUED and no
+  settled event is written. `ISSUED` and `CANCELLED` ignore a supplied
+  reference, and the domain drops it before forwarding those transitions.
+- `CashCall.settlementReference` is always present but null until the call
+  settles; it then holds the trimmed reference. The public projection still
+  omits `tenantId`, and the expert row id is still remapped to `cashCallId`.
+- `contract.cash-call.settled` carries `settlementReference` in its payload.
+  `contract.cash-call.requested`, `.issued`, and `.cancelled` omit the member,
+  and the settled fact keeps `eventVersion` 1. The reference is evidence
+  recorded by the Contract expert; Payment and FS-RI still own execution and
+  the actual payment record (SPEC 11.3.11, M-34).
+- The validator requires the nullable 120-character projection member, the
+  optional nullable 120-character status `reference`, its conditional
+  non-blank SETTLED requirement, the 400 `INVALID_REFERENCE` documentation,
+  the optional settled-event payload member, and the channel description that
+  says the other cash-call facts omit it. The full run passes 13,576 checks.
 
 ### Contract security/collateral contract (2026-10-20)
 
@@ -2559,7 +2596,10 @@ missing directory.
    required `TenantHeader` and `BookHeaderAssumed` parameters, the `CashCall`,
    `CashCallStatus`, `CreateCashCallRequest`, and
    `UpdateCashCallStatusRequest` schemas and their field types, the nullable
-   4000-character `notes`, the `ISSUED`/`SETTLED`/`CANCELLED` request enum, the
+   4000-character `notes` and nullable 120-character `settlementReference`, the
+   optional nullable 120-character status `reference` with its conditional
+   non-blank SETTLED requirement, the `ISSUED`/`SETTLED`/`CANCELLED` request
+   enum, the 400 `INVALID_REFERENCE` documentation, the
    201/200 successes, and the 400/404/409 responses, the three public security
    operations with their required `TenantHeader` and `BookHeaderAssumed`
    parameters, the ten-field `SecurityRecord` projection, the
@@ -2625,6 +2665,9 @@ missing directory.
    type, money, currency, and status members, and the
    `ContractSecurityStatusChangedData` payload with its contract/security
    identity, type, previous-status, and status members, the
+   `ContractCashCallData` payload with its contract and cash-call identity,
+   period, amount, currency, due date, status, and optional settlement
+   reference members, the
    `ContractTechnicalAccountLineData` payload with its contract, account, line,
    13-value detail type enum, and amount members, the
    `PolicyCreditNoteData` payload with its policy and note identity, note

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Contract API
-  version: 4.3.0
+  version: 4.4.0
   summary: Assumed-book reinsurance contract administration and the Contract expert API.
   description: >
     This document describes the implemented public Contract domain API and the
@@ -54,7 +54,11 @@ info:
     A cash call is an interim funding request on one contract period. The expert
     generates `callNumber` as `CC-{year}-{sequence}`, creates the row in
     REQUESTED, and moves it REQUESTED -> ISSUED -> SETTLED or
-    REQUESTED -> CANCELLED; both terminal states are immutable. A cash call is
+    REQUESTED -> CANCELLED; both terminal states are immutable. Settlement
+    records the payment reference that closed the call: the status PATCH takes
+    an optional `reference`, requires it for SETTLED, trims it, and caps it at
+    120 characters (400 `INVALID_REFERENCE` otherwise); the projection exposes
+    it as `settlementReference`, null until the call settles. A cash call is
     not a Payment: Payment and FS-RI own execution (SPEC 11.3.11). SPEC 11.3.10
     defines no cash-call route and SPEC 11.3.9 publishes only
     `contract.cash-call.issued`, so the implemented route and the three other
@@ -1531,9 +1535,14 @@ paths:
         ISSUED -> SETTLED. The request accepts `ISSUED`, `SETTLED`, or
         `CANCELLED`; `REQUESTED` is the creation state and is 400
         `INVALID_STATUS`. A skipped, repeated, or terminal edge is 409
-        `INVALID_STATUS_TRANSITION`. Each accepted transition appends
-        `contract.cash-call.issued`, `.settled`, or `.cancelled` to the outbox
-        in the same transaction as the row update.
+        `INVALID_STATUS_TRANSITION`. `reference` is the settlement reference:
+        a `SETTLED` request must carry it, it is trimmed, it must contain a
+        non-whitespace character, and it is at most 120 characters, otherwise
+        the call is 400 `INVALID_REFERENCE` and stays ISSUED. The `ISSUED` and
+        `CANCELLED` transitions ignore any `reference` supplied. Each accepted
+        transition appends `contract.cash-call.issued`, `.settled`, or
+        `.cancelled` to the outbox in the same transaction as the row update;
+        the settled event carries the recorded reference.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - $ref: './components.yaml#/components/parameters/BookHeaderAssumed'
@@ -1563,7 +1572,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/CashCall'
         '400':
-          $ref: './components.yaml#/components/responses/BadRequest'
+          description: >
+            400. `INVALID_REFERENCE` when a SETTLED transition omits
+            `reference` or supplies a blank or longer-than-120-character
+            reference; `INVALID_STATUS` when `status` is missing or is not
+            ISSUED, SETTLED, or CANCELLED.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
         '404':
           $ref: './components.yaml#/components/responses/NotFound'
         '409':
@@ -3859,9 +3876,11 @@ components:
         on one contract period (SPEC 11.3.4 `ISSUE_CASH_CALL`, SPEC 11.3.11).
         The expert generates `callNumber` as `CC-{year}-{sequence}` and creates
         the row in REQUESTED. `amount` is a decimal string (SPEC 10.3) and must
-        be greater than zero. `notes` is null until a note is supplied. The
-        status lifecycle is REQUESTED -> ISSUED -> SETTLED or
-        REQUESTED -> CANCELLED, with both terminal states immutable.
+        be greater than zero. `notes` is null until a note is supplied.
+        `settlementReference` is null until the call is SETTLED and then carries
+        the trimmed payment reference that closed it. The status lifecycle is
+        REQUESTED -> ISSUED -> SETTLED or REQUESTED -> CANCELLED, with both
+        terminal states immutable.
       required:
         - cashCallId
         - callNumber
@@ -3872,6 +3891,7 @@ components:
         - currency
         - dueDate
         - status
+        - settlementReference
         - notes
         - createdAt
       properties:
@@ -3900,6 +3920,13 @@ components:
           format: date
         status:
           $ref: '#/components/schemas/CashCallStatus'
+        settlementReference:
+          type: [string, 'null']
+          maxLength: 120
+          description: >
+            Payment reference that settled the call, trimmed by the expert. Null
+            until the call is SETTLED; the SETTLED status transition requires a
+            non-blank value.
         notes:
           type: [string, 'null']
           maxLength: 4000
@@ -3955,7 +3982,11 @@ components:
         Lifecycle command for one cash call. Only `ISSUED`, `SETTLED`, and
         `CANCELLED` are accepted; `REQUESTED` is the creation state and is
         rejected with 400 `INVALID_STATUS`. A skipped or repeated edge is 409
-        `INVALID_STATUS_TRANSITION`.
+        `INVALID_STATUS_TRANSITION`. `reference` is the settlement reference:
+        it is optional in the body, required and non-blank when `status` is
+        `SETTLED` (trimmed, at most 120 characters, else 400
+        `INVALID_REFERENCE`), and ignored by the `ISSUED` and `CANCELLED`
+        transitions.
       required:
         - status
       properties:
@@ -3965,6 +3996,30 @@ components:
             - ISSUED
             - SETTLED
             - CANCELLED
+        reference:
+          type: [string, 'null']
+          maxLength: 120
+          description: >
+            Settlement reference. Required for `SETTLED`, where the expert trims
+            it and requires at least one non-whitespace character; optional and
+            ignored for `ISSUED` and `CANCELLED`.
+      allOf:
+        - description: SETTLED requires a non-blank settlement reference.
+          if:
+            required:
+              - status
+            properties:
+              status:
+                const: SETTLED
+          then:
+            required:
+              - reference
+            properties:
+              reference:
+                type: string
+                minLength: 1
+                maxLength: 120
+                pattern: '\S'
     TowerSummary:
       type: object
       required:
@@ -4704,8 +4759,8 @@ x-implementation:
     domain accepts an absent X-EIA-Book on the security routes even though the
     canonical contract requires ASSUMED (M-37).
 x-compatibility:
-  contractVersion: 4.3.0
-  previousContractVersion: 4.2.0
+  contractVersion: 4.4.0
+  previousContractVersion: 4.3.0
   breaking:
     - The public GET/POST /api/v1/contracts/{contractId}/security operations now use the ten-field SecurityRecord response and the CreateContractSecurityRequest body. The wide Security and CreateSecurityRequest schemas are internal-expert only; a generated client of the old public Security shape must move to SecurityRecord.
     - PATCH /api/v1/contracts/{contractId}/status no longer accepts BOUND (since 2.0.0); it returns 409 BIND_REQUIRES_COMMAND and bind must use POST /bind.
@@ -4721,6 +4776,7 @@ x-compatibility:
     - Adds PATCH /api/v1/contracts/{contractId}/security/{securityId}/status with the UpdateContractSecurityStatusRequest schema and the RELEASED/EXPIRED security lifecycle.
     - Adds GET/POST /api/v1/contracts/{contractId}/technical-accounts/{accountId}/lines and DELETE .../lines/{lineId} with the TechnicalAccountLine, TechnicalAccountLineType, LineSummary, TechnicalAccountLineTotals, and CreateTechnicalAccountLineRequest schemas. The technical-account status description now documents issue-time line reconciliation.
     - Expands TechnicalAccountLineType to the 13 SPEC 11.3.4 detail types, adds the optional LineSummary totals.details per-line-type map, and documents that the expert's authoritative four-key bucketTotals map is normalized into the public premium/loss/commission/other buckets. The issue reconciliation now compares bucket sums with the header components. The retired aggregate LOSS is removed from the create enum: a client that posted LOSS must post PAID_LOSS, while a legacy LOSS total is still read into the loss bucket.
+    - Adds the optional UpdateCashCallStatusRequest.reference and the nullable CashCall.settlementReference. A SETTLED transition requires a trimmed, non-blank reference of at most 120 characters and otherwise returns 400 INVALID_REFERENCE; ISSUED and CANCELLED ignore the member.
   note: >
     Search, technical accounts, and cash calls are additive. The
     period-bordereau slice replaces the previously documented public bordereau
@@ -4743,7 +4799,10 @@ x-compatibility:
     rebuilds the reconciliation on the four buckets. The aggregate LOSS create
     value introduced in 4.2.0 is retired in this release, so a client that
     posted LOSS must move to PAID_LOSS; a legacy LOSS total from an older
-    projection is still read into loss. The HTTP base path stays
+    projection is still read into loss. The 4.4.0 settlement-reference addition
+    is additive: it adds one optional request field and one nullable response
+    field, and the SETTLED transition now documents the non-blank 120-character
+    requirement that the expert already enforces. The HTTP base path stays
     /api/v1/contracts.
 x-planned-operations:
   - method: PATCH

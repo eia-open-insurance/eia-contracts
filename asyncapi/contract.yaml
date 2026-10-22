@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:contract
 info:
   title: EIA Contract events
-  version: 1.8.0
+  version: 1.9.0
   summary: Published domain event names for the Contract vertical.
   description: >
     Event contract for the Contract vertical. The authoritative event names are
@@ -24,8 +24,10 @@ info:
     facts `contract.bordereau.received`, `.processed`, and `.failed`, and the
     four cash-call facts `contract.cash-call.requested`, `.issued`, `.settled`,
     and `.cancelled` through the transactional outbox; those channels and
-    operations are marked `x-status: implemented`. The security/collateral
-    fact `contract.security.recorded` is also implemented: it is a child
+    operations are marked `x-status: implemented`. The `settled` payload also
+    carries the recorded `settlementReference`; `requested`, `issued`, and
+    `cancelled` omit it. The security/collateral fact
+    `contract.security.recorded` is also implemented: it is a child
     aggregate keyed by the security id at version 1, while the outbox
     partition key stays the contract id. The security status action adds
     `contract.security.status-changed`, also implemented: it is a new child
@@ -472,7 +474,10 @@ channels:
       Emitted when an ISSUED cash call is settled. The cash-call aggregate
       version is 3 and the payload carries the SETTLED status with the same
       contract identity, period, amount, currency, and due date. Settlement is
-      terminal and the row update shares the transaction with the event.
+      terminal and the row update shares the transaction with the event. The
+      payload additionally carries `settlementReference`, the trimmed payment
+      reference that closed the call; it is non-blank and at most 120
+      characters.
     x-event-type: contract.cash-call.settled
     x-event-version: 1
     x-status: implemented
@@ -1346,6 +1351,14 @@ components:
               - ISSUED
               - SETTLED
               - CANCELLED
+          settlementReference:
+            type: string
+            maxLength: 120
+            description: >
+              Payment reference that settled the call, trimmed by the expert.
+              Present only on `contract.cash-call.settled`, where it is always
+              non-blank and at most 120 characters; `requested`, `issued`, and
+              `cancelled` omit it.
   securitySchemes:
     outboxSignature:
       type: httpApiKey
@@ -1380,7 +1393,8 @@ x-implementation:
     version 1 (received) or 2 (processed or failed) while the partition key
     stays the contract id. The four cash-call facts use the cash-call id and
     aggregate version 1 (requested), 2 (issued or cancelled), or 3 (settled)
-    while the partition key stays the contract id. The security fact uses the
+    while the partition key stays the contract id; the settled payload also
+    carries the settlement reference. The security fact uses the
     security id and aggregate version 1 while the partition key stays the
     contract id; its payload carries the derived status of the public create or
     a bind-slice status recorded through the internal expert surface. The

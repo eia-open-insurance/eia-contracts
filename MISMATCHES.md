@@ -1791,35 +1791,48 @@ standalone cash-call child aggregate:
 | Area | Implemented | SPEC / gap |
 |---|---|---|
 | Routes | `GET/POST /api/v1/contracts/{contractId}/cash-calls` and `PATCH .../cash-calls/{cashCallId}/status` (the M-01 short form) | SPEC 11.3.10 has no cash-call operation; only the SPEC 11.3.4 command name and the 11.3.11 narrative exist. |
-| Projection | Flat `{cashCallId, callNumber, contractId, periodStart, periodEnd, amount, currency, dueDate, status, notes, createdAt}`; the expert row id is remapped to `cashCallId` and `tenantId` is not exposed | No claim link, Payment link, cash-call limit/remaining amount, contract-period relation, or settlement evidence. |
+| Projection | Flat `{cashCallId, callNumber, contractId, periodStart, periodEnd, amount, currency, dueDate, status, settlementReference, notes, createdAt}`; `settlementReference` is null until SETTLED and then holds the trimmed payment reference, the expert row id is remapped to `cashCallId`, and `tenantId` is not exposed | No claim link, Payment link, cash-call limit/remaining amount, contract-period relation, or settlement amount/date evidence beyond the free-text reference. |
 | Status | `REQUESTED`, `ISSUED`, `SETTLED`, `CANCELLED`; only `REQUESTED -> ISSUED -> SETTLED` or `REQUESTED -> CANCELLED` | SPEC names no cash-call status vocabulary. `REQUESTED` as a target is 400 `INVALID_STATUS`; a skipped or repeated edge is 409 `INVALID_STATUS_TRANSITION`. |
-| Gate | `periodStart < periodEnd`, `amount > 0`, uppercase ISO 4217 currency, required `dueDate`, notes at most 4000 characters | No `cash_call_allowed` or `cash_call_limit_amount` term check, no large-loss-above-cash-loss-limit authorization, and no contract-window or contract-currency equality check. |
-| Events | `contract.cash-call.requested`, `.issued`, `.settled`, `.cancelled` | SPEC 11.3.9 publishes only `.issued`; the other three are new child-aggregate facts (M-22). The envelope uses the cash-call id and aggregate version 1/2/3 while the outbox partition key stays the contract id. |
+| Gate | `periodStart < periodEnd`, `amount > 0`, uppercase ISO 4217 currency, required `dueDate`, notes at most 4000 characters, and a SETTLED `reference` that is trimmed, non-blank, and at most 120 characters (400 `INVALID_REFERENCE`; ISSUED and CANCELLED ignore it) | No `cash_call_allowed` or `cash_call_limit_amount` term check, no large-loss-above-cash-loss-limit authorization, and no contract-window or contract-currency equality check. |
+| Events | `contract.cash-call.requested`, `.issued`, `.settled`, `.cancelled` | SPEC 11.3.9 publishes only `.issued`; the other three are new child-aggregate facts (M-22). The envelope uses the cash-call id and aggregate version 1/2/3 while the outbox partition key stays the contract id. The settled payload carries `settlementReference`; the other three omit it. |
 | Book | Canonical contract requires `X-EIA-Book: ASSUMED`; another book is 404 `BOOK_SCOPE_VIOLATION` | The domain's `requireAssumedBookWhenPresent` accepts an absent header, and the expert's `/internal/v1` alias checks no book at all (M-08). |
+
+The 2026-10-21 settlement-reference slice documents an already implemented
+extension: the expert requires a trimmed, non-blank reference of at most 120
+characters on SETTLED, persists it on the call, returns it as
+`settlementReference`, and adds it to the settled event only. It adds no
+claim/Payment linkage and no settlement amount or date evidence.
 
 Evidence:
 
 - `repos/eia-contract-domain/.../CashCallController.java:29-77` (public routes
-  and the book wall) and `CashCallClient.java:32-99` (tenant and ASSUMED
-  forwarding to the expert alias).
-- `repos/eia-contract-domain/.../CashCall.java:23-36` (`@JsonAlias("id")` remap
-  and the flat projection) and `ContractCommandRules.java:242-262` (domain
-  create and status validation).
-- `repos/eia-contract-expert/.../cashcall/CashCallController.java:50-156`
+  and the book wall) and `CashCallClient.java:32-118` (tenant and ASSUMED
+  forwarding to the expert alias, and dropping a reference on a non-settled
+  transition).
+- `repos/eia-contract-domain/.../CashCall.java:23-37` (`@JsonAlias("id")` remap,
+  the flat projection, and `settlementReference`),
+  `UpdateCashCallStatusCommand.java:15-22` (optional `reference`), and
+  `ContractCommandRules.java:299-301` (status validation; the reference bounds
+  stay in the expert).
+- `repos/eia-contract-expert/.../cashcall/CashCallController.java:50-160`
   (public and internal prefixes, tenant resolution, create and status flow,
   transactional outbox).
-- `repos/eia-contract-expert/.../cashcall/CashCallRules.java:29-103` (period
-  order, positive amount, currency, due date, notes, status parsing, and the
-  transition table), `CashCallStatus.java:11-37` (four statuses and event
-  versions), and `CashCallRepository.java:49-118` (newest-first list, unique
-  call number, compare-and-set status).
-- `repos/eia-contract-expert/src/main/resources/schema.sql:459-481`
-  (`contract_cash_call` columns, unique `(tenant_id, contract_id, call_number)`,
-  period/amount/currency/status checks).
-- `repos/eia-contract-expert/.../ContractEvents.java:67-70,248-318` (event names,
-  child-aggregate id/version, contract partition key).
-- `openapi/contract.yaml` 3.1.0 and the README cash-call section record the
-  implemented shape.
+- `repos/eia-contract-expert/.../cashcall/CashCallRules.java:14-120` (period
+  order, positive amount, currency, due date, notes, the 120-character
+  settlement reference and its SETTLED-only requirement, status parsing, and
+  the transition table), `UpdateCashCallStatusRequest.java:3-18` (the
+  settlement reference contract), `CashCallStatus.java:11-37` (four statuses and
+  event versions), and `CashCallRepository.java:49-118` (newest-first list,
+  unique call number, compare-and-set status).
+- `repos/eia-contract-expert/src/main/resources/schema.sql:524-556`
+  (`contract_cash_call` columns including `settlement_reference VARCHAR(120)`,
+  unique `(tenant_id, contract_id, call_number)`, period/amount/currency/status
+  checks, and the forward ALTER for an existing table).
+- `repos/eia-contract-expert/.../ContractEvents.java:77-80,283-309,400-402`
+  (event names, child-aggregate factories, id/version, contract partition key,
+  and the settled-only `settlementReference` payload member).
+- `openapi/contract.yaml` 4.4.0, `asyncapi/contract.yaml` 1.9.0, and the README
+  cash-call and settlement-reference sections record the implemented shape.
 
 Resolution: the implemented slice is documented as canonical for now. Closing
 the gap means adding the cash-call limit/term gate and the large-loss
