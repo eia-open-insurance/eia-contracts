@@ -1831,6 +1831,52 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   evidence.
 - `python scripts/validate_contracts.py` passes 15,375 checks with 0 failures.
 
+### Added in the Party status-transition contract (2026-10-22)
+
+- `openapi/party.yaml` is 1.3.0: adds
+  `PATCH /api/v1/parties/{partyId}/status` and the matching
+  `/internal/v1/parties/{partyId}/status` expert operation, the
+  `UpdatePartyStatusRequest` command (`status` required, optional
+  `reason` capped at 500 characters), the closed `PartyStatus` enum
+  (`PROSPECT`, `ACTIVE`, `INACTIVE`, `DECEASED`, `DISSOLVED`, `MERGED`,
+  `RESTRICTED`, `BLOCKED`), and the `Party.status` reference to it. The public
+  operation requires `X-EIA-Tenant`, returns the updated Party with the shared
+  `ETag`, and documents 400/404 only. A same-status request is a 200 no-op with
+  no version bump or event; an accepted change bumps the Party row version and
+  writes `party.party.updated` with `changedFields: [status]`, `version`,
+  `from`, `to`, and the optional trimmed reason in the same transaction. The
+  reason is not persisted and there is no status history. Optional `If-Match`
+  and `Idempotency-Key` headers are accepted and forwarded but not enforced, so
+  there is no 409. `x-compatibility` moves to 1.3.0 over 1.2.0.
+- `asyncapi/party.yaml` is 1.3.0: the implemented `party.party.updated` channel
+  gains the `PartyStatusUpdatedData` payload with the Party identity and number,
+  the exact `[status]` changed-field list, the row `version`, the eight-value
+  `from`/`to` pair, and the optional reason. Verification found no
+  `party.party.status-updated` event: the expert publishes the status-update
+  fact as `party.party.updated`, and SPEC 11.1.9's
+  `party.party.status-changed` remains planned. No channel is added or moved.
+- `asyncapi/event-catalog.yaml` is unchanged at 1.35.0 because no event name is
+  added, removed, or moved; the status fact is the already-counted
+  `party.party.updated` (220 published and 101 implemented names; Party 11
+  published and 4 implemented).
+- `scripts/validate_contracts.py` requires the two PATCH operations, the shared
+  tenant parameters, the uuid `partyId` path parameter, the public inline
+  `If-Match` and `Idempotency-Key` parameters, the
+  `UpdatePartyStatusRequest` `{status, reason?}` split and reason bound, the
+  exact eight-value `PartyStatus` enum, the `Party.status` reference, the 200
+  Party with the shared ETag on the public route and no ETag on the expert
+  route, the 400/404 responses, the no-409 rule, and the same-status and
+  no-transition-graph wording. It also requires the `PartyStatusUpdatedData`
+  payload, keeps `party.party.status-changed` planned, and rejects a
+  `party.party.status-updated` channel.
+- `README.md` records the additive version, the route, the body and status
+  vocabulary, the no-op and no-history rules, the event-only reason, the ETag
+  and unenforced headers, the `Party.status` narrowing, and the validation
+  count; `MISMATCHES.md` adds M-55 for the SPEC-less route, the absent
+  transition graph and status history, the event-only reason, the event-name
+  divergence, and the unenforced headers.
+- `python scripts/validate_contracts.py` passes 15,478 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

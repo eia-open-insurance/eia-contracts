@@ -59,6 +59,7 @@ REQUIRED_OPENAPI_PATHS = {
         ("/api/v1/parties", "get"),
         ("/api/v1/parties", "post"),
         ("/api/v1/parties/{partyId}", "get"),
+        ("/api/v1/parties/{partyId}/status", "patch"),
         ("/api/v1/parties/{partyId}/identifiers", "get"),
         ("/api/v1/parties/{partyId}/identifiers", "post"),
         ("/api/v1/parties/{partyId}/addresses", "get"),
@@ -66,6 +67,7 @@ REQUIRED_OPENAPI_PATHS = {
         ("/internal/v1/parties", "get"),
         ("/internal/v1/parties", "post"),
         ("/internal/v1/parties/{partyId}", "get"),
+        ("/internal/v1/parties/{partyId}/status", "patch"),
         ("/internal/v1/parties/{partyId}/identifiers", "get"),
         ("/internal/v1/parties/{partyId}/identifiers", "post"),
         ("/internal/v1/parties/{partyId}/addresses", "get"),
@@ -11832,6 +11834,376 @@ def check_direct_claim_list_filter(contracts: ContractSet, document, relative: s
 
 
 # ---------------------------------------------------------------------------
+# Party lifecycle status transitions (SPEC 11.1.5, SPEC 11.1.9)
+# ---------------------------------------------------------------------------
+
+# The public command and the expert command the Party domain calls. The public
+# operation requires X-EIA-Tenant and returns the updated Party with an ETag;
+# the expert takes ?tenantId= and does not set an ETag. Both accept the same
+# UpdatePartyStatusRequest and document 200/400/404 only: the expert has no
+# transition graph and does not compare If-Match or replay Idempotency-Key.
+PARTY_STATUS_PATHS = [
+    ("/api/v1/parties/{partyId}/status", False),
+    ("/internal/v1/parties/{partyId}/status", True),
+]
+
+# SPEC 11.1.5 PartyStatus. The service trims and upper-cases the request value
+# before the membership check, then accepts it from any current status.
+PARTY_STATUSES = (
+    "PROSPECT",
+    "ACTIVE",
+    "INACTIVE",
+    "DECEASED",
+    "DISSOLVED",
+    "MERGED",
+    "RESTRICTED",
+    "BLOCKED",
+)
+
+PARTY_STATUS_SCHEMA = "PartyStatus"
+PARTY_STATUS_REQUEST_SCHEMA = "UpdatePartyStatusRequest"
+PARTY_STATUS_REASON_MAX_LENGTH = 500
+PARTY_STATUS_EVENT = "party.party.updated"
+PARTY_STATUS_SPEC_EVENT = "party.party.status-changed"
+PARTY_STATUS_EVENT_MESSAGE = "PartyStatusUpdatedData"
+PARTY_STATUS_EVENT_FIELDS = (
+    "partyId",
+    "partyNumber",
+    "changedFields",
+    "version",
+    "from",
+    "to",
+    "reason",
+)
+PARTY_STATUS_EVENT_REQUIRED = (
+    "partyId",
+    "partyNumber",
+    "changedFields",
+    "version",
+    "from",
+    "to",
+)
+
+
+def check_party_status_openapi(contracts: ContractSet, document, relative: str):
+    """Require the party status command, the closed enum, and the 200 + ETag.
+
+    The public and expert PATCH operations are mandatory. The status vocabulary
+    is the exact SPEC 11.1.5 eight-value set, Party.status references it, and the
+    request requires only ``status`` with an optional 500-character ``reason``.
+    The public 200 must return the updated Party with the shared ETag, because
+    the domain derives ``ETag: "<version>"`` from the returned row version; the
+    expert 200 returns the Party only. There is no 409 in this slice.
+    """
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    for path, internal in PARTY_STATUS_PATHS:
+        path_item = paths.get(path) if isinstance(paths, dict) else None
+        contracts.check(
+            isinstance(path_item, dict),
+            f"{relative}: required path {path} is missing",
+        )
+        if not isinstance(path_item, dict):
+            continue
+        operation = path_item.get("patch")
+        where = f"{relative}: PATCH {path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+
+        references, names = _parameter_names(operation)
+        parameter = _inline_parameter(operation, "partyId") or {}
+        schema = parameter.get("schema") or {}
+        contracts.check("partyId" in names, f"{where}: must declare partyId")
+        contracts.check(
+            parameter.get("in") == "path" and parameter.get("required") is True,
+            f"{where}: partyId must be a required path parameter",
+        )
+        contracts.check(
+            (schema.get("type"), schema.get("format")) == ("string", "uuid"),
+            f"{where}: partyId must be a uuid string",
+        )
+        if internal:
+            contracts.check(
+                "TenantIdQuery" in references,
+                f"{where}: must document the shared TenantIdQuery parameter",
+            )
+            contracts.check(
+                operation.get("security") == [],
+                f"{where}: internal operations must declare security: []",
+            )
+            contracts.check(
+                operation.get("x-internal-api") is True,
+                f"{where}: internal operations must be marked x-internal-api: true",
+            )
+        else:
+            contracts.check(
+                "TenantHeader" in references,
+                f"{where}: must document the shared TenantHeader parameter",
+            )
+            contracts.check(
+                operation.get("security") != [],
+                f"{where}: public operations must keep the document-level security",
+            )
+            for header in ("If-Match", "Idempotency-Key"):
+                contracts.check(
+                    header in names,
+                    f"{where}: must document the optional {header} parameter",
+                )
+
+        request_body = operation.get("requestBody") or {}
+        contracts.check(
+            isinstance(request_body, dict) and request_body.get("required") is True,
+            f"{where}: requestBody must be required",
+        )
+        body_schema = (
+            ((request_body.get("content") or {}).get("application/json") or {})
+            .get("schema")
+            if isinstance(request_body, dict)
+            else None
+        )
+        contracts.check(
+            isinstance(body_schema, dict)
+            and str(body_schema.get("$ref", "")).endswith(
+                f"/schemas/{PARTY_STATUS_REQUEST_SCHEMA}"
+            ),
+            f"{where}: request body must use the {PARTY_STATUS_REQUEST_SCHEMA} schema",
+        )
+
+        ok_schema = _response_schema(operation, "200")
+        contracts.check(
+            isinstance(ok_schema, dict)
+            and str(ok_schema.get("$ref", "")).endswith("/schemas/Party"),
+            f"{where}: 200 must return the Party schema",
+        )
+        ok = (operation.get("responses") or {}).get("200")
+        headers = ok.get("headers") if isinstance(ok, dict) else None
+        if internal:
+            contracts.check(
+                not (isinstance(headers, dict) and "ETag" in headers),
+                f"{where}: the expert 200 must not declare an ETag",
+            )
+        else:
+            etag = headers.get("ETag") if isinstance(headers, dict) else None
+            contracts.check(
+                isinstance(etag, dict)
+                and str(etag.get("$ref", "")).endswith("/headers/ETag"),
+                f"{where}: 200 must declare the shared ETag header",
+            )
+
+        responses = operation.get("responses") or {}
+        for code, suffix in (
+            ("400", "/responses/BadRequest"),
+            ("404", "/responses/NotFound"),
+        ):
+            response = responses.get(code) if isinstance(responses, dict) else None
+            contracts.check(
+                isinstance(response, dict)
+                and str(response.get("$ref", "")).endswith(suffix),
+                f"{where}: {code} must reference the shared "
+                f"{suffix.rsplit('/', 1)[-1]} response",
+            )
+        contracts.check(
+            "409" not in responses,
+            f"{where}: must not document a 409; If-Match is not enforced in this "
+            "slice",
+        )
+        description = str(operation.get("description") or "")
+        contracts.check(
+            PARTY_STATUS_EVENT in description,
+            f"{where}: description must name the emitted {PARTY_STATUS_EVENT} fact",
+        )
+        contracts.check(
+            "no transition graph" in description.lower(),
+            f"{where}: description must document that there is no transition graph",
+        )
+        contracts.check(
+            "same-status" in description.lower(),
+            f"{where}: description must document the same-status no-op",
+        )
+
+    status = schemas.get(PARTY_STATUS_SCHEMA) or {}
+    contracts.check(
+        status.get("type") == "string",
+        f"{relative}: {PARTY_STATUS_SCHEMA}.type must be string",
+    )
+    contracts.check(
+        tuple(status.get("enum") or []) == PARTY_STATUSES,
+        f"{relative}: {PARTY_STATUS_SCHEMA}.enum must be exactly "
+        f"{list(PARTY_STATUSES)}",
+    )
+
+    party = schemas.get("Party") or {}
+    party_status = (party.get("properties") or {}).get("status") or {}
+    contracts.check(
+        party_status.get("$ref") == f"#/components/schemas/{PARTY_STATUS_SCHEMA}",
+        f"{relative}: Party.status must reference {PARTY_STATUS_SCHEMA}",
+    )
+
+    request = schemas.get(PARTY_STATUS_REQUEST_SCHEMA) or {}
+    properties = request.get("properties") or {}
+    contracts.check(
+        request.get("type") == "object",
+        f"{relative}: {PARTY_STATUS_REQUEST_SCHEMA}.type must be object",
+    )
+    contracts.check(
+        set(properties) == {"status", "reason"},
+        f"{relative}: {PARTY_STATUS_REQUEST_SCHEMA} must declare exactly "
+        "['status', 'reason']",
+    )
+    contracts.check(
+        set(request.get("required") or []) == {"status"},
+        f"{relative}: {PARTY_STATUS_REQUEST_SCHEMA}.required must be exactly "
+        "['status']",
+    )
+    contracts.check(
+        (properties.get("status") or {}).get("$ref")
+        == f"#/components/schemas/{PARTY_STATUS_SCHEMA}",
+        f"{relative}: {PARTY_STATUS_REQUEST_SCHEMA}.status must reference "
+        f"{PARTY_STATUS_SCHEMA}",
+    )
+    reason = properties.get("reason") or {}
+    contracts.check(
+        reason.get("type") == "string"
+        and reason.get("maxLength") == PARTY_STATUS_REASON_MAX_LENGTH,
+        f"{relative}: {PARTY_STATUS_REQUEST_SCHEMA}.reason must be a string of at "
+        f"most {PARTY_STATUS_REASON_MAX_LENGTH} characters",
+    )
+    contracts.check(
+        "reason" not in set(request.get("required") or []),
+        f"{relative}: {PARTY_STATUS_REQUEST_SCHEMA}.reason must stay optional",
+    )
+
+
+def check_party_status_asyncapi(contracts: ContractSet, document, relative: str):
+    """Require the implemented status-update fact and its payload.
+
+    The status-update fact is the already-implemented ``party.party.updated``
+    name, not ``party.party.status-updated``. The channel must carry the
+    ``PartyStatusUpdatedData`` payload with the Party identity, the exact
+    ``[status]`` changed-field list, the row version, the from/to enum pair, and
+    the optional 500-character reason. SPEC 11.1.9's
+    ``party.party.status-changed`` channel must stay planned, and no channel may
+    claim a ``party.party.status-updated`` name that the expert does not emit.
+    """
+    channels = document.get("channels") or {}
+    operations = document.get("operations") or {}
+    messages = (document.get("components") or {}).get("messages") or {}
+    send_events = {
+        operation.get("x-event-type")
+        for operation in operations.values()
+        if isinstance(operation, dict) and operation.get("action") == "send"
+    }
+    channel_by_event = {
+        channel.get("address"): channel
+        for channel in channels.values()
+        if isinstance(channel, dict)
+    }
+
+    where = f"{relative}: {PARTY_STATUS_EVENT}"
+    channel = channel_by_event.get(PARTY_STATUS_EVENT)
+    contracts.check(isinstance(channel, dict), f"{where}: channel is missing")
+    contracts.check(
+        PARTY_STATUS_EVENT in send_events, f"{where}: must have a send operation"
+    )
+    if not isinstance(channel, dict):
+        return
+    contracts.check(
+        channel.get("x-event-type") == PARTY_STATUS_EVENT,
+        f"{where}: x-event-type must equal the address",
+    )
+    contracts.check(
+        channel.get("x-status") == "implemented",
+        f"{where}: the channel must be implemented",
+    )
+    contracts.check(
+        str(channel.get("x-implemented-by", "")).endswith(PARTY_EVENT_IMPLEMENTED_BY),
+        f"{where}: x-implemented-by must name {PARTY_EVENT_IMPLEMENTED_BY}",
+    )
+    channel_messages = channel.get("messages") or {}
+    contracts.check(
+        "DomainEvent" in channel_messages,
+        f"{where}: the channel must reference the DomainEvent message",
+    )
+    contracts.check(
+        (channel_messages.get(PARTY_STATUS_EVENT_MESSAGE) or {}).get("$ref")
+        == f"#/components/messages/{PARTY_STATUS_EVENT_MESSAGE}",
+        f"{where}: the channel must reference {PARTY_STATUS_EVENT_MESSAGE}",
+    )
+
+    message = messages.get(PARTY_STATUS_EVENT_MESSAGE) or {}
+    payload = message.get("payload") or {}
+    properties = payload.get("properties") or {}
+    required = set(payload.get("required") or [])
+    contracts.check(
+        payload.get("type") == "object",
+        f"{where}: {PARTY_STATUS_EVENT_MESSAGE}.payload.type must be object",
+    )
+    contracts.check(
+        set(properties) == set(PARTY_STATUS_EVENT_FIELDS),
+        f"{where}: {PARTY_STATUS_EVENT_MESSAGE} must declare exactly "
+        f"{list(PARTY_STATUS_EVENT_FIELDS)}",
+    )
+    contracts.check(
+        required == set(PARTY_STATUS_EVENT_REQUIRED),
+        f"{where}: {PARTY_STATUS_EVENT_MESSAGE}.required must be exactly "
+        f"{list(PARTY_STATUS_EVENT_REQUIRED)}",
+    )
+    contracts.check(
+        (properties.get("partyId") or {}).get("format") == "uuid",
+        f"{where}: {PARTY_STATUS_EVENT_MESSAGE}.partyId must be a uuid",
+    )
+    changed_fields = properties.get("changedFields") or {}
+    changed_items = changed_fields.get("items") or {}
+    contracts.check(
+        changed_fields.get("type") == "array"
+        and changed_fields.get("minItems") == 1
+        and changed_fields.get("maxItems") == 1
+        and changed_items.get("const") == "status",
+        f"{where}: {PARTY_STATUS_EVENT_MESSAGE}.changedFields must be exactly "
+        "[status]",
+    )
+    version = properties.get("version") or {}
+    contracts.check(
+        (version.get("type"), version.get("minimum")) == ("integer", 0),
+        f"{where}: {PARTY_STATUS_EVENT_MESSAGE}.version must be an integer >= 0",
+    )
+    for field in ("from", "to"):
+        contracts.check(
+            tuple((properties.get(field) or {}).get("enum") or []) == PARTY_STATUSES,
+            f"{where}: {PARTY_STATUS_EVENT_MESSAGE}.{field} must enumerate "
+            f"{list(PARTY_STATUSES)}",
+        )
+    reason = properties.get("reason") or {}
+    contracts.check(
+        reason.get("type") == "string"
+        and reason.get("maxLength") == PARTY_STATUS_REASON_MAX_LENGTH,
+        f"{where}: {PARTY_STATUS_EVENT_MESSAGE}.reason must be a string of at most "
+        f"{PARTY_STATUS_REASON_MAX_LENGTH} characters",
+    )
+    contracts.check(
+        "reason" not in required,
+        f"{where}: {PARTY_STATUS_EVENT_MESSAGE}.reason must stay optional",
+    )
+
+    planned = channel_by_event.get(PARTY_STATUS_SPEC_EVENT) or {}
+    contracts.check(
+        planned.get("x-status") == "planned",
+        f"{where}: {PARTY_STATUS_SPEC_EVENT} must stay planned; the expert emits "
+        f"{PARTY_STATUS_EVENT}",
+    )
+    contracts.check(
+        "party.party.status-updated" not in channel_by_event,
+        f"{where}: party.party.status-updated is not an emitted event name; the "
+        f"status fact is {PARTY_STATUS_EVENT}",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Party identifier and address reference data (SPEC 11.1.4)
 # ---------------------------------------------------------------------------
 
@@ -13787,6 +14159,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_notification_source_filter(contracts, document, relative)
             check_notification_templates_openapi(contracts, document, relative)
         if vertical == "party":
+            check_party_status_openapi(contracts, document, relative)
             check_party_reference_data_openapi(contracts, document, relative)
         contracts.check_openapi_schemas(document, relative)
         if verbose:
@@ -14744,6 +15117,7 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
             check_notification_templates_asyncapi(contracts, document, relative)
 
         if vertical == "party":
+            check_party_status_asyncapi(contracts, document, relative)
             check_party_reference_data_asyncapi(contracts, document, relative)
 
         entry = catalog_entries.get(vertical) or {}

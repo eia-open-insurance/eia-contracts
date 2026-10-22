@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Party API
-  version: 1.2.0
+  version: 1.3.0
   summary: Party identity, reference data, and the Party expert API.
   description: >
     Party is shared identity data across both books. This document describes the
@@ -21,12 +21,29 @@ info:
     the transactional outbox in the same transaction as the child insert:
     `party.party.identifier-added` or `party.party.address-added`.
 
+    The lifecycle status is changed by `PATCH /api/v1/parties/{partyId}/status`
+    with `{status, reason}`. The status is trimmed and upper-cased and must be a
+    member of the closed `PartyStatus` enum (`PROSPECT`, `ACTIVE`, `INACTIVE`,
+    `DECEASED`, `DISSOLVED`, `MERGED`, `RESTRICTED`, `BLOCKED`); an accepted
+    change bumps the Party row version and writes `party.party.updated` with
+    `changedFields: [status]`, `from`, `to`, and the optional reason in the same
+    transaction. Repeating the current status is a 200 no-op with no version
+    bump and no event. The reason is carried in the event only; it is not
+    persisted on the Party row and the Party projection never returns it. The
+    public operation returns the updated Party with an `ETag` derived from its
+    row version. Every status is accepted from every current status: there is no
+    transition graph. A status change is published as `party.party.updated`, not
+    the SPEC 11.1.9 `party.party.status-changed` name, which remains planned
+    (M-22, M-55). Optional `If-Match` and `Idempotency-Key` headers are accepted
+    and forwarded by the domain, but the expert does not compare or replay them
+    in this slice (M-06, M-07, M-55).
+
     Deviations from this document are recorded in MISMATCHES.md. The Party
     domain translates expert 404, 409, and other 4xx failures into its
     `{code, message, details}` `ApiError` body rather than the canonical
     `application/problem+json` `Problem`, and the expert returns `{code,
-    message}`; M-02 and M-17 record the envelope gap and M-54 records the
-    reference-data slice.
+    message}`; M-02 and M-17 record the envelope gap, M-54 records the
+    reference-data slice, and M-55 records the status-transition slice.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -145,6 +162,103 @@ paths:
       responses:
         '200':
           description: Party detail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Party'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/parties/{partyId}/status:
+    patch:
+      operationId: updatePartyStatus
+      tags:
+        - Party
+      summary: Change a party's lifecycle status.
+      description: >
+        Applies one lifecycle status transition and returns the updated Party
+        with an `ETag` derived from its row version. The body is
+        `UpdatePartyStatusRequest`: `status` is required and `reason` is
+        optional.
+
+        `status` is trimmed and upper-cased before the membership check and
+        must be one of `PROSPECT`, `ACTIVE`, `INACTIVE`, `DECEASED`,
+        `DISSOLVED`, `MERGED`, `RESTRICTED`, or `BLOCKED`; any other value is
+        400 `VALIDATION_ERROR`. A missing or blank `status` is 400 `VALIDATION`
+        from the domain's request validation. `reason` is trimmed and capped at
+        500 characters; a longer value is 400 `VALIDATION` at the domain and
+        400 `VALIDATION_ERROR` at the expert, and a blank value is treated as
+        absent. A missing or malformed tenant is 400 `TENANT_REQUIRED` or
+        `TENANT_INVALID`.
+
+        There is no transition graph: every listed status is accepted from
+        every current status, including a same-status request. A same-status
+        request returns 200 with the current Party and its current `ETag`
+        without a version bump and without an event. An accepted change
+        increments the Party row version and writes `party.party.updated` with
+        `changedFields: [status]`, `version`, `from`, `to`, and the trimmed
+        `reason` when one was supplied, in the same transaction as the row
+        update. The envelope `aggregateVersion` is the new row version plus one
+        because Party rows start at version 0. The reason is not persisted on
+        the Party row and is not returned in the Party projection; there is no
+        status history.
+
+        An unknown party and another tenant's party are both 404 `NOT_FOUND`, so
+        the response cannot confirm that a foreign party exists. The public
+        route requires `X-EIA-Tenant`. Optional `If-Match` and
+        `Idempotency-Key` headers are accepted and forwarded to the expert, but
+        the expert does not compare the entity tag or replay the key in this
+        slice, so there is no 409 and a repeated non-no-op request applies again
+        (M-06, M-07, M-55). A status change is published as
+        `party.party.updated`; SPEC 11.1.9's `party.party.status-changed` name
+        remains planned (M-22, M-55).
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: partyId
+          in: path
+          required: true
+          description: Party whose lifecycle status is changed.
+          schema:
+            type: string
+            format: uuid
+        - name: If-Match
+          in: header
+          required: false
+          description: >
+            Optional entity tag from the last read, conventionally the strong
+            `"<version>"` form (for example `"3"`), or `*`. The domain forwards
+            the raw value when it is present and non-blank; the expert does not
+            compare it, so a stale or non-standard tag does not produce a 409
+            (M-06, M-55).
+          schema:
+            type: string
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: >
+            Optional idempotency key. The domain forwards it to the expert,
+            which neither validates nor replays it in this slice; a retry
+            applies the transition again unless it is a same-status no-op
+            (M-07, M-55).
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePartyStatusRequest'
+      responses:
+        '200':
+          description: >
+            Party after the transition, or the unchanged Party for a same-status
+            no-op.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
           content:
             application/json:
               schema:
@@ -412,6 +526,63 @@ paths:
           $ref: './components.yaml#/components/responses/NotFound'
         default:
           $ref: './components.yaml#/components/responses/Problem'
+  /internal/v1/parties/{partyId}/status:
+    patch:
+      operationId: expertUpdatePartyStatus
+      tags:
+        - Party internal
+      summary: Change a party's lifecycle status (expert).
+      description: >
+        Expert command used by the Party domain. The tenant is the required
+        `?tenantId=` query parameter; unlike the reference-data expert routes,
+        this operation does not read `X-EIA-Tenant`. A missing or malformed
+        `tenantId` is a 400 from Spring's request-parameter binding rather than a
+        structured `ApiError`.
+
+        The expert owns the status vocabulary and the transition rules
+        documented on the public operation: the status is trimmed and
+        upper-cased and must be a member of `PartyStatus`; there is no
+        transition graph, so every value is accepted from every current status;
+        a same-status request returns the
+        current Party with 200, no version bump, and no event; an accepted
+        change bumps the row version and writes `party.party.updated` with
+        `changedFields: [status]`, `version`, `from`, `to`, and the optional
+        trimmed reason in the same transaction. The expert route does not set
+        an `ETag`; the domain derives it from the returned `version`. An unknown
+        party and another tenant's party are both 404 `NOT_FOUND`. `If-Match`
+        and `Idempotency-Key` are not read on this route (M-55).
+      security: []
+      x-internal-api: true
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: partyId
+          in: path
+          required: true
+          description: Party whose lifecycle status is changed.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePartyStatusRequest'
+      responses:
+        '200':
+          description: >
+            Party after the transition, or the unchanged Party for a same-status
+            no-op.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Party'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
   /internal/v1/parties/{partyId}/identifiers:
     get:
       operationId: expertListPartyIdentifiers
@@ -594,9 +765,9 @@ components:
         - $ref: './components.yaml#/components/schemas/AuditFields'
       type: object
       description: >
-        Party projection. partyType, status, sanctionsStatus, and
-        confidentiality are free-form strings today; the SPEC 11.1.5
-        enumerations are not enforced yet.
+        Party projection. `status` is the closed `PartyStatus` enum. partyType,
+        sanctionsStatus, and confidentiality are still free-form strings; their
+        SPEC 11.1.5 enumerations are not enforced yet.
       required:
         - id
         - tenantId
@@ -627,14 +798,50 @@ components:
         legalName:
           type: string
         status:
-          type: string
-          description: Lifecycle status. Created as PROSPECT; not yet constrained by an enum.
+          $ref: '#/components/schemas/PartyStatus'
         sanctionsStatus:
           type: string
           description: Screening state. Created as NOT_SCREENED; not yet constrained by an enum.
         confidentiality:
           type: string
           description: Data classification. Created as INTERNAL; not yet constrained by an enum.
+    PartyStatus:
+      type: string
+      description: >
+        Closed party lifecycle vocabulary from SPEC 11.1.5. A party is created as
+        `PROSPECT`. A status transition is trimmed and upper-cased before the
+        membership check, and every value is accepted from every current status;
+        there is no transition graph (M-55).
+      enum:
+        - PROSPECT
+        - ACTIVE
+        - INACTIVE
+        - DECEASED
+        - DISSOLVED
+        - MERGED
+        - RESTRICTED
+        - BLOCKED
+    UpdatePartyStatusRequest:
+      type: object
+      description: >
+        Party lifecycle transition command. `status` is required; `reason` is
+        optional. The status is trimmed and upper-cased and must be a member of
+        `PartyStatus`. The reason is trimmed, a blank value is treated as absent,
+        and the value is carried only in the `party.party.updated` event: it is
+        not persisted on the Party row and is not returned in the Party
+        projection (M-55).
+      required:
+        - status
+      properties:
+        status:
+          $ref: '#/components/schemas/PartyStatus'
+        reason:
+          type: string
+          maxLength: 500
+          description: >
+            Optional rationale. Trimmed; a blank value is treated as absent.
+            Supplied on a same-status no-op request, the reason is ignored
+            because no transition and no event occurs.
     CreatePartyRequest:
       type: object
       description: Public create command. The tenant comes from X-EIA-Tenant, never from the body.
@@ -908,24 +1115,29 @@ components:
           format: date
 x-vertical: party
 x-compatibility:
-  contractVersion: 1.2.0
-  previousContractVersion: 1.1.0
+  contractVersion: 1.3.0
+  previousContractVersion: 1.2.0
   breaking: []
   compatible:
-    - Adds GET/POST /api/v1/parties/{partyId}/identifiers and /api/v1/parties/{partyId}/addresses.
-    - Adds the four matching /internal/v1 expert operations used by the Party domain.
-    - Adds the PartyIdentifier, PartyAddress, CreatePartyIdentifierRequest, and CreatePartyAddressRequest schemas.
-    - Adds the closed PartyIdentifierType (21 values) and PartyAddressType (11 values) enums.
-    - Documents 200/201/400/404/409 on the four public operations and the identifier duplicate guard.
-    - Documents the party.party.identifier-added and party.party.address-added facts and their payloads.
+    - Adds PATCH /api/v1/parties/{partyId}/status and the matching /internal/v1 expert operation.
+    - Adds the UpdatePartyStatusRequest command and the closed PartyStatus enum (8 values).
+    - Constrains Party.status to PartyStatus; every value the API writes is already a member.
+    - Documents the 200 Party with ETag, the 400 and 404 responses, the same-status no-op, and the party.party.updated status fact.
   note: >
-    The reference-data slice is additive over 1.1.0: no existing path, request
-    field, response field, or event name is removed or changes meaning.
+    The status-transition slice is additive over 1.2.0: no path, request field,
+    response field, or event name is removed or changes meaning. Party.status
+    was previously documented as a free-form string; it is now the closed
+    eight-value enum the service enforces on every write, so no response value
+    that the service can produce is excluded. The reason is accepted on the
+    command but is not persisted or returned, and If-Match and Idempotency-Key
+    are forwarded but not enforced (M-55).
 x-implementation:
   status: implemented
   verifiedAt: '2026-10-22'
   verifiedAgainst:
     - repos/eia-party-domain/src/main/java/com/eia/party/domain/PartyController.java
+    - repos/eia-party-domain/src/main/java/com/eia/party/domain/UpdatePartyStatusCommand.java
+    - repos/eia-party-domain/src/main/java/com/eia/party/domain/PartyDto.java
     - repos/eia-party-domain/src/main/java/com/eia/party/domain/PartySearchController.java
     - repos/eia-party-domain/src/main/java/com/eia/party/domain/PartySearchService.java
     - repos/eia-party-domain/src/main/java/com/eia/party/domain/PartySearchRepository.java
@@ -936,6 +1148,10 @@ x-implementation:
     - repos/eia-party-domain/src/main/java/com/eia/party/domain/PartyClient.java
     - repos/eia-party-domain/src/main/java/com/eia/party/domain/ApiExceptionHandler.java
     - repos/eia-party-expert/src/main/java/com/eia/party/expert/PartyController.java
+    - repos/eia-party-expert/src/main/java/com/eia/party/expert/PartyService.java
+    - repos/eia-party-expert/src/main/java/com/eia/party/expert/PartyRepository.java
+    - repos/eia-party-expert/src/main/java/com/eia/party/expert/UpdatePartyStatusRequest.java
+    - repos/eia-party-expert/src/main/java/com/eia/party/expert/Party.java
     - repos/eia-party-expert/src/main/java/com/eia/party/expert/ApiExceptionHandler.java
     - repos/eia-party-expert/src/main/java/com/eia/party/expert/PartyReferenceDataController.java
     - repos/eia-party-expert/src/main/java/com/eia/party/expert/PartyReferenceDataService.java
@@ -949,6 +1165,10 @@ x-implementation:
     - repos/eia-party-expert/src/test/java/com/eia/party/expert/PartyReferenceDataOutboxIntegrationTest.java
     - repos/eia-party-domain/src/test/java/com/eia/party/domain/PartyIdentifierControllerTest.java
     - repos/eia-party-domain/src/test/java/com/eia/party/domain/PartyAddressControllerTest.java
+    - repos/eia-party-domain/src/test/java/com/eia/party/domain/PartyControllerTest.java
+    - repos/eia-party-domain/src/test/java/com/eia/party/domain/PartyClientTest.java
+    - repos/eia-party-expert/src/test/java/com/eia/party/expert/PartyApiTest.java
+    - repos/eia-party-expert/src/test/java/com/eia/party/expert/PartyOutboxIntegrationTest.java
   notes: >
     The Party domain translates expert 404, 409, and other 4xx failures into its
     `{code, message, details}` `ApiError` body; the expert returns `{code,
@@ -957,13 +1177,28 @@ x-implementation:
     `(tenant_id, party_id, identifier_type, identifier_value)` key and is 409;
     the expert has no address uniqueness rule, so the documented
     `DUPLICATE_PARTY_ADDRESS` guard is not implemented yet (M-54). The expert
-    route requires `tenantId` or `X-EIA-Tenant` and rejects a mismatch; the
-    public domain requires `X-EIA-Tenant` and forwards it on both.
+    reference-data routes require `tenantId` or `X-EIA-Tenant` and reject a
+    mismatch; the public domain requires `X-EIA-Tenant` and forwards it on both.
+    The expert status route instead requires the `?tenantId=` query parameter
+    and does not read `X-EIA-Tenant`.
+
+    The status command normalizes the status to upper case and checks membership
+    against the eight-value `PartyStatus` set; it has no transition graph, so
+    every status is accepted from every current status. A same-status request
+    returns the current row without a version bump or event. An accepted change
+    increments `version` once and inserts one `party.party.updated` outbox row in
+    the same transaction; the payload carries `changedFields: [status]`,
+    `version`, `from`, `to`, and the trimmed reason when non-blank. The reason
+    has no column and no history, so it exists only in the event. The domain
+    forwards optional `If-Match` and `Idempotency-Key` headers, but the expert
+    status route does not declare or compare them, so neither concurrency nor a
+    replay is enforced and there is no 409 (M-06, M-07, M-55). The public 200
+    sets `ETag: "<version>"`; the expert 200 does not set an ETag.
 x-planned-operations:
   - method: PATCH
     path: /api/v1/parties/{partyId}
     spec: SPEC 11.1.10
-    note: Update party (transaction).
+    note: Update party (transaction). The lifecycle status transition is implemented at PATCH /api/v1/parties/{partyId}/status; the wider SPEC update path stays planned.
   - method: POST
     path: /api/v1/parties/{partyId}/merge
     spec: SPEC 11.1.10

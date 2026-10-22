@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:party
 info:
   title: EIA Party events
-  version: 1.2.0
+  version: 1.3.0
   summary: Published domain event names for the Party vertical.
   description: >
     Event contract for the Party vertical. The authoritative event names are
@@ -18,15 +18,20 @@ info:
     `party.party.identifier-added`, and `party.party.address-added` through the
     transactional outbox; those channels and operations are marked
     `x-status: implemented`. A status change is published as
-    `party.party.updated` with `changedFields: [status]`. Adding one identifier
+    `party.party.updated` with `changedFields: [status]`, `from`, `to`, the
+    Party row `version`, and the optional trimmed `reason`; the
+    `PartyStatusUpdatedData` message documents that payload. The implemented
+    status-update fact is therefore `party.party.updated`, not a separate
+    `party.party.status-updated` name, and SPEC 11.1.9's
+    `party.party.status-changed` remains planned (MISMATCHES.md M-22, M-55).
+    Adding one identifier
     or address bumps the Party row version and writes one child fact in the
     same transaction: the payload names the child id, the Party identity, and
     the Party row `version`, while the envelope `aggregateVersion` is that row
     version plus one. The two
     reference-data names are new: SPEC 11.1.9 publishes no identifier-added or
     address-added fact (MISMATCHES.md M-22, M-54), so they are additive under
-    EV-05. `party.party.status-changed` and the other SPEC 11.1.9 names remain
-    planned.
+    EV-05. The other SPEC 11.1.9 names remain planned.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -61,9 +66,15 @@ channels:
     address: party.party.updated
     title: party.party.updated
     description: >
-      Emitted when a party status changes. The payload carries
-      `changedFields: [status]`, `from`, `to`, the optional `reason`, and the
-      row version.
+      Emitted by the Party expert in the same transaction as an accepted
+      lifecycle status change. The payload is `PartyStatusUpdatedData`:
+      `changedFields: [status]`, the Party identity and number, the row
+      `version` after the bump, `from` and `to`, and the optional trimmed
+      `reason`. A same-status request writes no row update and no event. The
+      reason is not persisted on the Party row and there is no status history.
+      This is the implemented status-update fact; there is no separate
+      `party.party.status-updated` event name, and SPEC 11.1.9's
+      `party.party.status-changed` remains planned (MISMATCHES.md M-22, M-55).
     x-event-type: party.party.updated
     x-event-version: 1
     x-status: implemented
@@ -72,6 +83,8 @@ channels:
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
+      PartyStatusUpdatedData:
+        $ref: '#/components/messages/PartyStatusUpdatedData'
   PartyPartyIdentifierAdded:
     address: party.party.identifier-added
     title: party.party.identifier-added
@@ -231,7 +244,9 @@ operations:
       $ref: '#/channels/PartyPartyUpdated'
     summary: Publish party.party.updated
     description: >
-      Publishes party.party.updated when the party status changes.
+      Publishes party.party.updated through the transactional outbox in the same
+      transaction as the Party status update and version bump (SPEC 7.5.1). A
+      same-status request is a no-op and publishes nothing.
     x-event-type: party.party.updated
     x-status: implemented
   publishPartyPartyIdentifierAdded:
@@ -352,6 +367,76 @@ components:
             type: string
       payload:
         $ref: '../schemas/event-envelope.schema.json'
+    PartyStatusUpdatedData:
+      name: PartyStatusUpdatedData
+      title: party.party.updated status data
+      summary: One accepted party status transition and the Party row version.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - partyId
+          - partyNumber
+          - changedFields
+          - version
+          - from
+          - to
+        properties:
+          partyId:
+            type: string
+            format: uuid
+          partyNumber:
+            type: string
+            description: Generated Party business key, format PTY-000000001.
+          changedFields:
+            type: array
+            description: >
+              The changed member names. A status transition always publishes
+              exactly `[status]`.
+            minItems: 1
+            maxItems: 1
+            items:
+              type: string
+              const: status
+          version:
+            type: integer
+            minimum: 0
+            description: >
+              Party row version after the status update and version bump. The
+              envelope `aggregateVersion` is this value plus one because Party
+              rows start at version 0.
+          from:
+            type: string
+            description: Status before the transition.
+            enum:
+              - PROSPECT
+              - ACTIVE
+              - INACTIVE
+              - DECEASED
+              - DISSOLVED
+              - MERGED
+              - RESTRICTED
+              - BLOCKED
+          to:
+            type: string
+            description: Status after the transition; never equal to `from`.
+            enum:
+              - PROSPECT
+              - ACTIVE
+              - INACTIVE
+              - DECEASED
+              - DISSOLVED
+              - MERGED
+              - RESTRICTED
+              - BLOCKED
+          reason:
+            type: string
+            maxLength: 500
+            description: >
+              Optional trimmed rationale. The expert omits the member when the
+              reason is null or blank. It is carried only in this event and is
+              not persisted on the Party row or returned by the Party API.
     PartyIdentifierAddedData:
       name: PartyIdentifierAddedData
       title: party.party.identifier-added data
@@ -546,10 +631,17 @@ x-implementation:
     `party.party.created`, `party.party.updated`,
     `party.party.identifier-added`, and `party.party.address-added` are written
     to the transactional outbox in the same transaction as the party,
-    identifier, or address write and dispatched by the platform outbox
-    dispatcher when `eia.outbox.enabled=true`. Each reference-data fact is one
+    identifier, address, or status write and dispatched by the platform outbox
+    dispatcher when `eia.outbox.enabled=true`. A status transition writes one
+    `party.party.updated` row with `changedFields: [status]`, `version`, `from`,
+    `to`, and the optional trimmed reason; a same-status request writes no row
+    and no event. The reason has no Party column, so it exists only in the
+    event. Each reference-data fact is one
     outbox row per appended child, keyed by the Party aggregate at the bumped
-    version, with the child id and normalized values in the payload. The two
+    version, with the child id and normalized values in the payload. The
+    implemented status-update fact is `party.party.updated`; there is no
+    `party.party.status-updated` name, and the SPEC 11.1.9
+    `party.party.status-changed` name remains planned (M-22, M-55). The two
     reference-data names have no SPEC 11.1.9 equivalent (M-22, M-54); the other
     SPEC 11.1.9 names remain planned. There is no subscriber, inbox, or
     subscription registry yet.

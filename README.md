@@ -2422,6 +2422,36 @@ the tenant parameter, the 400 response, the both-or-neither wording, and the
 `INVALID_SOURCE_TYPE`/`INVALID_SOURCE_FILTER`/`EIA-NTF-9502` codes; it also
 rejects a `sourceReference` query parameter. The full run passes 14,947 checks.
 
+### Party lifecycle status transitions (2026-10-22)
+
+Party 1.3.0 documents the lifecycle status command. The change is additive: one
+public PATCH operation, its `/internal/v1` expert equivalent, the
+`UpdatePartyStatusRequest` command, the closed `PartyStatus` enum, and a status
+payload on the already-implemented `party.party.updated` event; no path, request
+field, response field, or event name is removed.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/party.yaml` | 1.3.0 | Additive | `PATCH /api/v1/parties/{partyId}/status`, the `/internal/v1` expert equivalent, `UpdatePartyStatusRequest`, `PartyStatus` (8 values), and the `Party.status` reference; 200 `Party` + `ETag`, 400, 404. |
+| `asyncapi/party.yaml` | 1.3.0 | Additive | `PartyStatusUpdatedData` on the implemented `party.party.updated` channel; no new event name. |
+| `asyncapi/event-catalog.yaml` | 1.35.0 | Unchanged | No event name is added or moved; the status fact is the already-counted `party.party.updated` (220 published and 101 implemented in total; Party 11 published and 4 implemented). |
+
+The route, body, status vocabulary, transition and no-op rules, ETag, tenant
+wall, error codes, event payload, and naming divergence are under
+[Party status transitions](#party-status-transitions).
+`party.party.status-updated` is not an emitted event name: the implemented
+status-update fact is `party.party.updated`, and SPEC 11.1.9's
+`party.party.status-changed` stays planned. `MISMATCHES.md` M-55 records the
+SPEC-less `/status` route, the absent transition graph and status history, the
+event-only reason, and the unenforced `If-Match`/`Idempotency-Key` headers.
+
+The validator requires both PATCH operations, the tenant and `partyId`
+parameters, the `UpdatePartyStatusRequest` and `PartyStatus` schemas, the
+`Party.status` reference, the 200 `Party` and shared ETag, the 400/404
+responses, the no-409 rule, the same-status and no-transition-graph wording, the
+`PartyStatusUpdatedData` payload, and the planned `status-changed` and absent
+`status-updated` names. The full run passes 15,478 checks.
+
 ### Party identifier and address reference data (2026-10-22)
 
 Party 1.2.0 documents the identifier and address reference data of the Party
@@ -2566,7 +2596,11 @@ Policy is the reference implementation:
   policy rejection is 422 `BUSINESS_RULE`; a missing approval is 428
   `APPROVAL_REQUIRED`.
 
-No other vertical emits `ETag` or accepts `If-Match`.
+Party is the only other vertical that emits `ETag`: its status command returns
+`ETag: "<version>"` and documents the optional `If-Match` and
+`Idempotency-Key` headers, but the expert does not compare the tag or replay the
+key, so a stale tag is not a 409 (M-06, M-07, M-55). No other vertical emits
+`ETag` or accepts `If-Match`.
 Contract bind takes `expectedVersion` and `approvedBy`; the Direct Claims child
 PATCH commands take `expectedVersion`; Assumed Claims propagates the expert's
 409/422/428; Cession/Retrocession still return 400 for an illegal lifecycle
@@ -2750,6 +2784,56 @@ Rules:
   reference-data route and SPEC 11.1.9 publishes neither event; M-54 records the
   wider type sets, the plaintext identifier value versus the SPEC encrypted
   column, the alpha-2 versus alpha-3 country, and the missing address dedup key.
+
+### Party status transitions
+
+`PATCH /api/v1/parties/{partyId}/status` changes one party's lifecycle status;
+the expert serves the same command at
+`/internal/v1/parties/{partyId}/status?tenantId=...`.
+
+| Operation | Public path | Expert path | Success | Errors |
+|---|---|---|---|---|
+| Change status | `PATCH /api/v1/parties/{partyId}/status` | `PATCH /internal/v1/parties/{partyId}/status` | 200 `Party` + `ETag` | 400, 404 |
+
+The body is `UpdatePartyStatusRequest`: `status` (required) and `reason`
+(optional, at most 500 characters). `status` is trimmed and upper-cased before
+the membership check and must be one of `PROSPECT`, `ACTIVE`, `INACTIVE`,
+`DECEASED`, `DISSOLVED`, `MERGED`, `RESTRICTED`, or `BLOCKED`. A missing or
+blank status is 400 `VALIDATION` at the domain and an unknown status is 400
+`VALIDATION_ERROR`. The reason is trimmed and a blank value is treated as
+absent.
+
+Rules:
+
+- There is no transition graph. Every status is accepted from every current
+  status. A same-status request is a 200 no-op: it returns the current Party and
+  `ETag` without a version bump and writes no event. It ignores a supplied
+  reason.
+- An accepted change increments the Party row version and writes exactly one
+  `party.party.updated` outbox row in the same transaction with
+  `changedFields: [status]`, `version`, `from`, `to`, and the trimmed reason
+  when non-blank. The envelope `aggregateVersion` is the new row version plus one
+  because Party rows start at version 0.
+- `reason` is not persisted: there is no status-reason column and no status
+  history. The Party projection never returns it; it exists only in the event
+  payload.
+- The public 200 sets `ETag: "<version>"`. Optional `If-Match` and
+  `Idempotency-Key` headers are accepted and forwarded, but the expert does not
+  compare the tag or replay the key, so there is no 409 and a repeated non-no-op
+  request applies again (M-06, M-07, M-55). The expert 200 does not set an
+  `ETag`.
+- An unknown party and another tenant's party are both 404 `NOT_FOUND`. The
+  public route requires `X-EIA-Tenant`; the expert route requires `?tenantId=`
+  and does not read `X-EIA-Tenant` on this operation.
+- The implemented status-update fact is `party.party.updated`. It is not
+  `party.party.status-updated`, and SPEC 11.1.9's
+  `party.party.status-changed` remains planned (M-22, M-55). The event payload is
+  `PartyStatusUpdatedData`; `changedFields` is exactly `[status]`, `from` and
+  `to` are the eight-value enum pair, and `reason` is optional.
+- `Party.status` is now the closed `PartyStatus` enum. The service only ever
+  writes one of the eight values, so the narrowing does not exclude a value the
+  API can produce; the previous document described the field as a free-form
+  string.
 
 ### Pagination and collections
 
@@ -3714,8 +3798,17 @@ missing directory.
    absence of the adjustment path from `x-planned-operations`, and agreement
    between
    `info.version` and `x-compatibility.contractVersion`. It also requires the
-   Party identifier and address operations on both the public and the expert
-   base, the shared tenant parameters and the uuid `partyId` path parameter,
+   Party status PATCH on both the public and the expert base, the inline
+   `If-Match` and `Idempotency-Key` parameters on the public operation, the
+   shared `TenantHeader` and `TenantIdQuery`, the required `partyId` path
+   parameter, the `UpdatePartyStatusRequest` `{status, reason?}` split with the
+   500-character reason bound, the exact eight-value `PartyStatus` enum, the
+   `Party.status` reference to it, the 200 `Party` with the shared ETag on the
+   public operation and no ETag on the expert operation, the 400/404 responses,
+   the no-409 rule, and the same-status and no-transition-graph wording. It also
+   requires the Party identifier and address operations on both the public and
+   the expert base, the shared tenant parameters and the uuid `partyId` path
+   parameter,
    the 200/201/400/404/409 responses with `DUPLICATE_PARTY_IDENTIFIER` and
    `DUPLICATE_PARTY_ADDRESS`, the exact 21-value `PartyIdentifierType` and
    11-value `PartyAddressType` enums, the `PartyIdentifier`, `PartyAddress`,
@@ -3800,7 +3893,13 @@ missing directory.
    the `PartyIdentifierAddedData` and `PartyAddressAddedData` payloads with
    their Party identity and row version, child id, normalized type and values,
    optional authority, effective date, second line, and region, country, actor,
-   and instant members.
+   and instant members, and the `PartyStatusUpdatedData` payload with its Party
+   identity, exact `[status]` changed-field list, row version, eight-value
+   `from`/`to` pair, and optional 500-character reason. It also requires the
+   implemented `party.party.updated` channel, keeps the SPEC
+   `party.party.status-changed` channel planned, and rejects a
+   `party.party.status-updated` channel because the expert does not emit that
+   name.
 5. **Event catalog cross-check.** The published set in `event-catalog.yaml`
    must equal the channel addresses in the matching vertical document, event
    names must be unique across the platform and must match
@@ -3808,6 +3907,8 @@ missing directory.
    and the catalog `implemented` list must equal the channels marked
    `x-status: implemented`. The implemented event names for all ten publishing
    verticals are required explicitly, including
+   `party.party.created`, `party.party.updated` (the implemented status-update
+   fact),
    `party.party.identifier-added`,
    `party.party.address-added`,
    `direct.claim.assigned`,
@@ -3885,12 +3986,14 @@ missing directory.
 - the Policy page envelope is offset-based (`items`, `page`, `size`, `total`,
   `_links`) rather than the cursor envelope in SPEC 7.6/12.2, and the other
   verticals still return bare arrays;
-- `ETag`/`If-Match` exist only in Policy, and the billing plan, installment, and
-  renewal commands do not accept them. `Idempotency-Key` covers Policy plus
+- `ETag`/`If-Match` are complete in Policy, and the Party status command returns
+  an `ETag` and accepts `If-Match` but the expert does not compare it; the
+  Policy billing plan, installment, and renewal commands do not accept the
+  headers. `Idempotency-Key` covers Policy plus
   the Direct Claims and Assumed Claims task/note creates; the remaining vertical
   creates do not accept it, the claim task/note responses spell the marker
   `Idempotent-Replay`, and the Direct Claims reservation has a narrow concurrent
-  first-attempt race (M-06, M-07). Detail `_links` exist nowhere, and
+  first-attempt race (M-06, M-07, M-55). Detail `_links` exist nowhere, and
   Cession/Retrocession still return 400 for an illegal lifecycle edge;
 - the Cession/Retrocession FS-RI hand-off is synchronous, with no hand-off
   queue or hand-off resource (SPEC 7.18.3/HAND-05);
@@ -4119,6 +4222,17 @@ missing directory.
   plaintext rather than encrypted, the country is alpha-2 rather than alpha-3,
   both lists are bare arrays, and the documented address duplicate guard is not
   implemented (M-22, M-54);
+- party lifecycle status is changed by a SPEC-less
+  `PATCH /api/v1/parties/{partyId}/status` command that accepts all eight
+  `PartyStatus` values from every current status. There is no transition graph,
+  no status history, and no persisted reason: the optional reason exists only in
+  the `party.party.updated` event payload, and a same-status request is a no-op.
+  The implemented status-update fact is the generic `party.party.updated`, not a
+  `party.party.status-updated` name, and SPEC 11.1.9's
+  `party.party.status-changed` remains planned. The public operation returns an
+  `ETag` and accepts `If-Match`/`Idempotency-Key`, but the expert compares
+  neither, so there is no 409 and a repeated non-no-op request applies again
+  (M-06, M-07, M-22, M-55);
 - ten experts publish a subset of their events through the transactional
   outbox into the platform `event-ingest` inbox, but no vertical consumes
   another vertical's events, there is no subscription registry or gap
