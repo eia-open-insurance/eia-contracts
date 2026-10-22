@@ -1854,6 +1854,113 @@ POLICY_RATING_EVENT_FIELDS = (
 POLICY_RATING_EVENT_IMPLEMENTED_BY = "PolicyEvents.java"
 
 
+# Policy underwriting submissions (SPEC 11.2.14 intake). A submission is a
+# tenant-owned pre-policy aggregate with a per-tenant SUB-{YYYY}-{7 digits}
+# number and a six-state one-way graph. The SPEC CLEARANCE/RATING intermediate
+# states and the clearance, rating, referral, quote, authority, declination, and
+# producer slices are not modelled; the public domain also hides the expert's
+# q/status list filters. The two facts are new: SPEC 11.2.9 publishes
+# policy.submission.received and policy.submission.declined instead, so the
+# implemented names are recorded in MISMATCHES.md M-22 and M-59.
+POLICY_SUBMISSIONS_PATH = "/api/v1/policies/submissions"
+POLICY_SUBMISSION_PATH = "/api/v1/policies/submissions/{submissionId}"
+POLICY_SUBMISSION_STATUS_PATH = (
+    "/api/v1/policies/submissions/{submissionId}/status"
+)
+POLICY_SUBMISSION_PROJECTION = "PolicySubmission"
+POLICY_SUBMISSION_CREATE_REQUEST = "CreatePolicySubmissionRequest"
+POLICY_SUBMISSION_STATUS_REQUEST = "UpdatePolicySubmissionStatusRequest"
+POLICY_SUBMISSION_STATUS_SCHEMA = "PolicySubmissionStatus"
+POLICY_SUBMISSION_STATUSES = (
+    "RECEIVED",
+    "REFERRED",
+    "QUOTED",
+    "BOUND",
+    "DECLINED",
+    "WITHDRAWN",
+)
+POLICY_SUBMISSION_TRANSITIONS = (
+    ("RECEIVED", ("REFERRED", "QUOTED", "DECLINED", "WITHDRAWN")),
+    ("REFERRED", ("QUOTED", "DECLINED", "WITHDRAWN")),
+    ("QUOTED", ("BOUND", "DECLINED", "WITHDRAWN")),
+)
+POLICY_SUBMISSION_TERMINAL_STATUSES = ("BOUND", "DECLINED", "WITHDRAWN")
+POLICY_SUBMISSION_PROJECTION_FIELDS = (
+    "submissionId",
+    "submissionNumber",
+    "tenantId",
+    "applicantPartyId",
+    "productCode",
+    "requestedEffectiveDate",
+    "requestedLimitAmount",
+    "requestedLimitCurrency",
+    "tortCodes",
+    "notes",
+    "status",
+    "version",
+    "createdAt",
+    "updatedAt",
+)
+POLICY_SUBMISSION_CREATE_REQUIRED_FIELDS = (
+    "applicantPartyId",
+    "productCode",
+    "requestedEffectiveDate",
+    "requestedLimitAmount",
+    "requestedLimitCurrency",
+)
+POLICY_SUBMISSION_CREATE_OPTIONAL_FIELDS = ("tortCodes", "notes")
+POLICY_SUBMISSION_ERROR_CODES = (
+    "MISSING_TENANT_HEADER",
+    "INVALID_TENANT_HEADER",
+    "VALIDATION_ERROR",
+    "INVALID_SUBMISSION_PRODUCT_CODE",
+    "INVALID_SUBMISSION_LIMIT",
+    "INVALID_SUBMISSION_CURRENCY",
+    "INVALID_SUBMISSION_TORT_CODES",
+    "INVALID_SUBMISSION_NOTES",
+    "INVALID_SUBMISSION_STATUS",
+    "INVALID_SUBMISSION_REASON",
+    "INVALID_SUBMISSION_TRANSITION",
+    "SUBMISSION_NOT_FOUND",
+    "DUPLICATE_SUBMISSION_NUMBER",
+    "CONCURRENT_MODIFICATION",
+    "BOOK_SCOPE_VIOLATION",
+)
+POLICY_SUBMISSION_EVENT_CREATED = "policy.submission.created"
+POLICY_SUBMISSION_EVENT_STATUS_CHANGED = "policy.submission.status-changed"
+POLICY_SUBMISSION_EVENT_MESSAGES = (
+    (POLICY_SUBMISSION_EVENT_CREATED, "PolicySubmissionCreatedData"),
+    (POLICY_SUBMISSION_EVENT_STATUS_CHANGED, "PolicySubmissionStatusChangedData"),
+)
+POLICY_SUBMISSION_CREATED_EVENT_FIELDS = (
+    "submissionId",
+    "submissionNumber",
+    "applicantPartyId",
+    "productCode",
+    "requestedEffectiveDate",
+    "requestedLimitAmount",
+    "requestedLimitCurrency",
+    "tortCodes",
+    "status",
+    "notes",
+    "version",
+    "createdAt",
+    "updatedAt",
+)
+POLICY_SUBMISSION_STATUS_EVENT_FIELDS = (
+    "submissionId",
+    "submissionNumber",
+    "applicantPartyId",
+    "productCode",
+    "previousStatus",
+    "status",
+    "version",
+    "updatedAt",
+    "reason",
+)
+POLICY_SUBMISSION_EVENT_IMPLEMENTED_BY = "PolicyEvents.java"
+
+
 # Event names the transactional-outbox rollout actually emits. The catalog must
 # list each one as published and implemented, and the vertical document must
 # expose a channel for it. Round 5 covered the first six verticals; the rollout
@@ -1895,6 +2002,8 @@ IMPLEMENTED_EVENTS = {
         "policy.credit-note.reversed",
         "policy.legal-entity.created",
         "policy.policy.legal-entity-assigned",
+        "policy.submission.created",
+        "policy.submission.status-changed",
     ],
     "contract": [
         "contract.contract.created",
@@ -9258,6 +9367,591 @@ def check_policy_rating_openapi(contracts: ContractSet, document, relative: str)
         )
 
 
+def check_policy_submissions_openapi(contracts: ContractSet, document, relative: str):
+    """Require the submission list/get/create/status slice and its rules."""
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+
+    collection = paths.get(POLICY_SUBMISSIONS_PATH) if isinstance(paths, dict) else None
+    detail = paths.get(POLICY_SUBMISSION_PATH) if isinstance(paths, dict) else None
+    status_path = (
+        paths.get(POLICY_SUBMISSION_STATUS_PATH) if isinstance(paths, dict) else None
+    )
+    list_operation = collection.get("get") if isinstance(collection, dict) else None
+    create_operation = collection.get("post") if isinstance(collection, dict) else None
+    get_operation = detail.get("get") if isinstance(detail, dict) else None
+    status_operation = (
+        status_path.get("patch") if isinstance(status_path, dict) else None
+    )
+
+    for label, path, operation in (
+        ("GET", POLICY_SUBMISSIONS_PATH, list_operation),
+        ("POST", POLICY_SUBMISSIONS_PATH, create_operation),
+        ("GET", POLICY_SUBMISSION_PATH, get_operation),
+        ("PATCH", POLICY_SUBMISSION_STATUS_PATH, status_operation),
+    ):
+        contracts.check(
+            isinstance(operation, dict),
+            f"{relative}: required submission operation {label} {path} is missing",
+        )
+
+    # The collection and detail surfaces are read/create/status only; the
+    # implemented controllers declare no PUT or DELETE operation.
+    for path, path_item in (
+        (POLICY_SUBMISSIONS_PATH, collection),
+        (POLICY_SUBMISSION_PATH, detail),
+        (POLICY_SUBMISSION_STATUS_PATH, status_path),
+    ):
+        if isinstance(path_item, dict):
+            for method in ("put", "delete"):
+                contracts.check(
+                    method not in path_item,
+                    f"{relative}: {method.upper()} {path} must stay unimplemented",
+                )
+
+    if isinstance(list_operation, dict):
+        where = f"{relative}: GET {POLICY_SUBMISSIONS_PATH}"
+        contracts.check(
+            list_operation.get("operationId") == "listPolicySubmissions",
+            f"{where}: operationId must be listPolicySubmissions",
+        )
+        parameter_refs, _ = _parameter_names(list_operation)
+        for parameter in ("TenantHeader", "BookHeaderDirectOptional"):
+            contracts.check(
+                parameter in parameter_refs,
+                f"{where}: must document the shared {parameter} parameter",
+            )
+        for parameter in ("IfMatch", "IdempotencyKey"):
+            contracts.check(
+                parameter not in parameter_refs,
+                f"{where}: read must not accept {parameter}",
+            )
+        contracts.check(
+            list_operation.get("requestBody") is None,
+            f"{where}: read operations must not declare a requestBody",
+        )
+        ok_schema = _response_schema(list_operation, "200")
+        contracts.check(
+            isinstance(ok_schema, dict) and ok_schema.get("type") == "array",
+            f"{where}: 200 must be a bare array, not a page envelope",
+        )
+        item_schema = (ok_schema or {}).get("items") if isinstance(ok_schema, dict) else None
+        contracts.check(
+            isinstance(item_schema, dict)
+            and str(item_schema.get("$ref", "")).endswith(
+                f"/schemas/{POLICY_SUBMISSION_PROJECTION}"
+            ),
+            f"{where}: 200 items must reference {POLICY_SUBMISSION_PROJECTION}",
+        )
+        responses = list_operation.get("responses") or {}
+        for code, suffix in (("400", "BadRequest"), ("404", "NotFound")):
+            response = responses.get(code) if isinstance(responses, dict) else None
+            contracts.check(
+                isinstance(response, dict)
+                and str(response.get("$ref", "")).endswith(f"/responses/{suffix}"),
+                f"{where}: {code} must reference the shared {suffix} response",
+            )
+        description = str(list_operation.get("description") or "")
+        for term in ("BOOK_SCOPE_VIOLATION", "newest", "does not use the offset page envelope"):
+            contracts.check(
+                term in description,
+                f"{where}: description must document {term}",
+            )
+
+    if isinstance(get_operation, dict):
+        where = f"{relative}: GET {POLICY_SUBMISSION_PATH}"
+        contracts.check(
+            get_operation.get("operationId") == "getPolicySubmission",
+            f"{where}: operationId must be getPolicySubmission",
+        )
+        parameter_refs, inline_names = _parameter_names(get_operation)
+        for parameter in ("TenantHeader", "BookHeaderDirectOptional"):
+            contracts.check(
+                parameter in parameter_refs,
+                f"{where}: must document the shared {parameter} parameter",
+            )
+        contracts.check(
+            "submissionId" in inline_names,
+            f"{where}: must declare the submissionId path parameter",
+        )
+        contracts.check(
+            get_operation.get("requestBody") is None,
+            f"{where}: read operations must not declare a requestBody",
+        )
+        ok_schema = _response_schema(get_operation, "200")
+        contracts.check(
+            isinstance(ok_schema, dict)
+            and str(ok_schema.get("$ref", "")).endswith(
+                f"/schemas/{POLICY_SUBMISSION_PROJECTION}"
+            ),
+            f"{where}: 200 must return {POLICY_SUBMISSION_PROJECTION}",
+        )
+        ok_headers = (get_operation.get("responses") or {}).get("200") or {}
+        ok_headers = ok_headers.get("headers") if isinstance(ok_headers, dict) else None
+        tag = ok_headers.get("ETag") if isinstance(ok_headers, dict) else None
+        contracts.check(
+            isinstance(tag, dict)
+            and str(tag.get("$ref", "")).endswith("/headers/ETag"),
+            f"{where}: 200 must declare the shared ETag header",
+        )
+        responses = get_operation.get("responses") or {}
+        for code, suffix in (("400", "BadRequest"), ("404", "NotFound")):
+            response = responses.get(code) if isinstance(responses, dict) else None
+            contracts.check(
+                isinstance(response, dict)
+                and str(response.get("$ref", "")).endswith(f"/responses/{suffix}"),
+                f"{where}: {code} must reference the shared {suffix} response",
+            )
+
+    if isinstance(create_operation, dict):
+        where = f"{relative}: POST {POLICY_SUBMISSIONS_PATH}"
+        contracts.check(
+            create_operation.get("operationId") == "createPolicySubmission",
+            f"{where}: operationId must be createPolicySubmission",
+        )
+        parameter_refs, _ = _parameter_names(create_operation)
+        for parameter in (
+            "TenantHeader",
+            "BookHeaderDirectOptional",
+            "IdempotencyKey",
+        ):
+            contracts.check(
+                parameter in parameter_refs,
+                f"{where}: must document the shared {parameter} parameter",
+            )
+        request_body = create_operation.get("requestBody") or {}
+        contracts.check(
+            request_body.get("required") is True,
+            f"{where}: request body must be required",
+        )
+        request_schema = (
+            ((request_body.get("content") or {}).get("application/json") or {}).get(
+                "schema"
+            )
+            if isinstance(request_body, dict)
+            else None
+        )
+        contracts.check(
+            isinstance(request_schema, dict)
+            and str(request_schema.get("$ref", "")).endswith(
+                f"/schemas/{POLICY_SUBMISSION_CREATE_REQUEST}"
+            ),
+            f"{where}: request body must use {POLICY_SUBMISSION_CREATE_REQUEST}",
+        )
+        created = (create_operation.get("responses") or {}).get("201")
+        created_headers = created.get("headers") if isinstance(created, dict) else None
+        for header, suffix in (
+            ("ETag", "ETag"),
+            ("Idempotent-Replayed", "IdempotentReplayed"),
+        ):
+            value = (
+                created_headers.get(header) if isinstance(created_headers, dict) else None
+            )
+            contracts.check(
+                isinstance(value, dict)
+                and str(value.get("$ref", "")).endswith(f"/headers/{suffix}"),
+                f"{where}: 201 must declare the shared {header} header",
+            )
+        location = (
+            created_headers.get("Location") if isinstance(created_headers, dict) else None
+        )
+        location_schema = (location or {}).get("schema") if isinstance(location, dict) else None
+        contracts.check(
+            isinstance(location_schema, dict)
+            and location_schema.get("format") == "uri-reference",
+            f"{where}: 201 must declare the Location header as a uri-reference",
+        )
+        created_schema = _response_schema(create_operation, "201")
+        contracts.check(
+            isinstance(created_schema, dict)
+            and str(created_schema.get("$ref", "")).endswith(
+                f"/schemas/{POLICY_SUBMISSION_PROJECTION}"
+            ),
+            f"{where}: 201 must return {POLICY_SUBMISSION_PROJECTION}",
+        )
+        responses = create_operation.get("responses") or {}
+        contracts.check(
+            "200" not in responses,
+            f"{where}: a replay 200 must not be documented; the expert does not "
+            "replay the optional Idempotency-Key",
+        )
+        for code, suffix in (("400", "BadRequest"), ("404", "NotFound")):
+            response = responses.get(code) if isinstance(responses, dict) else None
+            contracts.check(
+                isinstance(response, dict)
+                and str(response.get("$ref", "")).endswith(f"/responses/{suffix}"),
+                f"{where}: {code} must reference the shared {suffix} response",
+            )
+        conflict = responses.get("409") if isinstance(responses, dict) else None
+        conflict_text = (
+            str(conflict.get("description") or "") if isinstance(conflict, dict) else ""
+        )
+        contracts.check(
+            "DUPLICATE_SUBMISSION_NUMBER" in conflict_text,
+            f"{where}: 409 must document DUPLICATE_SUBMISSION_NUMBER",
+        )
+        conflict_schema = _response_schema(
+            create_operation, "409", "application/problem+json"
+        )
+        contracts.check(
+            isinstance(conflict_schema, dict)
+            and str(conflict_schema.get("$ref", "")).endswith("/schemas/Problem"),
+            f"{where}: 409 must document the shared Problem schema",
+        )
+        description = str(create_operation.get("description") or "")
+        for term in (
+            "RECEIVED",
+            "SUB-{YYYY}-{7 digits}",
+            "policy.submission.created",
+            "same transaction",
+            "DUPLICATE_SUBMISSION_NUMBER",
+            "does not replay",
+        ):
+            contracts.check(
+                term in description,
+                f"{where}: description must document {term}",
+            )
+
+    if isinstance(status_operation, dict):
+        where = f"{relative}: PATCH {POLICY_SUBMISSION_STATUS_PATH}"
+        contracts.check(
+            status_operation.get("operationId") == "updatePolicySubmissionStatus",
+            f"{where}: operationId must be updatePolicySubmissionStatus",
+        )
+        parameter_refs, inline_names = _parameter_names(status_operation)
+        for parameter in (
+            "TenantHeader",
+            "BookHeaderDirectOptional",
+            "IfMatch",
+            "IdempotencyKey",
+        ):
+            contracts.check(
+                parameter in parameter_refs,
+                f"{where}: must document the shared {parameter} parameter",
+            )
+        contracts.check(
+            "submissionId" in inline_names,
+            f"{where}: must declare the submissionId path parameter",
+        )
+        request_body = status_operation.get("requestBody") or {}
+        contracts.check(
+            request_body.get("required") is True,
+            f"{where}: request body must be required",
+        )
+        request_schema = (
+            ((request_body.get("content") or {}).get("application/json") or {}).get(
+                "schema"
+            )
+            if isinstance(request_body, dict)
+            else None
+        )
+        contracts.check(
+            isinstance(request_schema, dict)
+            and str(request_schema.get("$ref", "")).endswith(
+                f"/schemas/{POLICY_SUBMISSION_STATUS_REQUEST}"
+            ),
+            f"{where}: request body must use {POLICY_SUBMISSION_STATUS_REQUEST}",
+        )
+        updated = (status_operation.get("responses") or {}).get("200")
+        updated_headers = updated.get("headers") if isinstance(updated, dict) else None
+        for header, suffix in (
+            ("ETag", "ETag"),
+            ("Idempotent-Replayed", "IdempotentReplayed"),
+        ):
+            value = (
+                updated_headers.get(header) if isinstance(updated_headers, dict) else None
+            )
+            contracts.check(
+                isinstance(value, dict)
+                and str(value.get("$ref", "")).endswith(f"/headers/{suffix}"),
+                f"{where}: 200 must declare the shared {header} header",
+            )
+        ok_schema = _response_schema(status_operation, "200")
+        contracts.check(
+            isinstance(ok_schema, dict)
+            and str(ok_schema.get("$ref", "")).endswith(
+                f"/schemas/{POLICY_SUBMISSION_PROJECTION}"
+            ),
+            f"{where}: 200 must return {POLICY_SUBMISSION_PROJECTION}",
+        )
+        responses = status_operation.get("responses") or {}
+        for code, suffix in (("400", "BadRequest"), ("404", "NotFound")):
+            response = responses.get(code) if isinstance(responses, dict) else None
+            contracts.check(
+                isinstance(response, dict)
+                and str(response.get("$ref", "")).endswith(f"/responses/{suffix}"),
+                f"{where}: {code} must reference the shared {suffix} response",
+            )
+        conflict = responses.get("409") if isinstance(responses, dict) else None
+        conflict_text = (
+            str(conflict.get("description") or "") if isinstance(conflict, dict) else ""
+        )
+        for code in (
+            "INVALID_SUBMISSION_TRANSITION",
+            "CONCURRENT_MODIFICATION",
+            "currentStatus",
+            "targetStatus",
+            "currentVersion",
+            "expectedVersion",
+        ):
+            contracts.check(
+                code in conflict_text,
+                f"{where}: 409 must document {code}",
+            )
+        conflict_schema = _response_schema(
+            status_operation, "409", "application/problem+json"
+        )
+        contracts.check(
+            isinstance(conflict_schema, dict)
+            and str(conflict_schema.get("$ref", "")).endswith("/schemas/Problem"),
+            f"{where}: 409 must document the shared Problem schema",
+        )
+        description = str(status_operation.get("description") or "")
+        for status, targets in POLICY_SUBMISSION_TRANSITIONS:
+            line = "- `" + status + "` -> " + ", ".join(
+                f"`{target}`" for target in targets
+            )
+            contracts.check(
+                line in description,
+                f"{where}: description must document the transition {status} -> "
+                f"{list(targets)}",
+            )
+        for term in (
+            "terminal",
+            "INVALID_SUBMISSION_TRANSITION",
+            "CONCURRENT_MODIFICATION",
+            "policy.submission.status-changed",
+            "same transaction",
+            "not compared",
+        ):
+            contracts.check(
+                term in description,
+                f"{where}: description must document {term}",
+            )
+
+    planned_operations = document.get("x-planned-operations") or []
+    planned_pairs = {
+        (str(entry.get("method", "")).lower(), entry.get("path"))
+        for entry in planned_operations
+        if isinstance(entry, dict)
+    }
+    for method, path in (
+        ("get", POLICY_SUBMISSIONS_PATH),
+        ("post", POLICY_SUBMISSIONS_PATH),
+        ("get", POLICY_SUBMISSION_PATH),
+        ("patch", POLICY_SUBMISSION_STATUS_PATH),
+    ):
+        contracts.check(
+            (method, path) not in planned_pairs,
+            f"{relative}: implemented submission operation {method.upper()} {path} "
+            "must not reappear under x-planned-operations",
+        )
+
+    statuses = schemas.get(POLICY_SUBMISSION_STATUS_SCHEMA) or {}
+    contracts.check(
+        isinstance(statuses, dict)
+        and tuple(statuses.get("enum") or []) == POLICY_SUBMISSION_STATUSES,
+        f"{relative}: {POLICY_SUBMISSION_STATUS_SCHEMA} must enumerate "
+        f"{list(POLICY_SUBMISSION_STATUSES)}",
+    )
+
+    projection = schemas.get(POLICY_SUBMISSION_PROJECTION) or {}
+    projection_properties = projection.get("properties") or {}
+    projection_required = tuple(projection.get("required") or [])
+    contracts.check(
+        isinstance(projection, dict) and projection.get("type") == "object",
+        f"{relative}: {POLICY_SUBMISSION_PROJECTION} must be an object schema",
+    )
+    contracts.check(
+        set(projection_required) == set(POLICY_SUBMISSION_PROJECTION_FIELDS),
+        f"{relative}: {POLICY_SUBMISSION_PROJECTION} must require exactly "
+        f"{list(POLICY_SUBMISSION_PROJECTION_FIELDS)}",
+    )
+    contracts.check(
+        projection_required == POLICY_SUBMISSION_PROJECTION_FIELDS,
+        f"{relative}: {POLICY_SUBMISSION_PROJECTION}.required must keep the "
+        "documented member order",
+    )
+    for field in POLICY_SUBMISSION_PROJECTION_FIELDS:
+        contracts.check(
+            field in projection_properties,
+            f"{relative}: {POLICY_SUBMISSION_PROJECTION}.properties.{field} is "
+            "required",
+        )
+    for field in (
+        "submissionId",
+        "tenantId",
+        "applicantPartyId",
+    ):
+        contracts.check(
+            (projection_properties.get(field) or {}).get("format") == "uuid",
+            f"{relative}: {POLICY_SUBMISSION_PROJECTION}.{field} must be a uuid",
+        )
+    contracts.check(
+        (projection_properties.get("submissionNumber") or {}).get("maxLength") == 32,
+        f"{relative}: {POLICY_SUBMISSION_PROJECTION}.submissionNumber must be "
+        "capped at 32 characters",
+    )
+    contracts.check(
+        (projection_properties.get("requestedEffectiveDate") or {}).get("format")
+        == "date",
+        f"{relative}: {POLICY_SUBMISSION_PROJECTION}.requestedEffectiveDate must "
+        "be a date",
+    )
+    amount = projection_properties.get("requestedLimitAmount") or {}
+    contracts.check(
+        amount.get("type") == "number" and amount.get("minimum") == 0,
+        f"{relative}: {POLICY_SUBMISSION_PROJECTION}.requestedLimitAmount must be "
+        "a non-negative JSON number",
+    )
+    contracts.check(
+        (projection_properties.get("requestedLimitCurrency") or {}).get("pattern")
+        == "^[A-Z]{3}$",
+        f"{relative}: {POLICY_SUBMISSION_PROJECTION}.requestedLimitCurrency must be "
+        "an uppercase ISO code",
+    )
+    tort_codes = projection_properties.get("tortCodes") or {}
+    contracts.check(
+        tort_codes.get("type") == "array"
+        and tort_codes.get("maxItems") == 20
+        and ((tort_codes.get("items") or {}).get("maxLength")) == 32,
+        f"{relative}: {POLICY_SUBMISSION_PROJECTION}.tortCodes must be an array of "
+        "at most 20 codes of at most 32 characters",
+    )
+    notes = projection_properties.get("notes") or {}
+    contracts.check(
+        _schema_types(notes) == {"string", "null"} and notes.get("maxLength") == 2000,
+        f"{relative}: {POLICY_SUBMISSION_PROJECTION}.notes must be a nullable "
+        "2000-character string",
+    )
+    contracts.check(
+        (projection_properties.get("status") or {}).get("$ref")
+        == f"#/components/schemas/{POLICY_SUBMISSION_STATUS_SCHEMA}",
+        f"{relative}: {POLICY_SUBMISSION_PROJECTION}.status must reference "
+        f"{POLICY_SUBMISSION_STATUS_SCHEMA}",
+    )
+    version = projection_properties.get("version") or {}
+    contracts.check(
+        version.get("type") == "integer" and version.get("minimum") == 0,
+        f"{relative}: {POLICY_SUBMISSION_PROJECTION}.version must be a "
+        "non-negative integer",
+    )
+    for field in ("createdAt", "updatedAt"):
+        contracts.check(
+            (projection_properties.get(field) or {}).get("format") == "date-time",
+            f"{relative}: {POLICY_SUBMISSION_PROJECTION}.{field} must be a "
+            "date-time",
+        )
+
+    request = schemas.get(POLICY_SUBMISSION_CREATE_REQUEST) or {}
+    request_properties = request.get("properties") or {}
+    request_required = set(request.get("required") or [])
+    contracts.check(
+        isinstance(request, dict) and request.get("type") == "object",
+        f"{relative}: {POLICY_SUBMISSION_CREATE_REQUEST} must be an object schema",
+    )
+    contracts.check(
+        request_required == set(POLICY_SUBMISSION_CREATE_REQUIRED_FIELDS),
+        f"{relative}: {POLICY_SUBMISSION_CREATE_REQUEST} must require exactly "
+        f"{list(POLICY_SUBMISSION_CREATE_REQUIRED_FIELDS)}",
+    )
+    for field in POLICY_SUBMISSION_CREATE_REQUIRED_FIELDS:
+        contracts.check(
+            field in request_properties,
+            f"{relative}: {POLICY_SUBMISSION_CREATE_REQUEST}.properties.{field} is "
+            "required",
+        )
+    for field in POLICY_SUBMISSION_CREATE_OPTIONAL_FIELDS:
+        contracts.check(
+            field in request_properties,
+            f"{relative}: {POLICY_SUBMISSION_CREATE_REQUEST}.properties.{field} is "
+            "required as an optional member",
+        )
+        contracts.check(
+            field not in request_required,
+            f"{relative}: {POLICY_SUBMISSION_CREATE_REQUEST}.{field} must stay "
+            "optional",
+        )
+    contracts.check(
+        (request_properties.get("applicantPartyId") or {}).get("format") == "uuid",
+        f"{relative}: {POLICY_SUBMISSION_CREATE_REQUEST}.applicantPartyId must be "
+        "a uuid",
+    )
+    product_code = request_properties.get("productCode") or {}
+    contracts.check(
+        product_code.get("minLength") == 1 and product_code.get("maxLength") == 64,
+        f"{relative}: {POLICY_SUBMISSION_CREATE_REQUEST}.productCode must be 1-64 "
+        "characters",
+    )
+    request_amount = request_properties.get("requestedLimitAmount") or {}
+    contracts.check(
+        request_amount.get("type") == "number" and request_amount.get("minimum") == 0,
+        f"{relative}: {POLICY_SUBMISSION_CREATE_REQUEST}.requestedLimitAmount must "
+        "be a non-negative JSON number",
+    )
+    contracts.check(
+        (request_properties.get("requestedLimitCurrency") or {}).get("pattern")
+        == "^[A-Za-z]{3}$",
+        f"{relative}: {POLICY_SUBMISSION_CREATE_REQUEST}.requestedLimitCurrency "
+        "must accept three letters in either case",
+    )
+    request_torts = request_properties.get("tortCodes") or {}
+    contracts.check(
+        request_torts.get("maxItems") == 20
+        and (request_torts.get("items") or {}).get("maxLength") == 32,
+        f"{relative}: {POLICY_SUBMISSION_CREATE_REQUEST}.tortCodes must cap the "
+        "list at 20 codes of 32 characters",
+    )
+    contracts.check(
+        (request_properties.get("notes") or {}).get("maxLength") == 2000,
+        f"{relative}: {POLICY_SUBMISSION_CREATE_REQUEST}.notes must be capped at "
+        "2000 characters",
+    )
+
+    status_request = schemas.get(POLICY_SUBMISSION_STATUS_REQUEST) or {}
+    status_properties = status_request.get("properties") or {}
+    contracts.check(
+        isinstance(status_request, dict) and status_request.get("type") == "object",
+        f"{relative}: {POLICY_SUBMISSION_STATUS_REQUEST} must be an object schema",
+    )
+    contracts.check(
+        set(status_request.get("required") or []) == {"status"},
+        f"{relative}: {POLICY_SUBMISSION_STATUS_REQUEST} must require only status",
+    )
+    contracts.check(
+        (status_properties.get("status") or {}).get("$ref")
+        == f"#/components/schemas/{POLICY_SUBMISSION_STATUS_SCHEMA}",
+        f"{relative}: {POLICY_SUBMISSION_STATUS_REQUEST}.status must reference "
+        f"{POLICY_SUBMISSION_STATUS_SCHEMA}",
+    )
+    reason = status_properties.get("reason") or {}
+    contracts.check(
+        _schema_types(reason) == {"string", "null"}
+        and reason.get("maxLength") == 500,
+        f"{relative}: {POLICY_SUBMISSION_STATUS_REQUEST}.reason must be a nullable "
+        "500-character string",
+    )
+    contracts.check(
+        "reason" not in set(status_request.get("required") or []),
+        f"{relative}: {POLICY_SUBMISSION_STATUS_REQUEST}.reason must stay optional",
+    )
+
+    documented = " ".join(
+        str((operation or {}).get("description") or "")
+        for operation in (
+            list_operation,
+            create_operation,
+            get_operation,
+            status_operation,
+        )
+    )
+    for code in POLICY_SUBMISSION_ERROR_CODES:
+        contracts.check(
+            code in documented,
+            f"{relative}: submission descriptions must document {code}",
+        )
+
+
 def check_policy_rating_asyncapi(contracts: ContractSet, document, relative: str):
     """Require the implemented rated channel and its seven-member payload."""
     channels = document.get("channels") or {}
@@ -9358,6 +10052,194 @@ def check_policy_rating_asyncapi(contracts: ContractSet, document, relative: str
         f"{relative}: {POLICY_RATING_EVENT_MESSAGE}.calcHash must be a lower-case "
         "64-character digest",
     )
+
+
+def check_policy_submissions_asyncapi(contracts: ContractSet, document, relative: str):
+    """Require the two implemented submission facts and their payloads."""
+    channels = document.get("channels") or {}
+    operations = document.get("operations") or {}
+    messages = (document.get("components") or {}).get("messages") or {}
+    send_events = {
+        operation.get("x-event-type")
+        for operation in operations.values()
+        if isinstance(operation, dict) and operation.get("action") == "send"
+    }
+
+    for event, message_name in POLICY_SUBMISSION_EVENT_MESSAGES:
+        channel = next(
+            (
+                candidate
+                for candidate in channels.values()
+                if isinstance(candidate, dict)
+                and candidate.get("address") == event
+            ),
+            None,
+        )
+        contracts.check(
+            isinstance(channel, dict),
+            f"{relative}: required submission channel '{event}' is missing",
+        )
+        if not isinstance(channel, dict):
+            continue
+        contracts.check(
+            channel.get("x-status") == "implemented",
+            f"{relative}: {event} channel must be implemented",
+        )
+        contracts.check(
+            channel.get("x-event-version") == 1,
+            f"{relative}: {event} channel must stay at x-event-version 1",
+        )
+        contracts.check(
+            "SPEC 11.2.14" in str(channel.get("x-spec-section") or ""),
+            f"{relative}: {event} must name SPEC 11.2.14 in x-spec-section",
+        )
+        contracts.check(
+            str(channel.get("x-implemented-by", "")).endswith(
+                POLICY_SUBMISSION_EVENT_IMPLEMENTED_BY
+            ),
+            f"{relative}: {event} must name "
+            f"{POLICY_SUBMISSION_EVENT_IMPLEMENTED_BY} in x-implemented-by",
+        )
+        contracts.check(
+            event in send_events,
+            f"{relative}: {event} must have a send operation",
+        )
+        channel_messages = channel.get("messages") or {}
+        contracts.check(
+            (channel_messages.get(message_name) or {}).get("$ref")
+            == f"#/components/messages/{message_name}",
+            f"{relative}: {event} must reference {message_name}",
+        )
+        channel_description = str(channel.get("description") or "")
+        for term in ("UnderwritingSubmission", "same transaction"):
+            contracts.check(
+                term in channel_description,
+                f"{relative}: {event} description must document {term}",
+            )
+
+        message = messages.get(message_name) or {}
+        payload = message.get("payload") or {}
+        properties = payload.get("properties") or {}
+        required = tuple(payload.get("required") or [])
+        contracts.check(
+            payload.get("type") == "object",
+            f"{relative}: {message_name}.payload must be an object schema",
+        )
+        expected_fields = (
+            POLICY_SUBMISSION_CREATED_EVENT_FIELDS
+            if event == POLICY_SUBMISSION_EVENT_CREATED
+            else POLICY_SUBMISSION_STATUS_EVENT_FIELDS
+        )
+        contracts.check(
+            set(required) == set(expected_fields),
+            f"{relative}: {message_name} must require exactly {list(expected_fields)}",
+        )
+        contracts.check(
+            required == expected_fields,
+            f"{relative}: {message_name}.required must keep the documented member "
+            "order",
+        )
+        for field in expected_fields:
+            contracts.check(
+                field in properties,
+                f"{relative}: {message_name}.properties.{field} is required",
+            )
+        for field in ("submissionId", "applicantPartyId"):
+            contracts.check(
+                (properties.get(field) or {}).get("format") == "uuid",
+                f"{relative}: {message_name}.{field} must be a uuid",
+            )
+        contracts.check(
+            (properties.get("submissionNumber") or {}).get("maxLength") == 32,
+            f"{relative}: {message_name}.submissionNumber must be capped at 32 "
+            "characters",
+        )
+        contracts.check(
+            (properties.get("productCode") or {}).get("maxLength") == 64,
+            f"{relative}: {message_name}.productCode must be capped at 64 characters",
+        )
+        contracts.check(
+            (properties.get("version") or {}).get("type") == "integer",
+            f"{relative}: {message_name}.version must be an integer",
+        )
+
+        if event == POLICY_SUBMISSION_EVENT_CREATED:
+            contracts.check(
+                (properties.get("requestedEffectiveDate") or {}).get("format")
+                == "date",
+                f"{relative}: {message_name}.requestedEffectiveDate must be a date",
+            )
+            amount = properties.get("requestedLimitAmount") or {}
+            contracts.check(
+                amount.get("type") == "string"
+                and amount.get("pattern")
+                == "^(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,4})?$",
+                f"{relative}: {message_name}.requestedLimitAmount must be a "
+                "scale-4 decimal string, unlike the JSON-number HTTP projection",
+            )
+            contracts.check(
+                (properties.get("requestedLimitCurrency") or {}).get("pattern")
+                == "^[A-Z]{3}$",
+                f"{relative}: {message_name}.requestedLimitCurrency must be an "
+                "uppercase ISO code",
+            )
+            torts = properties.get("tortCodes") or {}
+            contracts.check(
+                torts.get("type") == "array"
+                and torts.get("maxItems") == 20
+                and (torts.get("items") or {}).get("maxLength") == 32,
+                f"{relative}: {message_name}.tortCodes must be an array of at most "
+                "20 codes of at most 32 characters",
+            )
+            contracts.check(
+                tuple((properties.get("status") or {}).get("enum") or [])
+                == ("RECEIVED",),
+                f"{relative}: {message_name}.status must be the single RECEIVED "
+                "creation state",
+            )
+            contracts.check(
+                _schema_types(properties.get("notes")) == {"string", "null"}
+                and (properties.get("notes") or {}).get("maxLength") == 2000,
+                f"{relative}: {message_name}.notes must be a nullable 2000-character "
+                "string",
+            )
+            contracts.check(
+                (properties.get("version") or {}).get("minimum") == 0,
+                f"{relative}: {message_name}.version must allow the creation value 0",
+            )
+            for field in ("createdAt", "updatedAt"):
+                contracts.check(
+                    (properties.get(field) or {}).get("format") == "date-time",
+                    f"{relative}: {message_name}.{field} must be a date-time",
+                )
+        else:
+            contracts.check(
+                tuple((properties.get("previousStatus") or {}).get("enum") or [])
+                == POLICY_SUBMISSION_STATUSES,
+                f"{relative}: {message_name}.previousStatus must enumerate "
+                f"{list(POLICY_SUBMISSION_STATUSES)}",
+            )
+            contracts.check(
+                tuple((properties.get("status") or {}).get("enum") or [])
+                == POLICY_SUBMISSION_STATUSES,
+                f"{relative}: {message_name}.status must enumerate "
+                f"{list(POLICY_SUBMISSION_STATUSES)}",
+            )
+            contracts.check(
+                (properties.get("version") or {}).get("minimum") == 1,
+                f"{relative}: {message_name}.version must be at least 1 after a "
+                "transition",
+            )
+            contracts.check(
+                (properties.get("updatedAt") or {}).get("format") == "date-time",
+                f"{relative}: {message_name}.updatedAt must be a date-time",
+            )
+            contracts.check(
+                _schema_types(properties.get("reason")) == {"string", "null"}
+                and (properties.get("reason") or {}).get("maxLength") == 500,
+                f"{relative}: {message_name}.reason must be a nullable "
+                "500-character string",
+            )
 
 
 def check_policy_premium_audit_asyncapi(contracts: ContractSet, document, relative: str):
@@ -15624,6 +16506,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_policy_legal_entities_openapi(contracts, document, relative)
             check_policy_premium_audit_openapi(contracts, document, relative)
             check_policy_rating_openapi(contracts, document, relative)
+            check_policy_submissions_openapi(contracts, document, relative)
         if vertical == "contract":
             check_contract_security(contracts, document, relative)
             check_contract_security_status(contracts, document, relative)
@@ -16221,6 +17104,7 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
             check_policy_legal_entities_asyncapi(contracts, document, relative)
             check_policy_premium_audit_asyncapi(contracts, document, relative)
             check_policy_rating_asyncapi(contracts, document, relative)
+            check_policy_submissions_asyncapi(contracts, document, relative)
             check_policy_billing_adjustment_asyncapi(contracts, document, relative)
 
         if vertical == "contract":

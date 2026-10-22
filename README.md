@@ -2719,6 +2719,83 @@ sets, the deleted-snapshot members, the `IMPLEMENTED_EVENTS` entries, and the
 catalog entries. It also rejects a `PUT` on either child path. The full run
 passes 16,329 checks.
 
+### Policy underwriting submissions (2026-10-22)
+
+Policy 2.18.0 adds the pre-policy underwriting submission intake collection.
+The change is additive: four public operations, three schemas, one status enum,
+and two implemented event names; no existing path, field, or event name changes.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/policy.yaml` | 2.18.0 | Additive | `GET/POST /api/v1/policies/submissions`, `GET .../{submissionId}`, `PATCH .../{submissionId}/status`, the `PolicySubmission` projection, the `CreatePolicySubmissionRequest` and `UpdatePolicySubmissionStatusRequest` bodies, the `PolicySubmissionStatus` enum, and the 400/404/409 responses. |
+| `asyncapi/policy.yaml` | 1.15.0 | Additive | The implemented `policy.submission.created` and `policy.submission.status-changed` channels, `send` operations, and `PolicySubmissionCreatedData`/`PolicySubmissionStatusChangedData` payloads. |
+| `asyncapi/event-catalog.yaml` | 1.38.0 | Additive | Both names are published and implemented (227 published and 108 implemented in total; Policy 38 published and 26 implemented). |
+
+Semantics:
+
+- A submission is a tenant-owned aggregate that exists before a policy. Create
+  requires `applicantPartyId`, `productCode`, `requestedEffectiveDate`,
+  `requestedLimitAmount`, and `requestedLimitCurrency`; `tortCodes` and `notes`
+  are optional. The server generates the immutable per-tenant
+  `SUB-{YYYY}-{7 digits}` number from a locked counter row and creates the
+  submission `RECEIVED` at `version` 0. `productCode` is capped at 64
+  characters, the limit is a non-negative amount normalized to four fraction
+  digits HALF_UP, the currency is three ISO 4217
+  letters stored upper-case, tort codes are capped at 20 entries of 32
+  characters, and notes at 2000 characters. A missing list stores an empty
+  array and blank notes store null.
+- The graph is `RECEIVED -> REFERRED/QUOTED/DECLINED/WITHDRAWN`,
+  `REFERRED -> QUOTED/DECLINED/WITHDRAWN`, and
+  `QUOTED -> BOUND/DECLINED/WITHDRAWN`; `BOUND`, `DECLINED`, and `WITHDRAWN`
+  are terminal. An accepted transition bumps `version`, returns the new strong
+  `ETag`, and writes `policy.submission.status-changed` with `previousStatus`,
+  `status`, `version`, `updatedAt`, and the optional trimmed `reason`. The
+  reason is event-only; the row stores no history. An out-of-order, no-op, or
+  terminal transition is 409 `INVALID_SUBMISSION_TRANSITION` with
+  `meta.submissionId`, `meta.currentStatus`, and `meta.targetStatus`; a
+  concurrent winner is 409 `CONCURRENT_MODIFICATION` with
+  `meta.currentVersion` and `meta.expectedVersion`, and the loser writes
+  neither the row nor an event.
+- The list is a bare tenant-scoped array ordered by newest update first; the
+  domain does not expose the expert's `q` or `status` filters publicly. `GET
+  .../{submissionId}` is tenant-scoped, so another tenant's submission is 404
+  `SUBMISSION_NOT_FOUND`. Every route requires `X-EIA-Tenant` (missing is 400
+  `MISSING_TENANT_HEADER`, malformed 400 `INVALID_TENANT_HEADER`), accepts an
+  absent `X-EIA-Book` for compatibility, and hides another book as 404
+  `BOOK_SCOPE_VIOLATION`.
+- The 201 create carries the stored projection, the `ETag` of version 0,
+  `Idempotent-Replayed: false`, and a `Location`, and writes
+  `policy.submission.created` in the same transaction. Both event facts are
+  keyed by the `UnderwritingSubmission` aggregate at the submission id; create
+  is aggregate version 1 and each accepted transition is the new version plus
+  the outbox convention offset. `requestedLimitAmount` is a JSON number in the
+  HTTP projection and create body, not the canonical `MoneyAmount` decimal
+  string; the `policy.submission.created` payload carries the same value as a
+  scale-4 decimal string (M-03).
+- `Idempotency-Key` is accepted and forwarded on both mutations but the expert
+  never replays it: a retried create makes a second submission with a new
+  number and a retried real transition applies again. `If-Match` is accepted
+  and forwarded on the status command but the expert compares neither it nor an
+  `expectedVersion` body field, so a stale tag is not itself a 409. The
+  optional headers, the missing replay, and the number/string amount gap are
+  recorded in M-03, M-06, M-07, and M-59.
+- SPEC 11.2.14 mounts the collection at `/api/v1/policy/submissions`, adds the
+  clearance, rating, referral, quote, authority, declination, and producer
+  slices and the `CLEARANCE`/`RATING` intermediate states, and names the facts
+  `policy.submission.received` and `policy.submission.declined`. The
+  implemented short path, six-state graph, intake-only aggregate, and the
+  `policy.submission.created`/`policy.submission.status-changed` names are
+  narrower and are recorded in M-01, M-22, and M-59.
+
+The validator requires the four operations, the shared tenant/optional-book
+parameters, the create and status bodies, the projection, the status enum, the
+three transition bullets and the terminal statement, the 201 `ETag`,
+`Idempotent-Replayed`, and `Location` headers, the 200 `ETag`, the 400/404/409
+responses and their codes, the bare-array list, the absence of a replay 200,
+the two implemented channels and their ordered payload members, the
+`IMPLEMENTED_EVENTS` entries, and the catalog entries. The full run passes
+16,687 checks.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -3863,6 +3940,79 @@ Rules:
   the worksheet is a policy-scoped, always-CALCULATED record, and the new
   `policy.policy.rated` name has no SPEC 11.2.9 equivalent (M-01, M-22, M-57).
 
+### Policy underwriting submissions
+
+Underwriting submissions are a top-level DIRECT-book collection rather than a
+policy child: they exist before a policy and are served at
+`/api/v1/policies/submissions`. The expert keeps the same four operations under
+`/internal/v1` for the domain adapter; that alias is an implementation detail.
+
+| Operation | Path | Success | Errors |
+|---|---|---|---|
+| List | `GET /api/v1/policies/submissions` | 200 bare `PolicySubmission` array | 400, 404 |
+| Create | `POST /api/v1/policies/submissions` | 201 `PolicySubmission` | 400, 404, 409 |
+| Read | `GET /api/v1/policies/submissions/{submissionId}` | 200 `PolicySubmission` | 400, 404 |
+| Transition | `PATCH /api/v1/policies/submissions/{submissionId}/status` | 200 `PolicySubmission` | 400, 404, 409 |
+
+The projection is `{submissionId, submissionNumber, tenantId, applicantPartyId,
+productCode, requestedEffectiveDate, requestedLimitAmount,
+requestedLimitCurrency, tortCodes, notes, status, version, createdAt,
+updatedAt}`. `submissionNumber` is the immutable server-generated
+`SUB-{YYYY}-{7 digits}` business key, unique per tenant; `tenantId` is filled
+from the scoped request because the expert row does not expose it. `notes` is
+null when absent and `tortCodes` is an empty array when none were supplied.
+`requestedLimitAmount` is a JSON number with at most four fraction digits
+rather than the canonical money string, while the created event payload carries
+the same amount as a scale-4 decimal string (M-03).
+
+Rules:
+
+- Create requires `applicantPartyId`, `productCode`, `requestedEffectiveDate`,
+  `requestedLimitAmount`, and `requestedLimitCurrency`; `tortCodes` and `notes`
+  are optional. `productCode` is capped at 64 characters, the limit is
+  non-negative and normalized to four fraction digits HALF_UP, the currency is
+  three ISO 4217 letters stored upper-case, tort
+  codes are capped at 20 entries of 32 characters, and notes at 2000
+  characters. Field failures are 400 `INVALID_SUBMISSION_*` at the expert and
+  `VALIDATION_ERROR` at the domain.
+- A new submission is `RECEIVED` at `version` 0. The one-way graph is
+  `RECEIVED -> REFERRED/QUOTED/DECLINED/WITHDRAWN`,
+  `REFERRED -> QUOTED/DECLINED/WITHDRAWN`, and
+  `QUOTED -> BOUND/DECLINED/WITHDRAWN`; `BOUND`, `DECLINED`, and `WITHDRAWN`
+  are terminal. An out-of-order, no-op, or terminal transition is 409
+  `INVALID_SUBMISSION_TRANSITION` with `meta.submissionId`,
+  `meta.currentStatus`, and `meta.targetStatus`; an unknown target value is 400
+  `INVALID_SUBMISSION_STATUS`.
+- An accepted transition bumps `version`, returns the new strong `ETag`, and
+  writes `policy.submission.status-changed` with `previousStatus`, `status`,
+  `version`, `updatedAt`, and the optional trimmed `reason`. The reason is
+  event-only: the row stores no history, and a concurrent loser writes neither
+  the row nor an event (409 `CONCURRENT_MODIFICATION` with
+  `meta.currentVersion` and `meta.expectedVersion`).
+- The collection is a bare array ordered by newest update first. The public
+  domain route exposes no `q` or `status` filter, although the expert implements
+  both. Every route requires `X-EIA-Tenant` (400 `MISSING_TENANT_HEADER` or
+  `INVALID_TENANT_HEADER`), accepts an absent `X-EIA-Book`, and hides another
+  book as 404 `BOOK_SCOPE_VIOLATION`. A submission of another tenant is 404
+  `SUBMISSION_NOT_FOUND`.
+- The create returns 201 with the strong `ETag`, `Idempotent-Replayed: false`,
+  and a `Location`, and writes `policy.submission.created` in the same
+  transaction as the row. The two facts are keyed by the
+  `UnderwritingSubmission` aggregate: create is aggregate version 1 and each
+  accepted transition is the new version plus the outbox convention offset.
+- `Idempotency-Key` is accepted and forwarded on the create and status
+  commands, but the expert does not replay it, so a retried create makes a
+  second submission with a new number. `If-Match` is accepted and forwarded on
+  the status command, but the expert compares neither the header nor an
+  `expectedVersion` body field, so a stale tag is not itself a 409 (M-06, M-07).
+- SPEC 11.2.14 mounts the collection at `/api/v1/policy/submissions`, adds the
+  clearance, rating, referral, quote, authority, declination, and producer
+  slices and the `CLEARANCE`/`RATING` intermediate states, and names the facts
+  `policy.submission.received` and `policy.submission.declined`. The implemented
+  short path, six-state graph, intake-only aggregate, and
+  `policy.submission.created`/`policy.submission.status-changed` names are
+  narrower and are recorded in M-01, M-22, and M-59.
+
 ### Global search
 
 The shell's `/search` page fans out to one search operation per vertical. Every
@@ -4228,7 +4378,16 @@ missing directory.
    64-character hash, the `PolicyRatingResult` envelope with its optional
    applied `policy`, the 201 `ETag`/`Idempotent-Replayed` headers, the 200
    worksheet read, and the 400/404/409 responses with the `RATING_*`,
-   `POLICY_NOT_RATEABLE`, and `RATING_WORKSHEET_NOT_FOUND` codes.
+   `POLICY_NOT_RATEABLE`, and `RATING_WORKSHEET_NOT_FOUND` codes. It also
+   requires the four submission operations with the shared tenant and optional
+   DIRECT book parameters, the create `IdempotencyKey` header, the status
+   `IfMatch` and `IdempotencyKey` headers, the required create and status
+   bodies, the fourteen-member `PolicySubmission`, the six-value
+   `PolicySubmissionStatus`, the three transition bullets and the terminal
+   statement, the bare-array list, the 201
+   `ETag`/`Idempotent-Replayed`/`Location` headers, the 200 `ETag`, the
+   400/404/409 responses and their codes, and the absence of a replay 200 and of
+   a public `q`/`status` list parameter.
 4. **AsyncAPI structure.** `asyncapi: 3.0.0`, channel addresses, `x-event-type`,
    `x-status: planned|implemented`, `x-implemented-by` on every implemented
    channel, one `send` operation per channel, a `DomainEvent` message on
@@ -4307,7 +4466,13 @@ missing directory.
    `party.party.status-updated` channel because the expert does not emit that
    name. It also requires the implemented `policy.policy.rated` channel and
    `send` operation with the seven-member `PolicyPolicyRatedData` payload and
-   its two-value method enum.
+   its two-value method enum. It also requires the implemented
+   `policy.submission.created` and `policy.submission.status-changed` channels
+   and `send` operations with the thirteen-member
+   `PolicySubmissionCreatedData` and nine-member
+   `PolicySubmissionStatusChangedData` payloads, their ordered members, the
+   six-value status enums, the nullable notes and reason, and the
+   `UnderwritingSubmission` channel wording.
 5. **Event catalog cross-check.** The published set in `event-catalog.yaml`
    must equal the channel addresses in the matching vertical document, event
    names must be unique across the platform and must match
@@ -4335,6 +4500,8 @@ missing directory.
    `policy.policy.renewed`,
    `policy.policy.premium-audited`,
    `policy.policy.rated`,
+   `policy.submission.created`,
+   `policy.submission.status-changed`,
    `policy.billing-plan.created`, `policy.billing-plan.adjusted`,
    `policy.installment.paid`,
    `policy.installment.waived`, `policy.dunning.sent`,

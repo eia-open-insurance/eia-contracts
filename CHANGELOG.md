@@ -2029,6 +2029,64 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   and refreshes the scope and validation evidence.
 - `python scripts/validate_contracts.py` passes 16,329 checks with 0 failures.
 
+### Added in the Policy underwriting-submission contract (2026-10-22)
+
+- `openapi/policy.yaml` is 2.18.0: adds
+  `GET/POST /api/v1/policies/submissions`,
+  `GET /api/v1/policies/submissions/{submissionId}`, and
+  `PATCH /api/v1/policies/submissions/{submissionId}/status`, the
+  `PolicySubmission` projection, the `CreatePolicySubmissionRequest` body
+  (`applicantPartyId`, `productCode`, `requestedEffectiveDate`,
+  `requestedLimitAmount`, and `requestedLimitCurrency` required; optional
+  `tortCodes` and `notes`), the `UpdatePolicySubmissionStatusRequest` body, and
+  the six-value `PolicySubmissionStatus` enum. A submission is created
+  `RECEIVED` at `version` 0 with a server-generated per-tenant
+  `SUB-{YYYY}-{7 digits}` number; the one-way graph is
+  `RECEIVED -> REFERRED/QUOTED/DECLINED/WITHDRAWN`,
+  `REFERRED -> QUOTED/DECLINED/WITHDRAWN`, and
+  `QUOTED -> BOUND/DECLINED/WITHDRAWN`, with `BOUND`, `DECLINED`, and
+  `WITHDRAWN` terminal. The operations document the bare-array list, the
+  strong `ETag`, the 400 tenant/validation codes, the 404
+  `SUBMISSION_NOT_FOUND` and `BOOK_SCOPE_VIOLATION`, and the 409
+  `DUPLICATE_SUBMISSION_NUMBER`, `INVALID_SUBMISSION_TRANSITION`, and
+  `CONCURRENT_MODIFICATION` codes. `x-compatibility` moves to 2.18.0 over
+  2.17.0.
+- `asyncapi/policy.yaml` is 1.15.0: the implemented
+  `policy.submission.created` and `policy.submission.status-changed` channels
+  and `send` operations, with the `PolicySubmissionCreatedData` payload
+  (`submissionId`, `submissionNumber`, `applicantPartyId`, `productCode`,
+  `requestedEffectiveDate`, `requestedLimitAmount`,
+  `requestedLimitCurrency`, `tortCodes`, `status: RECEIVED`, `notes`,
+  `version: 0`, `createdAt`, and `updatedAt`) and the
+  `PolicySubmissionStatusChangedData` payload (`submissionId`,
+  `submissionNumber`, `applicantPartyId`, `productCode`, `previousStatus`,
+  `status`, `version`, `updatedAt`, and nullable `reason`). The created
+  payload carries `requestedLimitAmount` as a scale-4 decimal string while the
+  HTTP projection serializes it as a JSON number. Both name
+  `PolicyEvents.java` and keep `eventVersion` 1; a submission is its own
+  `UnderwritingSubmission` aggregate.
+- `asyncapi/event-catalog.yaml` is 1.38.0: both names are published and
+  implemented, for 227 published and 108 implemented names (Policy 38 published
+  and 26 implemented).
+- `scripts/validate_contracts.py` requires the four submission operations with
+  the shared tenant and optional DIRECT book parameters, the create
+  `IdempotencyKey` header, the status `IfMatch` and `IdempotencyKey` headers,
+  the required create and status bodies, the fourteen-member `PolicySubmission`
+  projection, the six-value status enum, the three transition bullets and the
+  terminal statement, the bare-array list, the 201
+  `ETag`/`Idempotent-Replayed`/`Location` headers, the 200 `ETag`, the
+  400/404/409 responses and their codes, the absence of a replay 200 and of a
+  public `q`/`status` list parameter, the two implemented channels and their
+  ordered payload members, the `IMPLEMENTED_EVENTS` entries, and the catalog
+  entries.
+- `README.md` records the additive versions, the routes and status graph, the
+  projection and create bodies, the number/limit/code caps, the ETag and event
+  semantics, the unhonoured optional headers and JSON-number amount gap, the
+  SPEC route/state/event deviations, and the validation count; `MISMATCHES.md`
+  adds M-59, updates M-01, M-03, M-04, M-06, M-07, M-08, M-14, and M-22, and
+  refreshes the scope and validation evidence.
+- `python scripts/validate_contracts.py` passes 16,687 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

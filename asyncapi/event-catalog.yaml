@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.37.0
+  version: 1.38.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -212,6 +212,19 @@ info:
     implemented names, bringing the platform totals to 225 published and 106
     implemented; Party becomes 15 published and 8 implemented (M-22, M-54,
     M-58).
+    The 2026-10-22 Policy underwriting-submission slice adds two Policy names,
+    `policy.submission.created` and `policy.submission.status-changed`.
+    `created` has no SPEC 11.2.9 equivalent: SPEC publishes
+    `policy.submission.received` instead. `status-changed` has no SPEC name at
+    all: SPEC models the lifecycle as separate clearance, rating, referral,
+    quote, and declination facts. Both are facts of the
+    `UnderwritingSubmission` aggregate, keyed by the submission id at aggregate
+    version 1 on create and one higher per accepted transition, with the
+    submission id as the partition key; the transition payload carries the
+    previous and new status, the bumped version, the update instant, and the
+    optional reason. They add two published and two implemented names, bringing
+    the platform totals to 227 published and 108 implemented; Policy becomes 38
+    published and 26 implemented (M-22, M-59).
     The platform
     event-ingest service
     is the inbox:
@@ -330,7 +343,7 @@ x-event-catalog:
       - document.document.registered
   policy:
     eventVertical: policy
-    specSection: SPEC 10.11.3, SPEC 11.2.9, SPEC 11.2.13, SPEC 11.2.16
+    specSection: SPEC 10.11.3, SPEC 11.2.9, SPEC 11.2.13, SPEC 11.2.14, SPEC 11.2.16
     published:
       - policy.policy.created
       - policy.policy.updated
@@ -368,6 +381,8 @@ x-event-catalog:
       - policy.policy.program-assigned
       - policy.legal-entity.created
       - policy.policy.legal-entity-assigned
+      - policy.submission.created
+      - policy.submission.status-changed
     implemented:
       - policy.policy.created
       - policy.policy.updated
@@ -393,6 +408,8 @@ x-event-catalog:
       - policy.policy.program-assigned
       - policy.legal-entity.created
       - policy.policy.legal-entity-assigned
+      - policy.submission.created
+      - policy.submission.status-changed
     consumed:
       - direct.claim.registered
       - direct.claim.allocated

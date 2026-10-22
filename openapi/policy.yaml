@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Policy API
-  version: 2.17.0
+  version: 2.18.0
   summary: Direct-book policy administration and the Policy expert API.
   description: >
     This document describes the implemented public Policy domain API and the
@@ -412,6 +412,42 @@ info:
       publishes `policy.rating.completed`; the implemented policy-scoped route,
       `CALCULATED`-only status, and `policy.policy.rated` name are recorded in
       MISMATCHES.md M-01, M-22, and M-57.
+
+    The 2026-10-22 underwriting-submission slice adds the pre-policy intake
+    collection:
+
+    - `GET/POST /api/v1/policies/submissions`, `GET
+      .../{submissionId}`, and `PATCH .../{submissionId}/status` expose a
+      tenant-owned submission with a server-generated `SUB-{YYYY}-{7 digits}`
+      number. A create is `RECEIVED` at `version` 0 with the applicant, product,
+      requested term and limit, optional tort codes, and optional notes.
+    - The status graph is `RECEIVED -> REFERRED/QUOTED/DECLINED/WITHDRAWN`,
+      `REFERRED -> QUOTED/DECLINED/WITHDRAWN`, and
+      `QUOTED -> BOUND/DECLINED/WITHDRAWN`; `BOUND`, `DECLINED`, and
+      `WITHDRAWN` are terminal. An accepted transition bumps `version` and
+      returns the new `ETag`; an out-of-order or terminal transition is 409
+      `INVALID_SUBMISSION_TRANSITION`.
+    - The list is a bare array ordered by newest update first. The tenant comes
+      from `X-EIA-Tenant`; an absent `X-EIA-Book` is accepted and another book
+      is hidden as 404 `BOOK_SCOPE_VIOLATION`. The optional `Idempotency-Key`
+      and `If-Match` headers are accepted and forwarded, but the expert neither
+      replays the key nor compares the tag (M-06, M-07).
+    - The submission projection is flat: `submissionId`, `submissionNumber`,
+      `tenantId`, `applicantPartyId`, `productCode`,
+      `requestedEffectiveDate`, `requestedLimitAmount`,
+      `requestedLimitCurrency`, `tortCodes`, `notes`, `status`, `version`,
+      `createdAt`, and `updatedAt`. `requestedLimitAmount` is serialized as a
+      JSON number rather than the canonical money string (SPEC 10.3; M-03,
+      M-59); the `policy.submission.created` payload carries it as a decimal
+      string.
+    - SPEC 11.2.14 names the routes under `/api/v1/policy/submissions` and adds
+      the clearance, rating, referral, quote, declination, and producer slices,
+      plus the `CLEARANCE` and `RATING` intermediate states; the implemented
+      collection, six-state graph, and applicant/product references are
+      narrower. SPEC 11.2.9 publishes `policy.submission.received` and
+      `policy.submission.declined`; the implemented facts are
+      `policy.submission.created` and `policy.submission.status-changed`
+      (M-01, M-22, M-59).
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -550,6 +586,266 @@ paths:
           $ref: './components.yaml#/components/responses/BadRequest'
         '404':
           $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/submissions:
+    get:
+      operationId: listPolicySubmissions
+      tags:
+        - Policy
+      summary: List underwriting submissions for the caller's tenant.
+      description: >
+        Returns the tenant's underwriting submissions as a bare array ordered
+        by `updatedAt` descending (newest update first) with the submission id
+        as the tie-breaker. A submission is a pre-policy intake aggregate, so
+        this collection is not policy-scoped and does not use the offset page
+        envelope.
+
+        `X-EIA-Tenant` is required; a missing header is 400
+        `MISSING_TENANT_HEADER` and a malformed one is 400
+        `INVALID_TENANT_HEADER`. `X-EIA-Book` is optional for compatibility
+        with the other Policy proxy routes; when supplied it must be DIRECT,
+        and another book is hidden as 404 `BOOK_SCOPE_VIOLATION` before the
+        expert is called. The expert also implements case-insensitive `q` and
+        `status` filters, but the public domain route exposes neither
+        (MISMATCHES.md M-59). The list has no request body.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirectOptional'
+      responses:
+        '200':
+          description: The tenant's submissions, newest update first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PolicySubmission'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+    post:
+      operationId: createPolicySubmission
+      tags:
+        - Policy
+      summary: Create an underwriting submission.
+      description: >
+        Creates one underwriting submission in `RECEIVED` at `version` 0. The
+        server generates the immutable per-tenant `SUB-{YYYY}-{7 digits}`
+        number from a locked counter row, so `submissionId`,
+        `submissionNumber`, `status`, `version`, `createdAt`, and `updatedAt`
+        are server-owned and not part of the request schema.
+
+        `applicantPartyId`, `productCode`, `requestedEffectiveDate`,
+        `requestedLimitAmount`, and `requestedLimitCurrency` are required;
+        `tortCodes` and `notes` are optional. `productCode` is trimmed and
+        capped at 64 characters, the limit is normalized to four fraction
+        digits HALF_UP, the currency is trimmed and upper-cased to three ISO
+        4217 letters, `tortCodes` holds at most 20 non-blank codes of at most
+        32 characters each in submitted order with duplicates preserved, and
+        `notes` is trimmed, blank-to-null, and capped at 2000 characters. The
+        domain's Bean Validation reports a missing or out-of-bounds member as
+        400 `VALIDATION_ERROR` with the field name; the expert's service-level
+        backstops are `INVALID_SUBMISSION_PRODUCT_CODE`,
+        `INVALID_SUBMISSION_LIMIT`, `INVALID_SUBMISSION_CURRENCY`,
+        `INVALID_SUBMISSION_TORT_CODES`, and `INVALID_SUBMISSION_NOTES`. A
+        missing or malformed tenant is 400 `MISSING_TENANT_HEADER` or
+        `INVALID_TENANT_HEADER`, and a rejected body is 400
+        `VALIDATION_ERROR`. A duplicate generated number is 409
+        `DUPLICATE_SUBMISSION_NUMBER`.
+
+        The accepted create returns 201 with the stored projection, the strong
+        `ETag` of `version` 0, `Idempotent-Replayed: false`, and a `Location`
+        for the new submission, and writes `policy.submission.created` in the
+        same transaction as the row. `Idempotency-Key` is accepted and
+        forwarded, but the expert does not replay it: a retry creates a second
+        submission with a new number rather than returning 200 (MISMATCHES.md
+        M-06, M-07). An absent `X-EIA-Book` is accepted and a supplied
+        non-DIRECT book is 404 `BOOK_SCOPE_VIOLATION`.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirectOptional'
+        - $ref: './components.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePolicySubmissionRequest'
+      responses:
+        '201':
+          description: >
+            Submission created in RECEIVED with its server-generated number.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+            Location:
+              description: URI of the created submission.
+              schema:
+                type: string
+                format: uri-reference
+              example: /api/v1/policies/submissions/aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicySubmission'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            The generated submission number collided with an existing row for
+            the tenant. The canonical code is `DUPLICATE_SUBMISSION_NUMBER`;
+            the expert raises it and the domain preserves the 409.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/submissions/{submissionId}:
+    get:
+      operationId: getPolicySubmission
+      tags:
+        - Policy
+      summary: Get an underwriting submission.
+      description: >
+        Returns one tenant-scoped submission with the strong `ETag` of its
+        `version`. The lookup is scoped by tenant, so a submission of another
+        tenant is indistinguishable from a missing one and both are 404
+        `SUBMISSION_NOT_FOUND`. A missing or malformed tenant is 400
+        `MISSING_TENANT_HEADER` or `INVALID_TENANT_HEADER`, a supplied
+        non-DIRECT book is 404 `BOOK_SCOPE_VIOLATION`, and an absent book is
+        accepted. The read has no request body and no `If-Match`.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirectOptional'
+        - name: submissionId
+          in: path
+          required: true
+          description: Submission to read.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The stored submission projection.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicySubmission'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        default:
+          $ref: './components.yaml#/components/responses/Problem'
+  /api/v1/policies/submissions/{submissionId}/status:
+    patch:
+      operationId: updatePolicySubmissionStatus
+      tags:
+        - Policy
+      summary: Advance an underwriting submission through its lifecycle.
+      description: >
+        Applies one transition from the implemented one-way graph. The target
+        `status` is trimmed and upper-cased; a value outside
+        `PolicySubmissionStatus` is 400 `INVALID_SUBMISSION_STATUS`, a blank
+        value is 400 `VALIDATION_ERROR`, and a malformed body is 400
+        `VALIDATION_ERROR`. `reason` is optional: it is trimmed, stored as null
+        when blank, capped at 500 characters (a longer value is rejected as 400
+        `VALIDATION_ERROR`; the service-level backstop is
+        `INVALID_SUBMISSION_REASON`), and carried on the
+        `policy.submission.status-changed` event as the audit explanation; it
+        is not a submission column.
+
+        The implemented one-way graph is:
+
+        - `RECEIVED` -> `REFERRED`, `QUOTED`, `DECLINED`, `WITHDRAWN`
+        - `REFERRED` -> `QUOTED`, `DECLINED`, `WITHDRAWN`
+        - `QUOTED` -> `BOUND`, `DECLINED`, `WITHDRAWN`
+        - `BOUND`, `DECLINED`, and `WITHDRAWN` are terminal: any later
+          transition, including a no-op to the current status or a repeat of a
+          terminal status, is 409 `INVALID_SUBMISSION_TRANSITION`.
+
+        An accepted transition bumps `version`, returns the updated projection
+        with the new strong `ETag`, and writes
+        `policy.submission.status-changed` in the same transaction as the row
+        update. An out-of-order or terminal transition is 409
+        `INVALID_SUBMISSION_TRANSITION` with `meta.submissionId`,
+        `meta.currentStatus`, and `meta.targetStatus`, and writes nothing. The
+        update predicate includes the version and the current status read by
+        the command, so a concurrent winner is 409
+        `CONCURRENT_MODIFICATION` with `meta.currentVersion` and
+        `meta.expectedVersion`, and the loser writes neither the row nor an
+        event.
+
+        The lookup is tenant-scoped, so an unknown or foreign submission is 404
+        `SUBMISSION_NOT_FOUND`, and a missing or malformed tenant is 400
+        `MISSING_TENANT_HEADER` or `INVALID_TENANT_HEADER`. `If-Match` is
+        accepted and forwarded for compatibility, but the expert reads neither
+        the header nor an `expectedVersion` body field when deciding the
+        transition: the tag is not compared and a stale tag is not a 409 by
+        itself (MISMATCHES.md M-06). `Idempotency-Key` is likewise accepted and
+        forwarded but not replayed, so a repeated non-terminal transition
+        applies again with a new version (MISMATCHES.md M-07). An absent
+        `X-EIA-Book` is accepted and a supplied non-DIRECT book is 404
+        `BOOK_SCOPE_VIOLATION`.
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - $ref: './components.yaml#/components/parameters/BookHeaderDirectOptional'
+        - $ref: './components.yaml#/components/parameters/IfMatch'
+        - $ref: './components.yaml#/components/parameters/IdempotencyKey'
+        - name: submissionId
+          in: path
+          required: true
+          description: Submission to advance.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePolicySubmissionStatusRequest'
+      responses:
+        '200':
+          description: Submission after the accepted transition.
+          headers:
+            ETag:
+              $ref: './components.yaml#/components/headers/ETag'
+            Idempotent-Replayed:
+              $ref: './components.yaml#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicySubmission'
+        '400':
+          $ref: './components.yaml#/components/responses/BadRequest'
+        '404':
+          $ref: './components.yaml#/components/responses/NotFound'
+        '409':
+          description: >
+            The transition is not allowed from the stored status, or the
+            submission changed after it was read. An out-of-order, no-op, or
+            terminal transition is `INVALID_SUBMISSION_TRANSITION` with
+            `meta.submissionId`, `meta.currentStatus`, and
+            `meta.targetStatus`; a concurrent winner is
+            `CONCURRENT_MODIFICATION` with `meta.currentVersion` and
+            `meta.expectedVersion`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: './components.yaml#/components/schemas/Problem'
         default:
           $ref: './components.yaml#/components/responses/Problem'
   /api/v1/policies/{policyId}:
@@ -6110,6 +6406,200 @@ components:
           $ref: '#/components/schemas/RatingWorksheet'
         policy:
           $ref: '#/components/schemas/Policy'
+    PolicySubmission:
+      type: object
+      description: >
+        Underwriting submission projection (SPEC 11.2.14
+        `underwriting_submission`, intake slice). A submission is a tenant-owned
+        intake aggregate that exists before a policy: `submissionNumber` is the
+        immutable server-generated `SUB-{YYYY}-{7 digits}` business key,
+        `version` starts at 0 and is incremented once per accepted transition,
+        and the record carries the applicant, product code, requested effective
+        date, requested limit amount and currency, tort codes, optional notes,
+        status, and timestamps. `tenantId` is projected from the scoped request
+        because the expert row does not expose the tenant column. `notes` is
+        null when no notes were supplied and `tortCodes` is an empty array when
+        no codes were supplied. The SPEC `program_id`, `requested_limits`,
+        `requested_coverages`, `exposures`, `owner`, and product-version
+        references are not modelled (MISMATCHES.md M-59).
+      required:
+        - submissionId
+        - submissionNumber
+        - tenantId
+        - applicantPartyId
+        - productCode
+        - requestedEffectiveDate
+        - requestedLimitAmount
+        - requestedLimitCurrency
+        - tortCodes
+        - notes
+        - status
+        - version
+        - createdAt
+        - updatedAt
+      properties:
+        submissionId:
+          type: string
+          format: uuid
+        submissionNumber:
+          type: string
+          maxLength: 32
+          description: >
+            Server-generated immutable `SUB-{YYYY}-{7 digits}` number, unique
+            per tenant.
+          examples:
+            - SUB-2026-0000001
+        tenantId:
+          type: string
+          format: uuid
+        applicantPartyId:
+          type: string
+          format: uuid
+        productCode:
+          type: string
+          maxLength: 64
+          description: Trimmed product code supplied on create.
+        requestedEffectiveDate:
+          type: string
+          format: date
+        requestedLimitAmount:
+          type: number
+          minimum: 0
+          description: >
+            Non-negative requested limit amount, stored normalized to four
+            fraction digits HALF_UP. The implemented projection serializes the
+            amount as a JSON number rather than the canonical `MoneyAmount`
+            decimal string (SPEC 10.3; MISMATCHES.md M-03, M-59).
+        requestedLimitCurrency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          description: Uppercase ISO 4217 alpha-3 currency code.
+        tortCodes:
+          type: array
+          maxItems: 20
+          description: >
+            Tort codes in submitted order, trimmed and with duplicates
+            preserved; empty when none were supplied.
+          items:
+            type: string
+            maxLength: 32
+        notes:
+          type: [string, 'null']
+          maxLength: 2000
+          description: Trimmed free-text intake notes; null when absent.
+        status:
+          $ref: '#/components/schemas/PolicySubmissionStatus'
+        version:
+          type: integer
+          minimum: 0
+          description: >
+            Aggregate version. It is 0 on create and increments once per
+            accepted transition; the strong `ETag` is `"<version>"`.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    PolicySubmissionStatus:
+      type: string
+      description: >
+        Implemented underwriting submission lifecycle. A submission is created
+        `RECEIVED`; the one-way graph is `RECEIVED` to
+        `REFERRED`/`QUOTED`/`DECLINED`/`WITHDRAWN`, `REFERRED` to
+        `QUOTED`/`DECLINED`/`WITHDRAWN`, and `QUOTED` to
+        `BOUND`/`DECLINED`/`WITHDRAWN`. `BOUND`, `DECLINED`, and `WITHDRAWN`
+        are terminal. The SPEC 11.2.14 `CLEARANCE` and `RATING` intermediate
+        states are not modelled (MISMATCHES.md M-59).
+      enum:
+        - RECEIVED
+        - REFERRED
+        - QUOTED
+        - BOUND
+        - DECLINED
+        - WITHDRAWN
+    CreatePolicySubmissionRequest:
+      type: object
+      description: >
+        Public create command for an underwriting submission. The tenant comes
+        from `X-EIA-Tenant`; `submissionId`, `submissionNumber`, `status`,
+        `version`, and the timestamps are server-owned and are not part of this
+        schema. `productCode` is trimmed (1-64 characters), the requested limit
+        amount is non-negative and normalized to four fraction digits HALF_UP,
+        `requestedLimitCurrency` is trimmed and upper-cased to three ISO 4217
+        letters, `tortCodes` holds at most 20 non-blank codes of at most 32
+        characters each, and `notes` is capped at 2000 characters. The field
+        failures are 400 `INVALID_SUBMISSION_PRODUCT_CODE`,
+        `INVALID_SUBMISSION_LIMIT`, `INVALID_SUBMISSION_CURRENCY`,
+        `INVALID_SUBMISSION_TORT_CODES`, and `INVALID_SUBMISSION_NOTES`; the
+        public domain checks the same caps first and reports 400
+        `VALIDATION_ERROR` with the field names.
+      required:
+        - applicantPartyId
+        - productCode
+        - requestedEffectiveDate
+        - requestedLimitAmount
+        - requestedLimitCurrency
+      properties:
+        applicantPartyId:
+          type: string
+          format: uuid
+        productCode:
+          type: string
+          minLength: 1
+          maxLength: 64
+        requestedEffectiveDate:
+          type: string
+          format: date
+        requestedLimitAmount:
+          type: number
+          minimum: 0
+          description: >
+            Non-negative requested limit amount, stored normalized to four
+            fraction digits HALF_UP. The implemented wire value is a JSON
+            number rather than the canonical `MoneyAmount` decimal string
+            (SPEC 10.3; M-03, M-59).
+        requestedLimitCurrency:
+          type: string
+          pattern: '^[A-Za-z]{3}$'
+          description: >
+            Three-letter ISO 4217 currency code, accepted in either case and
+            stored upper-case.
+        tortCodes:
+          type: array
+          maxItems: 20
+          description: >
+            Optional tort codes; each code is trimmed and must be 1-32
+            characters. A missing list stores an empty array.
+          items:
+            type: string
+            minLength: 1
+            maxLength: 32
+        notes:
+          type: [string, 'null']
+          maxLength: 2000
+          description: Optional free-text notes; a blank value stores null.
+    UpdatePolicySubmissionStatusRequest:
+      type: object
+      description: >
+        Status transition command. `status` is trimmed and upper-cased and must
+        be a member of `PolicySubmissionStatus`; an unknown value is 400
+        `INVALID_SUBMISSION_STATUS`. `reason` is optional, trimmed, capped at
+        500 characters, stored as null when blank, and carried only on the
+        `policy.submission.status-changed` event. The expert owns the
+        transition graph and returns 409 `INVALID_SUBMISSION_TRANSITION` for an
+        out-of-order, no-op, or terminal transition.
+      required:
+        - status
+      properties:
+        status:
+          $ref: '#/components/schemas/PolicySubmissionStatus'
+        reason:
+          type: [string, 'null']
+          maxLength: 500
+          description: >
+            Optional audit explanation carried on the status-changed event; it
+            is not stored on the submission row.
     MassTortProfile:
       type: object
       description: >
@@ -7077,6 +7567,28 @@ x-implementation:
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/PolicyRatingServiceTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/RatingRulesTest.java
     - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/PolicyRatingIntegrationTest.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/SubmissionController.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/SubmissionService.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/SubmissionDto.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/CreateSubmissionCommand.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/UpdateSubmissionStatusCommand.java
+    - repos/eia-policy-domain/src/main/java/com/eia/policy/domain/PolicyClient.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/SubmissionControllerTest.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/SubmissionServiceTest.java
+    - repos/eia-policy-domain/src/test/java/com/eia/policy/domain/SubmissionClientTest.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/UnderwritingSubmissionController.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/UnderwritingSubmissionService.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/UnderwritingSubmissionRules.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/UnderwritingSubmissionRepository.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/UnderwritingSubmissionNumberAllocator.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/UnderwritingSubmission.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/UnderwritingSubmissionView.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/CreateUnderwritingSubmissionRequest.java
+    - repos/eia-policy-expert/src/main/java/com/eia/policy/expert/UpdateUnderwritingSubmissionStatusRequest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/UnderwritingSubmissionControllerTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/UnderwritingSubmissionServiceTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/UnderwritingSubmissionRulesTest.java
+    - repos/eia-policy-expert/src/test/java/com/eia/policy/expert/UnderwritingSubmissionIntegrationTest.java
   errorEnvelope: >
     Canonical RFC 9457 Problem with content type application/problem+json, from
     both the Policy domain and the Policy expert. The vertical keeps its legacy
@@ -7251,31 +7763,54 @@ x-implementation:
     tax, or fee. SPEC 11.2.14 mounts rating under the submission and SPEC
     11.2.9 publishes `policy.rating.completed`; the implemented route and event
     name are recorded in M-01, M-22, and M-57.
+
+    Underwriting submissions are a top-level DIRECT-book collection, not a
+    policy child. The domain proxies the expert's `/internal/v1` alias with the
+    tenant and DIRECT book and preserves expert 400/404/409 problems. The
+    expert owns the per-tenant locked number allocator, the applicant/product
+    and requested-term/limit rules, the `RECEIVED` creation state at version 0,
+    the one-way `RECEIVED`/`REFERRED`/`QUOTED`/`BOUND`/`DECLINED`/`WITHDRAWN`
+    graph, the conditional version-and-status update, and the two outbox facts.
+    The public list is a bare array ordered newest update first; the domain
+    fills `tenantId` from the scoped request because the expert row does not
+    expose the tenant column. The optional `Idempotency-Key` is forwarded but
+    the expert does not replay it, and the optional `If-Match` is forwarded but
+    the expert does not compare it, so a retry creates a second submission and
+    a stale tag is not a 409 by itself (M-06, M-07). The SPEC 11.2.14 clearance,
+    rating, referral, quote, authority, declination, and producer slices, its
+    `CLEARANCE`/`RATING` states, and its `/api/v1/policy/submissions` base are
+    not implemented; the HTTP `requestedLimitAmount` is a JSON number rather
+    than the canonical money string, while the created event carries it as a
+    decimal string (M-03, M-59). The implemented event facts are
+    `policy.submission.created` and `policy.submission.status-changed` against
+    the `UnderwritingSubmission` aggregate rather than the SPEC names (M-22,
+    M-59).
 x-compatibility:
-  contractVersion: 2.17.0
-  previousContractVersion: 2.16.0
+  contractVersion: 2.18.0
+  previousContractVersion: 2.17.0
   breaking: []
   compatible:
-    - Adds POST /api/v1/policies/{policyId}/rating with the RatePolicyRequest body and the {worksheet, policy?} PolicyRatingResult envelope.
-    - Adds GET /api/v1/policies/{policyId}/rating returning the newest RatingWorksheet.
-    - Adds the RatingWorksheet, RatingMethod, RatingWorksheetStatus, RatePolicyRequest, and PolicyRatingResult schemas.
-    - Documents the RATE_TIMES_EXPOSURE and FLAT methods, the DRAFT/QUOTED rateable-status gate, the HALF_UP premium rounding, and the canonical calcHash.
-    - Documents the 400 RATING_* validations, the 404 POLICY_NOT_FOUND/RATING_WORKSHEET_NOT_FOUND, and the 409 POLICY_NOT_RATEABLE/CONCURRENT_MODIFICATION conflicts.
-    - Adds the policy.policy.rated event.
+    - Adds GET/POST /api/v1/policies/submissions and GET /api/v1/policies/submissions/{submissionId}.
+    - Adds PATCH /api/v1/policies/submissions/{submissionId}/status with the six-state transition graph.
+    - Adds the PolicySubmission projection, the CreatePolicySubmissionRequest body, the UpdatePolicySubmissionStatusRequest body, and the PolicySubmissionStatus enum.
+    - Documents the per-tenant SUB-{YYYY}-{7 digits} number, the RECEIVED creation state, the six statuses and their one-way transitions, and the strong ETag from the submission version.
+    - Documents the 400 tenant and validation codes, the 404 SUBMISSION_NOT_FOUND and BOOK_SCOPE_VIOLATION, and the 409 DUPLICATE_SUBMISSION_NUMBER, INVALID_SUBMISSION_TRANSITION, and CONCURRENT_MODIFICATION codes.
+    - Adds the policy.submission.created and policy.submission.status-changed events.
     - Removes no path or field and changes no existing field meaning.
   note: >
-    The rating slice is additive over 2.16.0: two public operations on one new
-    path, five schemas, and one implemented event name. A calculation-only
-    request persists the worksheet without touching the policy; an applied
-    request replaces the policy premium, bumps the aggregate version, and
-    returns the refreshed Policy with its ETag. The worksheet is policy-scoped
-    and always CALCULATED, so the SPEC 11.2.14 submission-scoped route and
-    DRAFT/CALCULATED/APPROVED/SUPERSEDED lifecycle are narrower than the
-    specification, and the SPEC 11.2.9 policy.rating.completed name is not
-    published. The catalog grows to 221 published and 102 implemented names,
-    with Policy at 36 published and 24 implemented. The route, worksheet, and
-    event-name differences and the unhonoured optional idempotency header are
-    recorded in MISMATCHES.md M-01, M-06, M-07, M-22, and M-57.
+    The underwriting-submission slice is additive over 2.17.0: four public
+    operations, three schemas, one status enum, and two implemented event names.
+    A submission is a tenant-owned pre-policy intake aggregate created RECEIVED
+    at version 0 with a server-generated per-tenant number; the six-state graph
+    is one-way and BOUND/DECLINED/WITHDRAWN are terminal. The list is a bare
+    array and the public route exposes no q/status filter. The optional
+    Idempotency-Key and If-Match headers are accepted but not honoured by the
+    expert, and requestedLimitAmount is a JSON number rather than a money
+    string. The catalog grows to 227 published and 108 implemented names, with
+    Policy at 38 published and 26 implemented. The SPEC base path, the missing
+    clearance/rating/referral/quote/producer slices and CLEARANCE/RATING states,
+    the different event names, and the unhonoured headers are recorded in
+    MISMATCHES.md M-01, M-03, M-06, M-07, M-22, and M-59.
 x-planned-operations:
   - method: POST
     path: /api/v1/policies/{policyId}/bind
