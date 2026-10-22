@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-22 (Policy submission conversion).
+Status: open, reviewed 2026-10-22 (Policy idempotency request-hash conflicts).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -214,6 +214,14 @@ where the running code does not meet it yet.
   `PolicyIdempotencyService`, `PolicyIdempotencyRepository`,
   `IdempotentResponse`, `IdempotencyKeys`, and
   `PolicyIdempotencyReplayIntegrationTest`.
+  The Policy idempotency request-hash pass re-reads the expert
+  `PolicyIdempotencyService`, `PolicyIdempotencyRepository`,
+  `PolicyIdempotencyResponse`, `IdempotentResponse`, `IdempotencyKeys`, the
+  `policy_idempotency` table, `IdempotencyKeysTest`, and
+  `PolicyIdempotencyReplayIntegrationTest` for the canonical rating and
+  conversion hashes, the 409 `IDEMPOTENCY_CONFLICT` with
+  `meta.operation`/`meta.key`, the concurrent-reservation outcome, and the
+  legacy null-hash replay.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -247,7 +255,7 @@ removed per the resolution policy.
 | M-04 | Pagination: Policy uses an offset envelope, other lists are bare arrays | H |
 | M-05 | `_links` exist on Policy pages only; no detail links anywhere | M |
 | M-06 | `ETag`/`If-Match` are complete only in Policy; the Party status response emits an ETag and accepts `If-Match` but does not compare it, and other verticals use body versions | H |
-| M-07 | `Idempotency-Key` covers Policy (including keyed rating and conversion replay without a request hash) and claim task/note creates; the Party status command forwards but does not replay a key | M |
+| M-07 | `Idempotency-Key` covers Policy (including request-hash conflicts for rating and conversion since 2.21.0) and claim task/note creates; the Party status command forwards but does not replay a key | M |
 | M-08 | Tenant context is passed three different ways | M |
 | M-10 | Lifecycle operations use PATCH, POST, and PUT inconsistently | M |
 | M-11 | Illegal-transition status codes: Policy is 409, five verticals are 400 | M |
@@ -295,10 +303,10 @@ removed per the resolution policy.
 | M-54 | Party identifiers and addresses are SPEC-less append-only child routes with wider type sets, a plaintext value, and no implemented address duplicate guard | M |
 | M-55 | Party status transitions are a SPEC-less command with no transition graph, no status history, event-only reason, and unenforced concurrency/idempotency headers | M |
 | M-56 | Notification delivery attempts use a SPEC-less per-notification route, a narrower delivery row than SPEC 11.8.4, notification-level evidence, and a simulator-only provider with no retry | L |
-| M-57 | Policy rating worksheets are a SPEC-less policy-scoped route and event with only two rating methods, a CALCULATED-only worksheet, no submission/product, exposure-line, factor-trace, tax, or fee model, and a tenant+operation keyed replay without a request hash | L |
+| M-57 | Policy rating worksheets are a SPEC-less policy-scoped route and event with only two rating methods, a CALCULATED-only worksheet, no submission/product, exposure-line, factor-trace, tax, or fee model, and a tenant+operation keyed replay with a canonical request hash since 2.21.0 | L |
 | M-58 | Party identifier and address maintenance adds SPEC-less PATCH/DELETE child routes with full replacement, a no-op update, a hard delete, and unenforced duplicate/in-use guards and concurrency headers | M |
 | M-59 | Policy underwriting submissions are a SPEC-less pre-policy collection with a narrower six-state graph, no clearance/rating/referral/quote/producer slices, two new event names, unhonoured concurrency/idempotency headers, and a JSON-number limit amount | M |
-| M-60 | Submission conversion is a SPEC-less command with a bare-policy expert shape, a stored-key and linked-policy 200 replay without a request hash, a new event name, an unprojected public `Policy.submissionId`, and no SPEC clearance/rating gate | M |
+| M-60 | Submission conversion is a SPEC-less command with a bare-policy expert shape, a stored-key 200 replay with a canonical request hash since 2.21.0 and a linked-policy 200 replay without one, a new event name, an unprojected public `Policy.submissionId`, and no SPEC clearance/rating gate | M |
 
 ## M-01 Public base paths
 
@@ -630,35 +638,50 @@ same header on both the public and the expert route. The 2026-10-20 billing
 slice is the exception: the plan create and installment PATCH accept no key,
 and a repeated terminal settlement is the retry-safe path. The 2026-10-22
 rating and submission-conversion replay adds the key to those two commands with
-stored-response replay:
+stored-response replay and, from Policy 2.21.0, canonical request-hash
+conflicts:
 
 - The key is normalized (trimmed) and capped at 128 characters. A blank value
   is treated as absent and a value longer than 128 characters is 400
   `INVALID_IDEMPOTENCY_KEY`. For the commands that store the key, the scope is
   `(tenant, operation, key)`: the create operation is `create`, rating is
   `rating`, conversion is `conversion`, and the second-slice commands use their
-  own `(tenant, scope, key)` uniqueness. The key is not narrowed by a policy,
-  submission, or child id, so one key may be used once per operation and the
-  rating and conversion namespaces do not collide.
-- The expert stores `tenant + operation + key` in `policy_idempotency` in the
-  same transaction as the command. Create also stores a request hash and the
-  policy id; rating and conversion store the serialized response and its
-  status and leave the hash and policy id null.
-- A same-key replay returns 200 with `Idempotent-Replayed: true`. Create and
-  the second-slice commands require an identical request and return 409
-  `IDEMPOTENCY_CONFLICT` when it differs (`meta.existingPolicyId` or
-  `meta.existingResourceId`). Rating and conversion replay the stored body
-  without comparing the request, so they never return
-  `IDEMPOTENCY_CONFLICT`; a rating replay also returns the stored strong `ETag`
-  when the original applied, and a conversion replay returns the stored policy
-  body and its original `ETag`.
+  own `(tenant, scope, key)` uniqueness. The reservation is not split by a
+  policy, submission, or child id, so one key may be used once per operation and
+  the rating and conversion namespaces do not collide; the canonical request
+  hash does include the target id, so a key cannot replay a row from another
+  aggregate.
+- The expert reserves `tenant + operation + key` in `policy_idempotency` in the
+  same transaction as the command and stores the canonical request hash on the
+  reservation. Create also stores the policy id; rating and conversion store
+  the serialized response and its status and leave the policy id null. The hash
+  column is nullable so rows written before the hash existed remain readable.
+- A same-key replay of an identical canonical request returns 200 with
+  `Idempotent-Replayed: true`. Every stored-key command returns 409
+  `IDEMPOTENCY_CONFLICT` when the canonical request differs: create and the
+  second-slice commands carry `meta.existingPolicyId` or
+  `meta.existingResourceId`, while rating and conversion carry
+  `meta.operation` (`rating`/`conversion`) and `meta.key` plus
+  `errors[0].field` = `Idempotency-Key` and
+  `errors[0].code` = `IDEMPOTENCY_CONFLICT`. A rating
+  replay also returns the stored strong `ETag` when the original applied, and a
+  conversion replay returns the stored policy body and its original `ETag`. A
+  legacy row with a null `request_hash` replays instead of conflicting.
 - A fresh create is 201 with `Idempotent-Replayed: false`; a fresh keyed
   rating is 201, and a fresh keyed conversion that creates a policy is 201.
   Conversion also keeps the linked-policy 200 replay when the submission
   already has a policy, including for a new key, and stores that 200.
 - The create request hash normalizes amounts numerically (`1000.0` and
   `1000.0000` hash the same), uppercases currencies, and defaults the initial
-  status to DRAFT.
+  status to DRAFT. The rating hash covers `policyId`, the trimmed and
+  uppercased method, the numerically normalized base rate, exposure, and
+  factor (factor defaults to 1), and the effective `apply` flag (false when
+  absent). The conversion hash covers
+  `submissionId`, the normalized premium, the trimmed and uppercased currency,
+  and the null-or-date expiration. The path id in each hash stops a key from
+  replaying a row from another aggregate, and the reservation uses
+  `INSERT ... ON CONFLICT DO NOTHING`, so concurrent first attempts either
+  replay the winner or conflict and never run the command twice.
 - The header is optional for backward compatibility, even though SPEC 12.6
   requires it on transaction submission. `Idempotent-Replayed` is emitted by
   the Policy create, rating, and conversion responses; no other vertical uses
@@ -715,13 +738,14 @@ Residual differences:
   audit are also outside the Policy idempotency mechanism. The premium-audit
   command accepts and forwards an optional key, but the expert does not replay
   on it, so a retry applies a second audit (M-50). Policy rating and submission
-  conversion now replay the optional key: the key is scoped by tenant +
-  operation, a first execution is 201, and a replay returns 200 with
-  `Idempotent-Replayed: true`, the stored body, and the stored strong `ETag`.
-  Neither command compares the request body or stores a request hash, so a
-  different rating or conversion body under the same key replays the first
-  response rather than 409 `IDEMPOTENCY_CONFLICT`; conversion also keeps its
-  linked-policy 200 replay (M-57, M-60). The submission create and status
+  conversion also compare the optional key by canonical request hash: the key
+  is scoped by tenant + operation, a first execution is 201, an identical
+  request replays 200 with `Idempotent-Replayed: true`, the stored body, and
+  the stored strong `ETag`, and a different request is 409
+  `IDEMPOTENCY_CONFLICT` with `meta.operation`/`meta.key` and no write. A legacy
+  row with a null request hash replays; conversion also keeps its linked-policy
+  200 replay for an unkeyed call or a new key (M-57, M-60). The submission
+  create and status
   commands also accept and forward an optional key, but the expert submission
   service has no idempotency store or replay path: a retried create makes a
   second submission with a new number and a retried real transition applies
@@ -742,17 +766,22 @@ Residual differences:
 Evidence:
 
 - `repos/eia-policy-expert/.../IdempotencyKeys.java` (trim, blank-as-absent,
-  128-character cap, `INVALID_IDEMPOTENCY_KEY`), `PolicyIdempotencyService.java`
-  (rating and conversion replay, tenant + operation scope, stored-response
-  completion), `PolicyIdempotencyRepository.java` (find/reserve/complete on
-  `policy_idempotency`), `IdempotentResponse.java`,
+  128-character cap, `INVALID_IDEMPOTENCY_KEY`, and the rating/conversion
+  canonical request hash), `PolicyIdempotencyService.java` (hash compare before
+  replay, tenant + operation scope, 409 with `meta.operation`/`meta.key`, legacy
+  null-hash replay, stored-response completion),
+  `PolicyIdempotencyRepository.java` (find, reserve with the hash, and complete
+  on `policy_idempotency`), `IdempotentResponse.java`,
   `PolicyRatingController.java:47-68`, and
   `UnderwritingSubmissionController.java:100-124`;
   `repos/eia-policy-expert/src/main/resources/schema.sql:167-201` (the
   `(tenant_id, operation, idempotency_key)` unique scope and the nullable
-  response/hash/policy columns); `PolicyIdempotencyReplayIntegrationTest.java`
-  (rating and conversion stored-body/ETag replay, tenant and operation scope,
-  no-key path, 129-character rejection).
+  response/hash/policy columns); `IdempotencyKeysTest.java` (rating and
+  conversion hash stability across scale/whitespace and per-input changes);
+  `PolicyIdempotencyReplayIntegrationTest.java` (stored-body/ETag replay,
+  rating and conversion hash conflict with `meta.operation`/`meta.key`, tenant
+  and operation scope, policy/submission scoping, no-key path, 129-character
+  rejection).
 - `repos/eia-direct-claims-domain/.../ClaimDetailController.java` (tasks and
   notes), `ClaimDetailService.addTask`/`addNote`,
   `ClaimClient.addTask`/`changeTaskStatus`/`addNote` (forwards the header and
@@ -4223,8 +4252,8 @@ issue. The 2026-10-22 slice instead rates an existing policy directly:
 | Read | `GET .../rating` returns the newest worksheet for the policy, no `ETag`; a policy with no worksheet is 404 `RATING_WORKSHEET_NOT_FOUND` | No standalone worksheet read; a worksheet is addressed by submission |
 | Event | `policy.policy.rated`, payload `{policyId, policyNumber, premiumAmount, currency, ratingMethod, calcHash, worksheetId}`, emitted only on apply | `policy.rating.completed` for the submission-scoped worksheet; the implemented name is new (M-22) |
 | Concurrency | Optional `If-Match` is compared before any write; a stale tag is 409 `CONCURRENT_MODIFICATION` and a lost conditional premium update rolls the worksheet back | SPEC 12.6 requires the header on transaction submission |
-| Idempotency | Optional `Idempotency-Key` replays the stored response in the `(tenant, operation = rating, key)` scope: a first keyed calculation is 201 and a replay is 200 with `Idempotent-Replayed: true`, the stored `{worksheet, policy?}` body, and the stored strong `ETag` when the original applied. A blank key is absent, a 129+ key is 400 `INVALID_IDEMPOTENCY_KEY`, and neither the request nor `policyId` is compared, so a reused key replays the first worksheet | SPEC 12.6 requires the header and a request-hash conflict on transaction submission; the implemented replay has no request hash and is not narrowed by the policy |
-| Version | `openapi/policy.yaml` 2.17.0 (2.20.0 adds the keyed replay), `asyncapi/policy.yaml` 1.14.0, `asyncapi/event-catalog.yaml` 1.36.0 (additive) | No SPEC version has this route, worksheet, or event |
+| Idempotency | Optional `Idempotency-Key` replays the stored response in the `(tenant, operation = rating, key)` scope after comparing a canonical request hash: a first keyed calculation is 201, an identical canonical request is 200 with `Idempotent-Replayed: true`, the stored `{worksheet, policy?}` body, and the stored strong `ETag` when the original applied, and a changed request is 409 `IDEMPOTENCY_CONFLICT` with `meta.operation`/`meta.key` and no write. The hash covers `policyId` and the normalized inputs, so the key cannot replay another policy's worksheet; a blank key is absent, a 129+ key is 400 `INVALID_IDEMPOTENCY_KEY`, and a legacy null-hash row replays | SPEC 12.6 request-hash conflict (matches); the route, worksheet, and event remain SPEC-less |
+| Version | `openapi/policy.yaml` 2.17.0 (2.20.0 adds keyed replay; 2.21.0 adds the canonical request hash), `asyncapi/policy.yaml` 1.14.0, `asyncapi/event-catalog.yaml` 1.36.0 (additive) | No SPEC version has this route, worksheet, or event |
 
 Consequences:
 
@@ -4245,13 +4274,15 @@ Consequences:
   the worksheet identity, so two identical calculations on different policies
   produce the same hash. The hash identifies the calculation, not the
   worksheet; `worksheetId` is the row identity.
-- A retry with a key replays the stored worksheet and, when the original
-  applied, the stored `ETag`; a retry without a key still appends another
-  worksheet and, when `apply` is true, replaces the premium again at a new
-  version. Because the keyed replay does not compare the request, a different
-  body under the same key returns the first worksheet rather than 409
-  `IDEMPOTENCY_CONFLICT`. The pool of worksheets is append-only, so a no-key
-  retry is visible in `GET .../rating` but the previous premium is not.
+- A retry with a key and an identical canonical request replays the stored
+  worksheet and, when the original applied, the stored `ETag`. The same key
+  with a changed method or operand is 409 `IDEMPOTENCY_CONFLICT` with
+  `meta.operation`/`meta.key` and writes no worksheet, premium, version, or
+  event; a new key is needed for the new command. A retry without a key still
+  appends another worksheet and, when `apply` is true, replaces the premium
+  again at a new version. A legacy row with a null request hash replays. The
+  pool of worksheets is append-only, so a no-key retry is visible in
+  `GET .../rating` but the previous premium is not.
 - Adding the SPEC submission/product/factor/approval fields later is additive;
   removing the policy-scoped route or renaming the event is breaking under SPEC
   10.4 and needs a major contract version or the EV-05 dual-publish window.
@@ -4285,14 +4316,23 @@ Evidence:
   `RatingRulesTest`, and `PolicyRatingIntegrationTest` in the expert;
   `PolicyRatingControllerTest`, `PolicyRatingServiceTest`, and
   `PolicyRatingClientTest` in the domain.
-- `repos/eia-policy-expert/.../PolicyIdempotencyService.java:44-70`,
-  `PolicyIdempotencyRepository.java:28-76`, `IdempotentResponse.java`,
-  `IdempotencyKeys.java:25-45`, `src/main/resources/schema.sql:167-201`, and
-  `PolicyIdempotencyReplayIntegrationTest.java` (stored body and ETag replay,
+- `repos/eia-policy-expert/.../PolicyIdempotencyService.java:52-108` (rating
+  hash compare, 409 conflict with `meta.operation`/`meta.key`, legacy null-hash
+  replay, stored-response completion),
+  `PolicyIdempotencyRepository.java:28-76` (find, reserve with the hash, and
+  complete), `IdempotentResponse.java`, `IdempotencyKeys.java:25-99` (key
+  bounds and the rating/conversion `requestHash` functions),
+  `src/main/resources/schema.sql:167-201`, `IdempotencyKeysTest.java` (hash
+  stability across scale/whitespace and per-input changes), and
+  `PolicyIdempotencyReplayIntegrationTest.java`
+  (`ratingReplayAcceptsAnEquivalentBodyWithDifferentScaleAndWhitespace`,
+  `reusingARatingKeyWithADifferentBaseRateConflictsWithoutWriting`,
+  `aRatingKeyCannotReplayAWorksheetFromAnotherPolicy`, stored body/ETag replay,
   tenant/operation scope, no-key path, 129-character rejection).
 - SPEC 11.2.14 `rating_plan`, `rating_factor`, and `rating_worksheet` tables,
   RATE-02, UWR-01, and UWR-02; SPEC 11.2.9 published names.
-- `openapi/policy.yaml` 2.20.0 (2.17.0 introduced the route), `asyncapi/policy.yaml`
+- `openapi/policy.yaml` 2.21.0 (2.17.0 introduced the route, 2.20.0 the keyed
+  replay, and 2.21.0 the canonical request hash), `asyncapi/policy.yaml`
   1.14.0, and `asyncapi/event-catalog.yaml` 1.36.0 record the implemented shape.
 
 Resolution: the policy rating command is canonical for now. Closing the gap
@@ -4565,7 +4605,8 @@ the same (UWR-01, UW-01).
 
 Policy 2.19.0 adds `POST /api/v1/policies/submissions/{submissionId}/convert`
 and its `/internal/v1` expert alias; Policy 2.20.0 adds the tenant + operation
-keyed replay with the stored policy body and original `ETag`. SPEC 11.2.14
+keyed replay with the stored policy body and original `ETag`; Policy 2.21.0
+adds the canonical request hash and the 409 `IDEMPOTENCY_CONFLICT`. SPEC 11.2.14
 models the submission-to-policy step as separate quote and bind commands with
 the clearance and rating preconditions; it names no conversion route, no replay
 rule, and no conversion event. The implemented command creates a `DRAFT` policy
@@ -4583,7 +4624,7 @@ linked policy yet) and publishes a new fact.
 | Submission link | Nullable `PolicySubmission.policyId`; a `QUOTED` submission moves to `BOUND`, a `BOUND` submission keeps its status and only advances its version | SPEC has no submission projection or version rule |
 | Policy created | `DRAFT` with the normal server-generated `POL-{YYYY}-{7 digits}` number and version 1 after the link; one base coverage and limit schedule when the requested limit is positive | Quote/bind policy |
 | Events | `policy.submission.converted {submissionId, submissionNumber, policyId, policyNumber}` plus the normal `policy.policy.created`, in the same transaction as the policy, coverage, and link | `policy.submission.received` and `policy.submission.declined` only |
-| Idempotency | The optional `Idempotency-Key` is stored and replayed in the `(tenant, operation = conversion, key)` scope: a first keyed conversion stores its 201 (or linked-policy 200) bare-policy body and status, and a replay returns 200 with the stored policy body and original `ETag` (the public envelope projects `submission` from the link). A blank key is absent, a 129+ key is 400 `INVALID_IDEMPOTENCY_KEY`, and neither the request body nor `submissionId` is compared, so it never returns 409 `IDEMPOTENCY_CONFLICT`; the linked-policy 200 replay remains when no stored key exists | SPEC 12.6 `Idempotency-Key` with a request-hash conflict |
+| Idempotency | The optional `Idempotency-Key` is stored and replayed in the `(tenant, operation = conversion, key)` scope after comparing a canonical request hash: a first keyed conversion stores its 201 (or linked-policy 200) bare-policy body and status, an identical canonical request returns 200 with the stored policy body and original `ETag` (the public envelope projects `submission` from the link), and a changed request is 409 `IDEMPOTENCY_CONFLICT` with `meta.operation`/`meta.key` and no write. The hash covers `submissionId` and the normalized terms; a blank key is absent, a 129+ key is 400 `INVALID_IDEMPOTENCY_KEY`, a legacy null-hash row replays, and the linked-policy 200 replay remains when no stored key exists | SPEC 12.6 request-hash conflict (matches) |
 | Concurrency | The command locks the submission row (`SELECT ... FOR UPDATE`); the tenant-scoped unique `submission_id` is the second guard. No `If-Match`; a lost write is 409 `CONCURRENT_MODIFICATION` | SPEC 12.6 `If-Match` |
 | Errors | 400 `VALIDATION_ERROR`/`INVALID_CONVERSION_PREMIUM`/`INVALID_CONVERSION_CURRENCY`/`INVALID_CONVERSION_EXPIRATION`; 404 `SUBMISSION_NOT_FOUND`/`BOOK_SCOPE_VIOLATION`; 409 `SUBMISSION_NOT_CONVERTIBLE`/`CONCURRENT_MODIFICATION`; 422 `PRODUCT_CODE_TOO_LONG_FOR_POLICY` | Canonical `Problem` envelope (matches) |
 
@@ -4606,11 +4647,14 @@ Additional differences:
   submission accepts a product code up to 64 characters, but the policy column
   is 32, so a longer code can be created but not converted. It is a
   `category: BUSINESS_RULE` problem.
-- A replay with a different premium or expiration is silently accepted and
-  returns the stored policy (key replay) or the current linked policy
-  (linked-policy replay). There is no request hash, no
-  `IDEMPOTENCY_CONFLICT`, and no way for a caller to detect that the new terms
-  were ignored.
+- A replay with an identical canonical request returns the stored policy (key
+  replay) or the current linked policy (no matching reservation). A changed
+  premium or expiration under the same stored key is 409
+  `IDEMPOTENCY_CONFLICT`. A new key on an already-linked submission still
+  returns the current linked policy without comparing its terms with the
+  original conversion, because the command does not store the conversion
+  request on the submission; the first conversion remains authoritative for
+  that path.
 - Conversion writes two facts: the new `policy.submission.converted` against
   the `UnderwritingSubmission` aggregate (post-conversion submission version +
   the outbox convention offset; the integration test sees aggregate version 3
@@ -4635,10 +4679,11 @@ Consequences:
   rating worksheet) can convert a `QUOTED` submission without either; the
   command only checks the submission status.
 - A retried conversion is safe by the submission link and by the stored
-  `Idempotency-Key` response, but a retried request with different premium
-  terms is not detected as a conflict: the key replays the stored body without
-  comparing the request. Clients must treat the first successful conversion as
-  authoritative.
+  `Idempotency-Key` response. A retried request with different premium terms is
+  now 409 `IDEMPOTENCY_CONFLICT` when it reuses the stored key, but a new key on
+  an already-linked submission still returns the current linked policy and
+  ignores the new terms, so clients must treat the first successful conversion
+  as authoritative (M-06, M-07).
 - Public policy reads cannot navigate from the policy to its source submission
   until `submissionId` is projected; the conversion envelope and the expert read
   can.
@@ -4663,12 +4708,18 @@ Evidence:
   problem preservation)
 - `repos/eia-policy-expert/.../UnderwritingSubmissionController.java:99-122`
   (expert route and bare-policy response)
-- `repos/eia-policy-expert/.../PolicyIdempotencyService.java:72-106`
-  (conversion replay, tenant + operation scope, stored-response completion),
-  `PolicyIdempotencyRepository.java:28-76`,
-  `src/main/resources/schema.sql:167-201`, and
-  `PolicyIdempotencyReplayIntegrationTest.java` (stored body/ETag replay,
-  tenant and operation scope, 129-character rejection).
+- `repos/eia-policy-expert/.../PolicyIdempotencyService.java:84-108`
+  (conversion hash compare, 409 conflict with `meta.operation`/`meta.key`,
+  legacy null-hash replay, stored-response completion),
+  `PolicyIdempotencyRepository.java:28-76`, `IdempotencyKeys.java:83-99` (the
+  conversion `requestHash`), `src/main/resources/schema.sql:167-201`,
+  `IdempotencyKeysTest.java`, and
+  `PolicyIdempotencyReplayIntegrationTest.java`
+  (`conversionReplayAcceptsAnEquivalentBodyWithDifferentScale`,
+  `reusingAConversionKeyWithADifferentPremiumConflictsWithoutWriting`,
+  `reusingAConversionKeyWithADifferentExpirationConflictsWithoutWriting`,
+  `aConversionKeyCannotReplayAPolicyFromAnotherSubmission`, stored body/ETag
+  replay, tenant and operation scope, 129-character rejection).
 - `repos/eia-policy-expert/.../ConvertSubmissionRequest.java:18-24`,
   `SubmissionConversionService.java:82-157` (eligibility, term validation,
   policy creation, coverage, link, status/version movement, event insert,
@@ -4698,14 +4749,16 @@ Evidence:
 Resolution: amend SPEC 11.2.14 to the implemented conversion command and the
 `policy.submission.converted` name, or implement the SPEC quote/bind command
 chain with the clearance/rating gates and align the response shape, replay
-semantics, and links. In either case decide whether `Policy.submissionId` should
-be public, whether the `Idempotency-Key` should be stored and request-hashed,
-and whether a conversion repeat with different terms must be a 409.
+semantics, and links. The key is now stored and request-hashed, so the remaining
+replay decision is whether a new key on an already-linked submission should
+compare against the original conversion terms (currently it returns the linked
+policy without a comparison), and whether `Policy.submissionId` should be
+public.
 
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-22
-Policy rating and conversion idempotency-replay contract:
+Policy idempotency request-hash conflict contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -4744,7 +4797,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 16936 checks, 0 failures
+  PASS 16993 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -5151,7 +5204,15 @@ Additional checks and limits:
   reintroducing `does not replay` into the rating or public conversion
   description fails the stale-caveat message on the affected operation. All
   five were run on a throwaway copy, exited non-zero (exit 1), and the working
-  copy was left unchanged.
+  copy was left unchanged. The Policy idempotency request-hash pass added four
+  more, each run on a throwaway copy and exited non-zero (exit 1): removing
+  `meta.operation` from the rating 409 description fails the missing
+  conflict-meta message; removing `request hash` from the public conversion 200
+  replay fails the missing replay-description message; reintroducing `does not
+  compare` into the expert conversion description fails the stale-caveat
+  message; and removing `legacy` from the shared `IdempotencyKey` description
+  fails the missing component-term message. The working copy was left
+  unchanged.
 
 ## Resolution policy
 

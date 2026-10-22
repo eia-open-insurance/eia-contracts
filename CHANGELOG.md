@@ -2164,6 +2164,44 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   evidence, and the validation evidence.
 - `python scripts/validate_contracts.py` passes 16,936 checks with 0 failures.
 
+### Added in the Policy idempotency request-hash conflict contract (2026-10-22)
+
+- `openapi/policy.yaml` is 2.21.0: the rating and public/expert conversion
+  operations document a canonical request hash on the stored
+  `Idempotency-Key` reservation. The same key with an identical canonical
+  request still returns 200 with `Idempotent-Replayed: true` and the stored
+  body/`ETag`; the same key with a different canonical request is 409
+  `IDEMPOTENCY_CONFLICT` with `errors[0].field` = `Idempotency-Key` and
+  `errors[0].code` = `IDEMPOTENCY_CONFLICT`, `meta.operation`
+  (`rating`/`conversion`), and `meta.key`, and writes no
+  worksheet, policy, coverage, link, or event. A legacy
+  `policy_idempotency` row with a null request hash replays its stored
+  response. The hash canon is documented for both commands (rating:
+  `policyId`, normalized method/operands/apply; conversion: `submissionId`,
+  normalized premium/currency/expiration) and includes the path aggregate id,
+  so a key cannot replay across aggregates. The rating 409, public conversion
+  409, expert conversion 409, and both 200 replay descriptions are updated, the
+  stale no-request-comparison caveats are removed, and `x-compatibility` moves
+  to 2.21.0 over 2.20.0.
+- `openapi/components.yaml` is 1.8.0: the shared `IdempotencyKey` description
+  states that every stored-key Policy command conflicts on a changed canonical
+  request and that a legacy null-hash row replays; `IdempotentReplayed` states
+  that a conflicting reuse is 409 and is not a replay; the shared `Conflict`
+  response documents the `IDEMPOTENCY_CONFLICT` `meta.operation`/`meta.key` and
+  the legacy replay. The change is compatible and adds no path, request field,
+  or response body.
+- `scripts/validate_contracts.py` requires the canonical request-hash,
+  identical-request replay, legacy null-hash replay, `IDEMPOTENCY_CONFLICT`,
+  `meta.operation`, and `meta.key` wording on the rating and both conversion
+  operations, the 409 descriptions, and the shared components, and rejects the
+  old no-comparison phrases.
+- `README.md` records the additive/corrective versions, the hash canon, the
+  200/409/legacy outcomes, the linked-policy conversion path, and the
+  validation count; `MISMATCHES.md` closes the M-06/M-07/M-57/M-60 request-hash
+  wording, updates the summary table and evidence, and records four new
+  negative checks.
+- `python scripts/validate_contracts.py` passes 16,993 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

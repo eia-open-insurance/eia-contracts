@@ -9171,7 +9171,15 @@ def check_policy_rating_openapi(contracts: ContractSet, document, relative: str)
         replay_description = (
             str(replayed.get("description") or "") if isinstance(replayed, dict) else ""
         )
-        for term in ("stored", "Idempotent-Replayed", "ETag", "worksheet"):
+        for term in (
+            "stored",
+            "Idempotent-Replayed",
+            "ETag",
+            "worksheet",
+            "request hash",
+            "identical",
+            "IDEMPOTENCY_CONFLICT",
+        ):
             contracts.check(
                 term in replay_description,
                 f"{where_post}: 200 replay must describe the {term}",
@@ -9191,7 +9199,13 @@ def check_policy_rating_openapi(contracts: ContractSet, document, relative: str)
             if isinstance(conflict, dict)
             else ""
         )
-        for code in ("POLICY_NOT_RATEABLE", "CONCURRENT_MODIFICATION"):
+        for code in (
+            "POLICY_NOT_RATEABLE",
+            "CONCURRENT_MODIFICATION",
+            "IDEMPOTENCY_CONFLICT",
+            "meta.operation",
+            "meta.key",
+        ):
             contracts.check(
                 code in conflict_text,
                 f"{where_post}: 409 must document {code}",
@@ -9226,14 +9240,27 @@ def check_policy_rating_openapi(contracts: ContractSet, document, relative: str)
             "operation",
             "stored",
             "128",
-            "not compared",
+            "request hash",
+            "canonical",
+            "IDEMPOTENCY_CONFLICT",
+            "meta.operation",
+            "meta.key",
+            "legacy",
+            "null",
             "policyId",
         ):
             contracts.check(
                 term in description,
                 f"{where_post}: description must document {term}",
             )
-        for stale in ("always false", "does not replay", "not replayed"):
+        for stale in (
+            "always false",
+            "does not replay",
+            "not replayed",
+            "not compared",
+            "without comparing",
+            "does not compare",
+        ):
             contracts.check(
                 stale not in description,
                 f"{where_post}: description must not claim the key is not "
@@ -9932,7 +9959,14 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
                     f"{where}: 201 must document Idempotent-Replayed: false",
                 )
             else:
-                for term in ("stored", "ETag", "no policy"):
+                for term in (
+                    "stored",
+                    "ETag",
+                    "no policy",
+                    "request hash",
+                    "identical",
+                    "IDEMPOTENCY_CONFLICT",
+                ):
                     contracts.check(
                         term in response_description,
                         f"{where}: 200 replay must describe the {term}",
@@ -9956,6 +9990,9 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
         for term in (
             "SUBMISSION_NOT_CONVERTIBLE",
             "CONCURRENT_MODIFICATION",
+            "IDEMPOTENCY_CONFLICT",
+            "meta.operation",
+            "meta.key",
             "meta.submissionId",
             "meta.currentStatus",
         ):
@@ -9978,6 +10015,9 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
             "Idempotent-Replayed",
             "SUBMISSION_NOT_CONVERTIBLE",
             "CONCURRENT_MODIFICATION",
+            "IDEMPOTENCY_CONFLICT",
+            "meta.operation",
+            "meta.key",
             "SUBMISSION_NOT_FOUND",
             "BOOK_SCOPE_VIOLATION",
             "INVALID_CONVERSION_PREMIUM",
@@ -9987,7 +10027,10 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
             "policy.submission.converted",
             "policy.policy.created",
             "same transaction",
-            "not compared",
+            "request hash",
+            "canonical",
+            "legacy",
+            "null",
             "Idempotency-Key",
             "stored",
             "original",
@@ -9995,7 +10038,6 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
             "INVALID_IDEMPOTENCY_KEY",
             "tenant",
             "operation",
-            "not narrowed by",
             "bare `Policy`",
             "policyId",
         ):
@@ -10008,6 +10050,10 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
             "does not replay",
             "never replays",
             "not replayed",
+            "not compared",
+            "without comparing",
+            "does not compare",
+            "not narrowed by",
         ):
             contracts.check(
                 stale not in description,
@@ -10097,7 +10143,13 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
                 or ""
             )
             if code == "200":
-                for term in ("stored", "linked-policy", "no row"):
+                for term in (
+                    "stored",
+                    "linked-policy",
+                    "no row",
+                    "request hash",
+                    "IDEMPOTENCY_CONFLICT",
+                ):
                     contracts.check(
                         term in response_description,
                         f"{where}: 200 replay must describe the {term}",
@@ -10135,7 +10187,13 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
             "INVALID_IDEMPOTENCY_KEY",
             "tenant",
             "operation",
-            "not narrowed by",
+            "request hash",
+            "canonical",
+            "IDEMPOTENCY_CONFLICT",
+            "meta.operation",
+            "meta.key",
+            "legacy",
+            "null",
         ):
             contracts.check(
                 term in description,
@@ -10145,6 +10203,10 @@ def check_policy_submissions_openapi(contracts: ContractSet, document, relative:
             "accepts no `Idempotency-Key`",
             "does not consult",
             "never replays",
+            "not compared",
+            "without comparing",
+            "does not compare",
+            "not narrowed by",
         ):
             contracts.check(
                 stale not in description,
@@ -16574,7 +16636,18 @@ def check_openapi(contracts: ContractSet, verbose: bool):
         ) == ("string", 1, 128),
         "components.yaml: IdempotencyKey must be a 1-128 character string",
     )
-    for term in ("tenant", "operation", "INVALID_IDEMPOTENCY_KEY", "replay"):
+    for term in (
+        "tenant",
+        "operation",
+        "INVALID_IDEMPOTENCY_KEY",
+        "replay",
+        "request hash",
+        "IDEMPOTENCY_CONFLICT",
+        "meta.operation",
+        "meta.key",
+        "legacy",
+        "null",
+    ):
         contracts.check(
             term in policy_key_description,
             f"components.yaml: IdempotencyKey description must document {term}",
@@ -16583,7 +16656,16 @@ def check_openapi(contracts: ContractSet, verbose: bool):
         component_sections.get("headers") or {}
     ).get("IdempotentReplayed") or {}
     shared_replayed_description = str(shared_replayed.get("description") or "")
-    for term in ("Idempotent-Replayed", "create", "rating", "conversion"):
+    for term in (
+        "Idempotent-Replayed",
+        "create",
+        "rating",
+        "conversion",
+        "IDEMPOTENCY_CONFLICT",
+        "request hash",
+        "meta.operation",
+        "meta.key",
+    ):
         contracts.check(
             term in shared_replayed_description,
             "components.yaml: IdempotentReplayed description must document "
@@ -16649,7 +16731,15 @@ def check_openapi(contracts: ContractSet, verbose: bool):
     )
     shared_conflict = (component_sections.get("responses") or {}).get("Conflict") or {}
     conflict_text = str(shared_conflict.get("description") or "")
-    for code in ("EIA-DIR-4091", "EIA-RNS-4091"):
+    for code in (
+        "EIA-DIR-4091",
+        "EIA-RNS-4091",
+        "IDEMPOTENCY_CONFLICT",
+        "meta.operation",
+        "meta.key",
+        "request hash",
+        "legacy",
+    ):
         contracts.check(
             code in conflict_text,
             f"components.yaml: Conflict must document {code}",
