@@ -2392,6 +2392,36 @@ Semantics:
   messages with optional source members, and the three documented 400 codes.
   The full run passes 14,914 checks.
 
+### Notifications source filter (2026-10-22)
+
+Notifications 1.5.0 adds the optional source filter to the tenant-scoped list.
+The change is additive: two optional query parameters on an existing operation
+and no new route, response member, or event; a caller that omits both keeps the
+unfiltered list.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/notifications.yaml` | 1.5.0 | Additive | `GET /api/v1/notifications` and `GET /internal/v1/notifications` accept the optional `sourceType` + `sourceId` pair; the 400 `INVALID_SOURCE_TYPE`/`INVALID_SOURCE_FILTER` behaviour, the 400 `INVALID_ARGUMENT` malformed-id case, and the tenant scope are documented. |
+| `asyncapi/notifications.yaml` | 1.3.0 | Unchanged | No event name, channel, or payload changes. |
+| `asyncapi/event-catalog.yaml` | 1.34.0 | Unchanged | The catalog stays at 218 published and 99 implemented names (Notifications 15 published and 5 implemented). |
+
+Both parameters are optional, but they form a pair: supplying one without the
+other is 400 `INVALID_SOURCE_FILTER` (`EIA-NTF-9412`), not a silently widened
+list. `sourceType` references the six-value `NotificationSourceType` enum and is
+trimmed and upper-cased, so an unknown value is 400 `INVALID_SOURCE_TYPE`
+(`EIA-NTF-9409`); `sourceId` is a UUID, and a malformed value is 400
+`INVALID_ARGUMENT` (`EIA-NTF-9502`). The filter matches the exact normalized
+`(sourceType, sourceId)` pair inside the caller's tenant, keeps the newest-first
+`createdAt` order with `id` as the tie-break, and treats a blank value as
+absent. The full semantics are under
+[Notification source filter semantics](#notification-source-filter-semantics).
+
+The validator requires both list operations, both optional query parameters,
+the `NotificationSourceType` reference and six-value enum, the UUID `sourceId`,
+the tenant parameter, the 400 response, the both-or-neither wording, and the
+`INVALID_SOURCE_TYPE`/`INVALID_SOURCE_FILTER`/`EIA-NTF-9502` codes; it also
+rejects a `sourceReference` query parameter. The full run passes 14,947 checks.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -2880,6 +2910,44 @@ Rules and semantics:
 - The `notifications.notification.created` and `.sent` payloads carry the
   optional link in their `data` object. Each present member is emitted and all
   three are omitted when the notification is unlinked; `eventVersion` stays 1.
+
+### Notification source filter semantics
+
+The tenant-scoped list accepts an optional `sourceType` + `sourceId` pair:
+
+| Parameter | Type | Rule |
+|---|---|---|
+| `sourceType` | enum | `DIRECT_CLAIM`, `ASSUMED_CLAIM`, `POLICY`, `CONTRACT`, `PAYMENT`, or `OTHER`. Must be supplied with `sourceId`. The value is trimmed and upper-cased, so a lower-case value selects the canonical value. |
+| `sourceId` | UUID | Must be supplied with `sourceType`; a value that is not a UUID is 400 `INVALID_ARGUMENT` (`EIA-NTF-9502`). |
+
+Rules and semantics:
+
+- Both or neither. Supplying only `sourceType` or only `sourceId` is 400
+  `INVALID_SOURCE_FILTER` (`EIA-NTF-9412`), with the message naming the missing
+  member; the expert rejects the partial pair instead of returning a wider list.
+- An unknown `sourceType` is 400 `INVALID_SOURCE_TYPE` (`EIA-NTF-9409`). The type
+  is normalized before the pairing check, so an unknown type alone reports
+  `INVALID_SOURCE_TYPE` rather than `INVALID_SOURCE_FILTER`.
+- `sourceId` is bound as a UUID before the service rule. A value that is not a
+  UUID, including a malformed value supplied without `sourceType`, is 400
+  `INVALID_ARGUMENT` (`EIA-NTF-9502`), not `INVALID_SOURCE_FILTER`.
+- The match is exact on the normalized `(sourceType, sourceId)` pair and stays
+  inside the caller's tenant. A notification whose link has a different type, a
+  different id, or no link is not returned.
+- `OTHER` is part of the filter enum, but the pair is still mandatory, so a
+  type-only `OTHER` query is 400 and there is no way to list every OTHER
+  notification through this filter.
+- `sourceReference` is not a filter parameter; global search still matches it
+  through `q`.
+- The filtered list keeps the unfiltered list's order: `createdAt` descending,
+  with `id` ascending as the tie-break. Omitting both parameters, or supplying
+  only blank values, returns the unchanged unfiltered list.
+- `X-EIA-Tenant` is required on the public route and `?tenantId=` on the expert
+  route. The domain forwards the pair and the tenant to the expert, and the
+  expert owns the closed-set and pairing validation, so the public 400 code and
+  message are the expert's. A missing tenant header is 400 `EIA-NTF-9501`; a
+  malformed tenant is 400 `EIA-NTF-9502` (`INVALID_TENANT`), whose title differs
+  from the expert's malformed-`sourceId` `EIA-NTF-9502` (`INVALID_ARGUMENT`).
 
 ### Policy billing
 

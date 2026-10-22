@@ -2346,6 +2346,24 @@ NOTIFICATION_SOURCE_ERROR_CODES = (
     "INVALID_SOURCE_LINKAGE",
     "INVALID_SOURCE_REFERENCE",
 )
+
+# Notification list source filter. The public list and the expert list accept
+# the same optional sourceType + sourceId pair. The expert normalizes the type
+# before the pairing check, so an unknown type is INVALID_SOURCE_TYPE and a
+# partial pair is INVALID_SOURCE_FILTER; a sourceId that is not a UUID fails
+# request binding with INVALID_ARGUMENT (EIA-NTF-9502). A blank value counts as
+# absent and a sourceReference is not a filter parameter.
+NOTIFICATION_SOURCE_FILTER_PARAMETERS = ("sourceType", "sourceId")
+NOTIFICATION_SOURCE_FILTER_ERRORS = (
+    "INVALID_SOURCE_TYPE",
+    "INVALID_SOURCE_FILTER",
+)
+NOTIFICATION_SOURCE_FILTER_INVALID_ID = "INVALID_ARGUMENT"
+NOTIFICATION_SOURCE_FILTER_INVALID_ID_CODE = "EIA-NTF-9502"
+NOTIFICATION_SOURCE_FILTER_PATHS = (
+    ("/api/v1/notifications", "TenantHeader"),
+    ("/internal/v1/notifications", "TenantIdQuery"),
+)
 NOTIFICATION_CREATED_EVENT = "notifications.notification.created"
 NOTIFICATION_SENT_EVENT = "notifications.notification.sent"
 NOTIFICATION_CREATED_MESSAGE = "NotificationCreatedData"
@@ -12043,6 +12061,100 @@ def check_notification_sources_openapi(contracts: ContractSet, document, relativ
         )
 
 
+def check_notification_source_filter(contracts: ContractSet, document, relative: str):
+    """Require the optional sourceType + sourceId list filter and its 400s.
+
+    Both the public domain list and the expert list accept the pair. The
+    operation must document the tenant parameter, both optional query
+    parameters, the closed source-type enum, the UUID source id, the 400
+    response, the both-or-neither wording, the two filter error codes, and the
+    malformed-sourceId code. ``sourceReference`` is not a filter parameter.
+    """
+    paths = document.get("paths") or {}
+    schemas = (document.get("components") or {}).get("schemas") or {}
+    source_type = schemas.get(NOTIFICATION_SOURCE_SCHEMA) or {}
+    contracts.check(
+        source_type.get("type") == "string"
+        and tuple(source_type.get("enum") or []) == NOTIFICATION_SOURCE_TYPES,
+        f"{relative}: {NOTIFICATION_SOURCE_SCHEMA} must enumerate "
+        f"{list(NOTIFICATION_SOURCE_TYPES)} for the list filter",
+    )
+
+    for list_path, tenant_parameter in NOTIFICATION_SOURCE_FILTER_PATHS:
+        path_item = paths.get(list_path) if isinstance(paths, dict) else None
+        operation = path_item.get("get") if isinstance(path_item, dict) else None
+        where = f"{relative}: GET {list_path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required list operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+
+        parameter_refs, inline_names = _parameter_names(operation)
+        contracts.check(
+            tenant_parameter in parameter_refs,
+            f"{where}: must document the shared {tenant_parameter} parameter",
+        )
+        for name in NOTIFICATION_SOURCE_FILTER_PARAMETERS:
+            parameter = _inline_parameter(operation, name)
+            contracts.check(
+                parameter is not None,
+                f"{where}: must declare the optional {name} filter parameter",
+            )
+            if parameter is None:
+                continue
+            contracts.check(
+                parameter.get("in") == "query",
+                f"{where}: {name} must be a query parameter",
+            )
+            contracts.check(
+                parameter.get("required") is False,
+                f"{where}: {name} must stay optional",
+            )
+
+        source_type_parameter = _inline_parameter(operation, "sourceType") or {}
+        contracts.check(
+            str((source_type_parameter.get("schema") or {}).get("$ref", "")).endswith(
+                f"/schemas/{NOTIFICATION_SOURCE_SCHEMA}"
+            ),
+            f"{where}: sourceType must reference {NOTIFICATION_SOURCE_SCHEMA}",
+        )
+        source_id_parameter = _inline_parameter(operation, "sourceId") or {}
+        source_id_schema = source_id_parameter.get("schema") or {}
+        contracts.check(
+            source_id_schema.get("type") == "string"
+            and source_id_schema.get("format") == "uuid",
+            f"{where}: sourceId must be a uuid string",
+        )
+        contracts.check(
+            "sourceReference" not in inline_names,
+            f"{where}: sourceReference must not be a list filter parameter",
+        )
+
+        description = str(operation.get("description") or "")
+        for code in NOTIFICATION_SOURCE_FILTER_ERRORS:
+            contracts.check(
+                code in description,
+                f"{where}: description must document 400 {code}",
+            )
+        contracts.check(
+            NOTIFICATION_SOURCE_FILTER_INVALID_ID in description
+            and NOTIFICATION_SOURCE_FILTER_INVALID_ID_CODE in description,
+            f"{where}: description must document malformed sourceId 400 "
+            f"{NOTIFICATION_SOURCE_FILTER_INVALID_ID} "
+            f"({NOTIFICATION_SOURCE_FILTER_INVALID_ID_CODE})",
+        )
+        contracts.check(
+            "together" in description or "both" in description,
+            f"{where}: description must document the both-or-neither pair rule",
+        )
+        contracts.check(
+            "400" in (operation.get("responses") or {}),
+            f"{where}: must document the 400 response",
+        )
+
+
 def _notification_template_channel(schema) -> bool:
     """A template channel is either a NotificationChannel or null."""
     options = [option for option in (schema.get("oneOf") or []) if isinstance(option, dict)]
@@ -12992,6 +13104,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
         if vertical == "notifications":
             check_notifications_openapi(contracts, document, relative)
             check_notification_sources_openapi(contracts, document, relative)
+            check_notification_source_filter(contracts, document, relative)
             check_notification_templates_openapi(contracts, document, relative)
         contracts.check_openapi_schemas(document, relative)
         if verbose:

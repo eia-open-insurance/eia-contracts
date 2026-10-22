@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Notifications API
-  version: 1.4.0
+  version: 1.5.0
   summary: Notification drafting, delivery, and template administration and the Notifications expert API.
   description: >
     This document describes the implemented public Notifications domain API and
@@ -30,8 +30,13 @@ info:
     business record that caused it: `sourceType` classifies the source,
     `sourceId` is its UUID, and `sourceReference` is a human-readable label.
     The type and id are supplied together or not at all, and `sourceReference`
-    is optional metadata capped at 64 characters. See MISMATCHES.md M-53 for
-    the difference from the SPEC 12.5.5 subject EntityRef.
+    is optional metadata capped at 64 characters. The tenant-scoped list
+    accepts an optional `sourceType` + `sourceId` query pair that returns only
+    the notifications linked to one source; half a pair is 400
+    `INVALID_SOURCE_FILTER` (`EIA-NTF-9412`), an unknown type is 400
+    `INVALID_SOURCE_TYPE` (`EIA-NTF-9409`), and a `sourceId` that is not a UUID
+    is 400 `INVALID_ARGUMENT` (`EIA-NTF-9502`). See MISMATCHES.md M-53 for the
+    difference from the SPEC 12.5.5 subject EntityRef.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -59,10 +64,43 @@ paths:
         - Notifications
       summary: List notifications for the caller's tenant.
       description: >
-        Returns a bare JSON array. Free-text search is served by
+        Returns a bare JSON array ordered by `createdAt` newest first, with `id`
+        as the tie-break. The optional `sourceType` + `sourceId` pair restricts
+        the list to the notifications linked to exactly that source; both must
+        be supplied together, and a request that supplies only one is 400
+        `INVALID_SOURCE_FILTER` (`EIA-NTF-9412`). `sourceType` is trimmed and
+        matched case-insensitively against `NotificationSourceType`, so
+        `direct_claim` selects `DIRECT_CLAIM`; an unknown value is 400
+        `INVALID_SOURCE_TYPE` (`EIA-NTF-9409`) and is reported before the
+        pairing check. Request binding runs first: a `sourceId` that is not a
+        UUID is 400 `INVALID_ARGUMENT` (`EIA-NTF-9502`) even when no type is
+        supplied. A blank value is treated as absent; supplying neither value
+        keeps the unfiltered list. Free-text search is served by
         `GET /api/v1/notifications/search`; inbox filtering is planned.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
+        - name: sourceType
+          in: query
+          required: false
+          description: >
+            Optional notification-source filter. Must be supplied with
+            `sourceId`; half a pair is 400 `INVALID_SOURCE_FILTER`
+            (`EIA-NTF-9412`). The value is trimmed and upper-cased before
+            validation, so a lower-case value is accepted. A value outside the
+            six-value enum is 400 `INVALID_SOURCE_TYPE` (`EIA-NTF-9409`).
+          schema:
+            $ref: '#/components/schemas/NotificationSourceType'
+        - name: sourceId
+          in: query
+          required: false
+          description: >
+            Optional UUID of the source record. Must be supplied with
+            `sourceType`; half a pair is 400 `INVALID_SOURCE_FILTER`
+            (`EIA-NTF-9412`). A value that is not a UUID is 400
+            `INVALID_ARGUMENT` (`EIA-NTF-9502`).
+          schema:
+            type: string
+            format: uuid
       responses:
         '200':
           description: Notifications of the tenant.
@@ -410,10 +448,43 @@ paths:
       tags:
         - Notifications internal
       summary: List notifications for a tenant (expert).
+      description: >
+        Returns a bare JSON array ordered by `createdAt` newest first, with `id`
+        as the tie-break. `tenantId` is required. The optional `sourceType` +
+        `sourceId` pair restricts the list to the notifications linked to
+        exactly that source; both must be supplied together, and a request that
+        supplies only one is 400 `INVALID_SOURCE_FILTER` (`EIA-NTF-9412`). The
+        type is trimmed and upper-cased before validation, and an unknown value
+        is 400 `INVALID_SOURCE_TYPE` (`EIA-NTF-9409`). Request binding runs
+        first: a `sourceId` that is not a UUID is 400 `INVALID_ARGUMENT`
+        (`EIA-NTF-9502`) even when no type is supplied. A blank value is
+        treated as absent; supplying neither value keeps the unfiltered list.
       security: []
       x-internal-api: true
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantIdQuery'
+        - name: sourceType
+          in: query
+          required: false
+          description: >
+            Optional notification-source filter. Must be supplied with
+            `sourceId`; half a pair is 400 `INVALID_SOURCE_FILTER`
+            (`EIA-NTF-9412`). The value is trimmed and upper-cased before
+            validation. A value outside the six-value enum is 400
+            `INVALID_SOURCE_TYPE` (`EIA-NTF-9409`).
+          schema:
+            $ref: '#/components/schemas/NotificationSourceType'
+        - name: sourceId
+          in: query
+          required: false
+          description: >
+            Optional UUID of the source record. Must be supplied with
+            `sourceType`; half a pair is 400 `INVALID_SOURCE_FILTER`
+            (`EIA-NTF-9412`). A value that is not a UUID is 400
+            `INVALID_ARGUMENT` (`EIA-NTF-9502`).
+          schema:
+            type: string
+            format: uuid
       responses:
         '200':
           description: Notifications of the tenant.
@@ -1054,6 +1125,7 @@ x-implementation:
     - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationService.java
     - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/Notification.java
     - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationSourceType.java
+    - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationRepository.java
     - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationEvents.java
     - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationTemplateController.java
     - repos/eia-notifications-expert/src/main/java/com/eia/notifications/expert/NotificationTemplateService.java
@@ -1066,8 +1138,10 @@ x-implementation:
     The expert returns application/problem+json and the domain translates expert
     failures into the same envelope. Template, channel, and source-linkage rules
     are enforced in NotificationService; the expert normalizes and validates
-    NotificationSourceType and owns the both-or-neither pair rule. The expert
-    also serves the template routes under
+    NotificationSourceType and owns the both-or-neither pair rule for both the
+    create link and the list filter. The exact tenant-scoped `(sourceType,
+    sourceId)` list match is the findAllBySource query in NotificationRepository.
+    The expert also serves the template routes under
     `/internal/v1/notifications/templates` for direct internal callers; the
     domain uses the public path, so the internal alias is an implementation
     detail and is not documented as a separate public contract.
@@ -1129,20 +1203,18 @@ x-planned-operations:
     spec: SPEC 11.8.10
     note: Issue a notification from an event or a direct call.
 x-compatibility:
-  contractVersion: 1.4.0
-  previousContractVersion: 1.3.0
+  contractVersion: 1.5.0
+  previousContractVersion: 1.4.0
   breaking: []
   compatible:
-    - Adds optional nullable sourceType, sourceId, and sourceReference to Notification, CreateNotificationRequest, and CreateNotificationRequestInternal.
-    - Adds the NotificationSourceType schema with DIRECT_CLAIM, ASSUMED_CLAIM, POLICY, CONTRACT, PAYMENT, and OTHER, and the both-or-neither type/id rule with a 64-character sourceReference cap.
-    - Documents the optional source fields on the notifications.notification.created and notifications.notification.sent event payloads; eventVersion stays 1.
+    - Adds optional sourceType and sourceId query filters to GET /api/v1/notifications and GET /internal/v1/notifications, with the both-or-neither 400 INVALID_SOURCE_FILTER (EIA-NTF-9412), the unknown-type 400 INVALID_SOURCE_TYPE (EIA-NTF-9409), and the malformed-sourceId 400 INVALID_ARGUMENT (EIA-NTF-9502) behaviour.
+    - The 200 response stays a bare JSON array of the unchanged Notification projection; a caller that omits both parameters keeps the unfiltered list.
   note: >
-    Source linkage is additive over 1.3.0: three optional nullable fields on the
-    projection and both create commands, one new enum schema, and two enriched
-    event payloads. No path, required field, existing field meaning, or event
-    name changes, so a client that omits the source link is unaffected and a
-    consumer that ignores the new event members keeps working. The HTTP API
-    version stays /api/v1 and the event catalog stays at 215 published and 95
-    implemented names, with Notifications at 15 published and 5 implemented,
-    because no event name changes. MISMATCHES.md M-53 records the flat link
-    against the SPEC 12.5.5 subject EntityRef.
+    The list source filter is additive over 1.4.0: two optional query parameters
+    on an existing operation, no new path, required field, response member, or
+    event name. The HTTP API version stays /api/v1, asyncapi/notifications.yaml
+    stays 1.3.0, and the event catalog stays at 218 published and 99 implemented
+    names, with Notifications at 15 published and 5 implemented, because no
+    event name changes. MISMATCHES.md M-53 records the flat source link, the
+    exact-pair filter, and the malformed-sourceId code against the SPEC 12.5.5
+    subject EntityRef.

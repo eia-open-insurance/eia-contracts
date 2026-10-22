@@ -1763,6 +1763,32 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   validation evidence.
 - `python scripts/validate_contracts.py` passes 14,914 checks with 0 failures.
 
+### Added in the Notifications source-filter contract (2026-10-22)
+
+- `openapi/notifications.yaml` is 1.5.0: `GET /api/v1/notifications` and
+  `GET /internal/v1/notifications` accept the optional `sourceType` + `sourceId`
+  query pair. The two parameters are optional but must be supplied together; the
+  match is exact on the normalized pair and stays inside the caller's tenant,
+  and the result keeps the newest-first `createdAt` order with `id` as the
+  tie-break. A blank value counts as absent. The operations document 400
+  `INVALID_SOURCE_FILTER` (`EIA-NTF-9412`) for half a pair, 400
+  `INVALID_SOURCE_TYPE` (`EIA-NTF-9409`) for an unknown type, and 400
+  `INVALID_ARGUMENT` (`EIA-NTF-9502`) for a malformed `sourceId`.
+  `x-compatibility` moves to 1.5.0 over 1.4.0, and `x-implementation` names the
+  repository that applies the exact source match. `asyncapi/notifications.yaml`
+  stays 1.3.0 and the event catalog stays 1.34.0 because no event changes.
+- `scripts/validate_contracts.py` requires the `sourceType` + `sourceId` pair on
+  both notification list operations, both parameters to stay optional query
+  parameters, the `NotificationSourceType` reference and six-value enum, the
+  UUID `sourceId`, the tenant parameter, the 400 response, the both-or-neither
+  wording, and the `INVALID_SOURCE_TYPE`/`INVALID_SOURCE_FILTER`/`EIA-NTF-9502`
+  codes; it also rejects a `sourceReference` query parameter.
+- `README.md` records the additive 1.5.0 compatibility class, the exact-pair
+  filter semantics, the malformed-id code, and the validation count;
+  `MISMATCHES.md` extends M-53 with the list filter, its evidence, and the
+  refreshed validation evidence.
+- `python scripts/validate_contracts.py` passes 14,947 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was
