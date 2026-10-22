@@ -2680,12 +2680,16 @@ NOTIFICATION_DELIVERY_REFERENCE_PREFIX = "SIM-"
 # Notification template administration (SPEC 11.8.10, NTF-14). The implemented
 # public surface is the short /api/v1/notifications/templates resource rather
 # than the SPEC admin path: list with optional status/code filters, create DRAFT,
-# approve with an approver, and retire. A template is created DRAFT, approval is
-# the only path to ACTIVE, and RETIRED is terminal. The unique key is
-# (tenant, templateCode, templateVersion, locale), so a duplicate create is 409
-# TEMPLATE_ALREADY_EXISTS; a repeated approval of an ACTIVE template is 409
+# approve with a directory-identifier approver, and retire. A template is created
+# DRAFT, approval is the only path to ACTIVE, and RETIRED is terminal. The unique
+# key is (tenant, templateCode, templateVersion, locale), so a duplicate create is
+# 409 TEMPLATE_ALREADY_EXISTS; a repeated approval of an ACTIVE template is 409
 # TEMPLATE_ALREADY_ACTIVE; any other illegal transition or concurrent loss is
 # 409 TEMPLATE_STATUS_CONFLICT. Every accepted write emits one template event.
+# The approver is a stable directory id such as a-adjuster (trimmed, 1-128
+# characters), not a UUID: SPEC 11.8.7 types approved_by as uuid, but the
+# implemented column is VARCHAR(128) and the template projection and event carry
+# the string (MISMATCHES.md M-49).
 NOTIFICATION_TEMPLATE_OPENAPI_PATHS = [
     (
         "get",
@@ -2750,6 +2754,7 @@ NOTIFICATION_TEMPLATE_CREATE_REQUIRED = (
 )
 NOTIFICATION_TEMPLATE_CODE_MAX_LENGTH = 64
 NOTIFICATION_TEMPLATE_LOCALE_MAX_LENGTH = 16
+NOTIFICATION_TEMPLATE_APPROVER_MAX_LENGTH = 128
 NOTIFICATION_TEMPLATE_CONFLICT_CODES = (
     "TEMPLATE_ALREADY_EXISTS",
     "TEMPLATE_ALREADY_ACTIVE",
@@ -16272,8 +16277,19 @@ def check_notification_templates_openapi(contracts: ContractSet, document, relat
     approved_by = properties.get("approvedBy") or {}
     contracts.check(
         _schema_types(approved_by) == {"string", "null"}
-        and approved_by.get("format") == "uuid",
-        f"{relative}: NotificationTemplate.approvedBy must be a nullable uuid",
+        and approved_by.get("minLength") == 1
+        and approved_by.get("maxLength") == NOTIFICATION_TEMPLATE_APPROVER_MAX_LENGTH
+        and "format" not in approved_by,
+        f"{relative}: NotificationTemplate.approvedBy must be a nullable "
+        f"1-{NOTIFICATION_TEMPLATE_APPROVER_MAX_LENGTH} character directory id, "
+        "not a uuid",
+    )
+    approved_by_description = str(approved_by.get("description") or "").lower()
+    contracts.check(
+        "directory identifier" in approved_by_description
+        and "not a uuid" in approved_by_description,
+        f"{relative}: NotificationTemplate.approvedBy must document the directory "
+        "identifier and that it is not a uuid",
     )
     approved_at = properties.get("approvedAt") or {}
     contracts.check(
@@ -16363,9 +16379,26 @@ def check_notification_templates_openapi(contracts: ContractSet, document, relat
         approve.get("type") == "object" and "approvedBy" in (approve.get("required") or []),
         f"{relative}: ApproveNotificationTemplateRequest must require approvedBy",
     )
+    approve_approver = approve_properties.get("approvedBy") or {}
     contracts.check(
-        (approve_properties.get("approvedBy") or {}).get("format") == "uuid",
-        f"{relative}: ApproveNotificationTemplateRequest.approvedBy must be a uuid",
+        (
+            approve_approver.get("type"),
+            approve_approver.get("minLength"),
+            approve_approver.get("maxLength"),
+        )
+        == ("string", 1, NOTIFICATION_TEMPLATE_APPROVER_MAX_LENGTH)
+        and "format" not in approve_approver,
+        f"{relative}: ApproveNotificationTemplateRequest.approvedBy must be a "
+        f"required 1-{NOTIFICATION_TEMPLATE_APPROVER_MAX_LENGTH} character "
+        "directory id, not a uuid",
+    )
+    approve_description = str(approve.get("description") or "").lower()
+    contracts.check(
+        "directory identifier" in approve_description
+        and "not a uuid" in approve_description
+        and "trimmed" in approve_description,
+        f"{relative}: ApproveNotificationTemplateRequest must document the "
+        "trimmed directory identifier and that it is not a uuid",
     )
 
     planned = {
@@ -16492,6 +16525,20 @@ def check_notification_templates_openapi(contracts: ContractSet, document, relat
                 in str(operation.get("description") or ""),
                 f"{where}: create must document notifications.template.created",
             )
+        if request_schema == "ApproveNotificationTemplateRequest":
+            approve_text = str(operation.get("description") or "").lower()
+            for term in (
+                "directory identifier",
+                "a-adjuster",
+                "trimmed",
+                "1-128",
+                "eia-ntf-9404",
+                "server-assigned",
+            ):
+                contracts.check(
+                    term in approve_text,
+                    f"{where}: description must document {term!r}",
+                )
 
     compatibility = document.get("x-compatibility") or {}
     contracts.check(
@@ -17462,9 +17509,21 @@ def check_notification_templates_asyncapi(contracts: ContractSet, document, rela
     payload_approver = properties.get("approvedBy") or {}
     contracts.check(
         _schema_types(payload_approver) == {"string", "null"}
-        and payload_approver.get("format") == "uuid",
+        and payload_approver.get("minLength") == 1
+        and payload_approver.get("maxLength") == NOTIFICATION_TEMPLATE_APPROVER_MAX_LENGTH
+        and "format" not in payload_approver,
         f"{relative}: {NOTIFICATION_TEMPLATE_EVENT_MESSAGE}.approvedBy must be a "
-        "nullable uuid",
+        f"nullable 1-{NOTIFICATION_TEMPLATE_APPROVER_MAX_LENGTH} character "
+        "directory id, not a uuid",
+    )
+    payload_approver_description = str(
+        payload_approver.get("description") or ""
+    ).lower()
+    contracts.check(
+        "directory identifier" in payload_approver_description
+        and "not a uuid" in payload_approver_description,
+        f"{relative}: {NOTIFICATION_TEMPLATE_EVENT_MESSAGE}.approvedBy must "
+        "document the directory identifier and that it is not a uuid",
     )
 
     send_events = {

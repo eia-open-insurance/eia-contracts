@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:notifications
 info:
   title: EIA Notifications events
-  version: 1.5.0
+  version: 1.6.0
   summary: Published domain event names for the Notifications vertical.
   description: >
     Event contract for the Notifications vertical. The authoritative event names
@@ -125,7 +125,7 @@ channels:
       transaction as the status update that records `approvedBy` and
       `approvedAt`. The `NotificationTemplate` aggregate moves to version 2.
       The payload carries the template identity, code, and template version, its
-      locale, `ACTIVE` status, and the approver.
+      locale, `ACTIVE` status, and the trimmed directory-identifier approver.
     x-event-type: notifications.template.approved
     x-event-version: 1
     x-status: implemented
@@ -144,8 +144,8 @@ channels:
       transaction as the status update, so it can no longer issue notifications
       (NTF-14). The `NotificationTemplate` aggregate moves to version 3. The
       payload carries the template identity, code, and template version, its
-      locale, `RETIRED` status, and the approver (null when the template was
-      retired from DRAFT).
+      locale, `RETIRED` status, and the approver (a trimmed directory
+      identifier, or null when the template was retired from DRAFT).
     x-event-type: notifications.template.retired
     x-event-version: 1
     x-status: implemented
@@ -726,10 +726,12 @@ components:
               - RETIRED
           approvedBy:
             type: [string, 'null']
-            format: uuid
+            minLength: 1
+            maxLength: 128
             description: >
-              Approver recorded by the approval command; JSON null on a DRAFT
-              create and on a retirement from DRAFT.
+              Trimmed directory identifier of the approver (for example
+              `a-adjuster`), not a UUID; JSON null on a DRAFT create and on a
+              retirement from DRAFT.
   securitySchemes:
     outboxSignature:
       type: httpApiKey

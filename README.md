@@ -458,10 +458,13 @@ Semantics:
   `TEMPLATE_ALREADY_EXISTS` (`EIA-NTF-9205`) with no row and no event.
 - `POST /api/v1/notifications/templates/{id}/approve` requires `{approvedBy}`.
   Approval is the only path to ACTIVE (NTF-14) and records the approver and the
-  server-assigned instant in `approvedBy` and `approvedAt`. An already-ACTIVE
-  template is 409 `TEMPLATE_ALREADY_ACTIVE` (`EIA-NTF-9206`); a RETIRED template
-  or a lost concurrent conditional update is 409 `TEMPLATE_STATUS_CONFLICT`
-  (`EIA-NTF-9207`).
+  server-assigned instant in `approvedBy` and `approvedAt`. Since Notifications
+  1.8.0 the approver is a trimmed 1-128-character directory identifier such as
+  `a-adjuster` rather than a UUID
+  ([Notifications template approvers](#notifications-template-approvers)). An
+  already-ACTIVE template is 409 `TEMPLATE_ALREADY_ACTIVE` (`EIA-NTF-9206`); a
+  RETIRED template or a lost concurrent conditional update is 409
+  `TEMPLATE_STATUS_CONFLICT` (`EIA-NTF-9207`).
 - `POST /api/v1/notifications/templates/{id}/retire` has no request body and
   moves a DRAFT or ACTIVE template to RETIRED, which is terminal. The approval
   evidence is retained. An already-RETIRED template or a lost concurrent update
@@ -2577,6 +2580,55 @@ Semantics:
   sent-payload members and rejects them on the created payload. The full run
   passes 15,608 checks.
 
+### Notifications template approvers (2026-10-22)
+
+Notifications 1.8.0 changes the template approver from a UUID to a stable
+directory identifier. The change is corrective: `approvedBy` was always a JSON
+string, but the contract typed it as `format: uuid` while the implemented
+service trims a directory id such as `a-adjuster`, stores it in a 128-character
+column, and the web approval dialog already sends the directory person id. No
+path, request field, response field, or event name is added or removed.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/notifications.yaml` | 1.8.0 | Corrective (value-set widening) | `NotificationTemplate.approvedBy` is a nullable 1-128-character directory-id string and `ApproveNotificationTemplateRequest.approvedBy` is a required 1-128-character directory-id string; both drop `format: uuid`. The approve operation documents trimming, the 400 `EIA-NTF-9404` rejection, the server-assigned `approvedAt`, and the trimmed value in the response and event. |
+| `asyncapi/notifications.yaml` | 1.6.0 | Corrective | `NotificationTemplateData.approvedBy` is a nullable 1-128-character directory-id string and drops `format: uuid`; the approved and retired channel descriptions name the trimmed directory identifier. `eventVersion` stays 1. |
+| `asyncapi/event-catalog.yaml` | 1.39.0 | Unchanged | No event name changes; the catalog stays at 228 published and 109 implemented names (Notifications 15 published and 5 implemented). |
+
+Semantics:
+
+- `approvedBy` is required on the approve command. It is a stable directory
+  identifier (for example `a-adjuster`), not a UUID; the API trims it and
+  requires 1-128 characters, so an absent, blank, or over-long value is 400
+  `EIA-NTF-9404` `VALIDATION_FAILED` with `errors[0].field` = `approvedBy`. The
+  rejected command writes no status change and no event, so the template stays
+  DRAFT. The value is stored as supplied after trimming; it is not resolved
+  against a directory service, so the API does not prove that the id belongs to
+  an existing person.
+- The server assigns `approvedAt`; the caller cannot send it. Approval is still
+  the only DRAFT -> ACTIVE path (NTF-14), and the successful 200 projection
+  carries the trimmed approver.
+- `notifications.template.approved` carries the same trimmed string in
+  `data.approvedBy`; a DRAFT create and a retirement from DRAFT keep JSON null.
+  The event name and `eventVersion` 1 are unchanged because the payload field is
+  still a nullable string.
+- A UUID string remains a valid 1-128-character value, so a caller that sends a
+  UUID keeps working. A generated client that typed `approvedBy` as a UUID must
+  be regenerated to accept directory ids, and a consumer that parses the
+  response as a UUID must tolerate a non-UUID string. The notifications web
+  remote and the notification services are co-released.
+- SPEC 11.8.7 types `notification_template.approved_by` as `uuid`; the
+  implemented column is `VARCHAR(128)` holding a directory id, and the
+  `approved_by` migration is forward-only (`ALTER COLUMN ... USING
+  approved_by::text`). `MISMATCHES.md` M-49 records the deviation.
+- The validator requires the nullable directory-id `approvedBy` on
+  `NotificationTemplate`, the required 1-128-character directory-id
+  `approvedBy` on `ApproveNotificationTemplateRequest`, the same nullable shape
+  on `NotificationTemplateData`, the absence of `format: uuid`, and the approve
+  wording for the directory id, trimming, 400 `EIA-NTF-9404`, server-assigned
+  `approvedAt`, and the trimmed response/event value. The full run passes
+  17,002 checks.
+
 ### Policy rating worksheets (2026-10-22)
 
 Policy 2.17.0 adds the rating worksheet and premium calculation surface. The
@@ -4605,7 +4657,9 @@ missing directory.
    requires the four notification-template operations with the shared
    `TenantHeader` and the `status`/`code` list filters, the eleven-member
    `NotificationTemplate` projection, the closed `NotificationTemplateStatus`
-   enum, the create and approve request schemas and their field bounds, the
+   enum, the create and approve request schemas and their field bounds,
+   including the non-UUID 1-128-character `approvedBy` directory id on the
+   approve request and the nullable directory-id approver on the projection, the
    DRAFT-on-create rule, the 201/200/400/404/409 responses, the
    `TEMPLATE_ALREADY_EXISTS`/`TEMPLATE_ALREADY_ACTIVE`/`TEMPLATE_STATUS_CONFLICT`
    documentation, and the absence of the implemented routes from
@@ -4691,8 +4745,9 @@ missing directory.
    installment identity, number, and due date, and trimmed reason members,
    and the
    `NotificationTemplateData` payload with its template identity, code,
-   template version, locale, status, and nullable approver members for the
-   created, approved, and retired facts, the `NotificationCreatedData` and
+   template version, locale, status, and nullable 1-128-character directory-id
+   approver member for the created, approved, and retired facts, the
+   `NotificationCreatedData` and
    `NotificationSentData` payloads with their optional `sourceType`,
    `sourceId`, and `sourceReference` members on the two notification facts, the
    two delivery-attempt reads with their tenant parameter, the required
@@ -4903,7 +4958,9 @@ missing directory.
   and retire, while SPEC 11.8.10 mounts `/api/v1/notifications/admin/templates`
   and names a publish command. The three lifecycle facts
   `notifications.template.created`/`.approved`/`.retired` have no SPEC 11.8.9
-  name, and a template is channel-neutral when `channel` is null (M-22, M-49);
+  name, a template is channel-neutral when `channel` is null, and the approver
+  is a trimmed 1-128-character directory id rather than the SPEC 11.8.7 uuid
+  (M-22, M-49);
 - a notification carries a flat `sourceType`/`sourceId`/`sourceReference` link
   rather than the SPEC 11.8.4 `subject_vertical`/`subject_type`/`subject_id`/
   `subject_business_key` columns and the SPEC 12.5.5 `subject` EntityRef. The

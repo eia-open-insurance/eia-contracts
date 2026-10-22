@@ -2202,6 +2202,39 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   negative checks.
 - `python scripts/validate_contracts.py` passes 16,993 checks with 0 failures.
 
+### Changed in the Notifications template-approver contract (2026-10-22)
+
+- `openapi/notifications.yaml` is 1.8.0: `NotificationTemplate.approvedBy` is a
+  nullable 1-128-character directory-id string and
+  `ApproveNotificationTemplateRequest.approvedBy` is a required 1-128-character
+  directory-id string; both drop `format: uuid`. The approve operation documents
+  that the approver is a stable directory identifier such as `a-adjuster`, is
+  trimmed, must be non-blank and at most 128 characters, is 400
+  `EIA-NTF-9404` `VALIDATION_FAILED` otherwise with the template left DRAFT, and
+  that the server assigns `approvedAt` and the response and event carry the
+  trimmed value. The value is stored as supplied after trimming and is not
+  resolved against a directory service. `x-compatibility` moves to 1.8.0 over
+  1.7.0.
+- `asyncapi/notifications.yaml` is 1.6.0: `NotificationTemplateData.approvedBy`
+  is a nullable 1-128-character directory-id string and drops `format: uuid`;
+  the approved and retired channel descriptions name the trimmed directory
+  identifier. The event name and `eventVersion` stay 1.
+- `asyncapi/event-catalog.yaml` is unchanged at 1.39.0 because no event name
+  changes; the catalog stays at 228 published and 109 implemented names
+  (Notifications 15 published and 5 implemented).
+- `scripts/validate_contracts.py` requires the nullable directory-id
+  `approvedBy` on `NotificationTemplate`, the required 1-128-character
+  directory-id `approvedBy` on `ApproveNotificationTemplateRequest`, the same
+  nullable shape on `NotificationTemplateData`, the absence of `format: uuid`,
+  and the approve wording for the directory id, trimming, 400
+  `EIA-NTF-9404`, server-assigned `approvedAt`, and the trimmed response/event
+  value.
+- `README.md` records the corrective versions and approver semantics;
+  `MISMATCHES.md` M-49 records the SPEC 11.8.7 `approved_by uuid` deviation,
+  the implemented `VARCHAR(128)` column, and the forward-only migration, and
+  updates the validation evidence.
+- `python scripts/validate_contracts.py` passes 17,002 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

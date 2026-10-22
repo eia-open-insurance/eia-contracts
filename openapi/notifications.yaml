@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Notifications API
-  version: 1.7.0
+  version: 1.8.0
   summary: Notification drafting, delivery, and template administration and the Notifications expert API.
   description: >
     This document describes the implemented public Notifications domain API and
@@ -305,17 +305,21 @@ paths:
       summary: Approve a DRAFT notification template.
       description: >
         Moves a DRAFT template to ACTIVE and records the approver and the
-        approval instant in `approvedBy` and `approvedAt`. Approval is the only
-        path to ACTIVE (NTF-14). A template that is already ACTIVE is 409
-        `TEMPLATE_ALREADY_ACTIVE` (`EIA-NTF-9206`); any other non-DRAFT status
-        is 409 `TEMPLATE_STATUS_CONFLICT` (`EIA-NTF-9207`); a concurrent change
-        that loses the conditional update is the same 409
-        `TEMPLATE_STATUS_CONFLICT`. A template outside the caller's tenant is
-        404, indistinguishable from a missing template. `approvedBy` is
-        required (400 `EIA-NTF-9404` `VALIDATION_FAILED` when absent). An
-        accepted approval returns 200 with the ACTIVE template and writes
-        `notifications.template.approved` in the same transaction; a rejected
-        command writes no status change and no event.
+        server-assigned approval instant in `approvedBy` and `approvedAt`.
+        `approvedBy` is required and is a stable directory identifier such as
+        `a-adjuster`, not a UUID: the value is trimmed and must be 1-128
+        characters, so an absent, blank, or over-long approver is 400
+        `EIA-NTF-9404` `VALIDATION_FAILED` and the template stays DRAFT.
+        Approval is the only path to ACTIVE (NTF-14). A template that is
+        already ACTIVE is 409 `TEMPLATE_ALREADY_ACTIVE` (`EIA-NTF-9206`); any
+        other non-DRAFT status is 409 `TEMPLATE_STATUS_CONFLICT`
+        (`EIA-NTF-9207`); a concurrent change that loses the conditional update
+        is the same 409 `TEMPLATE_STATUS_CONFLICT`. A template outside the
+        caller's tenant is 404, indistinguishable from a missing template. An
+        accepted approval returns 200 with the ACTIVE template, carrying the
+        trimmed approver, and writes `notifications.template.approved` in the
+        same transaction; a rejected command writes no status change and no
+        event.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - name: id
@@ -1063,9 +1067,10 @@ components:
       description: >
         Tenant-scoped notification template registry entry. The projection is
         the template identity plus its lifecycle evidence; `tenantId` and the
-        effective dates are deliberately not exposed. `approvedBy` and
-        `approvedAt` are null until approval and stay as recorded after
-        retirement.
+        effective dates are deliberately not exposed. `approvedBy` is null
+        until approval; when present it is the trimmed directory identifier of
+        the approver (for example `a-adjuster`), not a UUID. `approvedBy` and
+        `approvedAt` stay as recorded after retirement.
       required:
         - id
         - code
@@ -1109,7 +1114,11 @@ components:
           $ref: '#/components/schemas/NotificationTemplateStatus'
         approvedBy:
           type: [string, 'null']
-          format: uuid
+          minLength: 1
+          maxLength: 128
+          description: >
+            Trimmed directory identifier of the approver, for example
+            `a-adjuster`; null until approval. It is not a UUID.
         approvedAt:
           type: [string, 'null']
           format: date-time
@@ -1169,14 +1178,22 @@ components:
     ApproveNotificationTemplateRequest:
       type: object
       description: >
-        Approval command. The approver is required audit evidence and is copied
-        to the template together with the server-assigned approval instant.
+        Approval command. The approver is required audit evidence: a stable
+        directory identifier such as `a-adjuster`, not a UUID, supplied as
+        1-128 characters and recorded trimmed. It is copied to the template
+        together with the server-assigned approval instant. The value is stored
+        as supplied after trimming and is not resolved against a directory
+        service.
       required:
         - approvedBy
       properties:
         approvedBy:
           type: string
-          format: uuid
+          minLength: 1
+          maxLength: 128
+          description: >
+            Stable directory identifier of the approver, for example
+            `a-adjuster`; trimmed and required. It is not a UUID.
     CreateNotificationRequest:
       type: object
       description: >
@@ -1469,27 +1486,27 @@ x-planned-operations:
     spec: SPEC 11.8.10
     note: Issue a notification from an event or a direct call.
 x-compatibility:
-  contractVersion: 1.7.0
-  previousContractVersion: 1.6.0
+  contractVersion: 1.8.0
+  previousContractVersion: 1.7.0
   breaking: []
   compatible:
-    - Adds GET /api/v1/notifications/{notificationId}/attempts and its /internal/v1 expert equivalent, returning a bare NotificationDeliveryAttempt array ordered by attemptNumber ascending.
-    - Adds the required-but-nullable Notification.deliveredAt and Notification.providerReference delivery evidence recorded by send.
-    - Adds the NotificationDeliveryAttempt and NotificationDeliveryAttemptStatus schemas.
-    - Documents the SIMULATOR provider semantics, the deterministic SIM-<notification uuid> idempotency reference, and the 502 DELIVERY_FAILED behaviour before an attempt row is written.
-    - Documents the tenant-wall 404 EIA-NTF-9001 for an unknown or foreign-tenant notification and the empty array for a known, unsent notification.
+    - Changes NotificationTemplate.approvedBy from format uuid to a nullable 1-128-character directory identifier.
+    - Changes ApproveNotificationTemplateRequest.approvedBy from format uuid to a required 1-128-character directory identifier such as a-adjuster.
+    - Documents that the approver is trimmed, must be non-blank and at most 128 characters, and that a rejected value is 400 EIA-NTF-9404 VALIDATION_FAILED with the template left DRAFT.
+    - Documents the server-assigned approvedAt and the trimmed approver returned on the 200 projection and carried in data.approvedBy of notifications.template.approved.
   note: >
-    The delivery-attempt history and provider evidence are additive over 1.6.0:
-    two read operations, one projection schema, one attempt-status enum, two
-    required-but-nullable response members on Notification, and two optional
-    members on the sent event payload. No existing path, request field, response
-    member, event name, or field meaning is removed or changed, and the HTTP API
-    stays /api/v1. A client that never reads the new route still receives the
-    same notifications, with the two delivery members null on rows that predate
-    the provider. asyncapi/notifications.yaml moves to 1.5.0 and keeps
-    notifications.notification.sent at eventVersion 1 because the payload change
-    is additive. The event catalog stays at 1.35.0 and at 220 published and 101
-    implemented names, with Notifications at 15 published and 5 implemented,
-    because no event name changes. MISMATCHES.md M-56 records the SPEC-less
-    attempts route, the narrowed SPEC 11.8.4 delivery row, the
-    notification-level evidence, and the simulator provider.
+    The approver change is corrective over 1.7.0. The field was always a JSON
+    string, but the contract typed it as a UUID while the implemented column and
+    the web approval dialog use a stable directory identifier such as
+    `a-adjuster`. The value set widens: a UUID string remains a valid 1-128
+    character value, but a generated client that typed approvedBy as a UUID must
+    be regenerated to accept directory ids, and a consumer that parses the
+    response as a UUID must tolerate a non-UUID string. No path, request field,
+    response field, or event name is added or removed, and the HTTP API stays
+    /api/v1. asyncapi/notifications.yaml moves to 1.6.0 and keeps
+    notifications.template.approved at eventVersion 1 because the payload field
+    is still a nullable string. The event catalog stays at 1.39.0 and at 228
+    published and 109 implemented names, with Notifications at 15 published and
+    5 implemented, because no event name changes. MISMATCHES.md M-49 records the
+    SPEC 11.8.7 `approved_by uuid` deviation and the VARCHAR(128)
+    implementation.

@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-22 (Policy idempotency request-hash conflicts).
+Status: open, reviewed 2026-10-22 (Notification template approver directory ids).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -130,6 +130,11 @@ where the running code does not meet it yet.
   template controllers, services, DTOs, status and channel enums, commands and
   requests, repository, event factory, `schema.sql`, expert client, exception
   mapping, and the template controller, service, integration, and outbox tests.
+  The Notifications template-approver pass re-reads the domain approve command
+  and service plus the expert approve request, template entity and DTO, service
+  validation, repository `markApproved`, `NotificationTemplateEvents`,
+  `schema.sql` and its H2 mirror, and the domain and expert template controller,
+  service, integration, and outbox tests for the string directory identifier.
   The Policy premium-audit pass reads the domain premium-audit controller,
   service, command, result, projection, and `PolicyClient` plus the expert
   premium-audit controller, service, rules, request, `VersionTimeline`,
@@ -295,7 +300,7 @@ removed per the resolution policy.
 | M-46 | Payment public status PATCH is SPEC-less and its graph is wider than SPEC 11.7.6 | L |
 | M-47 | Document content tombstones add a SPEC-less DELETE route and event and keep the metadata; a disposition now applies the same tombstone without the SPEC approval/certificate job | L |
 | M-48 | Notifications adds a SPEC-less `DUNNING_NOTICE` type to the closed `NotificationType` enum | L |
-| M-49 | Notification template administration uses a short path, approve/retire commands, and SPEC-less events | L |
+| M-49 | Notification template administration uses a short path, approve/retire commands, SPEC-less events, and a directory-id approver | L |
 | M-50 | Policy premium audit is a SPEC-less route/event that re-rates the policy premium without the SPEC `policy_premium_audit` worksheet or batch job | L |
 | M-51 | Policy billing adjustment is a SPEC-less derived-delta route and event and does not honour the optional concurrency/idempotency headers | L |
 | M-52 | Direct Claims litigation damages are a SPEC-less pair and the created event has no SPEC name | L |
@@ -3533,7 +3538,7 @@ hand-off in SPEC 11.2.13, or keep the implemented type and treat the OpenAPI
 enum as canonical. The addition needs no `/v2`; removing the member later would
 be breaking under SPEC 10.4.
 
-## M-49 Notification template administration uses a short path, approve/retire commands, and SPEC-less events
+## M-49 Notification template administration uses a short path, approve/retire commands, SPEC-less events, and a directory-id approver
 
 SPEC 11.8.10 mounts the template administration surface at
 `GET /api/v1/notifications/admin/templates` and names
@@ -3541,16 +3546,19 @@ SPEC 11.8.10 mounts the template administration surface at
 registry is the short `/api/v1/notifications/templates` resource: list, create
 DRAFT, approve, and retire. Approval is the only path to ACTIVE (NTF-14), and
 retirement is a separate command from DRAFT or ACTIVE. The three lifecycle
-facts are new names with no SPEC 11.8.9 equivalent.
+facts are new names with no SPEC 11.8.9 equivalent. The approver is a directory
+identifier such as `a-adjuster`, while SPEC 11.8.7 types
+`notification_template.approved_by` as `uuid`.
 
 | Aspect | Implemented | SPEC / gap |
 |---|---|---|
 | Path | `/api/v1/notifications/templates` for the collection, `.../{id}/approve`, and `.../{id}/retire` | SPEC 11.8.10 mounts `/api/v1/notifications/admin/templates` and a publish command |
 | Lifecycle | create always DRAFT; approve DRAFT -> ACTIVE with `approvedBy`/`approvedAt`; retire DRAFT or ACTIVE -> RETIRED (terminal); duplicate create 409 `TEMPLATE_ALREADY_EXISTS`, repeat approval 409 `TEMPLATE_ALREADY_ACTIVE`, other illegal transition or concurrent loss 409 `TEMPLATE_STATUS_CONFLICT` | SPEC 11.8.10 names publish, not a draft/approve/retire split; the stable conflict codes are the implementation's |
+| Approver | `approvedBy` is a trimmed, non-blank 1-128-character directory identifier such as `a-adjuster`, stored in `notification_template.approved_by VARCHAR(128)`; the request requires it, the projection returns it nullable, and the approved event carries the trimmed string | SPEC 11.8.7 types `approved_by` as `uuid`; the implemented column and the canonical contract use a directory id |
 | Projection | `NotificationTemplate` `{id, code, version, channel, locale, bodyTemplate, status, approvedBy, approvedAt, createdAt, updatedAt}`; tenant id and effective dates are hidden; a null channel means channel-neutral | SPEC 11.8.7 describes a template registry with effective dates and a channel; the public projection omits tenant and effective dating |
 | List | bare array ordered by `createdAt` newest first, then `code`, `version` descending, and `id`; optional exact `status` and `code` filters | SPEC 11.8.10 names no list filter or ordering |
 | Events | `notifications.template.created` (aggregate version 1), `.approved` (2), `.retired` (3), payload `{templateId, code, version, locale, status, approvedBy}` | SPEC 11.8.9 publishes notification lifecycle facts only; no template event |
-| Version | `openapi/notifications.yaml` 1.3.0, `asyncapi/notifications.yaml` 1.2.0, `asyncapi/event-catalog.yaml` 1.31.0 (additive) | no SPEC version has this surface |
+| Version | `openapi/notifications.yaml` 1.8.0, `asyncapi/notifications.yaml` 1.6.0, `asyncapi/event-catalog.yaml` 1.39.0 (corrective/additive) | no SPEC version has this surface |
 
 Consequences:
 
@@ -3563,6 +3571,12 @@ Consequences:
 - A template that is channel-neutral (`channel` null) can serve any channel; a
   channel-specific row wins over the neutral row, matching
   `NotificationTemplateRepository.find`.
+- The approver is a directory identifier, not a UUID. A client generated from
+  SPEC 11.8.7 that types `approved_by` as a UUID must be regenerated to send and
+  accept a directory id; a UUID string remains a valid 1-128-character value.
+  Existing rows migrate forward with
+  `ALTER COLUMN approved_by TYPE VARCHAR(128) USING approved_by::text`, so the
+  old UUID text is preserved rather than dropped.
 - The three events are additive; the catalog publishes and implements them and
   the validator requires them. Renaming one later is breaking under EV-05.
 
@@ -3570,24 +3584,35 @@ Evidence:
 
 - `repos/eia-notifications-domain/.../NotificationTemplateController.java:32-57`
   (list, create, approve, retire), `NotificationTemplateService.java:41-50`
-  (approvedBy required), and `NotificationTemplateDto.java:11-23`.
+  (approvedBy required and forwarded), `ApproveNotificationTemplateCommand.java`
+  (String approver), and `NotificationTemplateDto.java:11-23`.
 - `repos/eia-notifications-expert/.../NotificationTemplateController.java:39-74`
-  (the public and `/internal/v1` mappings), `NotificationTemplateService.java:32-124`
-  (filters, duplicate, ACTIVE/STATUS guards), `NotificationTemplateRepository.java:76-147`
-  (ordering and conditional updates), `NotificationTemplateDto.java:10-23`, and
-  `schema.sql:6-24` (unique key and status/approval checks).
+  (the public and `/internal/v1` mappings), `NotificationTemplateService.java:78-160`
+  (trim, non-blank, 128-character validation, and the ACTIVE/STATUS guards),
+  `NotificationTemplateRepository.java:76-147`
+  (ordering, string `markApproved`, and conditional updates),
+  `ApproveNotificationTemplateRequest.java` (String `approvedBy`),
+  `NotificationTemplate.java:14-27`, `NotificationTemplateDto.java:10-23`, and
+  `schema.sql:6-38` (VARCHAR(128) column, unique key, status/approval checks,
+  and the forward-only UUID-to-text migration).
 - `repos/eia-notifications-expert/.../NotificationTemplateEvents.java:26-28,50-91`
-  (names, aggregate versions, and payload).
+  (names, aggregate versions, and the string approver payload).
 - `repos/eia-notifications-domain/.../NotificationExpertClient.java:90-156`
   (list/create/approve/retire forwarding and problem translation).
 - `repos/eia-notifications-expert/src/test/java/com/eia/notifications/expert/NotificationTemplateControllerTest.java`,
-  `NotificationTemplateServiceTest.java`, and `NotificationTemplateIntegrationTest.java`.
+  `NotificationTemplateServiceTest.java`, and `NotificationTemplateIntegrationTest.java`
+  (directory-id approval, trimming, blank and 129-character rejection, the
+  128-character acceptance, and the VARCHAR(128) column assertion).
+- `repos/eia-notifications-web/src/TemplatesPanel.jsx` and
+  `tests/approver-directory.spec.js` (the directory-backed approver picker that
+  posts the directory person id as `approvedBy`).
 
 Resolution: either move the route and command shape to SPEC 11.8.10
-(publish -> approve, admin -> short path, and add the retire command) and
-publish the three template facts in SPEC 11.8.9, or keep the implemented
-surface and treat these documents as canonical. No `/v2` is needed; the
-surface is additive over the existing notification API.
+(publish -> approve, admin -> short path, and add the retire command), publish
+the three template facts in SPEC 11.8.9, and widen SPEC 11.8.7's `approved_by`
+to a directory-id string, or keep the implemented surface and treat these
+documents as canonical. No `/v2` is needed; the surface is additive over the
+existing notification API and the approver field was already a JSON string.
 
 ## M-50 Policy premium audit is a SPEC-less route and event without the SPEC audit worksheet
 
@@ -4758,7 +4783,7 @@ public.
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-22
-Policy idempotency request-hash conflict contract:
+Notifications template-approver contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -4797,7 +4822,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 16993 checks, 0 failures
+  PASS 17002 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -5211,7 +5236,15 @@ Additional checks and limits:
   replay fails the missing replay-description message; reintroducing `does not
   compare` into the expert conversion description fails the stale-caveat
   message; and removing `legacy` from the shared `IdempotencyKey` description
-  fails the missing component-term message. The working copy was left
+  fails the missing component-term message. The Notifications
+  template-approver pass added four more, each run on a throwaway copy and
+  exited non-zero (exit 1): widening
+  `ApproveNotificationTemplateRequest.approvedBy.maxLength` from 128 to 255
+  fails the required 1-128-character directory-id message; restoring
+  `format: uuid` on that property fails the not-a-uuid message; and widening
+  `NotificationTemplateData.approvedBy.maxLength` from 128 to 255 fails the
+  nullable directory-id payload message. Removing `server-assigned` from the
+  approve description fails the missing-term message. The working copy was left
   unchanged.
 
 ## Resolution policy
