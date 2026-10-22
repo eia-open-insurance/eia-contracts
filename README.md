@@ -2290,6 +2290,61 @@ Command semantics:
   channel and its nine-member payload, the `IMPLEMENTED_EVENTS` entry, and the
   catalog entry. The full run passes 14,694 checks.
 
+### Direct Claims litigation damages and events (2026-10-22)
+
+Direct Claims 1.11.0 documents the optional damages a litigation matter seeks
+and the two litigation events the expert publishes. The change is additive: two
+nullable request and projection members, no new route, and two event channels;
+no existing path, request field, response status, or event name changed.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/direct-claims.yaml` | 1.11.0 | Additive | `Litigation` and `LitigationRequest` add the optional `damagesSought` and `damagesCurrency` pair; the public and expert create/update descriptions document the both-or-neither rule, the positive amount, the three-letter currency, and the PATCH omission. |
+| `asyncapi/direct-claims.yaml` | 1.6.0 | Additive | The implemented `direct.claim.litigation-created` channel and `send` operation, and `direct.claim.litigation-updated` moves from planned to implemented with its documented payload. |
+| `asyncapi/event-catalog.yaml` | 1.34.0 | Additive | The created name is published and both names are implemented (218 published and 99 implemented in total; Direct Claims 28 published and 15 implemented). |
+
+Semantics:
+
+- `damagesSought` is the amount the claimant seeks and `damagesCurrency` is its
+  three-letter uppercase ISO 4217 code. Both are optional and nullable on the
+  request and the projection. When damages are recorded the pair is
+  both-or-neither: one member without the other is 400 `VALIDATION_ERROR`.
+  `damagesSought` is a decimal string greater than zero with at most four
+  fraction digits; the contract never returns it as a JSON number.
+- The create and the update use the same body. On an update, omitting both
+  members (or sending both as null) keeps the stored pair; supplying both
+  replaces it. `expectedVersion` remains required on the public PATCH and a
+  stale value is 409 `CONFLICT`.
+- The `Litigation` projection always returns both members together: the recorded
+  decimal string and uppercase currency when damages exist, and null for both
+  when the matter has none. The stored amount is normalized to four fraction
+  digits.
+- An accepted create writes `direct.claim.litigation-created`; an accepted
+  update writes `direct.claim.litigation-updated`. Both are written in the same
+  transaction as the matter write and the parent claim version bump, so the
+  per-claim event stream stays monotonic. The payload carries `claimId`,
+  `claimNumber`, `claimVersion` (the claim's post-write row version, serialized
+  as `version`), `litigationId`, `matterType`, `jurisdiction`,
+  `counselPartyId`, `filingDate`, `litigationStatus`, and
+  `litigationVersion`; `trialDate`, `caseNumber`, and the `damagesSought` /
+  `damagesCurrency` pair are omitted when null. `eventVersion` stays 1 and the
+  envelope aggregate version is the bumped claim version plus one, as for the
+  other claim child events.
+- The damages columns and the `direct.claim.litigation-created` name have no
+  SPEC 11.4.4 or 11.4.9 definition; `direct.claim.litigation-updated` is the
+  SPEC name and was previously planned. SPEC 11.4.9 publishes no
+  matter-creation fact, so the created name is an EV-05 additive extension.
+- The public domain pre-validates only a non-negative amount and a non-blank
+  currency. A zero amount or a one-sided pair therefore passes the domain
+  request validation and is rejected by the expert with 400
+  `VALIDATION_ERROR`; the end-to-end response still matches this contract.
+  `MISMATCHES.md` M-52 records the layering and the SPEC-less fields.
+- The validator requires both schemas, the four create/update operations, the
+  optional nullable pair, the `dependentRequired` mapping, the positive amount
+  and currency patterns, the implemented channels with their documented payload
+  members and both-or-neither wording, the `IMPLEMENTED_EVENTS` entries, and the
+  catalog entries. The full run passes 14,825 checks.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -3222,6 +3277,11 @@ missing directory.
    concurrent-change `CONFLICT`, the required-but-nullable
    `Settlement.paymentId`/`paymentLinkedAt`, and the idempotent-repeat and
    event documentation,
+   the optional nullable `damagesSought`/`damagesCurrency` pair on
+   `Litigation` and `LitigationRequest` with its `dependentRequired` mapping,
+   positive-amount and currency patterns, the four litigation create/update
+   operations, and the two implemented litigation events with their documented
+   payload members and both-or-neither wording,
    the six document association-link operations on
    the public and expert surfaces, the `DocumentLink`, `CreateDocumentLinkRequest`,
    and `DocumentLinkedType` schemas, the `linkedType` + `linkedId` list filter,
@@ -3474,6 +3534,7 @@ missing directory.
    `x-status: implemented`. The implemented event names for all ten publishing
    verticals are required explicitly, including `direct.claim.assigned`,
    `direct.claim.allocation-created`, `direct.claim.settlement-payment-linked`,
+   `direct.claim.litigation-created`, `direct.claim.litigation-updated`,
    `assumed.claim.assigned`,
    `document.link.added`,
    `document.link.removed`, `document.content.uploaded`,
@@ -3661,6 +3722,13 @@ missing directory.
   link is owned by the Direct Claims expert, calls no Payment service, and the
   public domain collapses the expert's stable `SETTLEMENT_NOT_LINKABLE` code to
   409 `CONFLICT` (M-22, M-45);
+- Direct Claims litigation matters carry an optional `damagesSought` /
+  `damagesCurrency` pair that SPEC 11.4.4 `claim_litigation` does not define, and
+  they publish `direct.claim.litigation-created` although SPEC 11.4.9 names only
+  `direct.claim.litigation-updated`. The pair is both-or-neither, the amount
+  must be greater than zero, and a PATCH that omits both keeps the stored pair.
+  The public domain's request validation admits a zero amount or a one-sided
+  pair and relies on the expert's 400 `VALIDATION_ERROR` (M-22, M-52);
 - Policy billing is implemented under `/api/v1/policies/{policyId}/billing`
   with the flat `BillingPlan`/`Installment` projection, while SPEC 11.2.13 names
   the route `/installments` and defines the plan event as

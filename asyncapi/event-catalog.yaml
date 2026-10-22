@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.33.0
+  version: 1.34.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -21,7 +21,8 @@ info:
     aggregate write. Each vertical entry lists that subset under `implemented`;
     `published` remains the full agreed contract, so an event is planned until
     it appears in both lists. The Direct Claims and Assumed Claims task, note,
-    and assignment events and the Direct Claims allocation-created event are
+    and assignment events and the Direct Claims allocation-created and
+    litigation-created events are
     new names with no SPEC 11.4.9 or 11.5.9 equivalent, and the Document link
     and content events are new names with no SPEC 11.6.9 equivalent
     (MISMATCHES.md M-22).
@@ -173,6 +174,16 @@ info:
     aggregate version. It adds one published and one implemented name, bringing
     the platform totals to 217 published and 97 implemented; Policy becomes 35
     published and 23 implemented (M-22, M-27, M-51).
+    The 2026-10-22 Direct Claims litigation-damages slice adds one Direct
+    Claims name, `direct.claim.litigation-created`, with no SPEC 11.4.9
+    equivalent: SPEC publishes only the matter-updated fact and defines no
+    matter-creation fact. The already-published
+    `direct.claim.litigation-updated` moves into the implemented subset in the
+    same slice; both facts carry the optional `damagesSought` /
+    `damagesCurrency` pair. The new name adds one published and one implemented
+    name, and the moved name adds one implemented name, bringing the platform
+    totals to 218 published and 99 implemented; Direct Claims becomes 28
+    published and 15 implemented (M-22, M-52).
     The platform
     event-ingest service
     is the inbox:
@@ -434,6 +445,7 @@ x-event-catalog:
       - direct.claim.task-completed
       - direct.claim.task-updated
       - direct.claim.note-added
+      - direct.claim.litigation-created
       - direct.claim.litigation-updated
       - direct.claim.settlement-authorized
       - direct.claim.settlement-executed
@@ -460,6 +472,8 @@ x-event-catalog:
       - direct.claim.task-completed
       - direct.claim.task-updated
       - direct.claim.note-added
+      - direct.claim.litigation-created
+      - direct.claim.litigation-updated
       - direct.claim.settlement-authorized
       - direct.claim.settlement-payment-linked
       - direct.claim.closed

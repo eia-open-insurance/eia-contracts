@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Direct Claims API
-  version: 1.10.0
+  version: 1.11.0
   summary: Direct-book claim administration and the Direct Claims expert API.
   description: >
     This document describes the implemented public Direct Claims domain API and
@@ -25,6 +25,12 @@ info:
     `expectedVersion` may be supplied. The expert close applies the closure
     preconditions (no unresolved lien, no open reserve, and a legal CLOSED
     transition).
+
+    A litigation matter carries an optional damages pair. `damagesSought` is a
+    decimal string greater than zero and `damagesCurrency` is a three-letter
+    uppercase ISO 4217 code; the two are supplied together on create and update
+    and are returned together on the projection. A PATCH that omits both keeps
+    the recorded pair, and supplying only one is 400 `VALIDATION_ERROR`.
 
     The task and note routes complete the Direct Claims second slice. Tasks are
     diary items with a task version used by PATCH for optimistic concurrency;
@@ -978,6 +984,10 @@ paths:
       description: >
         `matterType`, `jurisdiction`, `counselPartyId`, `filingDate`, and
         `status` are required; `trialDate` may not precede `filingDate`.
+        `damagesSought` and `damagesCurrency` are optional and must be supplied
+        together: an amount that is zero or negative, a currency that is not
+        three uppercase letters, or only one member of the pair is 400
+        `VALIDATION_ERROR`.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
@@ -1014,7 +1024,10 @@ paths:
       summary: Update a litigation matter.
       description: >
         `expectedVersion` is required; a stale value is 409 at the public
-        surface.
+        surface. `damagesSought` and `damagesCurrency` are optional and must be
+        supplied together; omitting both keeps the recorded damages, while an
+        amount that is zero or negative, a currency that is not three uppercase
+        letters, or only one member of the pair is 400 `VALIDATION_ERROR`.
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
@@ -2372,6 +2385,14 @@ paths:
       tags:
         - Direct Claims internal
       summary: Record a litigation matter (expert).
+      description: >
+        `matterType`, `jurisdiction`, `counselPartyId`, `filingDate`, and
+        `status` are required; `trialDate` may not precede `filingDate`.
+        `damagesSought` and `damagesCurrency` are optional and must be supplied
+        together: an amount that is zero or negative, a currency that is not
+        three letters, or only one member of the pair is 400
+        `VALIDATION_ERROR`. A supplied currency is normalized to uppercase and
+        the amount is stored with four fraction digits.
       security: []
       x-internal-api: true
       parameters:
@@ -2408,6 +2429,14 @@ paths:
       tags:
         - Direct Claims internal
       summary: Update a litigation matter (expert).
+      description: >
+        `expectedVersion` is optional at the expert surface and defaults to the
+        claim's current row version; a stale value is 409. `damagesSought` and
+        `damagesCurrency` are optional and must be supplied together; omitting
+        both keeps the recorded damages, while an amount that is zero or
+        negative, a currency that is not three letters, or only one member of
+        the pair is 400 `VALIDATION_ERROR`. A supplied currency is normalized to
+        uppercase.
       security: []
       x-internal-api: true
       parameters:
@@ -3682,6 +3711,12 @@ components:
           $ref: './components.yaml#/components/schemas/MoneyAmount'
     Litigation:
       type: object
+      description: >
+        A litigation matter. `damagesSought` and `damagesCurrency` are the
+        optional damages the matter seeks: both are returned together when
+        damages are recorded and both are null otherwise. `damagesSought` is a
+        decimal string greater than zero; `damagesCurrency` is a three-letter
+        uppercase ISO 4217 code. The pair is never half-present.
       required:
         - id
         - tenantId
@@ -3692,6 +3727,11 @@ components:
         - filingDate
         - status
         - version
+      dependentRequired:
+        damagesSought:
+          - damagesCurrency
+        damagesCurrency:
+          - damagesSought
       properties:
         id:
           type: string
@@ -3736,6 +3776,24 @@ components:
         caseNumber:
           type: [string, 'null']
           maxLength: 64
+        damagesSought:
+          type: [string, 'null']
+          description: >
+            Amount the claimant seeks, as a decimal string greater than zero.
+            Null when no damages are recorded; recorded together with
+            `damagesCurrency`.
+          pattern: '^(?!0(?:\.0{1,4})?$)(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,4})?$'
+          examples:
+            - '275000.0000'
+        damagesCurrency:
+          type: [string, 'null']
+          description: >
+            Uppercase ISO 4217 alpha-3 currency of `damagesSought`. Null when no
+            damages are recorded; recorded together with `damagesSought`.
+          pattern: '^[A-Z]{3}$'
+          maxLength: 3
+          examples:
+            - USD
         version:
           type: integer
           minimum: 0
@@ -4332,13 +4390,23 @@ components:
             linked to a limit, which stays `NOT_POSTED`.
     LitigationRequest:
       type: object
-      description: Record or update a litigation matter.
+      description: >
+        Record or update a litigation matter. `damagesSought` and
+        `damagesCurrency` are optional but form a pair: supplying one without
+        the other is 400 `VALIDATION_ERROR`, `damagesSought` must be a decimal
+        string greater than zero, and `damagesCurrency` must be three uppercase
+        letters. On update, omitting both keeps the stored damages.
       required:
         - matterType
         - jurisdiction
         - counselPartyId
         - filingDate
         - status
+      dependentRequired:
+        damagesSought:
+          - damagesCurrency
+        damagesCurrency:
+          - damagesSought
       properties:
         matterType:
           type: string
@@ -4374,6 +4442,24 @@ components:
         caseNumber:
           type: string
           maxLength: 64
+        damagesSought:
+          type: [string, 'null']
+          description: >
+            Amount the claimant seeks, as a decimal string greater than zero.
+            Optional; supplied together with `damagesCurrency`. Null counts as
+            omitted.
+          pattern: '^(?!0(?:\.0{1,4})?$)(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,4})?$'
+          examples:
+            - '275000.0000'
+        damagesCurrency:
+          type: [string, 'null']
+          description: >
+            Uppercase ISO 4217 alpha-3 currency of `damagesSought`. Optional;
+            supplied together with `damagesSought`. Null counts as omitted.
+          pattern: '^[A-Z]{3}$'
+          maxLength: 3
+          examples:
+            - USD
         expectedVersion:
           type: integer
           minimum: 0
@@ -4737,7 +4823,7 @@ components:
 x-vertical: direct-claims
 x-implementation:
   status: implemented
-  verifiedAt: '2026-10-21'
+  verifiedAt: '2026-10-22'
   verifiedAgainst:
     - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimController.java
     - repos/eia-direct-claims-domain/src/main/java/com/eia/directclaims/domain/ClaimDto.java
@@ -4772,6 +4858,10 @@ x-implementation:
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/AllocationExceedsHundredException.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/PolicyMismatchException.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/LitigationController.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/LitigationRequest.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/LitigationMatter.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/LitigationService.java
+    - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/LitigationRepository.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/SettlementController.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/SettlementService.java
     - repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/SettlementRepository.java
@@ -4866,9 +4956,21 @@ x-implementation:
     settlement and 409 `CONFLICT` for a concurrent change; the public domain
     currently reports both as `CONFLICT` while preserving the detail
     (MISMATCHES.md M-45). The event name has no SPEC 11.4.9 equivalent (M-22).
+    Litigation matters are implemented on both surfaces. The create and update
+    bodies and the projection carry the optional `damagesSought` /
+    `damagesCurrency` pair; the expert requires the pair together, a positive
+    amount, and a three-letter currency, and it normalizes the currency to
+    uppercase. A PATCH that omits both keeps the stored pair. The public domain
+    pre-validates a non-negative amount and a non-blank currency only, so a zero
+    amount or a one-sided pair reaches the expert and is rejected with 400
+    `VALIDATION_ERROR` there; the end-to-end result still matches the contract.
+    The expert emits `direct.claim.litigation-created` and
+    `direct.claim.litigation-updated` in the same transaction as the matter
+    write and the claim version bump. The created name and the damages pair have
+    no SPEC 11.4.4/11.4.9 definition (MISMATCHES.md M-22, M-52).
 x-compatibility:
-  contractVersion: 1.10.0
-  previousContractVersion: 1.9.0
+  contractVersion: 1.11.0
+  previousContractVersion: 1.10.0
   breaking: []
   compatible:
     - Adds the optional claimantPartyId UUID query parameter to GET /api/v1/claims and GET /internal/v1/claims, alongside the existing status filter.
@@ -4898,6 +5000,9 @@ x-compatibility:
     - Documents the retention of the domain's 400 MASS_TORT_YEAR_OUTSIDE_BLOCK coverage-block guard on the allocation create, alongside the remapped expert codes.
     - Adds PATCH /api/v1/claims/{claimId}/settlements/{settlementId}/payment and the /internal/v1 expert alias, with the required SettlementPaymentRequest body whose nullable paymentId links or clears the Payment record.
     - Adds the required-but-nullable paymentId and paymentLinkedAt fields to the Settlement projection, and documents the AUTHORIZED/EXECUTED linkability gate, 409 SETTLEMENT_NOT_LINKABLE, the idempotent repeat, and the direct.claim.settlement-payment-linked event.
+    - Adds the optional damagesSought and damagesCurrency members to the Litigation projection and the LitigationRequest create/update body.
+    - Documents the both-or-neither pair, the greater-than-zero decimal amount, the three-letter uppercase currency, the 400 VALIDATION_ERROR for a half-present pair, and the PATCH omission that keeps the stored damages.
+    - Documents the direct.claim.litigation-created event and moves direct.claim.litigation-updated from planned to implemented.
   note: >
     Idempotency on the task and note POSTs is additive over 1.3.0: the header is
     optional, no existing path, request body field, or response body field
@@ -4962,6 +5067,13 @@ x-compatibility:
     currently collapses the expert's stable `SETTLEMENT_NOT_LINKABLE` code to
     409 `CONFLICT` while preserving the status and detail (MISMATCHES.md M-45);
     the event name has no SPEC 11.4.9 equivalent (MISMATCHES.md M-22, M-45).
+
+    Litigation damages are additive over 1.10.0: both members are optional and
+    nullable, a matter without recorded damages returns null for both, and no
+    existing path, required field, response status, or event name changed. The
+    update keeps the stored pair when both members are omitted. The damages
+    columns and the `direct.claim.litigation-created` name have no SPEC 11.4.4
+    or 11.4.9 definition (MISMATCHES.md M-22, M-52).
 x-planned-operations:
   - method: PATCH
     path: /api/v1/claims/{claimId}

@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-22 (Policy billing adjustment).
+Status: open, reviewed 2026-10-22 (Direct Claims litigation damages).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -140,6 +140,10 @@ where the running code does not meet it yet.
   `PolicyClient`, and tests plus the expert billing controller, adjustment
   request and view, service, rules, repository, event factory, `schema.sql`,
   and tests.
+  The Direct Claims litigation pass reads the domain litigation controller,
+  service, command, projection, client, and tests plus the expert litigation
+  controller, request, matter, service, repository, event factory, `schema.sql`,
+  and the domain and expert litigation tests.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -1053,7 +1057,7 @@ planned name |
 |---|---|---|
 | Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created` / `.adjusted`; `policy.installment.paid` / `.waived`; `policy.dunning.sent`; `policy.program.created` / `policy.policy.program-assigned`; `policy.credit-note.created` / `.issued` / `.applied` / `.cancelled` / `.reversed`; `policy.legal-entity.created` / `policy.policy.legal-entity-assigned`; `policy.policy.premium-audited` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name; the positive premium adjustment fact has no SPEC 11.2.13 name either (M-51); the dunning fact differs from SPEC 11.2.13 `policy.billing.dunning-changed`; the two program facts have no SPEC name because SPEC defines no program create or policy-assignment event. SPEC 11.2.13 publishes only `policy.billing.credit-note-issued` and defines no created, applied, cancelled, or reversed fact, so all five credit-note names are new (M-41). The two legal-entity facts are new because SPEC 10.11.2/11.2.16 define the model and link but SPEC 11.2.9 names no catalog-create or assignment event (M-43). The premium-audit fact differs from SPEC 11.2.9 `policy.premium.audited`, which remains planned (M-50). `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
 | Contract | `contract.contract.updated`; `contract.technical-account.created` / `.issued` / `.settled`; `contract.bordereau.processed` / `.failed`; `contract.security.status-changed` | No SPEC name for updated, the technical-account facts, the two terminal bordereau facts, or the security status fact: SPEC 11.3.9 lists lifecycle verbs, the contract-level `contract.account.issued` / `.agreed` facts, `contract.bordereau.posted` / `.rejected`, and only the `contract.security.recorded` / `.breached` security facts. `created`, `bound`, `commuted`, `cession.recorded`, `contract.bordereau.received`, and `contract.security.recorded` match SPEC. |
-| Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned`; `direct.claim.allocation-created`; `direct.claim.settlement-payment-linked` | No SPEC names: SPEC 11.4.9 defines no assignment, task, note, allocation-created, or settlement-payment-link event; it names the allocation fact `direct.claim.allocated`, which remains planned, and models the settlement `payment_id` only as a Payment projection (M-45). `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and `closed` match SPEC. |
+| Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned`; `direct.claim.allocation-created`; `direct.claim.settlement-payment-linked`; `direct.claim.litigation-created` | No SPEC names: SPEC 11.4.9 defines no assignment, task, note, allocation-created, settlement-payment-link, or matter-creation event; it names the allocation fact `direct.claim.allocated`, which remains planned, and models the settlement `payment_id` only as a Payment projection (M-45). SPEC 11.4.4 also defines no litigation damages pair (M-52). `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `litigation-updated`, `settlement-authorized`, and `closed` match SPEC. |
 | Assumed Claims | `assumed.claim.updated`; `assumed.claim.assigned`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no assignment, task, or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
 | Cession | `cession.cession.created` / `.updated` / `.handed-off` | `cession.case.created`, `cession.handoff.sent`/`.acknowledged` |
 | Retrocession | `retrocession.retrocession.created` / `.updated` / `.handed-off` | `retrocession.case.created`, `retrocession.handoff.sent`/`.acknowledged` |
@@ -3477,10 +3481,90 @@ if the implemented name stays), and honouring `If-Match` and replaying
 ceiling are implementation choices with no SPEC counterpart; changing either is
 a behaviour change and needs its own contract version.
 
+## M-52 Direct Claims litigation damages are a SPEC-less pair and the created event has no SPEC name
+
+SPEC 11.4.4 `claim_litigation` defines the matter number, case number, court,
+jurisdiction, venue, judge, filing and trial dates, phase, status, lead and
+outside counsel, MDL number, class and bellwether flags, discovery and mediation
+dates, and the verdict, judgment, appeal, bond, and litigation-budget amounts.
+It defines no `damages_sought` or `damages_currency` column, and SPEC 11.4.9
+publishes `direct.claim.litigation-updated` with no matter-creation fact. The
+2026-10-22 slice adds the optional pair and the created event:
+
+| Aspect | Implemented | SPEC / gap |
+|---|---|---|
+| Columns | `claim_litigation.damages_sought NUMERIC(19,4)` and `damages_currency CHAR(3)`, with the `ck_litigation_damages` check that the pair is both-null or both-present-and-positive | No SPEC 11.4.4 column; SPEC records only verdict, judgment, appeal, bond, and budget amounts |
+| Request and projection | Optional/nullable `damagesSought` and `damagesCurrency` on `LitigationRequest` and `Litigation`; both present together when damages are recorded, both null otherwise | No SPEC field or pair rule |
+| Amount | Decimal string greater than zero, normalized to four fraction digits; zero or a negative amount is 400 `VALIDATION_ERROR`. The canonical schema never uses a JSON number | No SPEC field |
+| Currency | Uppercase ISO 4217 alpha-3, three letters; the expert normalizes a supplied internal value to uppercase | No SPEC field |
+| Pair rule | Supplying one member without the other is 400 `VALIDATION_ERROR`; a PATCH that omits both (or sends both null) keeps the stored pair | No SPEC field |
+| Routes | The existing `POST /api/v1/claims/{claimId}/litigation`, `PATCH .../litigation/{litigationId}`, and the two `/internal/v1` expert aliases | SPEC 11.4.10 lists the litigation GET and POST only and has no update route |
+| Events | `direct.claim.litigation-created` (new, SPEC-less) and `direct.claim.litigation-updated` (SPEC name, previously planned), both emitted in the same transaction as the matter write and the claim version bump | SPEC 11.4.9 names only the updated fact |
+| Payload | `claimId`, `claimNumber`, `claimVersion` (serialized as `version`), `litigationId`, `matterType`, `jurisdiction`, `counselPartyId`, `filingDate`, `litigationStatus`, `litigationVersion`, and, when non-null, `trialDate`, `caseNumber`, `damagesSought`, and `damagesCurrency` | No SPEC payload for the created fact; the updated fact had no payload contract while planned |
+| Version | `openapi/direct-claims.yaml` 1.11.0, `asyncapi/direct-claims.yaml` 1.6.0, `asyncapi/event-catalog.yaml` 1.34.0 (all additive) | No SPEC version defines the pair or the created fact |
+
+Consequences:
+
+- A consumer cannot discover the damages fields or the created event from SPEC
+  11.4.4/11.4.9 alone. They are additive under EV-05: `damagesSought` and
+  `damagesCurrency` are optional, so a client that omits both sees the previous
+  matter shape, and the new event adds one published name without renaming or
+  removing an existing name.
+- The pair is stored and returned together. There is no way to clear recorded
+  damages through the PATCH: omitting both keeps them, and supplying both
+  replaces them. Clearing would need a separate command or an explicit null-pair
+  convention, which the current slice does not define.
+- The public domain's bean validation admits a zero amount
+  (`@DecimalMin("0.00")`) and a one-sided pair; `ClaimDetailService` only
+  requires a non-negative amount and a non-blank currency and forwards the
+  command. The expert enforces `amount > 0` and the both-or-neither pair, so the
+  public response is still 400 `VALIDATION_ERROR`, but the rejection comes from
+  the expert rather than the domain. A direct `/internal/v1` caller sees the
+  expert rule.
+- The public `LitigationRequest` also rejects a lowercase currency with the
+  `@Pattern("[A-Z]{3}")` rule before forwarding, while the expert would
+  normalize it. The contract documents the uppercase public rule; an internal
+  caller may send lowercase and receive the normalized uppercase value.
+- `direct.claim.litigation-created` has no SPEC name. If SPEC 11.4.9 later adds
+  a matter-creation fact, aligning the implemented name needs the EV-05
+  dual-publish window; publishing both names is additive.
+
+Evidence:
+
+- `repos/eia-direct-claims-expert/.../LitigationRequest.java:8-24`,
+  `LitigationMatter.java:10-32`, `LitigationService.java:51-153` (pair and
+  positive-amount rules, upsert and update semantics),
+  `LitigationRepository.java:17-115`, `ClaimEvents.java:308-351` (both event
+  factories and the litigation payload members plus the optional damages
+  pair), and `schema.sql:185-220` (columns and the `ck_litigation_damages`
+  check, including the ADD COLUMN/constraint backfill).
+- `repos/eia-direct-claims-domain/.../ClaimCommands.java:90-115` (nullable
+  command members and `@DecimalMin`/`@Pattern`), `ClaimDetailDtos.java:148-170`
+  (decimal-string projection), `ClaimDetailService.java:300-333` (domain
+  pre-validation), `ClaimDetailController.java:174-205` (public POST/PATCH),
+  and `ClaimClient.java:257-297` (internal calls).
+- Tests: `LitigationIntegrationTest.java:48-237` (damages create/update,
+  omission, unpaired and non-positive rejection, DDL check, tenant scoping, and
+  the two event payloads), `LitigationServiceTest.java`, and
+  `DirectClaimsEndpointTest.java:284-380` in the expert; `ClaimDetailServiceTest.java:501-575`,
+  `ClaimDetailControllerTest.java:503-595`, and `ClaimClientTest.java:805-884`
+  in the domain.
+- `openapi/direct-claims.yaml` 1.11.0, `asyncapi/direct-claims.yaml` 1.6.0, and
+  `asyncapi/event-catalog.yaml` 1.34.0 record the implemented shape.
+
+Resolution: the optional damages pair and the created event are canonical for
+now. Closing the pair gap means adding the two columns and their rule to SPEC
+11.4.4; closing the event gap means adding a matter-creation fact to SPEC
+11.4.9 or renaming the implemented name under EV-05. Tightening the public
+domain's own validation to `> 0` and the both-or-neither rule would move the
+400 to the domain without changing the wire contract, and needs no contract
+version. Clearing recorded damages or accepting a null pair as a clear is a new
+command and needs its own contract version.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-22
-Policy billing-adjustment contract:
+Direct Claims litigation-damages contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -3504,14 +3588,14 @@ AsyncAPI 3 documents
   OK asyncapi/party.yaml  9 event channels
   OK asyncapi/policy.yaml  35 event channels
   OK asyncapi/contract.yaml  32 event channels
-  OK asyncapi/direct-claims.yaml  27 event channels
+  OK asyncapi/direct-claims.yaml  28 event channels
   OK asyncapi/assumed-claims.yaml  21 event channels
   OK asyncapi/cession.yaml  17 event channels
   OK asyncapi/retrocession.yaml  17 event channels
   OK asyncapi/document.yaml  24 event channels
   OK asyncapi/payment.yaml  20 event channels
   OK asyncapi/notifications.yaml  15 event channels
-  OK catalog: 217 unique published events across 10 verticals
+  OK catalog: 218 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -3519,7 +3603,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 14694 checks, 0 failures
+  PASS 14825 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -3815,7 +3899,14 @@ Additional checks and limits:
   Policy catalog `implemented` list each fail with the specific
   missing-operation, required-list, missing-code, or implemented-event message.
   All four were run on a throwaway copy and exited non-zero (exit 1); the working
-  copy was left unchanged.
+  copy was left unchanged. The Direct Claims litigation pass added four more:
+  removing `LitigationRequest.damagesSought`, breaking the request
+  `dependentRequired` pair, marking the `direct.claim.litigation-created`
+  channel planned, and dropping `direct.claim.litigation-created` from the
+  catalog `implemented` list each fail with the specific schema, pair,
+  implemented-channel, or implemented-event message. All four were run on a
+  throwaway copy and exited non-zero (exit 1); the working copy was left
+  unchanged.
 
 ## Resolution policy
 

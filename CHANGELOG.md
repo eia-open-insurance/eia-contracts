@@ -1697,6 +1697,37 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   M-22 and M-27, and refreshes the validation evidence.
 - `python scripts/validate_contracts.py` passes 14,694 checks with 0 failures.
 
+### Added in the Direct Claims litigation damages and events contract (2026-10-22)
+
+- `openapi/direct-claims.yaml` is 1.11.0: `Litigation` and `LitigationRequest`
+  add the optional nullable `damagesSought` (decimal string greater than zero)
+  and `damagesCurrency` (three uppercase letters) pair; both schemas declare
+  the pair with `dependentRequired`, the public and expert create/update
+  descriptions document the both-or-neither rule and the PATCH omission, and
+  `x-compatibility` moves to 1.11.0 over 1.10.0. No route is added.
+- `asyncapi/direct-claims.yaml` is 1.6.0: the implemented
+  `direct.claim.litigation-created` channel and `send` operation are added, and
+  `direct.claim.litigation-updated` moves from planned to implemented. Both
+  channels document the payload (`claimId`, `claimNumber`, `claimVersion`
+  serialized as `version`, `litigationId`, `matterType`, `jurisdiction`,
+  `counselPartyId`, `filingDate`, `trialDate`, `litigationStatus`,
+  `caseNumber`, `litigationVersion`, and the optional `damagesSought` /
+  `damagesCurrency` pair, with the optional members omitted when null).
+- `asyncapi/event-catalog.yaml` is 1.34.0: `direct.claim.litigation-created` is
+  published and implemented and `direct.claim.litigation-updated` joins the
+  Direct Claims implemented subset, for 218 published and 99 implemented names
+  (Direct Claims 28 published and 15 implemented).
+- `scripts/validate_contracts.py` requires the two schemas, the four
+  create/update operations, the optional nullable pair, the
+  `dependentRequired` mapping, the positive-amount and currency patterns, the
+  two implemented channels with their documented payload members and
+  both-or-neither wording, the `IMPLEMENTED_EVENTS` entries, and the catalog
+  entries.
+- `README.md` records the additive version and the pair, event, and validation
+  semantics; `MISMATCHES.md` adds M-52, updates M-22 and the scope/status, and
+  refreshes the validation evidence.
+- `python scripts/validate_contracts.py` passes 14,825 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

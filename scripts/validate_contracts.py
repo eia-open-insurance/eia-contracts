@@ -1005,6 +1005,70 @@ SETTLEMENT_PAYMENT_UNLINKABLE_STATUSES = ("PROPOSED", "REJECTED")
 SETTLEMENT_PAYMENT_CONFLICT_CODE = "SETTLEMENT_NOT_LINKABLE"
 
 
+# Direct Claims litigation matters. The public and expert create and update
+# routes carry an optional damages pair; the projection returns the pair. When
+# supplied, `damagesSought` and `damagesCurrency` are required together, the
+# amount is a decimal string greater than zero, and the currency is an uppercase
+# alpha-3 code. A PATCH that omits both keeps the recorded pair. The expert
+# emits direct.claim.litigation-created and direct.claim.litigation-updated in
+# the same transaction as the matter write and the parent claim version bump.
+LITIGATION_OPENAPI_PATHS = (
+    (
+        "/api/v1/claims/{claimId}/litigation",
+        "post",
+        "201",
+        "LitigationRequest",
+    ),
+    (
+        "/api/v1/claims/{claimId}/litigation/{litigationId}",
+        "patch",
+        "200",
+        "LitigationRequest",
+    ),
+    (
+        "/internal/v1/claims/{claimId}/litigation",
+        "post",
+        "201",
+        "LitigationRequest",
+    ),
+    (
+        "/internal/v1/claims/{claimId}/litigation/{litigationId}",
+        "patch",
+        "200",
+        "LitigationRequest",
+    ),
+)
+LITIGATION_SCHEMA = "Litigation"
+LITIGATION_REQUEST_SCHEMA = "LitigationRequest"
+LITIGATION_DAMAGES_FIELDS = ("damagesSought", "damagesCurrency")
+LITIGATION_DAMAGES_PATTERN = (
+    r"^(?!0(?:\.0{1,4})?$)(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,4})?$"
+)
+LITIGATION_CURRENCY_PATTERN = "^[A-Z]{3}$"
+LITIGATION_EVENTS = (
+    "direct.claim.litigation-created",
+    "direct.claim.litigation-updated",
+)
+LITIGATION_EVENT_FIELDS = (
+    "claimId",
+    "claimNumber",
+    "claimVersion",
+    "version",
+    "litigationId",
+    "matterType",
+    "jurisdiction",
+    "counselPartyId",
+    "filingDate",
+    "trialDate",
+    "litigationStatus",
+    "caseNumber",
+    "litigationVersion",
+    "damagesSought",
+    "damagesCurrency",
+)
+LITIGATION_EVENT_IMPLEMENTED_BY = "ClaimEvents.java"
+
+
 # Policy billing (SPEC 11.2.13). The public domain routes proxy the expert's
 # billing service; the expert's /internal/v1 alias is an implementation detail
 # and is not part of the public contract. Every operation requires the tenant
@@ -1775,6 +1839,8 @@ IMPLEMENTED_EVENTS = {
         "direct.claim.task-updated",
         "direct.claim.note-added",
         "direct.claim.allocation-created",
+        "direct.claim.litigation-created",
+        "direct.claim.litigation-updated",
     ],
     "assumed-claims": [
         "assumed.claim.registered",
@@ -11313,6 +11379,223 @@ def check_direct_claim_settlement_payment(contracts: ContractSet, document, rela
     )
 
 
+def check_direct_claim_litigation(contracts: ContractSet, document, relative: str):
+    """Require the optional litigation damages pair on both schemas and routes.
+
+    ``damagesSought`` and ``damagesCurrency`` are optional on the projection and
+    on the create/update body, but they are ``dependentRequired`` on each other:
+    one without the other is a validation error. The amount is a decimal string
+    greater than zero and the currency is an uppercase alpha-3 code. The two
+    public and two expert create/update operations must carry the request schema
+    and return the ``Litigation`` projection, and each operation description
+    must document the pair rule.
+    """
+    schemas = (document.get("components") or {}).get("schemas") or {}
+    for schema_name in (LITIGATION_SCHEMA, LITIGATION_REQUEST_SCHEMA):
+        schema = schemas.get(schema_name) or {}
+        properties = schema.get("properties") or {}
+        required = schema.get("required") or []
+        contracts.check(
+            isinstance(schema, dict) and schema.get("type") == "object",
+            f"{relative}: {schema_name} must be an object schema",
+        )
+        for field in LITIGATION_DAMAGES_FIELDS:
+            prop = properties.get(field)
+            contracts.check(
+                isinstance(prop, dict),
+                f"{relative}: {schema_name}.{field} is required",
+            )
+            contracts.check(
+                field not in required,
+                f"{relative}: {schema_name}.{field} must stay optional",
+            )
+            contracts.check(
+                _schema_types(prop or {}) == {"string", "null"},
+                f"{relative}: {schema_name}.{field} must be a nullable string",
+            )
+        amount = properties.get("damagesSought") or {}
+        contracts.check(
+            amount.get("pattern") == LITIGATION_DAMAGES_PATTERN,
+            f"{relative}: {schema_name}.damagesSought must be a positive "
+            "decimal string pattern",
+        )
+        currency = properties.get("damagesCurrency") or {}
+        contracts.check(
+            currency.get("pattern") == LITIGATION_CURRENCY_PATTERN,
+            f"{relative}: {schema_name}.damagesCurrency must be a three-letter "
+            "uppercase currency pattern",
+        )
+        contracts.check(
+            currency.get("maxLength") == 3,
+            f"{relative}: {schema_name}.damagesCurrency must cap at 3 characters",
+        )
+        dependent = schema.get("dependentRequired") or {}
+        contracts.check(
+            isinstance(dependent, dict),
+            f"{relative}: {schema_name}.dependentRequired must be a mapping",
+        )
+        for field, peer in (
+            ("damagesSought", "damagesCurrency"),
+            ("damagesCurrency", "damagesSought"),
+        ):
+            contracts.check(
+                isinstance(dependent, dict) and dependent.get(field) == [peer],
+                f"{relative}: {schema_name}.dependentRequired must pair {field} "
+                f"with {peer}",
+            )
+
+    paths = document.get("paths") or {}
+    for path, method, success_status, request_schema in LITIGATION_OPENAPI_PATHS:
+        path_item = paths.get(path) if isinstance(paths, dict) else None
+        operation = path_item.get(method) if isinstance(path_item, dict) else None
+        where = f"{relative}: {method.upper()} {path}"
+        contracts.check(
+            isinstance(operation, dict),
+            f"{where}: required litigation operation is missing",
+        )
+        if not isinstance(operation, dict):
+            continue
+        body_schema = (
+            (((operation.get("requestBody") or {}).get("content") or {})
+             .get("application/json") or {})
+            .get("schema") or {}
+        )
+        contracts.check(
+            str(body_schema.get("$ref", "")).endswith(
+                f"/schemas/{request_schema}"
+            ),
+            f"{where}: request body must use the {request_schema} schema",
+        )
+        responses = operation.get("responses") or {}
+        success = responses.get(success_status) if isinstance(responses, dict) else None
+        success_schema = None
+        if isinstance(success, dict):
+            success_schema = (
+                ((success.get("content") or {}).get("application/json") or {})
+                .get("schema")
+            )
+        contracts.check(
+            isinstance(success_schema, dict)
+            and str(success_schema.get("$ref", "")).endswith(
+                f"/schemas/{LITIGATION_SCHEMA}"
+            ),
+            f"{where}: {success_status} must return the {LITIGATION_SCHEMA} schema",
+        )
+        description = str(operation.get("description") or "")
+        for field in LITIGATION_DAMAGES_FIELDS:
+            contracts.check(
+                f"`{field}`" in description,
+                f"{where}: description must document {field}",
+            )
+        contracts.check(
+            "supplied together" in description,
+            f"{where}: description must document the both-or-neither pair",
+        )
+        contracts.check(
+            "greater than zero" in description or "zero or negative" in description,
+            f"{where}: description must document the positive amount rule",
+        )
+        if method == "patch":
+            contracts.check(
+                "omitting both" in description,
+                f"{where}: description must document that omitting both keeps "
+                "the recorded damages",
+            )
+
+    planned = document.get("x-planned-operations") or []
+    implemented_paths = {path for path, _, _, _ in LITIGATION_OPENAPI_PATHS}
+    contracts.check(
+        not any(
+            isinstance(entry, dict) and entry.get("path") in implemented_paths
+            for entry in planned
+        ),
+        f"{relative}: x-planned-operations must not list an implemented "
+        "litigation path",
+    )
+
+
+def check_direct_claim_litigation_asyncapi(
+    contracts: ContractSet, document, relative: str
+):
+    """Require both implemented litigation channels and their payload members.
+
+    The created name is new in this contract and has no SPEC 11.4.9 equivalent;
+    the updated name is the SPEC name and was previously planned. Both carry the
+    claim identity and version, the matter fields, the litigation version, and
+    the optional damages pair.
+    """
+    channels = document.get("channels") or {}
+    operations = document.get("operations") or {}
+    for event in LITIGATION_EVENTS:
+        channel = None
+        for candidate in channels.values():
+            if isinstance(candidate, dict) and candidate.get("address") == event:
+                channel = candidate
+                break
+        contracts.check(
+            channel is not None,
+            f"{relative}: required {event} channel is missing",
+        )
+        if not isinstance(channel, dict):
+            continue
+        contracts.check(
+            channel.get("x-event-type") == event,
+            f"{relative}: {event} x-event-type must equal the address",
+        )
+        contracts.check(
+            channel.get("x-status") == "implemented",
+            f"{relative}: {event} must be implemented",
+        )
+        contracts.check(
+            str(channel.get("x-implemented-by", "")).endswith(
+                LITIGATION_EVENT_IMPLEMENTED_BY
+            ),
+            f"{relative}: {event} must name {LITIGATION_EVENT_IMPLEMENTED_BY} "
+            "in x-implemented-by",
+        )
+        description = str(channel.get("description") or "")
+        for field in LITIGATION_EVENT_FIELDS:
+            contracts.check(
+                f"`{field}`" in description,
+                f"{relative}: {event} description must document payload member "
+                f"{field}",
+            )
+        for phrase in (
+            "both-or-neither",
+            "greater than zero",
+            "omitted when null",
+            "three uppercase letters",
+        ):
+            contracts.check(
+                phrase in description,
+                f"{relative}: {event} description must document '{phrase}'",
+            )
+        send_operations = [
+            operation
+            for operation in operations.values()
+            if isinstance(operation, dict)
+            and operation.get("action") == "send"
+            and operation.get("x-event-type") == event
+        ]
+        contracts.check(
+            bool(send_operations),
+            f"{relative}: {event} must have a send operation",
+        )
+        if not send_operations:
+            continue
+        operation = send_operations[0]
+        contracts.check(
+            operation.get("x-status") == "implemented",
+            f"{relative}: the {event} send operation must be implemented",
+        )
+        channel_ref = (operation.get("channel") or {}).get("$ref")
+        contracts.check(
+            isinstance(channel_ref, str) and channel_ref.startswith("#/channels/"),
+            f"{relative}: the {event} send operation must reference the local "
+            "channel",
+        )
+
+
 def check_direct_claim_settlement_payment_asyncapi(
     contracts: ContractSet, document, relative: str
 ):
@@ -12490,6 +12773,7 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_direct_claim_allocations(contracts, document, relative)
             check_direct_claim_list_filter(contracts, document, relative)
             check_direct_claim_settlement_payment(contracts, document, relative)
+            check_direct_claim_litigation(contracts, document, relative)
         if vertical == "notifications":
             check_notifications_openapi(contracts, document, relative)
             check_notification_templates_openapi(contracts, document, relative)
@@ -12710,6 +12994,9 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
 
         if vertical == "direct-claims":
             check_direct_claim_settlement_payment_asyncapi(
+                contracts, document, relative
+            )
+            check_direct_claim_litigation_asyncapi(
                 contracts, document, relative
             )
 

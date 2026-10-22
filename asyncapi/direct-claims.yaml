@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:direct-claims
 info:
   title: EIA Direct Claims events
-  version: 1.5.0
+  version: 1.6.0
   summary: Published domain event names for the Direct Claims vertical.
   description: >
     Event contract for the Direct Claims vertical. The authoritative event names are
@@ -20,13 +20,15 @@ info:
     `direct.claim.settlement-authorized`,
     `direct.claim.settlement-payment-linked`, `direct.claim.task-created`,
     `direct.claim.task-completed`, `direct.claim.task-updated`,
-    `direct.claim.note-added`, `direct.claim.allocation-created`, and
+    `direct.claim.note-added`, `direct.claim.allocation-created`,
+    `direct.claim.litigation-created`, `direct.claim.litigation-updated`, and
     `direct.claim.closed` through the transactional outbox; those channels and
     operations are marked `x-status: implemented`. The task, note, assignment,
-    allocation-created, and settlement-payment-linked names are new in this
-    contract and have no SPEC 11.4.9 equivalent (MISMATCHES.md M-22, M-45). The
-    SPEC name `direct.claim.allocated` remains planned. Every other implemented
-    name already exists in the SPEC.
+    allocation-created, settlement-payment-linked, and litigation-created names
+    are new in this contract and have no SPEC 11.4.9 equivalent
+    (MISMATCHES.md M-22, M-45, M-52). The SPEC name
+    `direct.claim.allocated` remains planned. Every other implemented name
+    already exists in the SPEC.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -253,17 +255,53 @@ channels:
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
+  DirectClaimLitigationCreated:
+    address: direct.claim.litigation-created
+    title: direct.claim.litigation-created
+    description: >
+      Emitted when a litigation matter is recorded, in the same transaction as
+      the matter insert and the parent claim version bump. The payload carries
+      the claim identity (`claimId`, `claimNumber`) and `claimVersion` (the
+      claim's post-write row version, serialized as `version`), the matter
+      fields (`litigationId`, `matterType`, `jurisdiction`, `counselPartyId`,
+      `filingDate`, `trialDate`, `litigationStatus`, `caseNumber`),
+      `litigationVersion`, and the optional damages pair (`damagesSought`,
+      `damagesCurrency`). `trialDate`, `caseNumber`, and both damages members
+      are omitted when null, and the recorded damages pair is both-or-neither:
+      `damagesSought` is a decimal string greater than zero and
+      `damagesCurrency` is three uppercase letters. This name is new in this
+      contract and has no SPEC 11.4.9 equivalent (MISMATCHES.md M-22, M-52).
+    x-event-type: direct.claim.litigation-created
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.4.9
+    x-implemented-by: repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
   DirectClaimLitigationUpdated:
     address: direct.claim.litigation-updated
     title: direct.claim.litigation-updated
     description: >
-      Declared domain event for this vertical (SPEC 11.4.9). No publisher is
-      implemented yet, so the channel is planned and the payload contract is
-      the shared event envelope.
+      Emitted when a litigation matter is changed, in the same transaction as
+      the matter update and the parent claim version bump. The payload carries
+      the claim identity (`claimId`, `claimNumber`) and `claimVersion` (the
+      claim's post-write row version, serialized as `version`), the matter
+      fields (`litigationId`, `matterType`, `jurisdiction`, `counselPartyId`,
+      `filingDate`, `trialDate`, `litigationStatus`, `caseNumber`),
+      `litigationVersion`, and the optional damages pair (`damagesSought`,
+      `damagesCurrency`). `trialDate`, `caseNumber`, and both damages members
+      are omitted when null, and the recorded damages pair is both-or-neither:
+      `damagesSought` is a decimal string greater than zero and
+      `damagesCurrency` is three uppercase letters. On a PATCH that omits both
+      damages members the stored pair is carried unchanged in the payload. The
+      name already exists in SPEC 11.4.9 and was planned before this contract
+      (MISMATCHES.md M-52).
     x-event-type: direct.claim.litigation-updated
     x-event-version: 1
-    x-status: planned
+    x-status: implemented
     x-spec-section: SPEC 11.4.9
+    x-implemented-by: repos/eia-direct-claims-expert/src/main/java/com/eia/directclaims/expert/ClaimEvents.java
     messages:
       DomainEvent:
         $ref: '#/components/messages/DomainEvent'
@@ -592,16 +630,28 @@ operations:
       same transaction as the note insert and the parent claim version bump.
     x-event-type: direct.claim.note-added
     x-status: implemented
+  publishDirectClaimLitigationCreated:
+    action: send
+    channel:
+      $ref: '#/channels/DirectClaimLitigationCreated'
+    summary: Publish direct.claim.litigation-created
+    description: >
+      Publishes direct.claim.litigation-created through the transactional outbox
+      in the same transaction as the litigation insert and the parent claim
+      version bump.
+    x-event-type: direct.claim.litigation-created
+    x-status: implemented
   publishDirectClaimLitigationUpdated:
     action: send
     channel:
       $ref: '#/channels/DirectClaimLitigationUpdated'
     summary: Publish direct.claim.litigation-updated
     description: >
-      Publishes direct.claim.litigation-updated through the transactional outbox over authenticated
-      HTTPS (SPEC 7.5). Planned.
+      Publishes direct.claim.litigation-updated through the transactional outbox
+      in the same transaction as the litigation update and the parent claim
+      version bump.
     x-event-type: direct.claim.litigation-updated
-    x-status: planned
+    x-status: implemented
   publishDirectClaimSettlementAuthorized:
     action: send
     channel:
@@ -774,14 +824,14 @@ x-implementation:
   publisher: eia-direct-claims-expert
   subscriber: none
   notes: >
-    Thirteen Direct Claims events are written to the transactional outbox in the
+    Fifteen Direct Claims events are written to the transactional outbox in the
     same transaction as the aggregate or child write: `registered`, `updated`,
     `assigned`, `coverage-assessed`, `reserve-changed`,
     `settlement-authorized`, `settlement-payment-linked`, `task-created`,
-    `task-completed`, `task-updated`, `note-added`, `allocation-created`, and
-    `closed`. The SPEC name `direct.claim.allocated` and the other SPEC 11.4.9
-    names remain planned. There is no business subscriber or subscription
-    registry yet.
+    `task-completed`, `task-updated`, `note-added`, `allocation-created`,
+    `litigation-created`, `litigation-updated`, and `closed`. The SPEC name
+    `direct.claim.allocated` and the other SPEC 11.4.9 names remain planned.
+    There is no business subscriber or subscription registry yet.
 
 x-consumed-events:
   - policy.policy.issued
