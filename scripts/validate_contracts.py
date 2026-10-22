@@ -62,16 +62,24 @@ REQUIRED_OPENAPI_PATHS = {
         ("/api/v1/parties/{partyId}/status", "patch"),
         ("/api/v1/parties/{partyId}/identifiers", "get"),
         ("/api/v1/parties/{partyId}/identifiers", "post"),
+        ("/api/v1/parties/{partyId}/identifiers/{identifierId}", "patch"),
+        ("/api/v1/parties/{partyId}/identifiers/{identifierId}", "delete"),
         ("/api/v1/parties/{partyId}/addresses", "get"),
         ("/api/v1/parties/{partyId}/addresses", "post"),
+        ("/api/v1/parties/{partyId}/addresses/{addressId}", "patch"),
+        ("/api/v1/parties/{partyId}/addresses/{addressId}", "delete"),
         ("/internal/v1/parties", "get"),
         ("/internal/v1/parties", "post"),
         ("/internal/v1/parties/{partyId}", "get"),
         ("/internal/v1/parties/{partyId}/status", "patch"),
         ("/internal/v1/parties/{partyId}/identifiers", "get"),
         ("/internal/v1/parties/{partyId}/identifiers", "post"),
+        ("/internal/v1/parties/{partyId}/identifiers/{identifierId}", "patch"),
+        ("/internal/v1/parties/{partyId}/identifiers/{identifierId}", "delete"),
         ("/internal/v1/parties/{partyId}/addresses", "get"),
         ("/internal/v1/parties/{partyId}/addresses", "post"),
+        ("/internal/v1/parties/{partyId}/addresses/{addressId}", "patch"),
+        ("/internal/v1/parties/{partyId}/addresses/{addressId}", "delete"),
     ],
     "policy": [
         ("/api/v1/policies", "get"),
@@ -1856,7 +1864,11 @@ IMPLEMENTED_EVENTS = {
         "party.party.created",
         "party.party.updated",
         "party.party.identifier-added",
+        "party.party.identifier-updated",
+        "party.party.identifier-deleted",
         "party.party.address-added",
+        "party.party.address-updated",
+        "party.party.address-deleted",
     ],
     "policy": [
         "policy.policy.created",
@@ -13013,6 +13025,150 @@ PARTY_ADDRESS_EVENT_REQUIRED = (
 
 PARTY_EVENT_IMPLEMENTED_BY = "PartyEvents.java"
 
+# Each tuple is (public path template, child id parameter, projection, update
+# request schema, update duplicate code, delete in-use code, updated event,
+# deleted event). The same PATCH and DELETE operations are implemented on the
+# /internal/v1 expert base. A PATCH is a full replacement; a replacement with
+# no normalized change is a 200 no-op with no version bump and no event.
+PARTY_REFERENCE_DATA_MAINTENANCE_PATHS = [
+    (
+        "/api/v1/parties/{partyId}/identifiers/{identifierId}",
+        "identifierId",
+        "PartyIdentifier",
+        "UpdatePartyIdentifierRequest",
+        "DUPLICATE_PARTY_IDENTIFIER",
+        "PARTY_IDENTIFIER_IN_USE",
+        "party.party.identifier-updated",
+        "party.party.identifier-deleted",
+    ),
+    (
+        "/api/v1/parties/{partyId}/addresses/{addressId}",
+        "addressId",
+        "PartyAddress",
+        "UpdatePartyAddressRequest",
+        "DUPLICATE_PARTY_ADDRESS",
+        "PARTY_ADDRESS_IN_USE",
+        "party.party.address-updated",
+        "party.party.address-deleted",
+    ),
+]
+
+PARTY_REFERENCE_DATA_MAINTENANCE_EVENTS = (
+    "party.party.identifier-updated",
+    "party.party.identifier-deleted",
+    "party.party.address-updated",
+    "party.party.address-deleted",
+)
+
+# The changed-field vocabularies in the order the expert emits them.
+PARTY_IDENTIFIER_UPDATE_FIELDS = (
+    "identifierType",
+    "identifierValue",
+    "issuingAuthority",
+    "effectiveDate",
+)
+
+PARTY_IDENTIFIER_SNAPSHOT_REQUIRED = ("identifierType", "identifierValue")
+
+PARTY_ADDRESS_UPDATE_FIELDS = (
+    "addressType",
+    "line1",
+    "line2",
+    "city",
+    "stateRegion",
+    "postalCode",
+    "country",
+    "effectiveDate",
+)
+
+PARTY_ADDRESS_SNAPSHOT_REQUIRED = (
+    "addressType",
+    "line1",
+    "city",
+    "postalCode",
+    "country",
+)
+
+PARTY_IDENTIFIER_UPDATED_EVENT_MESSAGE = "PartyIdentifierUpdatedData"
+PARTY_IDENTIFIER_DELETED_EVENT_MESSAGE = "PartyIdentifierDeletedData"
+PARTY_ADDRESS_UPDATED_EVENT_MESSAGE = "PartyAddressUpdatedData"
+PARTY_ADDRESS_DELETED_EVENT_MESSAGE = "PartyAddressDeletedData"
+
+PARTY_IDENTIFIER_UPDATED_EVENT_FIELDS = (
+    "partyId",
+    "partyNumber",
+    "version",
+    "identifierId",
+    "changedFields",
+    "from",
+    "to",
+)
+
+PARTY_IDENTIFIER_DELETED_EVENT_FIELDS = (
+    "partyId",
+    "partyNumber",
+    "version",
+    "identifierId",
+    "identifierType",
+    "identifierValue",
+    "issuingAuthority",
+    "effectiveDate",
+    "createdBy",
+    "createdAt",
+)
+
+PARTY_IDENTIFIER_DELETED_EVENT_REQUIRED = (
+    "partyId",
+    "partyNumber",
+    "version",
+    "identifierId",
+    "identifierType",
+    "identifierValue",
+    "createdBy",
+    "createdAt",
+)
+
+PARTY_ADDRESS_UPDATED_EVENT_FIELDS = (
+    "partyId",
+    "partyNumber",
+    "version",
+    "addressId",
+    "changedFields",
+    "from",
+    "to",
+)
+
+PARTY_ADDRESS_DELETED_EVENT_FIELDS = (
+    "partyId",
+    "partyNumber",
+    "version",
+    "addressId",
+    "addressType",
+    "line1",
+    "line2",
+    "city",
+    "stateRegion",
+    "postalCode",
+    "country",
+    "effectiveDate",
+    "createdBy",
+    "createdAt",
+)
+
+PARTY_ADDRESS_DELETED_EVENT_REQUIRED = (
+    "partyId",
+    "partyNumber",
+    "version",
+    "addressId",
+    "addressType",
+    "line1",
+    "city",
+    "postalCode",
+    "country",
+    "createdBy",
+    "createdAt",
+)
+
 
 def _check_party_reference_parameters(
     contracts: ContractSet, operation, where: str, internal: bool
@@ -13052,6 +13208,26 @@ def _check_party_reference_parameters(
             operation.get("security") != [],
             f"{where}: public operations must keep the document-level security",
         )
+
+
+def _check_party_reference_child_parameter(
+    contracts: ContractSet, operation, where: str, child_id: str
+):
+    """Require the child id path parameter on a PATCH or DELETE operation."""
+    _, names = _parameter_names(operation)
+    parameter = _inline_parameter(operation, child_id) or {}
+    schema = parameter.get("schema") or {}
+    contracts.check(
+        child_id in names, f"{where}: must declare the {child_id} path parameter"
+    )
+    contracts.check(
+        parameter.get("in") == "path" and parameter.get("required") is True,
+        f"{where}: {child_id} must be a required path parameter",
+    )
+    contracts.check(
+        (schema.get("type"), schema.get("format")) == ("string", "uuid"),
+        f"{where}: {child_id} must be a uuid string",
+    )
 
 
 def check_party_reference_data_openapi(contracts: ContractSet, document, relative: str):
@@ -13191,6 +13367,181 @@ def check_party_reference_data_openapi(contracts: ContractSet, document, relativ
                     f"{where}: description must name the emitted {event} fact",
                 )
 
+    for (
+        public_path,
+        child_id,
+        projection,
+        request_schema,
+        duplicate_code,
+        in_use_code,
+        updated_event,
+        deleted_event,
+    ) in PARTY_REFERENCE_DATA_MAINTENANCE_PATHS:
+        internal_path = public_path.replace("/api/v1/", "/internal/v1/", 1)
+        for path, internal in ((public_path, False), (internal_path, True)):
+            path_item = paths.get(path) if isinstance(paths, dict) else None
+            contracts.check(
+                isinstance(path_item, dict),
+                f"{relative}: required path {path} is missing",
+            )
+            if not isinstance(path_item, dict):
+                continue
+
+            update = path_item.get("patch")
+            where = f"{relative}: PATCH {path}"
+            contracts.check(
+                isinstance(update, dict), f"{where}: operation must be a mapping"
+            )
+            if isinstance(update, dict):
+                _check_party_reference_parameters(contracts, update, where, internal)
+                _check_party_reference_child_parameter(
+                    contracts, update, where, child_id
+                )
+                contracts.check(
+                    "put" not in path_item,
+                    f"{where}: replacement uses PATCH; PUT is not documented",
+                )
+                description = str(update.get("description") or "")
+                contracts.check(
+                    "replacement" in description.lower(),
+                    f"{where}: description must document the full replacement",
+                )
+                contracts.check(
+                    updated_event in description,
+                    f"{where}: description must name the emitted {updated_event} fact",
+                )
+                contracts.check(
+                    "no-op" in description,
+                    f"{where}: description must document the no-op replacement rule",
+                )
+                request_body = update.get("requestBody") or {}
+                contracts.check(
+                    isinstance(request_body, dict)
+                    and request_body.get("required") is True,
+                    f"{where}: requestBody must be required",
+                )
+                body_schema = (
+                    ((request_body.get("content") or {}).get("application/json") or {})
+                    .get("schema")
+                    if isinstance(request_body, dict)
+                    else None
+                )
+                contracts.check(
+                    isinstance(body_schema, dict)
+                    and str(body_schema.get("$ref", "")).endswith(
+                        f"/schemas/{request_schema}"
+                    ),
+                    f"{where}: request body must use the {request_schema} schema",
+                )
+                replaced = _response_schema(update, "200")
+                contracts.check(
+                    isinstance(replaced, dict)
+                    and str(replaced.get("$ref", "")).endswith(
+                        f"/schemas/{projection}"
+                    ),
+                    f"{where}: 200 must return the {projection} schema",
+                )
+                responses = update.get("responses") or {}
+                for code, suffix in (
+                    ("400", "/responses/BadRequest"),
+                    ("404", "/responses/NotFound"),
+                ):
+                    response = responses.get(code) if isinstance(responses, dict) else None
+                    contracts.check(
+                        isinstance(response, dict)
+                        and str(response.get("$ref", "")).endswith(suffix),
+                        f"{where}: {code} must reference the shared "
+                        f"{suffix.rsplit('/', 1)[-1]} response",
+                    )
+                conflict = responses.get("409") if isinstance(responses, dict) else None
+                conflict_text = (
+                    str(conflict.get("description") or "")
+                    if isinstance(conflict, dict)
+                    else ""
+                )
+                contracts.check(
+                    duplicate_code in conflict_text,
+                    f"{where}: 409 must document {duplicate_code}",
+                )
+                problem_schema = (
+                    (((conflict or {}).get("content") or {})
+                     .get("application/problem+json") or {})
+                    .get("schema")
+                    if isinstance(conflict, dict)
+                    else None
+                )
+                contracts.check(
+                    isinstance(problem_schema, dict)
+                    and str(problem_schema.get("$ref", "")).endswith("/schemas/Problem"),
+                    f"{where}: 409 must document the shared Problem schema",
+                )
+
+            delete = path_item.get("delete")
+            where = f"{relative}: DELETE {path}"
+            contracts.check(
+                isinstance(delete, dict), f"{where}: operation must be a mapping"
+            )
+            if isinstance(delete, dict):
+                _check_party_reference_parameters(contracts, delete, where, internal)
+                _check_party_reference_child_parameter(
+                    contracts, delete, where, child_id
+                )
+                contracts.check(
+                    "requestBody" not in delete,
+                    f"{where}: DELETE must not declare a request body",
+                )
+                description = str(delete.get("description") or "")
+                contracts.check(
+                    deleted_event in description,
+                    f"{where}: description must name the emitted {deleted_event} fact",
+                )
+                contracts.check(
+                    "204" in description,
+                    f"{where}: description must document the 204 no-content success",
+                )
+                responses = delete.get("responses") or {}
+                contracts.check(
+                    "204" in responses,
+                    f"{where}: 204 must be documented",
+                )
+                contracts.check(
+                    "200" not in responses,
+                    f"{where}: a delete returns 204, not 200",
+                )
+                for code, suffix in (
+                    ("400", "/responses/BadRequest"),
+                    ("404", "/responses/NotFound"),
+                ):
+                    response = responses.get(code) if isinstance(responses, dict) else None
+                    contracts.check(
+                        isinstance(response, dict)
+                        and str(response.get("$ref", "")).endswith(suffix),
+                        f"{where}: {code} must reference the shared "
+                        f"{suffix.rsplit('/', 1)[-1]} response",
+                    )
+                conflict = responses.get("409") if isinstance(responses, dict) else None
+                conflict_text = (
+                    str(conflict.get("description") or "")
+                    if isinstance(conflict, dict)
+                    else ""
+                )
+                contracts.check(
+                    in_use_code in conflict_text,
+                    f"{where}: 409 must document {in_use_code}",
+                )
+                problem_schema = (
+                    (((conflict or {}).get("content") or {})
+                     .get("application/problem+json") or {})
+                    .get("schema")
+                    if isinstance(conflict, dict)
+                    else None
+                )
+                contracts.check(
+                    isinstance(problem_schema, dict)
+                    and str(problem_schema.get("$ref", "")).endswith("/schemas/Problem"),
+                    f"{where}: 409 must document the shared Problem schema",
+                )
+
     identifier_type = schemas.get("PartyIdentifierType") or {}
     contracts.check(
         identifier_type.get("type") == "string",
@@ -13325,6 +13676,32 @@ def check_party_reference_data_openapi(contracts: ContractSet, document, relativ
         "PartyAddressType",
         r"^[A-Za-z]{2}$",
     )
+    check_request(
+        "UpdatePartyIdentifierRequest",
+        PARTY_IDENTIFIER_REQUEST_FIELDS,
+        PARTY_IDENTIFIER_REQUEST_REQUIRED,
+        "identifierType",
+        "PartyIdentifierType",
+        None,
+    )
+    check_request(
+        "UpdatePartyAddressRequest",
+        PARTY_ADDRESS_REQUEST_FIELDS,
+        PARTY_ADDRESS_REQUEST_REQUIRED,
+        "addressType",
+        "PartyAddressType",
+        r"^[A-Za-z]{2}$",
+    )
+    for name in ("UpdatePartyIdentifierRequest", "UpdatePartyAddressRequest"):
+        description = str((schemas.get(name) or {}).get("description") or "")
+        contracts.check(
+            "replacement" in description.lower(),
+            f"{relative}: {name} must document the full replacement",
+        )
+        contracts.check(
+            "immutable" in description,
+            f"{relative}: {name} must document the immutable createdAt/createdBy",
+        )
 
 
 def check_party_reference_data_asyncapi(contracts: ContractSet, document, relative: str):
@@ -13452,6 +13829,306 @@ def check_party_reference_data_asyncapi(contracts: ContractSet, document, relati
             contracts.check(
                 (properties.get("country") or {}).get("pattern") == r"^[A-Z]{2}$",
                 f"{where}: {message_name}.country must be a two-letter upper-case code",
+            )
+
+
+# ---------------------------------------------------------------------------
+# Notifications NotificationType checks
+# ---------------------------------------------------------------------------
+
+
+def _check_party_event_snapshot(
+    contracts: ContractSet,
+    snapshot,
+    where: str,
+    required,
+    optional,
+    type_field: str,
+    types,
+    country: bool,
+):
+    """Require one before/after child snapshot object and its bounds."""
+    contracts.check(
+        isinstance(snapshot, dict) and snapshot.get("type") == "object",
+        f"{where}: must be an object snapshot",
+    )
+    if not isinstance(snapshot, dict):
+        return
+    properties = snapshot.get("properties") or {}
+    contracts.check(
+        set(properties) == set(required) | set(optional),
+        f"{where}: must declare exactly {list(required) + list(optional)}",
+    )
+    contracts.check(
+        set(snapshot.get("required") or []) == set(required),
+        f"{where}.required must be exactly {list(required)}",
+    )
+    contracts.check(
+        tuple((properties.get(type_field) or {}).get("enum") or []) == types,
+        f"{where}.{type_field} must enumerate {list(types)}",
+    )
+    for field in optional:
+        contracts.check(
+            field in properties,
+            f"{where}.{field} must be declared as an optional snapshot member",
+        )
+        contracts.check(
+            field not in set(snapshot.get("required") or []),
+            f"{where}.{field} must stay optional",
+        )
+    for field, maximum in PARTY_REFERENCE_DATA_MAX_LENGTHS.items():
+        if field in properties:
+            contracts.check(
+                (properties.get(field) or {}).get("maxLength") == maximum,
+                f"{where}.{field} maxLength must be {maximum}",
+            )
+    if "effectiveDate" in properties:
+        contracts.check(
+            (properties.get("effectiveDate") or {}).get("format") == "date",
+            f"{where}.effectiveDate must be a date",
+        )
+    if country:
+        contracts.check(
+            (properties.get("country") or {}).get("pattern") == r"^[A-Z]{2}$",
+            f"{where}.country must be a two-letter upper-case code",
+        )
+
+
+def check_party_reference_data_maintenance_asyncapi(
+    contracts: ContractSet, document, relative: str
+):
+    """Require the four implemented maintenance channels and their payloads.
+
+    The two update payloads carry the ordered ``changedFields`` list plus the
+    ``from`` and ``to`` snapshots; the two delete payloads carry the last
+    stored snapshot and the original actor and instant. All four are child
+    facts of the Party aggregate at the bumped Party row version.
+    """
+    channels = document.get("channels") or {}
+    operations = document.get("operations") or {}
+    messages = (document.get("components") or {}).get("messages") or {}
+    send_events = {
+        operation.get("x-event-type")
+        for operation in operations.values()
+        if isinstance(operation, dict) and operation.get("action") == "send"
+    }
+    channel_by_event = {
+        channel.get("address"): channel
+        for channel in channels.values()
+        if isinstance(channel, dict)
+    }
+
+    update_specs = (
+        (
+            "party.party.identifier-updated",
+            PARTY_IDENTIFIER_UPDATED_EVENT_MESSAGE,
+            PARTY_IDENTIFIER_UPDATED_EVENT_FIELDS,
+            "identifierId",
+            "identifierType",
+            PARTY_IDENTIFIER_TYPES,
+            PARTY_IDENTIFIER_UPDATE_FIELDS,
+            PARTY_IDENTIFIER_SNAPSHOT_REQUIRED,
+            ("issuingAuthority", "effectiveDate"),
+            False,
+        ),
+        (
+            "party.party.address-updated",
+            PARTY_ADDRESS_UPDATED_EVENT_MESSAGE,
+            PARTY_ADDRESS_UPDATED_EVENT_FIELDS,
+            "addressId",
+            "addressType",
+            PARTY_ADDRESS_TYPES,
+            PARTY_ADDRESS_UPDATE_FIELDS,
+            PARTY_ADDRESS_SNAPSHOT_REQUIRED,
+            ("line2", "stateRegion", "effectiveDate"),
+            True,
+        ),
+    )
+
+    delete_specs = (
+        (
+            "party.party.identifier-deleted",
+            PARTY_IDENTIFIER_DELETED_EVENT_MESSAGE,
+            PARTY_IDENTIFIER_DELETED_EVENT_FIELDS,
+            PARTY_IDENTIFIER_DELETED_EVENT_REQUIRED,
+            "identifierId",
+            "identifierType",
+            PARTY_IDENTIFIER_TYPES,
+            False,
+        ),
+        (
+            "party.party.address-deleted",
+            PARTY_ADDRESS_DELETED_EVENT_MESSAGE,
+            PARTY_ADDRESS_DELETED_EVENT_FIELDS,
+            PARTY_ADDRESS_DELETED_EVENT_REQUIRED,
+            "addressId",
+            "addressType",
+            PARTY_ADDRESS_TYPES,
+            True,
+        ),
+    )
+
+    contracts.check(
+        {spec[0] for spec in update_specs + delete_specs}
+        == set(PARTY_REFERENCE_DATA_MAINTENANCE_EVENTS),
+        f"{relative}: the maintenance event specs are out of sync with "
+        f"PARTY_REFERENCE_DATA_MAINTENANCE_EVENTS "
+        f"{list(PARTY_REFERENCE_DATA_MAINTENANCE_EVENTS)}",
+    )
+
+    def check_channel(event, message_name):
+        where = f"{relative}: {event}"
+        channel = channel_by_event.get(event)
+        contracts.check(isinstance(channel, dict), f"{where}: channel is missing")
+        contracts.check(event in send_events, f"{where}: must have a send operation")
+        if not isinstance(channel, dict):
+            return None
+        contracts.check(
+            channel.get("x-event-type") == event,
+            f"{where}: x-event-type must equal the address",
+        )
+        contracts.check(
+            channel.get("x-status") == "implemented",
+            f"{where}: the channel must be implemented",
+        )
+        contracts.check(
+            str(channel.get("x-implemented-by", "")).endswith(PARTY_EVENT_IMPLEMENTED_BY),
+            f"{where}: x-implemented-by must name {PARTY_EVENT_IMPLEMENTED_BY}",
+        )
+        channel_messages = channel.get("messages") or {}
+        contracts.check(
+            "DomainEvent" in channel_messages,
+            f"{where}: the channel must reference the DomainEvent message",
+        )
+        contracts.check(
+            message_name in channel_messages,
+            f"{where}: the channel must reference {message_name}",
+        )
+        return messages.get(message_name) or {}
+
+    def check_common(payload, message_name, where, child_id):
+        properties = payload.get("properties") or {}
+        contracts.check(
+            payload.get("type") == "object",
+            f"{where}: {message_name}.payload.type must be object",
+        )
+        version = properties.get("version") or {}
+        contracts.check(
+            (version.get("type"), version.get("minimum")) == ("integer", 0),
+            f"{where}: {message_name}.version must be an integer >= 0",
+        )
+        for field in ("partyId", child_id):
+            contracts.check(
+                (properties.get(field) or {}).get("format") == "uuid",
+                f"{where}: {message_name}.{field} must be a uuid",
+            )
+
+    for (
+        event,
+        message_name,
+        fields,
+        child_id,
+        type_field,
+        types,
+        changed_fields,
+        snapshot_required,
+        snapshot_optional,
+        country,
+    ) in update_specs:
+        where = f"{relative}: {event}"
+        message = check_channel(event, message_name)
+        if message is None:
+            continue
+        payload = message.get("payload") or {}
+        properties = payload.get("properties") or {}
+        contracts.check(
+            set(properties) == set(fields),
+            f"{where}: {message_name} must declare exactly {list(fields)}",
+        )
+        contracts.check(
+            set(payload.get("required") or []) == set(fields),
+            f"{where}: {message_name}.required must list every member",
+        )
+        check_common(payload, message_name, where, child_id)
+        changed = properties.get("changedFields") or {}
+        items = changed.get("items") or {}
+        contracts.check(
+            changed.get("type") == "array"
+            and changed.get("minItems") == 1
+            and changed.get("maxItems") == len(changed_fields),
+            f"{where}: {message_name}.changedFields must be an array of 1-"
+            f"{len(changed_fields)} members",
+        )
+        contracts.check(
+            tuple(items.get("enum") or []) == changed_fields,
+            f"{where}: {message_name}.changedFields must enumerate "
+            f"{list(changed_fields)}",
+        )
+        for side in ("from", "to"):
+            _check_party_event_snapshot(
+                contracts,
+                properties.get(side),
+                f"{where}: {message_name}.{side}",
+                snapshot_required,
+                snapshot_optional,
+                type_field,
+                types,
+                country,
+            )
+
+    for (
+        event,
+        message_name,
+        fields,
+        required,
+        child_id,
+        type_field,
+        types,
+        country,
+    ) in delete_specs:
+        where = f"{relative}: {event}"
+        message = check_channel(event, message_name)
+        if message is None:
+            continue
+        payload = message.get("payload") or {}
+        properties = payload.get("properties") or {}
+        contracts.check(
+            set(properties) == set(fields),
+            f"{where}: {message_name} must declare exactly {list(fields)}",
+        )
+        contracts.check(
+            set(payload.get("required") or []) == set(required),
+            f"{where}: {message_name}.required must be exactly {list(required)}",
+        )
+        check_common(payload, message_name, where, child_id)
+        contracts.check(
+            tuple((properties.get(type_field) or {}).get("enum") or []) == types,
+            f"{where}: {message_name}.{type_field} must enumerate {list(types)}",
+        )
+        for field in set(fields) - set(required):
+            contracts.check(
+                field not in set(payload.get("required") or []),
+                f"{where}: {message_name}.{field} must stay optional",
+            )
+        for field, maximum in PARTY_REFERENCE_DATA_MAX_LENGTHS.items():
+            if field in properties:
+                contracts.check(
+                    (properties.get(field) or {}).get("maxLength") == maximum,
+                    f"{where}: {message_name}.{field} maxLength must be {maximum}",
+                )
+        contracts.check(
+            (properties.get("createdAt") or {}).get("format") == "date-time",
+            f"{where}: {message_name}.createdAt must be a date-time",
+        )
+        contracts.check(
+            (properties.get("effectiveDate") or {}).get("format") == "date",
+            f"{where}: {message_name}.effectiveDate must be a date",
+        )
+        if country:
+            contracts.check(
+                (properties.get("country") or {}).get("pattern") == r"^[A-Z]{2}$",
+                f"{where}: {message_name}.country must be a two-letter "
+                "upper-case code",
             )
 
 
@@ -16014,6 +16691,9 @@ def check_asyncapi(contracts: ContractSet, verbose: bool):
         if vertical == "party":
             check_party_status_asyncapi(contracts, document, relative)
             check_party_reference_data_asyncapi(contracts, document, relative)
+            check_party_reference_data_maintenance_asyncapi(
+                contracts, document, relative
+            )
 
         entry = catalog_entries.get(vertical) or {}
         published = entry.get("published") or []

@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:catalog
 info:
   title: EIA canonical domain event catalog
-  version: 1.36.0
+  version: 1.37.0
   summary: The authoritative catalog of domain event names, publishers, and subscribers.
   description: >
     Cross-vertical event catalog. Every domain event name used by the platform
@@ -201,6 +201,17 @@ info:
     calculation-only request writes no event. It adds one published and one
     implemented name, bringing the platform totals to 221 published and 102
     implemented; Policy becomes 36 published and 24 implemented (M-22, M-57).
+    The 2026-10-22 Party identifier and address maintenance slice adds four
+    Party names, `party.party.identifier-updated`, `.identifier-deleted`,
+    `.address-updated`, and `.address-deleted`, with no SPEC 11.1.9
+    equivalent: SPEC publishes no reference-data child fact at all. Each is a
+    child fact of the Party aggregate keyed by the party id at the bumped
+    aggregate version; a replacement carries the ordered `changedFields` list
+    and the `from`/`to` snapshots, and a delete carries the last stored
+    snapshot because the row is hard-deleted. They add four published and four
+    implemented names, bringing the platform totals to 225 published and 106
+    implemented; Party becomes 15 published and 8 implemented (M-22, M-54,
+    M-58).
     The platform
     event-ingest service
     is the inbox:
@@ -289,7 +300,11 @@ x-event-catalog:
       - party.party.created
       - party.party.updated
       - party.party.identifier-added
+      - party.party.identifier-updated
+      - party.party.identifier-deleted
       - party.party.address-added
+      - party.party.address-updated
+      - party.party.address-deleted
       - party.party.status-changed
       - party.party.merged
       - party.role.added
@@ -301,7 +316,11 @@ x-event-catalog:
       - party.party.created
       - party.party.updated
       - party.party.identifier-added
+      - party.party.identifier-updated
+      - party.party.identifier-deleted
       - party.party.address-added
+      - party.party.address-updated
+      - party.party.address-deleted
     consumed:
       - policy.policy.issued
       - contract.contract.bound

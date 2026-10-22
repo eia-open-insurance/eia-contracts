@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:party
 info:
   title: EIA Party events
-  version: 1.3.0
+  version: 1.4.0
   summary: Published domain event names for the Party vertical.
   description: >
     Event contract for the Party vertical. The authoritative event names are
@@ -15,8 +15,10 @@ info:
     equals the event name; it is not a broker topic.
 
     The Party expert publishes `party.party.created`, `party.party.updated`,
-    `party.party.identifier-added`, and `party.party.address-added` through the
-    transactional outbox; those channels and operations are marked
+    `party.party.identifier-added`, `party.party.identifier-updated`,
+    `party.party.identifier-deleted`, `party.party.address-added`,
+    `party.party.address-updated`, and `party.party.address-deleted` through
+    the transactional outbox; those channels and operations are marked
     `x-status: implemented`. A status change is published as
     `party.party.updated` with `changedFields: [status]`, `from`, `to`, the
     Party row `version`, and the optional trimmed `reason`; the
@@ -24,14 +26,18 @@ info:
     status-update fact is therefore `party.party.updated`, not a separate
     `party.party.status-updated` name, and SPEC 11.1.9's
     `party.party.status-changed` remains planned (MISMATCHES.md M-22, M-55).
-    Adding one identifier
-    or address bumps the Party row version and writes one child fact in the
+    Adding, replacing, or deleting one identifier or
+    address bumps the Party row version and writes one child fact in the
     same transaction: the payload names the child id, the Party identity, and
     the Party row `version`, while the envelope `aggregateVersion` is that row
-    version plus one. The two
-    reference-data names are new: SPEC 11.1.9 publishes no identifier-added or
-    address-added fact (MISMATCHES.md M-22, M-54), so they are additive under
-    EV-05. The other SPEC 11.1.9 names remain planned.
+    version plus one. An add carries the stored child values, an update carries
+    the ordered `changedFields` list plus the `from` and `to` snapshots, and a
+    delete carries the last stored snapshot because the row is gone after the
+    commit. A replacement with no normalized change is a no-op and writes no
+    event. The six
+    reference-data names are new: SPEC 11.1.9 publishes no identifier or
+    address child fact at all (MISMATCHES.md M-22, M-54, M-58), so they are
+    additive under EV-05. The other SPEC 11.1.9 names remain planned.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -129,6 +135,91 @@ channels:
         $ref: '#/components/messages/DomainEvent'
       PartyAddressAddedData:
         $ref: '#/components/messages/PartyAddressAddedData'
+  PartyPartyIdentifierUpdated:
+    address: party.party.identifier-updated
+    title: party.party.identifier-updated
+    description: >
+      Emitted by the Party expert when one identifier is fully replaced, in the
+      same transaction as the child update and the Party row version bump. The
+      payload is `PartyIdentifierUpdatedData`: the Party identity and row
+      version, the identifier id, the ordered `changedFields` list, and the
+      `from` and `to` snapshots. A replacement whose normalized values equal
+      the stored values is a no-op and writes no event. The name has no SPEC
+      11.1.9 equivalent (MISMATCHES.md M-22, M-54, M-58).
+    x-event-type: party.party.identifier-updated
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.1.9
+    x-implemented-by: repos/eia-party-expert/src/main/java/com/eia/party/expert/PartyEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      PartyIdentifierUpdatedData:
+        $ref: '#/components/messages/PartyIdentifierUpdatedData'
+  PartyPartyIdentifierDeleted:
+    address: party.party.identifier-deleted
+    title: party.party.identifier-deleted
+    description: >
+      Emitted by the Party expert when one identifier is hard-deleted, in the
+      same transaction as the child delete and the Party row version bump. The
+      payload is `PartyIdentifierDeletedData`: the Party identity and row
+      version, the identifier id, the last stored snapshot (type, value, and
+      the optional authority and effective date), and the original actor and
+      instant. A repeated delete is 404 and writes no second event. The name
+      has no SPEC 11.1.9 equivalent (MISMATCHES.md M-22, M-54, M-58).
+    x-event-type: party.party.identifier-deleted
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.1.9
+    x-implemented-by: repos/eia-party-expert/src/main/java/com/eia/party/expert/PartyEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      PartyIdentifierDeletedData:
+        $ref: '#/components/messages/PartyIdentifierDeletedData'
+  PartyPartyAddressUpdated:
+    address: party.party.address-updated
+    title: party.party.address-updated
+    description: >
+      Emitted by the Party expert when one address is fully replaced, in the
+      same transaction as the child update and the Party row version bump. The
+      payload is `PartyAddressUpdatedData`: the Party identity and row version,
+      the address id, the ordered `changedFields` list, and the `from` and `to`
+      snapshots. A replacement whose normalized values equal the stored values
+      is a no-op and writes no event. The name has no SPEC 11.1.9 equivalent
+      (MISMATCHES.md M-22, M-54, M-58).
+    x-event-type: party.party.address-updated
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.1.9
+    x-implemented-by: repos/eia-party-expert/src/main/java/com/eia/party/expert/PartyEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      PartyAddressUpdatedData:
+        $ref: '#/components/messages/PartyAddressUpdatedData'
+  PartyPartyAddressDeleted:
+    address: party.party.address-deleted
+    title: party.party.address-deleted
+    description: >
+      Emitted by the Party expert when one address is hard-deleted, in the same
+      transaction as the child delete and the Party row version bump. The
+      payload is `PartyAddressDeletedData`: the Party identity and row version,
+      the address id, the last stored snapshot (type, lines, city, region,
+      postal code, upper-case country, and optional effective date), and the
+      original actor and instant. A repeated delete is 404 and writes no second
+      event. The name has no SPEC 11.1.9 equivalent (MISMATCHES.md M-22, M-54,
+      M-58).
+    x-event-type: party.party.address-deleted
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.1.9
+    x-implemented-by: repos/eia-party-expert/src/main/java/com/eia/party/expert/PartyEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      PartyAddressDeletedData:
+        $ref: '#/components/messages/PartyAddressDeletedData'
   PartyPartyStatusChanged:
     address: party.party.status-changed
     title: party.party.status-changed
@@ -270,6 +361,50 @@ operations:
       the same transaction as the address insert and the Party version bump
       (SPEC 7.5.1).
     x-event-type: party.party.address-added
+    x-status: implemented
+  publishPartyPartyIdentifierUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/PartyPartyIdentifierUpdated'
+    summary: Publish party.party.identifier-updated
+    description: >
+      Publishes party.party.identifier-updated through the transactional outbox
+      in the same transaction as the identifier replacement and the Party
+      version bump (SPEC 7.5.1). A no-op replacement publishes nothing.
+    x-event-type: party.party.identifier-updated
+    x-status: implemented
+  publishPartyPartyIdentifierDeleted:
+    action: send
+    channel:
+      $ref: '#/channels/PartyPartyIdentifierDeleted'
+    summary: Publish party.party.identifier-deleted
+    description: >
+      Publishes party.party.identifier-deleted through the transactional outbox
+      in the same transaction as the identifier hard delete and the Party
+      version bump (SPEC 7.5.1).
+    x-event-type: party.party.identifier-deleted
+    x-status: implemented
+  publishPartyPartyAddressUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/PartyPartyAddressUpdated'
+    summary: Publish party.party.address-updated
+    description: >
+      Publishes party.party.address-updated through the transactional outbox in
+      the same transaction as the address replacement and the Party version
+      bump (SPEC 7.5.1). A no-op replacement publishes nothing.
+    x-event-type: party.party.address-updated
+    x-status: implemented
+  publishPartyPartyAddressDeleted:
+    action: send
+    channel:
+      $ref: '#/channels/PartyPartyAddressDeleted'
+    summary: Publish party.party.address-deleted
+    description: >
+      Publishes party.party.address-deleted through the transactional outbox in
+      the same transaction as the address hard delete and the Party version bump
+      (SPEC 7.5.1).
+    x-event-type: party.party.address-deleted
     x-status: implemented
   publishPartyPartyStatusChanged:
     action: send
@@ -613,6 +748,483 @@ components:
           createdAt:
             type: string
             format: date-time
+    PartyIdentifierUpdatedData:
+      name: PartyIdentifierUpdatedData
+      title: party.party.identifier-updated data
+      summary: One replaced party identifier and the Party row version.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - partyId
+          - partyNumber
+          - version
+          - identifierId
+          - changedFields
+          - from
+          - to
+        properties:
+          partyId:
+            type: string
+            format: uuid
+          partyNumber:
+            type: string
+            description: Generated Party business key, format PTY-000000001.
+          version:
+            type: integer
+            minimum: 0
+            description: >
+              Party row version after the child replacement and version bump.
+              The envelope `aggregateVersion` is this value plus one because
+              Party rows start at version 0.
+          identifierId:
+            type: string
+            format: uuid
+          changedFields:
+            type: array
+            description: >
+              The changed member names in the fixed order `identifierType`,
+              `identifierValue`, `issuingAuthority`, `effectiveDate`. A no-op
+              replacement writes no event, so the list is never empty.
+            minItems: 1
+            maxItems: 4
+            items:
+              type: string
+              enum:
+                - identifierType
+                - identifierValue
+                - issuingAuthority
+                - effectiveDate
+          from:
+            type: object
+            description: >
+              Stored snapshot before the replacement. The expert omits an
+              optional member when it is null.
+            required:
+              - identifierType
+              - identifierValue
+            properties:
+              identifierType:
+                type: string
+                enum:
+                  - TAX_ID
+                  - REGISTRATION
+                  - LICENSE
+                  - TIN
+                  - EIN
+                  - SSN
+                  - ITIN
+                  - DUNS
+                  - LEI
+                  - PASSPORT
+                  - DRIVER_LICENSE
+                  - STATE_ID
+                  - MEDICARE_ID
+                  - MEDICAID_ID
+                  - NPI
+                  - BAR_NUMBER
+                  - ACORD_PARTY_ID
+                  - ISO_PARTY_ID
+                  - TRUST_CLAIM_NUMBER
+                  - BANKRUPTCY_CASE_NUMBER
+                  - OTHER
+              identifierValue:
+                type: string
+                minLength: 1
+                maxLength: 128
+                description: Trimmed identifier value as stored.
+              issuingAuthority:
+                type: string
+                maxLength: 128
+                description: Optional issuing authority; omitted when null.
+              effectiveDate:
+                type: string
+                format: date
+                description: Optional effective date; omitted when null.
+          to:
+            type: object
+            description: >
+              Stored snapshot after the replacement. The expert omits an
+              optional member when it is null.
+            required:
+              - identifierType
+              - identifierValue
+            properties:
+              identifierType:
+                type: string
+                enum:
+                  - TAX_ID
+                  - REGISTRATION
+                  - LICENSE
+                  - TIN
+                  - EIN
+                  - SSN
+                  - ITIN
+                  - DUNS
+                  - LEI
+                  - PASSPORT
+                  - DRIVER_LICENSE
+                  - STATE_ID
+                  - MEDICARE_ID
+                  - MEDICAID_ID
+                  - NPI
+                  - BAR_NUMBER
+                  - ACORD_PARTY_ID
+                  - ISO_PARTY_ID
+                  - TRUST_CLAIM_NUMBER
+                  - BANKRUPTCY_CASE_NUMBER
+                  - OTHER
+              identifierValue:
+                type: string
+                minLength: 1
+                maxLength: 128
+                description: Trimmed identifier value as stored.
+              issuingAuthority:
+                type: string
+                maxLength: 128
+                description: Optional issuing authority; omitted when null.
+              effectiveDate:
+                type: string
+                format: date
+                description: Optional effective date; omitted when null.
+    PartyIdentifierDeletedData:
+      name: PartyIdentifierDeletedData
+      title: party.party.identifier-deleted data
+      summary: One deleted party identifier, its last snapshot, and the Party row version.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - partyId
+          - partyNumber
+          - version
+          - identifierId
+          - identifierType
+          - identifierValue
+          - createdBy
+          - createdAt
+        properties:
+          partyId:
+            type: string
+            format: uuid
+          partyNumber:
+            type: string
+            description: Generated Party business key, format PTY-000000001.
+          version:
+            type: integer
+            minimum: 0
+            description: >
+              Party row version after the child delete and version bump. The
+              envelope `aggregateVersion` is this value plus one because Party
+              rows start at version 0.
+          identifierId:
+            type: string
+            format: uuid
+          identifierType:
+            type: string
+            description: Normalized identifier type of the deleted row.
+            enum:
+              - TAX_ID
+              - REGISTRATION
+              - LICENSE
+              - TIN
+              - EIN
+              - SSN
+              - ITIN
+              - DUNS
+              - LEI
+              - PASSPORT
+              - DRIVER_LICENSE
+              - STATE_ID
+              - MEDICARE_ID
+              - MEDICAID_ID
+              - NPI
+              - BAR_NUMBER
+              - ACORD_PARTY_ID
+              - ISO_PARTY_ID
+              - TRUST_CLAIM_NUMBER
+              - BANKRUPTCY_CASE_NUMBER
+              - OTHER
+          identifierValue:
+            type: string
+            minLength: 1
+            maxLength: 128
+            description: Trimmed identifier value of the deleted row.
+          issuingAuthority:
+            type: string
+            maxLength: 128
+            description: >
+              Optional issuing authority. The expert omits the member when it
+              is null.
+          effectiveDate:
+            type: string
+            format: date
+            description: >
+              Optional effective date. The expert omits the member when it is
+              null.
+          createdBy:
+            type: string
+            maxLength: 128
+            description: Stored actor; `system` in the current slice.
+          createdAt:
+            type: string
+            format: date-time
+    PartyAddressUpdatedData:
+      name: PartyAddressUpdatedData
+      title: party.party.address-updated data
+      summary: One replaced party address and the Party row version.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - partyId
+          - partyNumber
+          - version
+          - addressId
+          - changedFields
+          - from
+          - to
+        properties:
+          partyId:
+            type: string
+            format: uuid
+          partyNumber:
+            type: string
+            description: Generated Party business key, format PTY-000000001.
+          version:
+            type: integer
+            minimum: 0
+            description: >
+              Party row version after the child replacement and version bump.
+              The envelope `aggregateVersion` is this value plus one because
+              Party rows start at version 0.
+          addressId:
+            type: string
+            format: uuid
+          changedFields:
+            type: array
+            description: >
+              The changed member names in the fixed order `addressType`,
+              `line1`, `line2`, `city`, `stateRegion`, `postalCode`, `country`,
+              `effectiveDate`. A no-op replacement writes no event, so the list
+              is never empty.
+            minItems: 1
+            maxItems: 8
+            items:
+              type: string
+              enum:
+                - addressType
+                - line1
+                - line2
+                - city
+                - stateRegion
+                - postalCode
+                - country
+                - effectiveDate
+          from:
+            type: object
+            description: >
+              Stored snapshot before the replacement. The expert omits an
+              optional member when it is null.
+            required:
+              - addressType
+              - line1
+              - city
+              - postalCode
+              - country
+            properties:
+              addressType:
+                type: string
+                enum:
+                  - PRIMARY
+                  - LEGAL
+                  - PHYSICAL
+                  - MAILING
+                  - BILLING
+                  - CLAIM_SITE
+                  - EXPOSURE_SITE
+                  - EMPLOYER
+                  - PROVIDER
+                  - BANK
+                  - OTHER
+              line1:
+                type: string
+                minLength: 1
+                maxLength: 128
+              line2:
+                type: string
+                maxLength: 128
+                description: Optional second line; omitted when null.
+              city:
+                type: string
+                minLength: 1
+                maxLength: 64
+              stateRegion:
+                type: string
+                maxLength: 64
+                description: Optional region; omitted when null.
+              postalCode:
+                type: string
+                minLength: 1
+                maxLength: 16
+              country:
+                type: string
+                pattern: '^[A-Z]{2}$'
+                description: ISO 3166-1 alpha-2 country code, stored upper-case.
+              effectiveDate:
+                type: string
+                format: date
+                description: Optional effective date; omitted when null.
+          to:
+            type: object
+            description: >
+              Stored snapshot after the replacement. The expert omits an
+              optional member when it is null.
+            required:
+              - addressType
+              - line1
+              - city
+              - postalCode
+              - country
+            properties:
+              addressType:
+                type: string
+                enum:
+                  - PRIMARY
+                  - LEGAL
+                  - PHYSICAL
+                  - MAILING
+                  - BILLING
+                  - CLAIM_SITE
+                  - EXPOSURE_SITE
+                  - EMPLOYER
+                  - PROVIDER
+                  - BANK
+                  - OTHER
+              line1:
+                type: string
+                minLength: 1
+                maxLength: 128
+              line2:
+                type: string
+                maxLength: 128
+                description: Optional second line; omitted when null.
+              city:
+                type: string
+                minLength: 1
+                maxLength: 64
+              stateRegion:
+                type: string
+                maxLength: 64
+                description: Optional region; omitted when null.
+              postalCode:
+                type: string
+                minLength: 1
+                maxLength: 16
+              country:
+                type: string
+                pattern: '^[A-Z]{2}$'
+                description: ISO 3166-1 alpha-2 country code, stored upper-case.
+              effectiveDate:
+                type: string
+                format: date
+                description: Optional effective date; omitted when null.
+    PartyAddressDeletedData:
+      name: PartyAddressDeletedData
+      title: party.party.address-deleted data
+      summary: One deleted party address, its last snapshot, and the Party row version.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - partyId
+          - partyNumber
+          - version
+          - addressId
+          - addressType
+          - line1
+          - city
+          - postalCode
+          - country
+          - createdBy
+          - createdAt
+        properties:
+          partyId:
+            type: string
+            format: uuid
+          partyNumber:
+            type: string
+            description: Generated Party business key, format PTY-000000001.
+          version:
+            type: integer
+            minimum: 0
+            description: >
+              Party row version after the child delete and version bump. The
+              envelope `aggregateVersion` is this value plus one because Party
+              rows start at version 0.
+          addressId:
+            type: string
+            format: uuid
+          addressType:
+            type: string
+            description: Normalized address type of the deleted row.
+            enum:
+              - PRIMARY
+              - LEGAL
+              - PHYSICAL
+              - MAILING
+              - BILLING
+              - CLAIM_SITE
+              - EXPOSURE_SITE
+              - EMPLOYER
+              - PROVIDER
+              - BANK
+              - OTHER
+          line1:
+            type: string
+            minLength: 1
+            maxLength: 128
+          line2:
+            type: string
+            maxLength: 128
+            description: >
+              Optional second line of the deleted row. The expert omits the
+              member when it is null.
+          city:
+            type: string
+            minLength: 1
+            maxLength: 64
+          stateRegion:
+            type: string
+            maxLength: 64
+            description: >
+              Optional state, province, or region of the deleted row. The
+              expert omits the member when it is null.
+          postalCode:
+            type: string
+            minLength: 1
+            maxLength: 16
+          country:
+            type: string
+            pattern: '^[A-Z]{2}$'
+            description: ISO 3166-1 alpha-2 country code, stored upper-case.
+          effectiveDate:
+            type: string
+            format: date
+            description: >
+              Optional effective date of the deleted row. The expert omits the
+              member when it is null.
+          createdBy:
+            type: string
+            maxLength: 128
+            description: Stored actor; `system` in the current slice.
+          createdAt:
+            type: string
+            format: date-time
   securitySchemes:
     outboxSignature:
       type: httpApiKey
@@ -629,7 +1241,9 @@ x-implementation:
   subscriber: none
   notes: >
     `party.party.created`, `party.party.updated`,
-    `party.party.identifier-added`, and `party.party.address-added` are written
+    `party.party.identifier-added`, `party.party.identifier-updated`,
+    `party.party.identifier-deleted`, `party.party.address-added`,
+    `party.party.address-updated`, and `party.party.address-deleted` are written
     to the transactional outbox in the same transaction as the party,
     identifier, address, or status write and dispatched by the platform outbox
     dispatcher when `eia.outbox.enabled=true`. A status transition writes one
@@ -637,13 +1251,19 @@ x-implementation:
     `to`, and the optional trimmed reason; a same-status request writes no row
     and no event. The reason has no Party column, so it exists only in the
     event. Each reference-data fact is one
-    outbox row per appended child, keyed by the Party aggregate at the bumped
-    version, with the child id and normalized values in the payload. The
+    outbox row per added, replaced, or deleted child, keyed by the Party
+    aggregate at the bumped version, with the child id and normalized values in
+    the payload. An add carries the stored values; an update carries the
+    ordered `changedFields` list and the `from`/`to` snapshots; a delete carries
+    the last stored snapshot and the original `createdBy`/`createdAt` because
+    the row is hard-deleted. A replacement whose normalized values equal the
+    stored values returns the unchanged projection and writes no outbox row and
+    no version bump, and a repeated delete is 404 and writes nothing. The
     implemented status-update fact is `party.party.updated`; there is no
     `party.party.status-updated` name, and the SPEC 11.1.9
-    `party.party.status-changed` name remains planned (M-22, M-55). The two
-    reference-data names have no SPEC 11.1.9 equivalent (M-22, M-54); the other
-    SPEC 11.1.9 names remain planned. There is no subscriber, inbox, or
+    `party.party.status-changed` name remains planned (M-22, M-55). The six
+    reference-data names have no SPEC 11.1.9 equivalent (M-22, M-54, M-58); the
+    other SPEC 11.1.9 names remain planned. There is no subscriber, inbox, or
     subscription registry yet.
 
 x-consumed-events:

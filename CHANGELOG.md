@@ -1981,6 +1981,54 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   the scope and validation evidence.
 - `python scripts/validate_contracts.py` passes 15,814 checks with 0 failures.
 
+### Added in the Party identifier and address maintenance contract (2026-10-22)
+
+- `openapi/party.yaml` is 1.4.0: adds
+  `PATCH/DELETE /api/v1/parties/{partyId}/identifiers/{identifierId}` and
+  `PATCH/DELETE /api/v1/parties/{partyId}/addresses/{addressId}`, their four
+  `/internal/v1` expert equivalents, and the `UpdatePartyIdentifierRequest` and
+  `UpdatePartyAddressRequest` full-replacement schemas. PATCH requires every
+  create-required member, treats an omitted or blank optional member as a
+  clear, returns the 200 projection, and is a 200 no-op with no version bump
+  and no event when the normalized values are unchanged; a real replacement
+  preserves `createdAt`/`createdBy`, bumps the Party row version, and writes
+  the matching `-updated` fact. DELETE hard-deletes the child, returns 204 with
+  no body, bumps the Party row version, and writes the matching `-deleted` fact
+  with the last stored snapshot; a repeated delete is 404. Both routes document
+  400/404/409; the identifier replacement duplicate is
+  `DUPLICATE_PARTY_IDENTIFIER` (implemented as the generic `CONFLICT`), the
+  canonical address replacement duplicate is `DUPLICATE_PARTY_ADDRESS`, and
+  the canonical delete guards are `PARTY_IDENTIFIER_IN_USE` and
+  `PARTY_ADDRESS_IN_USE`, neither of which the expert enforces. The routes set
+  no ETag and read no If-Match or Idempotency-Key. `x-compatibility` moves to
+  1.4.0 over 1.3.0.
+- `asyncapi/party.yaml` is 1.4.0: the implemented
+  `party.party.identifier-updated`, `.identifier-deleted`, `.address-updated`,
+  and `.address-deleted` channels and `send` operations, with the
+  `PartyIdentifierUpdatedData`, `PartyIdentifierDeletedData`,
+  `PartyAddressUpdatedData`, and `PartyAddressDeletedData` payloads. The update
+  payloads carry the ordered `changedFields` list and the `from`/`to`
+  snapshots; the delete payloads carry the last stored snapshot and the
+  original actor and instant. All four name `PartyEvents.java`; `eventVersion`
+  stays 1.
+- `asyncapi/event-catalog.yaml` is 1.37.0: all four names are published and
+  implemented, for 225 published and 106 implemented names (Party 15 published
+  and 8 implemented).
+- `scripts/validate_contracts.py` requires the eight maintenance operations
+  with the shared tenant parameters and the uuid child id path parameter, the
+  required replacement body and schema, the 200 projection, the 204 delete
+  without a body or 200, the 400/404/409 responses and the duplicate/in-use
+  codes, the full-replacement and no-op wording, the four implemented channels
+  with their payload-message references, the ordered `changedFields` enums, the
+  snapshot field sets, the deleted-snapshot members, the `IMPLEMENTED_EVENTS`
+  entries, and the catalog entries; it also rejects `PUT` on either child path.
+- `README.md` records the additive versions, routes and both edges, the
+  full-replacement and clearing rules, the no-op and hard-delete semantics, the
+  event payloads, the unenforced guards, and the validation count;
+  `MISMATCHES.md` adds M-58, updates M-01, M-06, M-07, M-14, M-22, and M-54,
+  and refreshes the scope and validation evidence.
+- `python scripts/validate_contracts.py` passes 16,329 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

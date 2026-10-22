@@ -2653,6 +2653,72 @@ Semantics:
   channel and its seven-member payload, the `IMPLEMENTED_EVENTS` entry, and the
   catalog entry. The full run passes 15,814 checks.
 
+### Party identifier and address maintenance (2026-10-22)
+
+Party 1.4.0 documents the replacement and delete commands for the identifier and
+address children. The change is additive: eight new operations (four public and
+four expert), two full-replacement request schemas, and four implemented event
+names; no existing path, request field, response field, or event name changes.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/party.yaml` | 1.4.0 | Additive | `PATCH/DELETE /api/v1/parties/{partyId}/identifiers/{identifierId}`, `PATCH/DELETE /api/v1/parties/{partyId}/addresses/{addressId}`, their `/internal/v1` expert equivalents, the `UpdatePartyIdentifierRequest`/`UpdatePartyAddressRequest` full-replacement schemas, the 200 projection, the 204 delete, and the 400/404/409 responses with the duplicate and in-use codes. |
+| `asyncapi/party.yaml` | 1.4.0 | Additive | The implemented `party.party.identifier-updated`, `.identifier-deleted`, `.address-updated`, and `.address-deleted` channels, `send` operations, and `PartyIdentifierUpdatedData`/`PartyIdentifierDeletedData`/`PartyAddressUpdatedData`/`PartyAddressDeletedData` payloads. |
+| `asyncapi/event-catalog.yaml` | 1.37.0 | Additive | All four names are published and implemented (225 published and 106 implemented in total; Party 15 published and 8 implemented). |
+
+Semantics:
+
+- `PATCH .../identifiers/{identifierId}` and `PATCH .../addresses/{addressId}`
+  are full replacements, not partial updates. Every create-required member is
+  required again on every request, and `issuingAuthority`/`effectiveDate` on an
+  identifier and `line2`/`stateRegion`/`effectiveDate` on an address are
+  optional on every request, so omitting or blanking one clears the stored
+  value. Normalization is identical to the create commands: the type is trimmed
+  and upper-cased, text is trimmed, and the country is stored as two upper-case
+  letters.
+- A replacement whose normalized values equal the stored values is a 200 no-op:
+  the unchanged projection is returned with no version bump and no event.
+  Otherwise the expert replaces only the mutable columns, preserves
+  `createdAt`/`createdBy`, increments the Party row version once, and writes
+  `party.party.identifier-updated` or `party.party.address-updated` with the
+  ordered `changedFields` list and the `from`/`to` snapshots in the same
+  transaction. The identifier changed-field order is `identifierType`,
+  `identifierValue`, `issuingAuthority`, `effectiveDate`; the address order is
+  `addressType`, `line1`, `line2`, `city`, `stateRegion`, `postalCode`,
+  `country`, `effectiveDate`.
+- `DELETE` hard-deletes the child and returns 204 with no body. The expert
+  snapshots the row first, bumps the Party row version, and writes
+  `party.party.identifier-deleted` or `party.party.address-deleted` with the
+  last stored snapshot and the original `createdBy`/`createdAt` in the same
+  transaction. A repeated delete is 404, not a 204.
+- The child lookup is scoped by tenant, party, and child id, so an unknown
+  child, a child of another party, another tenant's child, and an unknown party
+  are all 404 `NOT_FOUND`.
+- A replacement that would duplicate the normalized identifier key of another
+  row is 409 `DUPLICATE_PARTY_IDENTIFIER`. The expert currently returns the
+  generic `CONFLICT` code and the domain preserves it. The canonical address
+  replacement guard is 409 `DUPLICATE_PARTY_ADDRESS`, and the canonical delete
+  guards are 409 `PARTY_IDENTIFIER_IN_USE` and `PARTY_ADDRESS_IN_USE`; the
+  expert has neither an address uniqueness rule nor a reference check, so those
+  three statuses are agreed targets rather than current behaviour (M-54, M-58).
+- The maintenance routes set no `ETag` and read neither `If-Match` nor
+  `Idempotency-Key`; a retry of a real replacement applies again with a new
+  version and a retry of a delete is 404 (M-06, M-07, M-58). The lists remain
+  bare oldest-first arrays, and every route keeps the tenant wall and the
+  domain/expert `{code, message, details}` error bodies rather than the
+  canonical `Problem` (M-02, M-17).
+
+The validator requires the eight operations on both bases, the tenant and
+`partyId` parameters, the uuid child id parameter, the required replacement
+body with the `UpdatePartyIdentifierRequest`/`UpdatePartyAddressRequest`
+schemas, the 200 projection, the 204 delete without body or 200, the
+400/404/409 responses, the duplicate and in-use codes, the full-replacement and
+no-op wording, the four implemented channels and their payload-message
+references, the ordered `changedFields` enums, the `from`/`to` snapshot field
+sets, the deleted-snapshot members, the `IMPLEMENTED_EVENTS` entries, and the
+catalog entries. It also rejects a `PUT` on either child path. The full run
+passes 16,329 checks.
+
 ### Compatibility matrix
 
 | Change | Classification | Requirement |
@@ -2885,18 +2951,22 @@ Rules:
 
 ### Party identifiers and addresses
 
-Party identifiers (`party_identifier`) and addresses (`party_address`) are
-append-only child records of the Party aggregate (SPEC 11.1.4). The public
-domain and the expert both serve them; the domain forwards the tenant and the
-caller's command body to the expert, which owns the type vocabulary, the
-normalization, the identifier duplicate detection, and the tenant wall.
+Party identifiers (`party_identifier`) and addresses (`party_address`) are child
+records of the Party aggregate (SPEC 11.1.4). The public domain and the expert
+both serve them; the domain forwards the tenant and the caller's command body to
+the expert, which owns the type vocabulary, the normalization, the identifier
+duplicate detection, and the tenant wall.
 
 | Operation | Public path | Expert path | Success | Errors |
 |---|---|---|---|---|
 | List identifiers | `GET /api/v1/parties/{partyId}/identifiers` | `GET /internal/v1/parties/{partyId}/identifiers` | 200 `PartyIdentifier[]` | 400, 404 |
 | Add identifier | `POST /api/v1/parties/{partyId}/identifiers` | `POST /internal/v1/parties/{partyId}/identifiers` | 201 `PartyIdentifier` | 400, 404, 409 |
+| Replace identifier | `PATCH /api/v1/parties/{partyId}/identifiers/{identifierId}` | `PATCH /internal/v1/parties/{partyId}/identifiers/{identifierId}` | 200 `PartyIdentifier` | 400, 404, 409 |
+| Delete identifier | `DELETE /api/v1/parties/{partyId}/identifiers/{identifierId}` | `DELETE /internal/v1/parties/{partyId}/identifiers/{identifierId}` | 204 | 400, 404, 409 |
 | List addresses | `GET /api/v1/parties/{partyId}/addresses` | `GET /internal/v1/parties/{partyId}/addresses` | 200 `PartyAddress[]` | 400, 404 |
 | Add address | `POST /api/v1/parties/{partyId}/addresses` | `POST /internal/v1/parties/{partyId}/addresses` | 201 `PartyAddress` | 400, 404, 409 |
+| Replace address | `PATCH /api/v1/parties/{partyId}/addresses/{addressId}` | `PATCH /internal/v1/parties/{partyId}/addresses/{addressId}` | 200 `PartyAddress` | 400, 404, 409 |
+| Delete address | `DELETE /api/v1/parties/{partyId}/addresses/{addressId}` | `DELETE /internal/v1/parties/{partyId}/addresses/{addressId}` | 204 | 400, 404, 409 |
 
 Shapes:
 
@@ -2904,13 +2974,16 @@ Shapes:
   identifierValue, issuingAuthority?, effectiveDate?, createdAt, createdBy}`.
   `issuingAuthority` and `effectiveDate` are optional; the public domain omits a
   null member and the expert serializes it.
-- `CreatePartyIdentifierRequest` is `{identifierType, identifierValue,
-  issuingAuthority?, effectiveDate?}`.
+- `CreatePartyIdentifierRequest` and `UpdatePartyIdentifierRequest` are
+  `{identifierType, identifierValue, issuingAuthority?, effectiveDate?}`. The
+  update schema is a full replacement: the optional members are still supplied
+  on every request and omitting one clears the stored value.
 - `PartyAddress` is `{id, tenantId, partyId, addressType, line1, line2?, city,
   stateRegion?, postalCode, country, effectiveDate?, createdAt, createdBy}`.
   `line2`, `stateRegion`, and `effectiveDate` are optional in the same sense.
-- `CreatePartyAddressRequest` is `{addressType, line1, line2?, city,
-  stateRegion?, postalCode, country, effectiveDate?}`.
+- `CreatePartyAddressRequest` and `UpdatePartyAddressRequest` are `{addressType,
+  line1, line2?, city, stateRegion?, postalCode, country, effectiveDate?}` with
+  the same full-replacement rule.
 - `PartyIdentifierType` is the closed 21-value set: `TAX_ID`, `REGISTRATION`,
   `LICENSE`, `TIN`, `EIN`, `SSN`, `ITIN`, `DUNS`, `LEI`, `PASSPORT`,
   `DRIVER_LICENSE`, `STATE_ID`, `MEDICARE_ID`, `MEDICAID_ID`, `NPI`,
@@ -2928,29 +3001,50 @@ Rules:
   `line2` at 128, `city` at 64, `stateRegion` at 64, and `postalCode` at 16.
   `stateRegion` keeps its case; `country` accepts either case and is stored as
   two upper-case letters (ISO 3166-1 alpha-2).
+- A replacement is a full replacement, not a merge. Every create-required member
+  is required again, and an omitted or blank `issuingAuthority`, `effectiveDate`,
+  `line2`, or `stateRegion` clears the stored value. The replacement preserves
+  `createdAt` and `createdBy`; those members are never accepted.
+- A replacement whose normalized values equal the stored values is a 200 no-op:
+  the unchanged projection is returned with no version bump and no event.
 - The identifier unique key is the normalized `(tenantId, partyId,
-  identifierType, identifierValue)`, so a duplicate is 409. The canonical code
-  is `DUPLICATE_PARTY_IDENTIFIER`; the expert currently returns the generic
-  `CONFLICT` code and the domain preserves it (M-54).
+  identifierType, identifierValue)`, so a create or a replacement that would
+  duplicate it is 409. The canonical code is `DUPLICATE_PARTY_IDENTIFIER`; the
+  expert currently returns the generic `CONFLICT` code and the domain preserves
+  it (M-54, M-58).
 - Addresses have no uniqueness rule in the implemented expert: a party may hold
-  several addresses of the same type. The canonical contract documents a 409
-  `DUPLICATE_PARTY_ADDRESS` guard for a repeat of the same normalized address;
-  that guard is the agreed target and is not enforced yet (M-54).
-- An unknown party and another tenant's party are both 404, so the response
-  cannot confirm a foreign record. The public routes require `X-EIA-Tenant`; the
-  expert also accepts `?tenantId=` and rejects a mismatch or a missing tenant
-  with 400.
+  several addresses of the same type, including after a replacement. The
+  canonical contract documents a 409 `DUPLICATE_PARTY_ADDRESS` guard for a
+  repeat of the same normalized address; that guard is the agreed target and is
+  not enforced yet (M-54, M-58).
+- An unknown party, an unknown child, and another tenant's record are all 404,
+  so the response cannot confirm a foreign record. The public routes require
+  `X-EIA-Tenant`; the expert also accepts `?tenantId=` and rejects a mismatch or
+  a missing tenant with 400.
 - Adding one child bumps the Party row version and writes
   `party.party.identifier-added` or `party.party.address-added` in the same
   transaction as the child insert, so a rejected duplicate leaves no row, no
   version bump, and no event. The payload carries the Party identity and row
   `version`, the child id and normalized values, and `createdBy`/`createdAt`;
   the envelope `aggregateVersion` is the row version plus one.
+- A real replacement bumps the Party row version and writes
+  `party.party.identifier-updated` or `party.party.address-updated` in the same
+  transaction, with the ordered `changedFields` list and the `from`/`to`
+  snapshots. A delete hard-deletes the row, bumps the Party row version, and
+  writes `party.party.identifier-deleted` or `party.party.address-deleted` with
+  the last stored snapshot and the new `version`; a repeated delete is 404. The
+  delete 409 codes `PARTY_IDENTIFIER_IN_USE` and `PARTY_ADDRESS_IN_USE` are
+  canonical guards that the expert does not enforce yet (M-58).
+- The maintenance routes set no `ETag` and read neither `If-Match` nor
+  `Idempotency-Key`, so a retry of a real replacement applies again with a new
+  version (M-06, M-07, M-58).
 - Both lists are bare arrays ordered by `createdAt`, then `id` (oldest first),
   not the SPEC cursor envelope (M-04). The SPEC 11.1.10 route table has no
-  reference-data route and SPEC 11.1.9 publishes neither event; M-54 records the
-  wider type sets, the plaintext identifier value versus the SPEC encrypted
-  column, the alpha-2 versus alpha-3 country, and the missing address dedup key.
+  reference-data route and SPEC 11.1.9 publishes none of the six child events;
+  M-54 records the wider type sets, the plaintext identifier value versus the
+  SPEC encrypted column, the alpha-2 versus alpha-3 country, and the missing
+  address dedup key. M-58 records the maintenance slice, the full-replacement
+  clearing rule, the no-op, the hard delete, and the unenforced guards.
 
 ### Party status transitions
 
@@ -4096,10 +4190,16 @@ missing directory.
    the 200/201/400/404/409 responses with `DUPLICATE_PARTY_IDENTIFIER` and
    `DUPLICATE_PARTY_ADDRESS`, the exact 21-value `PartyIdentifierType` and
    11-value `PartyAddressType` enums, the `PartyIdentifier`, `PartyAddress`,
-   `CreatePartyIdentifierRequest`, and `CreatePartyAddressRequest` field sets
+   `CreatePartyIdentifierRequest`, `CreatePartyAddressRequest`,
+   `UpdatePartyIdentifierRequest`, and `UpdatePartyAddressRequest` field sets
    and bounds, the nullable `issuingAuthority`, `effectiveDate`, `line2`, and
    `stateRegion` members, the identifier-value and country patterns, and the
-   documented address 409 target. It also requires the
+   documented address 409 target. It also requires the identifier and address
+   PATCH and DELETE operations on both bases, the required replacement body,
+   the uuid child id path parameter, the 200 projection and 204 delete, the
+   full-replacement and no-op wording, the emitted updated and deleted facts,
+   the `PARTY_IDENTIFIER_IN_USE` and `PARTY_ADDRESS_IN_USE` delete codes, and
+   the absence of PUT and of a DELETE request body. It also requires the
    Notifications `NotificationType` member `DUNNING_NOTICE`, its position
    between `ESCHEATMENT_DUE` and `NEW_DOCUMENT_UPLOAD`, no repeated enum value,
    and the `NotificationType` reference on the `Notification` projection and on
@@ -4194,7 +4294,12 @@ missing directory.
    the `PartyIdentifierAddedData` and `PartyAddressAddedData` payloads with
    their Party identity and row version, child id, normalized type and values,
    optional authority, effective date, second line, and region, country, actor,
-   and instant members, and the `PartyStatusUpdatedData` payload with its Party
+   and instant members, the `PartyIdentifierUpdatedData` and
+   `PartyAddressUpdatedData` payloads with their ordered `changedFields` list
+   and `from`/`to` snapshots, the `PartyIdentifierDeletedData` and
+   `PartyAddressDeletedData` payloads with their last stored snapshot and
+   original actor and instant, and the `PartyStatusUpdatedData` payload with its
+   Party
    identity, exact `[status]` changed-field list, row version, eight-value
    `from`/`to` pair, and optional 500-character reason. It also requires the
    implemented `party.party.updated` channel, keeps the SPEC
@@ -4213,7 +4318,11 @@ missing directory.
    `party.party.created`, `party.party.updated` (the implemented status-update
    fact),
    `party.party.identifier-added`,
+   `party.party.identifier-updated`,
+   `party.party.identifier-deleted`,
    `party.party.address-added`,
+   `party.party.address-updated`,
+   `party.party.address-deleted`,
    `direct.claim.assigned`,
    `direct.claim.allocation-created`, `direct.claim.settlement-payment-linked`,
    `direct.claim.litigation-created`, `direct.claim.litigation-updated`,
@@ -4298,7 +4407,7 @@ missing directory.
   the Direct Claims and Assumed Claims task/note creates; the remaining vertical
   creates do not accept it, the claim task/note responses spell the marker
   `Idempotent-Replay`, and the Direct Claims reservation has a narrow concurrent
-  first-attempt race (M-06, M-07, M-55). Detail `_links` exist nowhere, and
+  first-attempt race (M-06, M-07, M-55, M-58). Detail `_links` exist nowhere, and
   Cession/Retrocession still return 400 for an illegal lifecycle edge;
 - the Cession/Retrocession FS-RI hand-off is synchronous, with no hand-off
   queue or hand-off resource (SPEC 7.18.3/HAND-05);
@@ -4541,13 +4650,15 @@ missing directory.
   The slice has no cash-call limit or `cash_call_allowed` term check, no
   contract-window or contract-currency reconciliation, and no claim or Payment
   link; the domain also accepts an absent `X-EIA-Book` (M-22, M-34);
-- Party identifiers and addresses are append-only child routes with no SPEC
-  11.1.10 route and no SPEC 11.1.9 event. The enforced identifier vocabulary
+- Party identifiers and addresses are child routes with no SPEC 11.1.10 route
+  and no SPEC 11.1.9 event. The enforced identifier vocabulary
   adds `TAX_ID`, `REGISTRATION`, `LICENSE`, and `OTHER` beyond SPEC 11.1.4 and
   the address vocabulary adds `PRIMARY`; the identifier value is stored
   plaintext rather than encrypted, the country is alpha-2 rather than alpha-3,
   both lists are bare arrays, and the documented address duplicate guard is not
-  implemented (M-22, M-54);
+  implemented. A replacement is a full replacement that clears an omitted
+  optional member and is a no-op when nothing changes, and a delete is a hard
+  delete whose canonical in-use 409 guards are not enforced (M-22, M-54, M-58);
 - party lifecycle status is changed by a SPEC-less
   `PATCH /api/v1/parties/{partyId}/status` command that accepts all eight
   `PartyStatus` values from every current status. There is no transition graph,

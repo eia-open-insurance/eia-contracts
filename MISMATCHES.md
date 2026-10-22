@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-22 (Policy rating worksheets).
+Status: open, reviewed 2026-10-22 (Party identifier and address maintenance).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -169,6 +169,13 @@ where the running code does not meet it yet.
   status request, party record, repository, `PartyEvents`, `schema.sql`, the
   expert `ApiExceptionHandler`, and the domain and expert status and outbox
   tests.
+  The Party maintenance pass re-reads the domain identifier and address
+  controllers, DTOs, client, and exception handler and the expert shared
+  reference-data controller, service, `UpdatePartyIdentifierRequest`,
+  `UpdatePartyAddressRequest`, `PartyChildNotFoundException`, both repositories,
+  `PartyEvents`, `schema.sql`, `ApiExceptionHandler`, and the domain and expert
+  update/delete tests, negatives, version bumps, no-ops, and outbox
+  assertions.
   The Notifications delivery-attempt pass reads the domain attempts controller,
   service, expert client, delivery-attempt projection, and exception handling
   plus the expert attempts controller, service, attempt record and repository,
@@ -264,6 +271,7 @@ removed per the resolution policy.
 | M-55 | Party status transitions are a SPEC-less command with no transition graph, no status history, event-only reason, and unenforced concurrency/idempotency headers | M |
 | M-56 | Notification delivery attempts use a SPEC-less per-notification route, a narrower delivery row than SPEC 11.8.4, notification-level evidence, and a simulator-only provider with no retry | L |
 | M-57 | Policy rating worksheets are a SPEC-less policy-scoped route and event with only two rating methods, a CALCULATED-only worksheet, and no submission/product, exposure-line, factor-trace, tax, or fee model | L |
+| M-58 | Party identifier and address maintenance adds SPEC-less PATCH/DELETE child routes with full replacement, a no-op update, a hard delete, and unenforced duplicate/in-use guards and concurrency headers | M |
 
 ## M-01 Public base paths
 
@@ -304,7 +312,11 @@ not list; its tenant-wide delivery diagnostics and retry command remain planned
 (M-56). Policy rating adds a command and read row: the implemented
 `POST/GET /api/v1/policies/{policyId}/rating` has no SPEC 11.2.10 route; SPEC
 11.2.14 mounts rating under `/api/v1/policy/submissions/{submissionId}/rating`
-and names no standalone worksheet read (M-57).
+and names no standalone worksheet read (M-57). Party identifier and address
+maintenance adds no base-path row: the implemented
+`PATCH/DELETE /api/v1/parties/{partyId}/identifiers/{identifierId}` and
+`PATCH/DELETE /api/v1/parties/{partyId}/addresses/{addressId}` routes live under
+the already-short Party base and have no SPEC 11.1.10 equivalent (M-58).
 
 The ten global-search routes follow the same shorter form
 (`/api/v1/{resource}/search`); their SPEC naming gap and validation differences
@@ -492,6 +504,7 @@ Policy now implements the SPEC 12.6 concurrency mechanism:
 | Policy public rating | Accepts optional `If-Match` and compares it before any write; the applied 201 returns the refreshed policy `ETag`, while a calculation-only 201 has no `ETag`; a stale tag is 409 `CONCURRENT_MODIFICATION` |
 | Policy public mass tort profile | No `ETag`/`If-Match`; a concurrent profile or policy change is 409 `CONCURRENT_MODIFICATION` |
 | Party public PATCH status | Returns `ETag: "<version>"`; accepts optional `If-Match` and `Idempotency-Key`, forwards both, but the expert compares neither, so a stale tag is not a 409 and a retry is not replayed |
+| Party public child PATCH/DELETE | No `ETag`/`If-Match`; a replacement and a delete are unconditional once the party and child resolve, and a concurrent change is last-write-wins |
 | Policy expert GET/create/PATCH | Same ETag and If-Match behaviour as the public service |
 | Contract public PATCH | Required `expectedVersion` body field; no ETag |
 | Contract public bind and commutation | Required `expectedVersion` on bind; the commutation has no caller-supplied version |
@@ -530,6 +543,12 @@ Policy nuances:
   same-status request is the only deduplicated retry and a different status on a
   retry applies again with a new version. The contract documents the headers and
   the missing 409 to keep that gap visible (M-55).
+- The Party child maintenance routes accept no `If-Match` and return no `ETag`.
+  The domain forwards the tenant and body and preserves an expert 409, but the
+  expert raises 409 only for a duplicate identifier (and would for the canonical
+  address and in-use guards). A lost update is not detected, so two concurrent
+  replacements both apply and the later one wins with its own version bump
+  (M-58).
 
 Evidence:
 
@@ -627,6 +646,9 @@ Residual differences:
   premium replacement (M-57). The Party status command also
   accepts and forwards an optional key, but the expert status route does not
   read it; a repeated non-no-op request applies the transition again (M-55). The
+  Party child maintenance routes accept no key: a repeated real replacement
+  applies again with a new version (a same-value request is the only no-op) and
+  a repeated delete is 404, so neither path is a replay (M-58). The
   domain's shared mutation
   helper still emits
   `Idempotent-Replayed: false` on the renewal 201 even though no key is
@@ -884,7 +906,7 @@ ten publishing verticals now emit a subset:
 
 | Vertical | Implemented event names | Source |
 |---|---|---|
-| Party | `party.party.created`, `party.party.updated`, `party.party.identifier-added`, `party.party.address-added` | `repos/eia-party-expert/.../PartyEvents.java` |
+| Party | `party.party.created`, `party.party.updated`, `party.party.identifier-added`, `party.party.identifier-updated`, `party.party.identifier-deleted`, `party.party.address-added`, `party.party.address-updated`, `party.party.address-deleted` | `repos/eia-party-expert/.../PartyEvents.java` |
 | Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.billing-plan.created`, `policy.installment.paid`, `policy.installment.waived`, `policy.dunning.sent`, `policy.mass-tort-profile.updated`, `policy.program.created`, `policy.policy.program-assigned`, `policy.credit-note.created`, `policy.credit-note.issued`, `policy.credit-note.applied`, `policy.credit-note.cancelled`, `policy.credit-note.reversed`, `policy.legal-entity.created`, `policy.policy.legal-entity-assigned` | `repos/eia-policy-expert/.../PolicyEvents.java` |
 | Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded`, `contract.technical-account.created`, `contract.technical-account.issued`, `contract.technical-account.settled`, `contract.technical-account.line-added`, `contract.technical-account.line-removed`, `contract.bordereau.received`, `contract.bordereau.processed`, `contract.bordereau.failed`, `contract.cash-call.requested`, `contract.cash-call.issued`, `contract.cash-call.settled`, `contract.cash-call.cancelled`, `contract.security.recorded`, `contract.security.status-changed` | `repos/eia-contract-expert/.../ContractEvents.java` |
 | Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.assigned`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.settlement-payment-linked`, `direct.claim.closed`, `direct.claim.task-created`, `direct.claim.task-completed`, `direct.claim.task-updated`, `direct.claim.note-added`, `direct.claim.allocation-created` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
@@ -918,14 +940,22 @@ fields, the released amount, the required reason, and the reversal instant.
 Neither bumps the payment row version, and a repeat reversal writes no event.
 Both names have no SPEC 11.7.10 equivalent (M-22, M-35).
 
-The two Party reference-data facts are child facts of the Party aggregate.
+The six Party reference-data facts are child facts of the Party aggregate.
 `PartyEvents.identifierAdded` and `PartyEvents.addressAdded` write one outbox
 row per appended child in the same transaction as the child insert and the
 Party row version bump, keyed by the party id at the bumped aggregate version,
 with the child id, the normalized values, and the actor and instant in the
-payload. The payload `version` is the bumped Party row version and the envelope
+payload. `PartyEvents.identifierUpdated` and `PartyEvents.addressUpdated` write
+one row per real replacement in the same transaction as the child update and
+bump, with the ordered `changedFields` list and the `from`/`to` snapshots; a
+replacement whose normalized values equal the stored values writes no row and
+does not bump the Party. `PartyEvents.identifierDeleted` and
+`PartyEvents.addressDeleted` write one row per hard delete in the same
+transaction as the row delete and bump, with the last stored snapshot and the
+original `createdBy`/`createdAt`; a repeated delete is 404 and writes nothing.
+The payload `version` is the bumped Party row version and the envelope
 `aggregateVersion` is that value plus one, matching the existing Party
-convention. The two names have no SPEC 11.1.9 equivalent (M-22, M-54).
+convention. The six names have no SPEC 11.1.9 equivalent (M-22, M-54, M-58).
 
 The Document expert's link writes append `document.link.added` or
 `document.link.removed` from `DocumentLinkEvents.java` in the same transaction
@@ -1144,7 +1174,7 @@ tables. The differences are:
 | Vertical | Implemented | SPEC /
 planned name |
 |---|---|---|
-| Party | `party.party.identifier-added` / `party.party.address-added`; `party.party.updated` for a status change | No SPEC 11.1.9 name for the reference-data facts: SPEC publishes the party lifecycle, role, screening, and consent facts but no fact for an appended identifier or address, so both names are new (M-54). `created` and `updated` match SPEC. A status change reuses the generic `party.party.updated` name with `changedFields: [status]` instead of publishing SPEC 11.1.9's dedicated `party.party.status-changed`, which remains planned; `party.party.status-updated` is not an emitted name (M-55). |
+| Party | `party.party.identifier-added` / `.identifier-updated` / `.identifier-deleted` / `party.party.address-added` / `.address-updated` / `.address-deleted`; `party.party.updated` for a status change | No SPEC 11.1.9 name for the reference-data facts: SPEC publishes the party lifecycle, role, screening, and consent facts but no fact for an added, replaced, or deleted identifier or address, so all six names are new (M-54, M-58). `created` and `updated` match SPEC. A status change reuses the generic `party.party.updated` name with `changedFields: [status]` instead of publishing SPEC 11.1.9's dedicated `party.party.status-changed`, which remains planned; `party.party.status-updated` is not an emitted name (M-55). |
 | Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created` / `.adjusted`; `policy.installment.paid` / `.waived`; `policy.dunning.sent`; `policy.program.created` / `policy.policy.program-assigned`; `policy.credit-note.created` / `.issued` / `.applied` / `.cancelled` / `.reversed`; `policy.legal-entity.created` / `policy.policy.legal-entity-assigned`; `policy.policy.premium-audited`; `policy.policy.rated` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name; the positive premium adjustment fact has no SPEC 11.2.13 name either (M-51); the dunning fact differs from SPEC 11.2.13 `policy.billing.dunning-changed`; the two program facts have no SPEC name because SPEC defines no program create or policy-assignment event. SPEC 11.2.13 publishes only `policy.billing.credit-note-issued` and defines no created, applied, cancelled, or reversed fact, so all five credit-note names are new (M-41). The two legal-entity facts are new because SPEC 10.11.2/11.2.16 define the model and link but SPEC 11.2.9 names no catalog-create or assignment event (M-43). The premium-audit fact differs from SPEC 11.2.9 `policy.premium.audited`, which remains planned (M-50). The rating fact has no SPEC 11.2.9 or 11.2.14 equivalent: SPEC models rating under a submission-scoped worksheet and publishes no rating event, so the policy-scoped name is new (M-57). `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
 | Contract | `contract.contract.updated`; `contract.technical-account.created` / `.issued` / `.settled`; `contract.bordereau.processed` / `.failed`; `contract.security.status-changed` | No SPEC name for updated, the technical-account facts, the two terminal bordereau facts, or the security status fact: SPEC 11.3.9 lists lifecycle verbs, the contract-level `contract.account.issued` / `.agreed` facts, `contract.bordereau.posted` / `.rejected`, and only the `contract.security.recorded` / `.breached` security facts. `created`, `bound`, `commuted`, `cession.recorded`, `contract.bordereau.received`, and `contract.security.recorded` match SPEC. |
 | Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned`; `direct.claim.allocation-created`; `direct.claim.settlement-payment-linked`; `direct.claim.litigation-created` | No SPEC names: SPEC 11.4.9 defines no assignment, task, note, allocation-created, settlement-payment-link, or matter-creation event; it names the allocation fact `direct.claim.allocated`, which remains planned, and models the settlement `payment_id` only as a Payment projection (M-45). SPEC 11.4.4 also defines no litigation damages pair (M-52). `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `litigation-updated`, `settlement-authorized`, and `closed` match SPEC. |
@@ -1163,8 +1193,8 @@ implemented name is breaking and needs the EV-05 dual-publish window.
 
 Evidence:
 
-- `repos/eia-party-expert/.../PartyEvents.java:27-28,66-112` (reference-data
-  names, payloads, and aggregate version)
+- `repos/eia-party-expert/.../PartyEvents.java:25-32,70-207` (reference-data
+  names, update snapshots, delete snapshots, and aggregate version)
 - `repos/eia-policy-expert/.../PolicyEvents.java:37-56,98-169` (policy, billing,
   dunning, mass tort, program, credit-note creation, credit-note-transition,
   premium-audit, and rating names)
@@ -3756,27 +3786,30 @@ keeping the exact-pair rule.
 
 ## M-54 Party identifiers and addresses are SPEC-less child routes
 
-Party identifiers and addresses are implemented as append-only child facts of
-the Party aggregate. The same four operations are served on the public base and
-on the `/internal/v1` expert base (the domain forwards to the expert), and each
-append bumps the Party row version and writes
-`party.party.identifier-added` or `party.party.address-added` in the same
-transaction.
+Party identifiers and addresses are implemented as child facts of
+the Party aggregate. The same eight operations are served on the public base and
+on the `/internal/v1` expert base (the domain forwards to the expert). An add, a
+real replacement, or a delete bumps the Party row version and writes the
+matching child fact in the same transaction; a replacement with no normalized
+change is a 200 no-op with no bump and no event (M-58).
 
 | Aspect | Implemented | SPEC 11.1.4 / 11.1.10 |
 |---|---|---|
-| Public routes | `GET/POST /api/v1/parties/{partyId}/identifiers`, `GET/POST /api/v1/parties/{partyId}/addresses` | No route: SPEC 11.1.10 lists the party, role, relationship, screening, consent, document, lineage, match, and audit routes only |
-| Expert routes | the same four operations under `/internal/v1/parties/{partyId}/...` | No internal reference-data route in SPEC 11.1.10 |
+| Public routes | `GET/POST/PATCH/DELETE /api/v1/parties/{partyId}/identifiers` and `.../identifiers/{identifierId}`, `GET/POST/PATCH/DELETE /api/v1/parties/{partyId}/addresses` and `.../addresses/{addressId}` | No route: SPEC 11.1.10 lists the party, role, relationship, screening, consent, document, lineage, match, and audit routes only |
+| Expert routes | the same eight operations under `/internal/v1/parties/{partyId}/...` | No internal reference-data route in SPEC 11.1.10 |
 | Identifier types | 21 values: `TAX_ID`, `REGISTRATION`, `LICENSE`, `TIN`, `EIN`, `SSN`, `ITIN`, `DUNS`, `LEI`, `PASSPORT`, `DRIVER_LICENSE`, `STATE_ID`, `MEDICARE_ID`, `MEDICAID_ID`, `NPI`, `BAR_NUMBER`, `ACORD_PARTY_ID`, `ISO_PARTY_ID`, `TRUST_CLAIM_NUMBER`, `BANKRUPTCY_CASE_NUMBER`, `OTHER` | 17 values; no `TAX_ID`, `REGISTRATION`, `LICENSE`, or `OTHER` |
 | Address types | 11 values: `PRIMARY`, `LEGAL`, `PHYSICAL`, `MAILING`, `BILLING`, `CLAIM_SITE`, `EXPOSURE_SITE`, `EMPLOYER`, `PROVIDER`, `BANK`, `OTHER` | 10 values; no `PRIMARY` |
 | Identifier value | plaintext `identifier_value varchar(128)` returned on the projection | `identifier_value_encrypted bytea` plus an `identifier_last4 char(4)` display projection |
 | Identifier coverage | type, value, issuing authority, effective date | adds `issuing_country`, `effective_from`/`effective_to`, `verified_flag`, `verified_at`, and `verification_source` |
 | Address coverage | type, line1/line2, city, stateRegion, postalCode, country (alpha-2), effective date | adds `line3`, `district`, `region`, `region_code`, latitude/longitude, `geocode_accuracy`, `effective_from`/`effective_to`, `direct_flag`, `validated_flag`, and `normalized_hash` |
 | Country | two-letter ISO 3166-1 alpha-2, normalized upper-case | `char(3)` ISO 3166-1 alpha-3 |
-| Identifier duplicate | 409 on the unique `(tenant, party, type, value)` key | No explicit unique key in SPEC 11.1.4; the implemented key is scoped to one party and identifier type |
+| Identifier duplicate | 409 on the unique `(tenant, party, type, value)` key, checked on create and on a key-changing replacement | No explicit unique key in SPEC 11.1.4; the implemented key is scoped to one party and identifier type |
 | Address duplicate | no uniqueness rule; a party may hold several addresses of the same type | `normalized_hash` is the SPEC dedup key |
+| Update semantics | PATCH is a full replacement: every create-required member is required again and an omitted/blank optional member clears the stored value; an unchanged normalized value is a 200 no-op | SPEC defines no child update route or body; the flat clear-on-omit rule is an implementation choice (M-58) |
+| Delete semantics | hard delete with 204 and no body; the row is gone, a repeat delete is 404, and the event carries the last snapshot | SPEC defines no child delete route and no child fact |
+| Concurrency / idempotency | no `ETag`, `If-Match`, or `Idempotency-Key` on either maintenance route; a lost update is last-write-wins | SPEC 12.6 requires `If-Match`/`Idempotency-Key` on transaction submission |
 | List shape | bare array, oldest first (`created_at`, `id`) | the SPEC list conventions are cursor-paged (M-04) |
-| Events | `party.party.identifier-added`, `party.party.address-added` | SPEC 11.1.9 publishes neither fact |
+| Events | `party.party.identifier-added`, `.identifier-updated`, `.identifier-deleted`, `party.party.address-added`, `.address-updated`, `.address-deleted` | SPEC 11.1.9 publishes none of the six child facts |
 | Error envelope | expert `{code, message}`; domain `{code, message, details}`; `application/json` | canonical `Problem` with `application/problem+json` (M-02, M-17) |
 
 Additional differences:
@@ -3786,14 +3819,25 @@ Additional differences:
   domain preserves the expert code, so a client that branches on the code sees
   `CONFLICT` today.
 - The contract documents a 409 `DUPLICATE_PARTY_ADDRESS` guard for a repeat of
-  the same normalized address. The expert implements no address uniqueness
-  check and accepts the repeat; the status is the agreed target, not current
-  behaviour.
+  the same normalized address, including on a replacement. The expert implements
+  no address uniqueness check and accepts the repeat; the status is the agreed
+  target, not current behaviour.
+- The contract documents 409 `PARTY_IDENTIFIER_IN_USE` and
+  `PARTY_ADDRESS_IN_USE` guards for a delete of a still-referenced child. The
+  expert has no reference check and hard-deletes any row it finds, so both
+  statuses are agreed targets, not current behaviour. The domain test doubles
+  preserve such a 409 if the expert ever returns one.
+- A replacement is a full replacement, not a merge: omitting or blanking
+  `issuingAuthority`, `effectiveDate`, `line2`, or `stateRegion` clears the
+  stored value, `createdAt`/`createdBy` are immutable, and a same-value request
+  returns the unchanged projection without a version bump or event (M-58).
+- A delete hard-deletes the row rather than stamping a `record_state` or
+  end-dating a temporal row; the last snapshot survives only in the event.
 - The public domain requires `X-EIA-Tenant` and reports its absence as 400
   `TENANT_REQUIRED`. The expert accepts `?tenantId=` or `X-EIA-Tenant`,
   requires one of them (400 `VALIDATION_ERROR`), and rejects a mismatch with
   400 `VALIDATION_ERROR`. The domain sends both with the same value.
-- `createdBy` is hard-coded to `system`; there is no caller identity on either
+- `createdBy` is hard-coded to `system`; there is no caller identity on any
   route, so the actor is not attributable (M-20).
 - The expert README still lists five identifier types (`TAX_ID`,
   `REGISTRATION`, `LICENSE`, `PASSPORT`, `OTHER`) and four address types
@@ -3803,36 +3847,47 @@ Additional differences:
 
 Evidence:
 
-- `repos/eia-party-domain/.../PartyIdentifierController.java:22-46`,
-  `PartyAddressController.java:22-46` (public routes, header-only tenant, 201)
+- `repos/eia-party-domain/.../PartyIdentifierController.java:22-79`,
+  `PartyAddressController.java:22-79` (public routes, header-only tenant, 201,
+  200 replacement, 204 delete)
 - `repos/eia-party-domain/.../PartyIdentifierDto.java`,
   `PartyAddressDto.java` (NON_NULL projection)
-- `repos/eia-party-domain/.../PartyClient.java:79-186` (tenant forwarding and
-  404/409/4xx mapping)
+- `repos/eia-party-domain/.../PartyClient.java:79-330` (tenant forwarding,
+  update/delete calls, and 404/409/4xx mapping)
 - `repos/eia-party-domain/.../ApiExceptionHandler.java:18-53`
-- `repos/eia-party-expert/.../PartyReferenceDataController.java:20-77` (dual
-  base and tenant resolution)
-- `repos/eia-party-expert/.../PartyReferenceDataService.java:24-163` (type
-  sets, country normalization, identifier conflict, version bump, outbox)
-- `repos/eia-party-expert/.../PartyIdentifierRepository.java:38-56` and
-  `PartyAddressRepository.java:40-48` (oldest-first reads; the address table
-  has no unique key)
+- `repos/eia-party-expert/.../PartyReferenceDataController.java:26-104` (dual
+  base, tenant resolution, and the eight operations)
+- `repos/eia-party-expert/.../PartyReferenceDataService.java:24-289` (type
+  sets, country normalization, identifier conflict, update/delete, no-op,
+  version bump, outbox)
+- `repos/eia-party-expert/.../UpdatePartyIdentifierRequest.java`,
+  `UpdatePartyAddressRequest.java` (full-replacement bodies)
+- `repos/eia-party-expert/.../PartyChildNotFoundException.java` (child-scoped
+  404)
+- `repos/eia-party-expert/.../PartyIdentifierRepository.java:38-127` and
+  `PartyAddressRepository.java:40-102` (oldest-first reads, update, delete; the
+  address table has no unique key)
 - `repos/eia-party-expert/.../schema.sql:21-59` (`party_identifier` unique key,
   plaintext value, `char(2)` country)
-- `repos/eia-party-expert/.../PartyEvents.java:27-28,66-112`
-- `repos/eia-party-expert/src/test/java/com/eia/party/expert/PartyReferenceDataApiTest.java:101-131,190-301`
-  (validation, duplicate 409, country normalization, tenant wall)
-- `repos/eia-party-expert/src/test/java/com/eia/party/expert/PartyReferenceDataOutboxIntegrationTest.java:61-232`
-  (event per append, transaction rollback, monotonic versions)
-- `repos/eia-party-domain/src/test/java/com/eia/party/domain/PartyIdentifierControllerTest.java:90-150`
-  and `PartyAddressControllerTest.java:91-140` (tenant-required, 404, 409, 400)
+- `repos/eia-party-expert/.../PartyEvents.java:25-32,70-207`
+- `repos/eia-party-expert/src/test/java/com/eia/party/expert/PartyReferenceDataApiTest.java:101-131,190-529`
+  (validation, duplicate 409, country normalization, tenant wall, update/delete,
+  no-op, child 404)
+- `repos/eia-party-expert/src/test/java/com/eia/party/expert/PartyReferenceDataOutboxIntegrationTest.java:61-360`
+  (event per append/replacement/delete, no-op, transaction rollback, monotonic
+  versions, delete snapshot)
+- `repos/eia-party-domain/src/test/java/com/eia/party/domain/PartyIdentifierControllerTest.java:90-340`
+  and `PartyAddressControllerTest.java:91-295` (tenant-required, 404, 409, 400,
+  update body forwarding, delete 204, delete 409 preservation)
 - `repos/eia-party-expert/README.md:39-68` (stale type lists)
 
 Resolution: keep the implemented child-resource shape and widen SPEC
 11.1.4/11.1.10 to it, or adopt the SPEC encrypted identifier projection, the
 alpha-3 country, the address dedup key, and a SPEC route for reference data. In
-either case decide the PII/encryption treatment of `identifier_value` and the
-address duplicate rule, and correct the expert README.
+either case decide the PII/encryption treatment of `identifier_value`, the
+address duplicate rule, the full-replacement clear semantics, the hard delete
+and its retention rule, and whether the child routes need ETag/If-Match
+replay protection, and correct the expert README.
 
 ## M-55 Party status transitions are a SPEC-less command
 
@@ -4125,10 +4180,137 @@ separate command or a consequence of an approved worksheet. Renaming
 `policy.policy.rated` to a SPEC name or adding the submission route is additive;
 removing the implemented route is breaking.
 
+## M-58 Party identifier and address maintenance adds SPEC-less PATCH/DELETE child routes
+
+Party 1.4.0 adds full-replacement `PATCH` and hard-delete `DELETE` commands for
+the identifier and address children on the public and `/internal/v1` expert
+bases. Neither route exists in SPEC 11.1.10, and SPEC 11.1.9 publishes no child
+fact for a replaced or deleted identifier or address. A real replacement or a
+delete bumps the Party row version and writes the matching child fact in the
+same transaction; a replacement with no normalized change is a 200 no-op.
+
+| Aspect | Implemented | SPEC 11.1.4 / 11.1.10 / 12.6 |
+|---|---|---|
+| PATCH routes | `PATCH /api/v1/parties/{partyId}/identifiers/{identifierId}`, `PATCH /api/v1/parties/{partyId}/addresses/{addressId}`, and their `/internal/v1` mirrors | No child update route or body in SPEC 11.1.10 |
+| DELETE routes | `DELETE /api/v1/parties/{partyId}/identifiers/{identifierId}`, `DELETE /api/v1/parties/{partyId}/addresses/{addressId}`, and their `/internal/v1` mirrors | No child delete route in SPEC 11.1.10 |
+| Update body | `UpdatePartyIdentifierRequest` `{identifierType, identifierValue, issuingAuthority?, effectiveDate?}` and `UpdatePartyAddressRequest` `{addressType, line1, line2?, city, stateRegion?, postalCode, country, effectiveDate?}` | SPEC defines no child update representation |
+| Replacement semantics | full replacement, not a merge: every create-required member is required again, an omitted or blank optional member clears the stored value, and `createdAt`/`createdBy` are immutable | No SPEC rule; the clear-on-omit behaviour is an implementation choice |
+| No-op | a replacement whose normalized values equal the stored values returns the unchanged projection with 200, no Party version bump, and no event | No SPEC rule |
+| Delete semantics | hard delete with 204 and no body; the event carries the last stored snapshot; a repeat delete is 404 | No SPEC rule; SPEC 11.1.4 defines no child lifecycle or tombstone |
+| Identifier duplicate | 409 `DUPLICATE_PARTY_IDENTIFIER` on a replacement that would duplicate another row's normalized key; the expert returns the generic `CONFLICT` | SPEC 11.1.4 defines no explicit unique key |
+| Address duplicate | canonical 409 `DUPLICATE_PARTY_ADDRESS`; not enforced because the expert has no address uniqueness rule | `normalized_hash` is the SPEC dedup key |
+| Delete guards | canonical 409 `PARTY_IDENTIFIER_IN_USE` and `PARTY_ADDRESS_IN_USE`; not enforced because the expert has no reference check | No SPEC child-reference rule |
+| Events | `party.party.identifier-updated` / `.identifier-deleted` and `party.party.address-updated` / `.address-deleted`, keyed by the Party aggregate at the bumped version | SPEC 11.1.9 publishes none of the four facts |
+| Concurrency / idempotency | no `ETag`, `If-Match`, or `Idempotency-Key`; a real replacement retry applies again and a delete retry is 404 | SPEC 12.6 requires `If-Match`/`Idempotency-Key` on transaction submission |
+| Error envelope | domain `{code, message, details}`, expert `{code, message}`, `application/json` | canonical `Problem` with `application/problem+json` (M-02, M-17) |
+| Version | `openapi/party.yaml` 1.4.0 and `asyncapi/party.yaml` 1.4.0 (additive); catalog 1.37.0 | No SPEC version defines the maintenance routes or facts |
+
+Additional differences:
+
+- The canonical contract documents the delete guards `PARTY_IDENTIFIER_IN_USE`
+  and `PARTY_ADDRESS_IN_USE`, but `PartyReferenceDataService.deleteIdentifier`
+  and `deleteAddress` perform an unconditional delete after the scoped read.
+  Nothing can currently produce the documented 409; the domain preserves a 409
+  if one were returned, and its tests cover that mapping with a stubbed expert.
+- The canonical address replacement guard is `DUPLICATE_PARTY_ADDRESS`, but
+  `updateAddress` performs no uniqueness check and accepts a replacement that
+  matches another address. The same gap applies to create (M-54).
+- A replacement is a full replacement with clear-on-omit semantics, which is a
+  different contract from a JSON Merge Patch or a partial PATCH. A client that
+  sends only the field it wants to change clears the other optional members;
+  the contract states this explicitly and the schema requires every
+  create-required member.
+- A replacement with the same normalized values returns the row read before the
+  update, so it preserves `version`, `updatedAt`, and the ETag-equivalent state
+  and writes no outbox row. It is the only safe retry; there is no idempotency
+  key and a real replacement retry applies a second version bump and a second
+  event.
+- A delete is a hard delete, not a `record_state` stamp or an end-dated temporal
+  row. The last snapshot exists only in the `-deleted` event, so a consumer must
+  persist it if the deleted values are needed after the commit.
+- The update event carries the ordered `changedFields` list, which the expert
+  builds in a fixed order (`identifierType`, `identifierValue`,
+  `issuingAuthority`, `effectiveDate`; `addressType`, `line1`, `line2`, `city`,
+  `stateRegion`, `postalCode`, `country`, `effectiveDate`). The list never
+  repeats a member and is never empty on an emitted event, but a consumer should
+  treat it as a set of changed member names rather than rely on position.
+- Both update payloads carry `from`/`to` snapshots rather than an entire child
+  graph; both delete payloads flatten the last snapshot and add
+  `createdBy`/`createdAt`. The envelope `aggregateVersion` is the bumped Party
+  row version plus one because Party rows start at version 0.
+- Neither maintenance route sets an `ETag` or reads `If-Match`/`Idempotency-Key`,
+  so a concurrent replacement is last-write-wins and the route cannot detect a
+  lost update (M-06, M-07).
+- The public domain forwards the caller's body unchanged and keeps the expert
+  status and code, so a duplicate identifier surfaces as the generic `CONFLICT`
+  rather than `DUPLICATE_PARTY_IDENTIFIER`. A missing tenant is 400
+  `TENANT_REQUIRED` and a malformed tenant is 400 `TENANT_INVALID`; the expert
+  accepts `?tenantId=` or `X-EIA-Tenant` and rejects a mismatch with 400
+  `VALIDATION_ERROR`.
+- `createdBy` is `system` for every child route, so a replacement or delete is
+  not attributable to a caller (M-20).
+
+Consequences:
+
+- An event subscriber that only consumes `identifier-added`/`address-added`
+  misses replacements and deletions and will hold stale child data. The catalog
+  now publishes and implements all six child names, so a subscriber must also
+  consume the four maintenance facts to stay current.
+- A consumer that treats PATCH as a partial update will clear optional members.
+  The contract, the README, and the schema descriptions all state the
+  full-replacement rule.
+- Deleting a child does not check whether another aggregate references it, and
+  there is no soft-delete or restore command. A mistaken delete is unrecoverable
+  through the API except by re-creating the child.
+
+Evidence:
+
+- `repos/eia-party-domain/.../PartyIdentifierController.java:55-79` and
+  `PartyAddressController.java:55-79` (public PATCH/DELETE, header-only tenant,
+  200/204)
+- `repos/eia-party-domain/.../PartyClient.java:178-330` (update/delete calls,
+  tenant on query and header, body forwarding, 404/409/4xx mapping)
+- `repos/eia-party-domain/src/test/java/com/eia/party/domain/PartyIdentifierControllerTest.java:182-340`
+  and `PartyAddressControllerTest.java:147-295` (200/204, tenant-required,
+  400/404/409 preservation, malformed id, body forwarding)
+- `repos/eia-party-expert/.../PartyReferenceDataController.java:48-104` (dual
+  base, `@Valid` bodies, 204 deletes)
+- `repos/eia-party-expert/.../PartyReferenceDataService.java:126-289` (full
+  replacement, no-op early return, duplicate check, update predicate, hard
+  delete, version bump, outbox)
+- `repos/eia-party-expert/.../UpdatePartyIdentifierRequest.java` and
+  `UpdatePartyAddressRequest.java` (`@NotBlank` required members and optional
+  clear members)
+- `repos/eia-party-expert/.../PartyChildNotFoundException.java` and
+  `ApiExceptionHandler.java` (child 404)
+- `repos/eia-party-expert/.../PartyIdentifierRepository.java:86-127` and
+  `PartyAddressRepository.java:88-102` (`existsExcluding`, update, delete with
+  scoped predicates)
+- `repos/eia-party-expert/.../PartyEvents.java:118-207` (changed-field
+  snapshots, delete snapshots, `aggregateVersion = version + 1`)
+- `repos/eia-party-expert/src/test/java/com/eia/party/expert/PartyReferenceDataApiTest.java:307-529`
+  (update/delete, no-op, child 404, duplicate 409, invalid fields leave the row
+  unchanged)
+- `repos/eia-party-expert/src/test/java/com/eia/party/expert/PartyReferenceDataOutboxIntegrationTest.java:235-470`
+  (changed fields, no event on no-op, delete snapshot, duplicate update writes
+  nothing, tenant/party scoping, monotonic versions)
+- `repos/eia-party-expert/src/main/resources/schema.sql:21-59` (no child
+  tombstone or end-date column; hard delete)
+- SPEC 11.1.4 `party_identifier`/`party_address`, SPEC 11.1.9, SPEC 11.1.10,
+  SPEC 12.6.
+- `openapi/party.yaml` 1.4.0 and `asyncapi/party.yaml` 1.4.0 record the
+  implemented shape.
+
+Resolution: keep the full-replacement and hard-delete shape, or move to a
+partial PATCH and a tombstone/end-date model with a retention rule. In either
+case implement or withdraw the address duplicate and delete in-use guards,
+decide whether the child routes need `If-Match`/`Idempotency-Key`, and decide
+whether the parent Party version must be bumped for a no-op.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-22
-Policy rating-worksheet contract:
+Party identifier and address maintenance contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -4137,7 +4319,7 @@ repository: .../repos/eia-contracts
 python: 3.12.8 (standard library only)
 
 OpenAPI 3.1 documents
-  OK openapi/party.yaml  11 paths, 17 operations
+  OK openapi/party.yaml  15 paths, 25 operations
   OK openapi/policy.yaml  54 paths, 71 operations
   OK openapi/contract.yaml  43 paths, 62 operations
   OK openapi/direct-claims.yaml  51 paths, 74 operations
@@ -4149,7 +4331,7 @@ OpenAPI 3.1 documents
   OK openapi/notifications.yaml  12 paths, 15 operations
 
 AsyncAPI 3 documents
-  OK asyncapi/party.yaml  11 event channels
+  OK asyncapi/party.yaml  15 event channels
   OK asyncapi/policy.yaml  36 event channels
   OK asyncapi/contract.yaml  32 event channels
   OK asyncapi/direct-claims.yaml  28 event channels
@@ -4159,7 +4341,7 @@ AsyncAPI 3 documents
   OK asyncapi/document.yaml  24 event channels
   OK asyncapi/payment.yaml  20 event channels
   OK asyncapi/notifications.yaml  15 event channels
-  OK catalog: 221 unique published events across 10 verticals
+  OK catalog: 225 unique published events across 10 verticals
 
 JSON Schema 2020-12 documents
 
@@ -4167,7 +4349,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 15814 checks, 0 failures
+  PASS 16329 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -4533,7 +4715,18 @@ Additional checks and limits:
   must-be-implemented message; and dropping `policy.policy.rated` from the
   Policy catalog `implemented` list fails with the channel/catalog-set message.
   All five were run on a throwaway copy, exited non-zero (exit 1), and the
-  working copy was left unchanged.
+  working copy was left unchanged. The Party maintenance pass added five more:
+  renaming the public
+  `/api/v1/parties/{partyId}/identifiers/{identifierId}` path fails with the
+  missing required-path and missing identifier-maintenance operation messages;
+  making the identifier replacement `requestBody.required: false` fails with
+  the required-body message; removing the `identifierId` path parameter fails
+  with the missing child-id parameter message; dropping
+  `party.party.address-deleted` from both catalog lists fails with the published
+  and implemented set messages; and removing `issuingAuthority` from the
+  identifier update `changedFields` enum fails with the exact-enum message. All
+  five were run on a throwaway copy, exited non-zero (exit 1), and the working
+  copy was left unchanged.
 
 ## Resolution policy
 
