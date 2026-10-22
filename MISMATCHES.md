@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-21 (credit-note application to billing installments).
+Status: open, reviewed 2026-10-21 (credit-note reversal).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -85,6 +85,10 @@ where the running code does not meet it yet.
   expert billing repository, installment projection, summary, rules, and event
   factory, and the domain billing plan, installment, summary, receivable, and
   client remaps.
+  The credit-note reversal pass re-read the same credit-note sources plus the
+  expert reversal rule, repository transition, event factory, and `schema.sql`
+  columns and the domain reversal command, projection, client forwarding, and
+  the domain and expert reversal tests.
   The Policy legal-entity pass reads the domain legal-entity and
   policy-assignment controllers, services, DTO/commands, `PolicyDto`, and
   `PolicyClient` plus the expert legal-entity controller, service, rules,
@@ -155,7 +159,7 @@ removed per the resolution policy.
 | M-38 | Policy installment dunning adds a SPEC-less route and event name and a different level vocabulary and book rule | L |
 | M-39 | Policy program catalog uses a short read/create path, a different type/status vocabulary, a flat optional capacity pair, and SPEC-less membership and event names | L |
 | M-40 | Document content keeps a current pointer plus revisions under `/content/versions`, not the SPEC `/versions` store | L |
-| M-41 | Policy credit notes use a short path, a four-state lifecycle, free-text reason, and new event names, with no approval or SAP step | L |
+| M-41 | Policy credit notes use a short path, a five-state lifecycle, free-text reason, installment application and reversal, and new event names, with no approval or SAP step | L |
 | M-42 | Contract technical-account lines implement the 13-type SPEC vocabulary and bucket reconciliation but omit line correction, per-line currency/source metadata, and per-line approval | L |
 | M-43 | Policy legal entity catalog is a narrow five-type slice with a nullable issuing-entity link | M |
 | M-44 | Document legal holds and disposition are a per-document, synchronous slice without the SPEC hold collection or the approval/certificate workflow | L |
@@ -636,9 +640,9 @@ unimplemented fields and list the missing operations under
   2026-10-20 billing slice adds the installment plan and settlement; billing
   accounts, billing instructions, disputes, and commission statements from
   SPEC 11.2.13 remain gaps (M-27). The credit-note slice adds the narrow
-  DRAFT/ISSUED/APPLIED/CANCELLED adjustment (M-41), so the request surface
-  exists, but the SPEC approval, SAP credit-memo, tax, and original-invoice
-  members remain gaps. The premium-receivables
+  DRAFT/ISSUED/APPLIED/CANCELLED/REVERSED adjustment (M-41), so the request
+  surface exists, but the SPEC approval, SAP credit-memo, tax, and
+  original-invoice members remain gaps. The premium-receivables
   slice adds the tenant-wide receivable queue and the dunning slice adds the
   per-installment dunning history and command (M-38), so receivables and
   dunning are no longer resource gaps. The renewal
@@ -734,7 +738,7 @@ ten publishing verticals now emit a subset:
 | Vertical | Implemented event names | Source |
 |---|---|---|
 | Party | `party.party.created`, `party.party.updated` | `repos/eia-party-expert/.../PartyEvents.java` |
-| Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.billing-plan.created`, `policy.installment.paid`, `policy.installment.waived`, `policy.dunning.sent`, `policy.mass-tort-profile.updated`, `policy.program.created`, `policy.policy.program-assigned`, `policy.credit-note.issued`, `policy.credit-note.applied`, `policy.credit-note.cancelled`, `policy.legal-entity.created`, `policy.policy.legal-entity-assigned` | `repos/eia-policy-expert/.../PolicyEvents.java` |
+| Policy | `policy.policy.created`, `policy.policy.updated`, `policy.policy.version-issued`, `policy.policy.endorsed`, `policy.policy.cancelled`, `policy.policy.reinstated`, `policy.policy.renewed`, `policy.billing-plan.created`, `policy.installment.paid`, `policy.installment.waived`, `policy.dunning.sent`, `policy.mass-tort-profile.updated`, `policy.program.created`, `policy.policy.program-assigned`, `policy.credit-note.issued`, `policy.credit-note.applied`, `policy.credit-note.cancelled`, `policy.credit-note.reversed`, `policy.legal-entity.created`, `policy.policy.legal-entity-assigned` | `repos/eia-policy-expert/.../PolicyEvents.java` |
 | Contract | `contract.contract.created`, `contract.contract.updated`, `contract.contract.bound`, `contract.contract.commuted`, `contract.cession.recorded`, `contract.technical-account.created`, `contract.technical-account.issued`, `contract.technical-account.settled`, `contract.technical-account.line-added`, `contract.technical-account.line-removed`, `contract.bordereau.received`, `contract.bordereau.processed`, `contract.bordereau.failed`, `contract.cash-call.requested`, `contract.cash-call.issued`, `contract.cash-call.settled`, `contract.cash-call.cancelled`, `contract.security.recorded`, `contract.security.status-changed` | `repos/eia-contract-expert/.../ContractEvents.java` |
 | Direct Claims | `direct.claim.registered`, `direct.claim.updated`, `direct.claim.assigned`, `direct.claim.coverage-assessed`, `direct.claim.reserve-changed`, `direct.claim.settlement-authorized`, `direct.claim.closed`, `direct.claim.task-created`, `direct.claim.task-completed`, `direct.claim.task-updated`, `direct.claim.note-added`, `direct.claim.allocation-created` | `repos/eia-direct-claims-expert/.../ClaimEvents.java` |
 | Assumed Claims | `assumed.claim.registered`, `assumed.claim.updated`, `assumed.claim.assigned`, `assumed.claim.closed`, `assumed.claim.reopened`, `assumed.claim.loss-advice-posted`, `assumed.claim.reserve-changed`, `assumed.claim.cash-call-requested`, `assumed.claim.recovery-recorded`, `assumed.claim.commuted`, `assumed.claim.task-created`, `assumed.claim.task-completed`, `assumed.claim.task-updated`, `assumed.claim.note-added` | `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java` |
@@ -793,14 +797,17 @@ version advances with the action, so every dunning event is distinct. The name
 is `policy.dunning.sent`; SPEC 11.2.13 publishes
 `policy.billing.dunning-changed` instead, which remains planned (M-22, M-38).
 
-The three credit-note facts are policy-level transitions:
+The four credit-note facts are policy-level transitions:
 `PolicyEvents.creditNoteStatusChanged` picks `policy.credit-note.issued`,
 `.applied`, or `.cancelled` from the new status and builds the payload from the
 policy identity and number, the credit-note identity and number, the amount as
-a decimal string, the currency, and the status. Each accepted transition bumps
+a decimal string, the currency, and the status; `PolicyEvents.creditNoteReversed`
+writes `policy.credit-note.reversed` with the note identity and number, the
+nullable installment that received the original credit, the amount, the
+required reversal reason, and status REVERSED. Each accepted transition bumps
 the policy row version, so every event is distinct. Creating the DRAFT note
 bumps the policy version but writes no event; SPEC 11.2.13 publishes only
-`policy.billing.credit-note-issued` (M-22, M-41).
+`policy.billing.credit-note-issued` and defines no reversal (M-22, M-41).
 
 The two legal-entity facts are catalog and policy commands:
 `PolicyEvents.legalEntityCreated` writes `policy.legal-entity.created` against
@@ -942,7 +949,7 @@ tables. The differences are:
 | Vertical | Implemented | SPEC /
 planned name |
 |---|---|---|
-| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created`; `policy.installment.paid` / `.waived`; `policy.dunning.sent`; `policy.program.created` / `policy.policy.program-assigned`; `policy.credit-note.issued` / `.applied` / `.cancelled`; `policy.legal-entity.created` / `policy.policy.legal-entity-assigned` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name; the dunning fact differs from SPEC 11.2.13 `policy.billing.dunning-changed`; the two program facts have no SPEC name because SPEC defines no program create or policy-assignment event. SPEC 11.2.13 publishes only `policy.billing.credit-note-issued` and defines no applied or cancelled fact, so all three credit-note names are new (M-41). The two legal-entity facts are new because SPEC 10.11.2/11.2.16 define the model and link but SPEC 11.2.9 names no catalog-create or assignment event (M-43). `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
+| Policy | `policy.policy.created` / `.updated`; `policy.billing-plan.created`; `policy.installment.paid` / `.waived`; `policy.dunning.sent`; `policy.program.created` / `policy.policy.program-assigned`; `policy.credit-note.issued` / `.applied` / `.cancelled` / `.reversed`; `policy.legal-entity.created` / `policy.policy.legal-entity-assigned` | No SPEC name for created/updated: SPEC 11.2.9 starts at `policy.policy.quoted`. The billing plan name differs from SPEC 11.2.13 `policy.billing.plan-created`; the installment facts have no SPEC name; the dunning fact differs from SPEC 11.2.13 `policy.billing.dunning-changed`; the two program facts have no SPEC name because SPEC defines no program create or policy-assignment event. SPEC 11.2.13 publishes only `policy.billing.credit-note-issued` and defines no applied, cancelled, or reversed fact, so all four credit-note names are new (M-41). The two legal-entity facts are new because SPEC 10.11.2/11.2.16 define the model and link but SPEC 11.2.9 names no catalog-create or assignment event (M-43). `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`, and `mass-tort-profile.updated` match SPEC. |
 | Contract | `contract.contract.updated`; `contract.technical-account.created` / `.issued` / `.settled`; `contract.bordereau.processed` / `.failed`; `contract.security.status-changed` | No SPEC name for updated, the technical-account facts, the two terminal bordereau facts, or the security status fact: SPEC 11.3.9 lists lifecycle verbs, the contract-level `contract.account.issued` / `.agreed` facts, `contract.bordereau.posted` / `.rejected`, and only the `contract.security.recorded` / `.breached` security facts. `created`, `bound`, `commuted`, `cession.recorded`, `contract.bordereau.received`, and `contract.security.recorded` match SPEC. |
 | Direct Claims | `direct.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added`; `direct.claim.assigned`; `direct.claim.allocation-created` | No SPEC names: SPEC 11.4.9 defines no assignment, task, note, or allocation-created event; it names the allocation fact `direct.claim.allocated`, which remains planned. `registered`, `updated`, `coverage-assessed`, `reserve-changed`, `settlement-authorized`, and `closed` match SPEC. |
 | Assumed Claims | `assumed.claim.updated`; `assumed.claim.assigned`; `assumed.claim.task-created` / `.task-completed` / `.task-updated` / `.note-added` | No SPEC names: SPEC 11.5.9 lists lifecycle verbs only and defines no assignment, task, or note event. `registered`, `closed`, `reopened`, `loss-advice-posted`, `reserve-changed`, `cash-call-requested`, `recovery-recorded`, and `commuted` match SPEC. |
@@ -960,8 +967,8 @@ implemented name is breaking and needs the EV-05 dual-publish window.
 
 Evidence:
 
-- `repos/eia-policy-expert/.../PolicyEvents.java:37-56` (policy, billing, dunning,
-  mass tort, program, and credit-note names)
+- `repos/eia-policy-expert/.../PolicyEvents.java:37-56,96-167` (policy, billing,
+  dunning, mass tort, program, credit-note, and credit-note-reversal names)
 - `repos/eia-contract-expert/.../ContractEvents.java:41-56`
 - `repos/eia-direct-claims-expert/.../ClaimEvents.java:57-68`
 - `repos/eia-assumed-claims-expert/.../AssumedClaimEvents.java:52-65`
@@ -1300,6 +1307,7 @@ per-installment dunning history:
 | Plan status | `ACTIVE`, `COMPLETE`, `CANCELLED` | `DRAFT`, `ACTIVE`, `SUPERSEDED`, `CANCELLED` |
 | Installment status | `DUE`, `OVERDUE`, `PAID`, `WAIVED`, `CREDITED` | Billing-instruction status values |
 | Credit application | APPLIED credit note requires an `installmentId`; credits the note amount to a DUE/OVERDUE installment on the same tenant and policy. A partial credit raises `creditedAmount` and leaves the row open; a credit that covers the uncredited remainder sets the new terminal status `CREDITED`. A missing id is 400 `INVALID_CREDIT_NOTE_INSTALLMENT`, an unknown/foreign installment is 404 `INSTALLMENT_NOT_FOUND`, a settled or fully credited target is 409 `INSTALLMENT_NOT_CREDITABLE`, and an oversized note is 409 `CREDIT_NOTE_EXCEEDS_INSTALLMENT` | `credit_note_request` has no installment column and no APPLIED state; `BIL-06` defines only `outstanding = invoiced - paid - credited` and the non-negative rule, with no application command |
+| Credit reversal | APPLIED -> REVERSED with a required 1-500 character reason. Releases the note amount from the installment recorded at application time, clamps `creditedAmount` at zero, and reopens a fully credited row as DUE or OVERDUE when it no longer covers the gross amount; a legacy APPLIED note without an installment is only marked REVERSED. Reversing a non-APPLIED or already REVERSED note is 409 `INVALID_CREDIT_NOTE_TRANSITION`; a missing or blank reason is 400 `INVALID_CREDIT_NOTE_REASON` | No reversal command or reversal fact; `BIL-06` has no unapply rule |
 | Plan summary | `totalAmount`, `paidAmount`, `waivedAmount`, `creditedAmount`, net `outstandingAmount`, `overdueAmount`, `currency`, `installmentCount` | No plan summary row; `BIL-06` defines the net outstanding formula |
 | Dunning level | `REMINDER`, `FIRST_NOTICE`, `SECOND_NOTICE`, `COLLECTIONS` | `billing_account.dunning_status`: `CLEAR`, `REMINDER`, `DUNNING`, `LEGAL`, `BLOCKED`; collections flow `CURRENT -> REMINDER -> DUNNING_1 -> DUNNING_2 -> NOTICE -> CANCELLATION_PENDING -> CANCELLED` |
 
@@ -2341,30 +2349,32 @@ amend SPEC 11.6.9 and 11.6.10 to the current-pointer plus revision proxy, the
 `document.content.uploaded` payload. The contract documents the implemented
 shape until that decision.
 
-## M-41 Policy credit notes use a short path, a four-state lifecycle, installment application, and new event names
+## M-41 Policy credit notes use a short path, a five-state lifecycle, installment application and reversal, and new event names
 
 SPEC 11.2.13 defines the `credit_note_request` row, mounts the request at
 `POST /api/v1/policy/policies/{policyId}/credit-notes`, routes the request
 through a human approval step and the Payment SAP subtransaction, and publishes
 `policy.billing.credit-note-issued`. The implemented slice is a narrower
 tenant-scoped child resource with its own lifecycle, free-text reason, an
-APPLIED transition that credits an open billing installment, and three new
-event names.
+APPLIED transition that credits an open billing installment, an APPLIED ->
+REVERSED transition that releases the credit with a required reason, and four
+new event names.
 
 | Aspect | Implemented | SPEC 11.2.13 |
 |---|---|---|
 | Paths | `GET/POST /api/v1/policies/{policyId}/credit-notes` and `PATCH .../{creditNoteId}/status` | `POST /api/v1/policy/policies/{policyId}/credit-notes`; no public list or status action row |
 | Identity | `creditNoteId` UUID; server-generated `noteNumber` `CN-{7 digits}` | `id`; optional `original_invoice_number` and `sap_credit_memo_number` |
-| Status | `DRAFT`, `ISSUED`, `APPLIED`, `CANCELLED` | `REQUESTED`, `APPROVED`, `SENT_TO_SAP`, `ISSUED`, `REJECTED` |
-| Transitions | DRAFT -> ISSUED -> APPLIED; CANCELLED from DRAFT or ISSUED; APPLIED and CANCELLED terminal | Request, approve, send to SAP, persist the SAP reference, issue, reject |
+| Status | `DRAFT`, `ISSUED`, `APPLIED`, `CANCELLED`, `REVERSED` | `REQUESTED`, `APPROVED`, `SENT_TO_SAP`, `ISSUED`, `REJECTED` |
+| Transitions | DRAFT -> ISSUED -> APPLIED; CANCELLED from DRAFT or ISSUED; REVERSED from APPLIED; APPLIED, CANCELLED, and REVERSED terminal | Request, approve, send to SAP, persist the SAP reference, issue, reject |
 | Credit application | APPLIED requires an `installmentId`; the note is credited to a DUE/OVERDUE installment on the same tenant and policy. A partial credit raises the installment's `creditedAmount` and leaves it open; a credit that covers its uncredited remainder sets the new terminal installment status `CREDITED` and a zero `outstandingAmount`. A missing id is 400 `INVALID_CREDIT_NOTE_INSTALLMENT`, an unknown/foreign installment is 404 `INSTALLMENT_NOT_FOUND`, a settled/credited target is 409 `INSTALLMENT_NOT_CREDITABLE`, and an oversized note is 409 `CREDIT_NOTE_EXCEEDS_INSTALLMENT` with the note amount and available remainder | `credit_note_request` has no installment column and no APPLIED state; `BIL-06` defines only `outstanding = invoiced - paid - credited` and the non-negative rule, with no application command |
-| Reason | free text, trimmed, optional, at most 500 characters | closed enum `CANCELLATION`, `ENDORSEMENT`, `AUDIT_RETURN`, `OVERPAYMENT`, `REFUND`, `CORRECTION` |
+| Credit reversal | APPLIED -> REVERSED only, with a required non-blank `reason` of at most 500 characters. Releases the note amount from the installment recorded at application time, subtracts it from `creditedAmount` clamped at zero, and reopens a fully credited installment as DUE when its due date is today or later and as OVERDUE when it is past. A partial credit on an open row keeps its status, and a legacy APPLIED note without an installment is only marked REVERSED. Reversing a DRAFT/ISSUED/CANCELLED or already REVERSED note is 409 `INVALID_CREDIT_NOTE_TRANSITION`; a missing or blank reason is 400 `INVALID_CREDIT_NOTE_REASON`; a longer reason is 400 `VALIDATION_ERROR`; a concurrent installment change is 409 `CONCURRENT_MODIFICATION` | No reversal command, state, or fact; `BIL-06` defines no unapply or restore rule |
+| Reason | creation reason is free text, trimmed, optional, at most 500 characters; reversal reason is free text, trimmed, required, non-blank, at most 500 characters | closed enum `CANCELLATION`, `ENDORSEMENT`, `AUDIT_RETURN`, `OVERPAYMENT`, `REFUND`, `CORRECTION` |
 | Money | positive `amount` plus `currency`, which must equal the policy premium currency | `amount`, optional `tax_amount`, and `currency` |
 | Approval | none | `policy.credit-note.approve` human approval with `approved_by` |
 | SAP | no credit-memo number, no `payment.finance.credit-note` call, and no Payment link | SAP credit-memo request and persisted reference |
 | Original invoice | not modelled | optional `original_invoice_number` |
-| Projection | flat eleven fields, including nullable `appliedInstallmentId`; `tenantId` is not exposed | the full request row including tax, approval, and SAP columns |
-| Events | `policy.credit-note.issued`, `.applied`, `.cancelled`; the `applied` payload adds `installmentId` and the installment's cumulative `creditedAmount` | only `policy.billing.credit-note-issued` |
+| Projection | flat thirteen fields, including nullable `appliedInstallmentId`, `reversedAt`, and `reversalReason`; `tenantId` is not exposed | the full request row including tax, approval, and SAP columns |
+| Events | `policy.credit-note.issued`, `.applied`, `.cancelled`, `.reversed`; the `applied` payload adds `installmentId` and the installment's cumulative `creditedAmount`, and the `reversed` payload is a dedicated `PolicyCreditNoteReversedData` with the note identity and number, the nullable released installment, the amount, the reason, and status REVERSED | only `policy.billing.credit-note-issued` |
 | Book | the canonical contract requires `X-EIA-Book: DIRECT`; the domain and expert accept an absent header | SPEC 3.6 book wall |
 
 Consequences:
@@ -2374,8 +2384,8 @@ Consequences:
 - The free-text reason cannot be mapped to the SPEC six-value enum without a
   translation table; the domain test's `CANCELLATION`/`ENDORSEMENT`/... example
   is illustrative, not enforced by the expert's `CreditNoteRules`.
-- The four-state lifecycle collapses the SPEC request/approval/SAP flow into
-  DRAFT/ISSUED/APPLIED/CANCELLED, so a client cannot observe REQUESTED,
+- The five-state lifecycle collapses the SPEC request/approval/SAP flow into
+  DRAFT/ISSUED/APPLIED/CANCELLED/REVERSED, so a client cannot observe REQUESTED,
   APPROVED, SENT_TO_SAP, or REJECTED.
 - Credit application goes beyond the SPEC row: a note is tied to one billing
   installment that the SPEC does not model as a credit-note target, and the
@@ -2383,77 +2393,94 @@ Consequences:
   `creditedAmount` is bounded by the gross amount and the derived
   `outstandingAmount` is clamped at zero, so the implementation satisfies
   BIL-06 even though the SPEC defines no application command.
-- Application is forward-only: there is no unapply or reversal, a rejected
-  application rolls back both the note and the installment, and CANCELLED is
-  reachable only before APPLIED. A partial credit does not block a later
-  settlement, so an installment can be PAID or WAIVED after carrying a partial
-  credit; its `outstandingAmount` is then zero because the terminal status wins.
+- Reversal also goes beyond the SPEC row: it is a one-way release with no
+  unreverse command, it keeps the application facts for audit, and it is the
+  only way to make an applied credit stop counting toward the installment. The
+  subtract-and-clamp rule keeps the persisted `creditedAmount` non-negative even
+  when the ledger and the note disagree, and the DUE/OVERDUE reopen rule is an
+  implementation choice the SPEC does not define.
+- A rejected application or reversal rolls back both the note and the
+  installment, so a failed reversal leaves the note APPLIED and the credit in
+  place. A partial credit does not block a later settlement, so an installment
+  can be PAID or WAIVED after carrying a partial credit; its `outstandingAmount`
+  is then zero because the terminal status wins.
 - A legacy APPLIED note that predates installment application has a null
-  `appliedInstallmentId`, which is why the member is required but nullable.
+  `appliedInstallmentId`, which is why the member is required but nullable and
+  why a reversal of such a note changes no installment.
 - Creating a note bumps the policy row version but writes no event, so a
   consumer that only subscribes to the credit-note facts never sees the DRAFT
-  creation. Only the three transition facts are published.
+  creation. Only the four transition facts are published.
 - The create has no `Idempotency-Key` and no caller-supplied business key, so a
   retried request produces a second note and consumes a second server-assigned
   number; the status command accepts no `If-Match`, and a replay of a terminal
-  target is a 409 rather than a no-op.
+  target, including a second REVERSED, is a 409 rather than a no-op.
 - A missing `X-EIA-Book` is accepted by both the domain and the expert even
   though the canonical contract requires DIRECT; another book is hidden as 404
   `BOOK_SCOPE_VIOLATION`.
-- The three event names are new and have no SPEC equivalent other than the
+- The four event names are new and have no SPEC equivalent other than the
   issued fact, so aligning them requires the EV-05 dual-publish window (M-22).
   The `applied` payload additions keep `eventVersion` 1 because they are
-  optional and additive.
+  optional and additive; the reversal has a dedicated payload under a new name
+  and also keeps `eventVersion` 1.
 
 Evidence:
 
 - `repos/eia-policy-domain/.../PolicyCreditNoteController.java:27-76` (public
   GET/POST/PATCH, required tenant header, `requireDirectWhenPresent`, 201),
   `PolicyCreditNoteService.java` (expert delegation), `CreditNote.java`
-  (`appliedInstallmentId`), `CreateCreditNoteCommand.java`, and
-  `UpdateCreditNoteStatusCommand.java` (optional `installmentId`).
-- `repos/eia-policy-domain/.../PolicyClient.java:780-822` (expert
-  `/internal/v1` calls; `installmentId` forwarded only for APPLIED; `id` ->
-  `creditNoteId`, `tenantId` dropped) and `:1103-1121` (`ExpertCreditNote`
-  aliases).
+  (`appliedInstallmentId`, `reversedAt`, `reversalReason`),
+  `CreateCreditNoteCommand.java`, and `UpdateCreditNoteStatusCommand.java`
+  (optional `installmentId` and optional 500-character `reason`).
+- `repos/eia-policy-domain/.../PolicyClient.java:788-828` (expert
+  `/internal/v1` calls; `installmentId` forwarded only for APPLIED, `reason`
+  only for REVERSED; `id` -> `creditNoteId`, `tenantId` dropped, reversal
+  members mapped) and `:1281-1310` (`ExpertCreditNote` aliases including
+  `reversed_at`/`reversal_reason`).
 - `repos/eia-policy-expert/.../CreditNoteController.java:27-77` (public and
   internal aliases, tenant query/header, 201/200),
-  `CreditNoteService.java:84-154` (policy wall, currency match, number
-  consumption, APPLIED installment validation and credit, conditional
-  transition, policy version bump, outbox),
-  `CreditNoteRules.java:16-158` (four states, transition graph, positive
-  amount, currency, 500-character reason, `INVALID_CREDIT_NOTE_INSTALLMENT`,
-  `INSTALLMENT_NOT_CREDITABLE`, `CREDIT_NOTE_EXCEEDS_INSTALLMENT`, CREDITED
-  transition), `CreditNoteRepository.java:20-130` (tenant/policy-scoped reads,
-  `CN-{7 digits}` sequence, `applied_installment_id` update),
-  `PolicyCreditNote.java`, `CreateCreditNoteRequest.java`, and
-  `UpdateCreditNoteStatusRequest.java`.
+  `CreditNoteService.java:69-223` (policy wall, currency match, number
+  consumption, APPLIED installment validation and credit, REVERSED release and
+  reopen, conditional transition, policy version bump, outbox),
+  `CreditNoteRules.java:83-123,181-210` (five states, transition graph,
+  required/optional 500-character reason, `INVALID_CREDIT_NOTE_REASON`,
+  `INVALID_CREDIT_NOTE_INSTALLMENT`, `INSTALLMENT_NOT_CREDITABLE`,
+  `CREDIT_NOTE_EXCEEDS_INSTALLMENT`, CREDITED transition, credited-after and
+  status-after-reversal arithmetic),
+  `CreditNoteRepository.java:21-130` (tenant/policy-scoped reads,
+  `CN-{7 digits}` sequence, `applied_installment_id`, conditional reversal with
+  `reversed_at`/`reversal_reason`), `PolicyCreditNote.java`,
+  `CreateCreditNoteRequest.java`, and `UpdateCreditNoteStatusRequest.java`.
 - `repos/eia-policy-expert/.../BillingRepository.java:232-270` (conditional
-  credited-amount update and the status change to CREDITED) and
-  `BillingRules.java:99-114` (zero outstanding for PAID, WAIVED, and CREDITED).
-- `repos/eia-policy-expert/.../PolicyEvents.java:22-24,96-138`
+  credited-amount update, status change to CREDITED, and the reversal release)
+  and `BillingRules.java:99-114` (zero outstanding for PAID, WAIVED, and
+  CREDITED).
+- `repos/eia-policy-expert/.../PolicyEvents.java:52,96-167`
   (`policy.credit-note.issued` / `.applied` / `.cancelled` with policy and note
   identity, amount, currency, and status; the applied payload adds
-  `installmentId` and `creditedAmount`) and
-  `src/main/resources/schema.sql:525-620` (`policy_credit_note`, its CHECK
-  constraints, the number sequence, `applied_installment_id`, and the
-  `policy_installment.credited_amount` migration).
+  `installmentId` and `creditedAmount`; `creditNoteReversed` writes the
+  six-member reversal payload) and
+  `src/main/resources/schema.sql:525-640` (`policy_credit_note`, its CHECK
+  constraints including the REVERSED status and `reversed_at` requirement, the
+  number sequence, `applied_installment_id`, `reversed_at`, `reversal_reason`,
+  and the `policy_installment.credited_amount` migration).
 - Tests: `PolicyCreditNoteControllerTest`, `PolicyCreditNoteServiceTest`,
   `PolicyCreditNoteClientTest`, `CreditNoteControllerTest`,
-  `CreditNoteServiceTest`, `CreditNoteRulesTest`, `BillingServiceTest`,
-  `BillingRulesTest`, `BillingSummaryTest`, and
-  `BillingReceivablesServiceTest`.
-- `openapi/policy.yaml` 2.11.0, `asyncapi/policy.yaml` 1.9.0, and
-  `asyncapi/event-catalog.yaml` 1.23.0 record the implemented shape.
+  `CreditNoteServiceTest` (reversal, reason bounds, restore and reopen,
+  rollback, tenant/policy wall), `CreditNoteRulesTest` (transition graph and
+  reversal arithmetic), `BillingServiceTest`, `BillingRulesTest`,
+  `BillingSummaryTest`, and `BillingReceivablesServiceTest`.
+- `openapi/policy.yaml` 2.13.0, `asyncapi/policy.yaml` 1.10.0, and
+  `asyncapi/event-catalog.yaml` 1.25.0 record the implemented shape.
 
 Resolution: either extend SPEC 11.2.13 with the implemented short route,
-four-state lifecycle, free-text reason, installment application, and three
-event names, or add the SPEC request/approval/SAP lifecycle, reason enum, and
-`policy.billing.credit-note-issued` name behind an EV-05 dual-publish window.
-The installment target and the CREDITED installment status are the parts of the
-slice closest to BIL-06 and can be adopted into the SPEC as the credit
-application rule. Until then the contract documents the implemented narrow
-surface and the DIRECT book requirement.
+five-state lifecycle, free-text reason, installment application and reversal,
+and four event names, or add the SPEC request/approval/SAP lifecycle, reason
+enum, and `policy.billing.credit-note-issued` name behind an EV-05 dual-publish
+window. The installment target, the CREDITED installment status, and the
+reversal/reopen rule are the parts of the slice closest to BIL-06 and can be
+adopted into the SPEC as the credit application and release rules. Until then
+the contract documents the implemented narrow surface and the DIRECT book
+requirement.
 
 ## M-42 Contract technical-account lines omit correction and line-level metadata
 
@@ -2957,7 +2984,13 @@ Additional checks and limits:
   each fail with the specific missing-operation, required-field,
   conflict-code, or implemented-event message. All four were run on a
   throwaway copy and exited non-zero (exit 1); the working copy was left
-  unchanged.
+  unchanged. The credit-note reversal pass added four more: removing the
+  optional `reason` property from `UpdateCreditNoteStatusRequest`, making
+  `CreditNote.reversedAt` non-nullable, dropping `policy.credit-note.reversed`
+  from the Policy catalog `implemented` list, and removing `REVERSED` from
+  `CreditNoteStatus` each fail with the specific optional-reason, nullability,
+  implemented-event, or status-enum message. All four were run on throwaway
+  copies and exited non-zero (exit 1); the working copy was left unchanged.
 
 ## Resolution policy
 

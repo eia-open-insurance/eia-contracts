@@ -1384,10 +1384,13 @@ POLICY_CREDIT_NOTE_FIELDS = (
     "appliedAt",
     "appliedInstallmentId",
     "createdAt",
+    "reversedAt",
+    "reversalReason",
 )
 
-POLICY_CREDIT_NOTE_STATUSES = ("DRAFT", "ISSUED", "APPLIED", "CANCELLED")
-POLICY_CREDIT_NOTE_REQUEST_STATUSES = ("ISSUED", "APPLIED", "CANCELLED")
+POLICY_CREDIT_NOTE_STATUSES = ("DRAFT", "ISSUED", "APPLIED", "CANCELLED", "REVERSED")
+POLICY_CREDIT_NOTE_REQUEST_STATUSES = ("ISSUED", "APPLIED", "CANCELLED", "REVERSED")
+POLICY_CREDIT_NOTE_EVENT_STATUSES = ("ISSUED", "APPLIED", "CANCELLED")
 POLICY_CREDIT_NOTE_REASON_MAX_LENGTH = 500
 POLICY_CREDIT_NOTE_AMOUNT_PATTERN = (
     r"^(?!0(?:\.0{1,4})?$)(?:0|[1-9][0-9]{0,14})(?:\.[0-9]{1,4})?$"
@@ -1396,6 +1399,7 @@ POLICY_CREDIT_NOTE_EVENTS = (
     "policy.credit-note.issued",
     "policy.credit-note.applied",
     "policy.credit-note.cancelled",
+    "policy.credit-note.reversed",
 )
 POLICY_CREDIT_NOTE_EVENT_FIELDS = (
     "policyId",
@@ -1410,6 +1414,18 @@ POLICY_CREDIT_NOTE_EVENT_FIELDS = (
 # cumulative credited amount; ISSUED and CANCELLED omit both members.
 POLICY_CREDIT_NOTE_APPLIED_EVENT_FIELDS = ("installmentId", "creditedAmount")
 POLICY_CREDIT_NOTE_EVENT_MESSAGE = "PolicyCreditNoteData"
+# The reversal payload is a dedicated message: it has no policy identity members
+# and names the released installment, the amount, the required reason, and the
+# terminal status.
+POLICY_CREDIT_NOTE_REVERSED_EVENT_FIELDS = (
+    "creditNoteId",
+    "noteNumber",
+    "installmentId",
+    "amount",
+    "reason",
+    "status",
+)
+POLICY_CREDIT_NOTE_REVERSED_EVENT_MESSAGE = "PolicyCreditNoteReversedData"
 POLICY_CREDIT_NOTE_EVENT_IMPLEMENTED_BY = "PolicyEvents.java"
 
 
@@ -1547,6 +1563,7 @@ IMPLEMENTED_EVENTS = {
         "policy.credit-note.issued",
         "policy.credit-note.applied",
         "policy.credit-note.cancelled",
+        "policy.credit-note.reversed",
         "policy.legal-entity.created",
         "policy.policy.legal-entity-assigned",
     ],
@@ -6033,6 +6050,7 @@ def check_policy_credit_notes_openapi(contracts: ContractSet, document, relative
         "INVALID_CREDIT_NOTE_STATUS",
         "INVALID_CREDIT_NOTE_TRANSITION",
         "INVALID_CREDIT_NOTE_INSTALLMENT",
+        "INVALID_CREDIT_NOTE_REASON",
         "INSTALLMENT_NOT_FOUND",
         "INSTALLMENT_NOT_CREDITABLE",
         "CREDIT_NOTE_EXCEEDS_INSTALLMENT",
@@ -6048,6 +6066,10 @@ def check_policy_credit_notes_openapi(contracts: ContractSet, document, relative
         "CREDITED",
         "partial credit",
         "outstandingAmount",
+        "APPLIED -> REVERSED",
+        "reversedAt",
+        "reversalReason",
+        "REVERSED",
     ):
         contracts.check(
             term in status_text,
@@ -6140,6 +6162,19 @@ def check_policy_credit_notes_openapi(contracts: ContractSet, document, relative
         (properties.get("createdAt") or {}).get("format") == "date-time",
         f"{relative}: CreditNote.createdAt must be a date-time",
     )
+    reversed_at = properties.get("reversedAt") or {}
+    contracts.check(
+        _schema_types(reversed_at) == {"string", "null"}
+        and reversed_at.get("format") == "date-time",
+        f"{relative}: CreditNote.reversedAt must be a nullable date-time",
+    )
+    reversal_reason = properties.get("reversalReason") or {}
+    contracts.check(
+        _schema_types(reversal_reason) == {"string", "null"}
+        and reversal_reason.get("maxLength") == POLICY_CREDIT_NOTE_REASON_MAX_LENGTH,
+        f"{relative}: CreditNote.reversalReason must be a nullable string of at "
+        f"most {POLICY_CREDIT_NOTE_REASON_MAX_LENGTH} characters",
+    )
 
     status_schema = schemas.get("CreditNoteStatus") or {}
     contracts.check(
@@ -6222,6 +6257,18 @@ def check_policy_credit_notes_openapi(contracts: ContractSet, document, relative
         f"{relative}: UpdateCreditNoteStatusRequest.installmentId must be a "
         "nullable uuid",
     )
+    request_reason = request_properties.get("reason") or {}
+    contracts.check(
+        "reason" in request_properties
+        and "reason" not in set(request.get("required") or []),
+        f"{relative}: UpdateCreditNoteStatusRequest.reason must be optional",
+    )
+    contracts.check(
+        _schema_types(request_reason) == {"string", "null"}
+        and request_reason.get("maxLength") == POLICY_CREDIT_NOTE_REASON_MAX_LENGTH,
+        f"{relative}: UpdateCreditNoteStatusRequest.reason must be a nullable "
+        f"string of at most {POLICY_CREDIT_NOTE_REASON_MAX_LENGTH} characters",
+    )
     applied_condition = next(
         (
             entry
@@ -6245,10 +6292,44 @@ def check_policy_credit_notes_openapi(contracts: ContractSet, document, relative
         f"{relative}: UpdateCreditNoteStatusRequest must require installmentId "
         "when status is APPLIED",
     )
+    reversed_condition = next(
+        (
+            entry
+            for entry in request.get("allOf") or []
+            if isinstance(entry, dict)
+            and ((entry.get("if") or {}).get("properties") or {})
+            .get("status", {})
+            .get("const")
+            == "REVERSED"
+        ),
+        None,
+    )
+    contracts.check(
+        isinstance(reversed_condition, dict),
+        f"{relative}: UpdateCreditNoteStatusRequest must conditionally require "
+        "reason for REVERSED",
+    )
+    contracts.check(
+        set(((reversed_condition or {}).get("then") or {}).get("required") or [])
+        == {"reason"},
+        f"{relative}: UpdateCreditNoteStatusRequest must require reason when "
+        "status is REVERSED",
+    )
+    reversed_reason = (
+        ((reversed_condition or {}).get("then") or {}).get("properties") or {}
+    ).get("reason") or {}
+    contracts.check(
+        reversed_reason.get("type") == "string"
+        and reversed_reason.get("minLength") == 1
+        and reversed_reason.get("maxLength") == POLICY_CREDIT_NOTE_REASON_MAX_LENGTH,
+        f"{relative}: UpdateCreditNoteStatusRequest must require a non-blank "
+        f"reason of at most {POLICY_CREDIT_NOTE_REASON_MAX_LENGTH} characters "
+        "when status is REVERSED",
+    )
 
 
 def check_policy_credit_notes_asyncapi(contracts: ContractSet, document, relative: str):
-    """Require the three implemented credit-note channels and their payload."""
+    """Require the four implemented credit-note channels and their payloads."""
     channels = document.get("channels") or {}
     operations = document.get("operations") or {}
     messages = (
@@ -6292,20 +6373,30 @@ def check_policy_credit_notes_asyncapi(contracts: ContractSet, document, relativ
             event in send_events,
             f"{relative}: credit-note event '{event}' must have a send operation",
         )
+        is_reversed = event == "policy.credit-note.reversed"
+        expected_message = (
+            POLICY_CREDIT_NOTE_REVERSED_EVENT_MESSAGE
+            if is_reversed
+            else POLICY_CREDIT_NOTE_EVENT_MESSAGE
+        )
         channel_messages = channel.get("messages") or {}
         contracts.check(
-            (
-                channel_messages.get(POLICY_CREDIT_NOTE_EVENT_MESSAGE) or {}
-            ).get("$ref")
-            == f"#/components/messages/{POLICY_CREDIT_NOTE_EVENT_MESSAGE}",
-            f"{relative}: {event} must reference "
-            f"{POLICY_CREDIT_NOTE_EVENT_MESSAGE}",
+            (channel_messages.get(expected_message) or {}).get("$ref")
+            == f"#/components/messages/{expected_message}",
+            f"{relative}: {event} must reference {expected_message}",
         )
         if event == "policy.credit-note.applied":
             applied_text = str(channel.get("description") or "")
             for field in POLICY_CREDIT_NOTE_APPLIED_EVENT_FIELDS:
                 contracts.check(
                     field in applied_text,
+                    f"{relative}: {event} description must document {field}",
+                )
+        if is_reversed:
+            reversed_text = str(channel.get("description") or "")
+            for field in ("installmentId", "reason", "REVERSED"):
+                contracts.check(
+                    field in reversed_text,
                     f"{relative}: {event} description must document {field}",
                 )
 
@@ -6347,9 +6438,9 @@ def check_policy_credit_notes_asyncapi(contracts: ContractSet, document, relativ
     )
     contracts.check(
         set((payload_properties.get("status") or {}).get("enum") or [])
-        == set(POLICY_CREDIT_NOTE_REQUEST_STATUSES),
+        == set(POLICY_CREDIT_NOTE_EVENT_STATUSES),
         f"{relative}: {POLICY_CREDIT_NOTE_EVENT_MESSAGE}.status must enumerate "
-        f"{list(POLICY_CREDIT_NOTE_REQUEST_STATUSES)}",
+        f"{list(POLICY_CREDIT_NOTE_EVENT_STATUSES)}",
     )
     for field in POLICY_CREDIT_NOTE_APPLIED_EVENT_FIELDS:
         contracts.check(
@@ -6371,6 +6462,57 @@ def check_policy_credit_notes_asyncapi(contracts: ContractSet, document, relativ
         (payload_properties.get("creditedAmount") or {}).get("type") == "string",
         f"{relative}: {POLICY_CREDIT_NOTE_EVENT_MESSAGE}.creditedAmount must be "
         "a decimal string",
+    )
+
+    reversed_message = messages.get(POLICY_CREDIT_NOTE_REVERSED_EVENT_MESSAGE) or {}
+    reversed_payload = reversed_message.get("payload") or {}
+    reversed_properties = reversed_payload.get("properties") or {}
+    reversed_required = set(reversed_payload.get("required") or [])
+    contracts.check(
+        reversed_required == set(POLICY_CREDIT_NOTE_REVERSED_EVENT_FIELDS),
+        f"{relative}: {POLICY_CREDIT_NOTE_REVERSED_EVENT_MESSAGE} must require "
+        f"exactly {list(POLICY_CREDIT_NOTE_REVERSED_EVENT_FIELDS)}",
+    )
+    for field in POLICY_CREDIT_NOTE_REVERSED_EVENT_FIELDS:
+        contracts.check(
+            field in reversed_properties,
+            f"{relative}: {POLICY_CREDIT_NOTE_REVERSED_EVENT_MESSAGE}."
+            f"properties.{field} is required",
+        )
+    contracts.check(
+        (reversed_properties.get("creditNoteId") or {}).get("format") == "uuid",
+        f"{relative}: {POLICY_CREDIT_NOTE_REVERSED_EVENT_MESSAGE}.creditNoteId "
+        "must be a uuid",
+    )
+    contracts.check(
+        (reversed_properties.get("noteNumber") or {}).get("maxLength") == 32,
+        f"{relative}: {POLICY_CREDIT_NOTE_REVERSED_EVENT_MESSAGE}.noteNumber "
+        "must be at most 32 characters",
+    )
+    reversed_installment = reversed_properties.get("installmentId") or {}
+    contracts.check(
+        _schema_types(reversed_installment) == {"string", "null"}
+        and reversed_installment.get("format") == "uuid",
+        f"{relative}: {POLICY_CREDIT_NOTE_REVERSED_EVENT_MESSAGE}.installmentId "
+        "must be a nullable uuid",
+    )
+    contracts.check(
+        (reversed_properties.get("amount") or {}).get("type") == "string",
+        f"{relative}: {POLICY_CREDIT_NOTE_REVERSED_EVENT_MESSAGE}.amount must be "
+        "a decimal string",
+    )
+    reversed_reason = reversed_properties.get("reason") or {}
+    contracts.check(
+        reversed_reason.get("type") == "string"
+        and reversed_reason.get("maxLength") == POLICY_CREDIT_NOTE_REASON_MAX_LENGTH,
+        f"{relative}: {POLICY_CREDIT_NOTE_REVERSED_EVENT_MESSAGE}.reason must be "
+        f"a string of at most {POLICY_CREDIT_NOTE_REASON_MAX_LENGTH} characters",
+    )
+    contracts.check(
+        tuple((reversed_properties.get("status") or {}).get("enum") or [])
+        == ("REVERSED",),
+        f"{relative}: {POLICY_CREDIT_NOTE_REVERSED_EVENT_MESSAGE}.status must "
+        "enumerate REVERSED only",
     )
 
 

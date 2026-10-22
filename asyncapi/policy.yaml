@@ -2,7 +2,7 @@ asyncapi: 3.0.0
 id: urn:eia:contracts:events:policy
 info:
   title: EIA Policy events
-  version: 1.9.0
+  version: 1.10.0
   summary: Published domain event names for the Policy vertical.
   description: >
     Event contract for the Policy vertical. The authoritative event names are
@@ -23,7 +23,8 @@ info:
     `policy.mass-tort-profile.updated`, the program facts
     `policy.program.created` and `policy.policy.program-assigned`, and the
     credit-note facts `policy.credit-note.issued`,
-    `policy.credit-note.applied`, and `policy.credit-note.cancelled` through
+    `policy.credit-note.applied`, `policy.credit-note.cancelled`, and
+    `policy.credit-note.reversed` through
     the transactional outbox; those channels and operations are marked
     `x-status: implemented`. The `created` and `updated` names are additive: the
     catalog had no generic create or update fact. The billing plan name is
@@ -38,7 +39,7 @@ info:
     The two program facts are new names with no SPEC 11.2.9 equivalent: a
     program is a catalog aggregate and the assignment is a policy command, so
     the names, the aggregate type, and the nullable membership fields are
-    recorded in M-22 and M-39. The three credit-note facts are new names as
+    recorded in M-22 and M-39. The four credit-note facts are new names as
     well: SPEC 11.2.13 publishes only `policy.billing.credit-note-issued`, and
     the implemented lifecycle has no approval or SAP step, so the names and the
     narrower status model are recorded in M-22 and M-41. The two legal-entity
@@ -54,6 +55,12 @@ info:
     additions keep `eventVersion` 1. The APPLIED installment link, the CREDITED
     installment state, and the net receivable totals are recorded in M-27 and
     M-41.
+    The credit-note reversal slice adds a dedicated `reversed` payload rather
+    than widening the shared one: `PolicyCreditNoteReversedData` requires
+    `creditNoteId`, `noteNumber`, `installmentId` (nullable for a legacy APPLIED
+    note), `amount`, `reason`, and `status: REVERSED`. The new event name and the
+    payload keep `eventVersion` 1, and the reversal extension is recorded in
+    M-22 and M-41.
     The remaining SPEC
     11.2.9 and 11.2.13 names are planned.
   contact:
@@ -348,6 +355,29 @@ channels:
         $ref: '#/components/messages/DomainEvent'
       PolicyCreditNoteData:
         $ref: '#/components/messages/PolicyCreditNoteData'
+  PolicyCreditNoteReversed:
+    address: policy.credit-note.reversed
+    title: policy.credit-note.reversed
+    description: >
+      Emitted when an APPLIED credit note is reversed, in the same transaction as
+      the note row, the released installment credit, the policy-version bump, and
+      the outbox row. The payload carries the credit-note identity and number,
+      the `installmentId` that received the original credit (explicitly null for
+      a legacy APPLIED note that predates installment application), the note
+      amount as a decimal string, the required `reason` for the reversal, and
+      status REVERSED. Reversal releases the note amount from the installment and
+      reopens a fully credited row as DUE or OVERDUE when it no longer covers its
+      gross amount. REVERSED is terminal.
+    x-event-type: policy.credit-note.reversed
+    x-event-version: 1
+    x-status: implemented
+    x-spec-section: SPEC 11.2.13
+    x-implemented-by: repos/eia-policy-expert/src/main/java/com/eia/policy/expert/PolicyEvents.java
+    messages:
+      DomainEvent:
+        $ref: '#/components/messages/DomainEvent'
+      PolicyCreditNoteReversedData:
+        $ref: '#/components/messages/PolicyCreditNoteReversedData'
   PolicyPolicyRenewed:
     address: policy.policy.renewed
     title: policy.policy.renewed
@@ -763,6 +793,17 @@ operations:
       policy-version bump.
     x-event-type: policy.credit-note.cancelled
     x-status: implemented
+  publishPolicyCreditNoteReversed:
+    action: send
+    channel:
+      $ref: '#/channels/PolicyCreditNoteReversed'
+    summary: Publish policy.credit-note.reversed
+    description: >
+      Publishes policy.credit-note.reversed when an APPLIED credit note is
+      reversed with a reason, in the same transaction as the note row, the
+      released installment credit, and the policy-version bump.
+    x-event-type: policy.credit-note.reversed
+    x-status: implemented
   publishPolicyPolicyRenewed:
     action: send
     channel:
@@ -1155,8 +1196,8 @@ components:
               - CANCELLED
     PolicyCreditNoteData:
       name: PolicyCreditNoteData
-      title: policy.credit-note.* data
-      summary: One accepted policy credit-note lifecycle transition.
+      title: policy.credit-note.issued/applied/cancelled data
+      summary: One accepted credit-note issue, application, or cancellation transition.
       contentType: application/json
       payload:
         type: object
@@ -1207,6 +1248,49 @@ components:
               application, as a positive decimal money string with up to four
               fraction digits (SPEC 10.3). Present only when `status` is
               APPLIED.
+    PolicyCreditNoteReversedData:
+      name: PolicyCreditNoteReversedData
+      title: policy.credit-note.reversed data
+      summary: One accepted credit-note reversal that releases an applied credit.
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: true
+        required:
+          - creditNoteId
+          - noteNumber
+          - installmentId
+          - amount
+          - reason
+          - status
+        properties:
+          creditNoteId:
+            type: string
+            format: uuid
+          noteNumber:
+            type: string
+            maxLength: 32
+            description: Server-generated as `CN-{7 digits}` and unique per policy.
+          installmentId:
+            type: [string, 'null']
+            format: uuid
+            description: >
+              Installment that received the original credit and is released by
+              the reversal; explicitly null for a legacy APPLIED note that
+              predates installment application.
+          amount:
+            type: string
+            description: Positive decimal money string with up to four fraction digits (SPEC 10.3).
+          reason:
+            type: string
+            maxLength: 500
+            description: >
+              Required, trimmed, non-blank explanation of the reversal supplied
+              with the REVERSED transition.
+          status:
+            type: string
+            enum:
+              - REVERSED
     PolicyMassTortProfileUpdatedData:
       name: PolicyMassTortProfileUpdatedData
       title: policy.mass-tort-profile.updated data
@@ -1518,7 +1602,7 @@ x-implementation:
   publisher: eia-policy-expert
   subscriber: none
   notes: >
-    Nineteen Policy events are written to the transactional outbox in the same
+    Twenty Policy events are written to the transactional outbox in the same
     transaction as the aggregate write and dispatched by the platform outbox
     dispatcher when `eia.outbox.enabled=true`: `created`, `updated`,
     `version-issued`, `endorsed`, `cancelled`, `reinstated`, `renewed`,
@@ -1526,7 +1610,8 @@ x-implementation:
     `dunning.sent`, `mass-tort-profile.updated`, the program facts
     `policy.program.created` and `policy.policy.program-assigned`, the
     credit-note facts `policy.credit-note.issued`,
-    `policy.credit-note.applied`, and `policy.credit-note.cancelled`, and the
+    `policy.credit-note.applied`, `policy.credit-note.cancelled`, and
+    `policy.credit-note.reversed`, and the
     legal-entity facts `policy.legal-entity.created` and
     `policy.policy.legal-entity-assigned`. The renewal
     event carries both policy identities and the lineage link; the billing plan
@@ -1539,7 +1624,9 @@ x-implementation:
     credit-note events carry the policy and note identity, the note number, the
     amount as a decimal string, the currency, and the new status; the `applied`
     payload additionally carries the credited installment id and that
-    installment's cumulative credited amount. They are
+    installment's cumulative credited amount, and the `reversed` payload carries
+    the note identity and number, the nullable released installment id, the
+    amount, the required reversal reason, and status REVERSED. They are
     keyed by the policy aggregate because every transition bumps the policy
     version. The legal-entity created fact is keyed by the `LegalEntity`
     aggregate at version 1 and carries the catalog row; the assignment fact is

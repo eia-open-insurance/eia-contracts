@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Policy API
-  version: 2.12.0
+  version: 2.13.0
   summary: Direct-book policy administration and the Policy expert API.
   description: >
     This document describes the implemented public Policy domain API and the
@@ -173,9 +173,10 @@ info:
     - `GET/POST /api/v1/policies/{policyId}/credit-notes` lists the policy's
       notes newest first and requests a new DRAFT note. `PATCH
       .../credit-notes/{creditNoteId}/status` advances a note once through
-      DRAFT -> ISSUED -> APPLIED, with CANCELLED reachable from DRAFT or ISSUED;
-      APPLIED and CANCELLED are terminal.
-    - The projection is the eleven-field `CreditNote`; the server owns
+      DRAFT -> ISSUED -> APPLIED, with CANCELLED reachable from DRAFT or ISSUED
+      and REVERSED reachable from APPLIED; APPLIED, CANCELLED, and REVERSED are
+      terminal.
+    - The projection is the thirteen-field `CreditNote`; the server owns
       `creditNoteId`, `noteNumber` (`CN-{7 digits}`), the DRAFT creation state,
       the timestamps, and the policy-version bump. `amount` must be greater than
       zero, `currency` must equal the policy premium currency, and `reason` is
@@ -265,6 +266,33 @@ info:
       share rules, and the public domain currently reports a capacity
       request-shape failure as 400 `VALIDATION_ERROR`; MISMATCHES.md M-39
       records both deviations.
+
+    The 2026-10-21 credit-note reversal slice releases an applied credit and
+    adds the fifth lifecycle state:
+
+    - `PATCH .../credit-notes/{creditNoteId}/status` accepts an optional
+      `reason` beside `status`; it is required for REVERSED, trimmed, non-blank,
+      and capped at 500 characters, and it is ignored by the other statuses.
+      REVERSED is reachable only from APPLIED, and APPLIED, CANCELLED, and
+      REVERSED are terminal.
+    - `CreditNote` adds the REVERSED status and the nullable `reversedAt` and
+      `reversalReason` members. A reversed note keeps its `issuedAt`,
+      `appliedAt`, and `appliedInstallmentId`, so the original credit stays
+      auditable.
+    - Reversal releases the note amount from the installment recorded at
+      application time: `creditedAmount` shrinks by the note amount (clamped at
+      zero) and a CREDITED installment that no longer covers its gross amount
+      reopens as DUE when its due date is today or later and as OVERDUE when it
+      is already past. A partial credit on an open installment just shrinks
+      `creditedAmount` and keeps its status. A legacy APPLIED note without an
+      applied installment is only marked REVERSED.
+    - Reversing a note that is not APPLIED, or repeating a reversal, is 409
+      `INVALID_CREDIT_NOTE_TRANSITION`; a missing or blank reason is 400
+      `INVALID_CREDIT_NOTE_REASON` and a reason longer than 500 characters is
+      400 `VALIDATION_ERROR`. The accepted transition writes
+      `policy.credit-note.reversed` in the same transaction as the note row,
+      the installment release, and the policy-version bump. MISMATCHES.md M-22
+      and M-41 record the implementation extension.
   contact:
     name: EIA Architecture
     url: https://github.com/eia-open-insurance
@@ -1899,10 +1927,11 @@ paths:
       summary: Advance a credit note through its status lifecycle.
       description: >
         Advances one credit note through the expert-owned lifecycle and returns
-        the updated projection. The body is `{status, installmentId?}`. The only
-        allowed edges are DRAFT -> ISSUED, DRAFT -> CANCELLED, ISSUED -> APPLIED,
-        and ISSUED -> CANCELLED. APPLIED and CANCELLED are terminal, so any
-        later transition, including a replay of the same terminal status, is 409
+        the updated projection. The body is `{status, installmentId?, reason?}`.
+        The only allowed edges are DRAFT -> ISSUED, DRAFT -> CANCELLED,
+        ISSUED -> APPLIED, ISSUED -> CANCELLED, and APPLIED -> REVERSED.
+        APPLIED, CANCELLED, and REVERSED are terminal, so any later transition,
+        including a replay of the same terminal status, is 409
         `INVALID_CREDIT_NOTE_TRANSITION` with `meta.currentStatus` and
         `meta.targetStatus`. `status` is trimmed and upper-cased; DRAFT and
         unknown values are 400 `INVALID_CREDIT_NOTE_STATUS`, and a blank or
@@ -1910,8 +1939,10 @@ paths:
 
         ISSUED stamps `issuedAt`; APPLIED stamps `appliedAt` and
         `appliedInstallmentId`; CANCELLED stamps neither and preserves an
-        `issuedAt` the note already carries. `installmentId` is required for
-        APPLIED and ignored by ISSUED and CANCELLED. APPLIED credits the note
+        `issuedAt` the note already carries; REVERSED stamps `reversedAt` and
+        `reversalReason` and preserves `issuedAt`, `appliedAt`, and
+        `appliedInstallmentId`. `installmentId` is required for APPLIED and
+        ignored by ISSUED, CANCELLED, and REVERSED. APPLIED credits the note
         amount to an open installment that belongs to the same tenant and
         policy. The installment must be DUE or OVERDUE and the note amount must
         fit inside its uncredited remainder (`amount - creditedAmount`): a
@@ -1932,16 +1963,40 @@ paths:
         concurrent credit that moves the installment
         is 409 `CONCURRENT_MODIFICATION`.
 
+        REVERSED is permitted only from APPLIED and releases the note amount
+        from the installment recorded at application time. `creditedAmount`
+        shrinks by the note amount, clamped at zero so a mismatched ledger can
+        never drive the installment negative. A fully credited installment that
+        no longer covers its gross `amount` reopens as DUE when its due date is
+        today or later and as OVERDUE when it is already past; any other status
+        is kept, so a partial credit on an open installment simply shrinks
+        `creditedAmount` and keeps the open status. A legacy APPLIED note with a
+        null `appliedInstallmentId` is only marked REVERSED and changes no
+        installment. The note update, the installment release, the policy
+        version bump, and the event commit together.
+
+        Rejections on REVERSED: a missing or blank `reason` is 400
+        `INVALID_CREDIT_NOTE_REASON`, and a reason longer than 500 characters is
+        400 `VALIDATION_ERROR` (the expert's `INVALID_CREDIT_NOTE_REASON` is the
+        internal backstop). Reversing a note that is not APPLIED, including a
+        DRAFT, ISSUED, or CANCELLED note, or reversing an already REVERSED note,
+        is 409 `INVALID_CREDIT_NOTE_TRANSITION` with `meta.currentStatus` and
+        `meta.targetStatus`. An unknown or foreign applied installment is 404
+        `INSTALLMENT_NOT_FOUND`, and a concurrent installment change is 409
+        `CONCURRENT_MODIFICATION`.
+
         The accepted transition bumps the policy row version and writes
-        `policy.credit-note.issued`, `policy.credit-note.applied`, or
-        `policy.credit-note.cancelled` in the same transaction as the row, so a
-        rejection writes neither. The `applied` event additionally carries
-        `installmentId` and the installment's cumulative `creditedAmount`. An
-        unknown policy or credit note, including a note under another policy or
-        tenant, is 404 `POLICY_NOT_FOUND` or `CREDIT_NOTE_NOT_FOUND`; another
-        book is 404 `BOOK_SCOPE_VIOLATION`; a concurrent policy change is 409
-        `CONCURRENT_MODIFICATION`. The command accepts no `Idempotency-Key` or
-        `If-Match` (M-06, M-07).
+        `policy.credit-note.issued`, `policy.credit-note.applied`,
+        `policy.credit-note.cancelled`, or `policy.credit-note.reversed` in the
+        same transaction as the row, so a rejection writes neither. The
+        `applied` event additionally carries `installmentId` and the
+        installment's cumulative `creditedAmount`; the `reversed` event carries
+        `creditNoteId`, `noteNumber`, the nullable `installmentId`, `amount`,
+        `reason`, and `status`. An unknown policy or credit note, including a
+        note under another policy or tenant, is 404 `POLICY_NOT_FOUND` or
+        `CREDIT_NOTE_NOT_FOUND`; another book is 404 `BOOK_SCOPE_VIOLATION`; a
+        concurrent policy change is 409 `CONCURRENT_MODIFICATION`. The command
+        accepts no `Idempotency-Key` or `If-Match` (M-06, M-07).
       parameters:
         - $ref: './components.yaml#/components/parameters/TenantHeader'
         - $ref: './components.yaml#/components/parameters/BookHeaderDirect'
@@ -5654,22 +5709,26 @@ components:
         Public projection of one policy billing credit note (SPEC 11.2.13
         billing adjustments). A note is created DRAFT for the policy premium
         currency and advances once through DRAFT -> ISSUED -> APPLIED, with
-        CANCELLED reachable from DRAFT or ISSUED. APPLIED and CANCELLED are
-        terminal. APPLIED requires an `installmentId` in the status command and
-        credits the note amount to that open billing installment; a partial
-        credit leaves the installment open and a credit that covers its
-        uncredited remainder moves it to CREDITED. `creditNoteId` is the
-        domain's public name for the expert row id; `noteNumber` is
-        server-generated as `CN-{7 digits}` and is unique per policy.
-        `issuedAt` is stamped by ISSUED and preserved afterwards; `appliedAt`
-        is stamped only by APPLIED; `createdAt` is the request instant.
-        `appliedInstallmentId` names the installment an APPLIED note was
-        credited against and stays null for every other status, including a
-        legacy APPLIED note that predates installment application.
-        `reason` is optional and null when it was omitted or blank. The
-        projection does not expose `tenantId`. The lifecycle, reason freedom,
-        and event names are narrower than the SPEC `credit_note_request`
-        (MISMATCHES.md M-41).
+        CANCELLED reachable from DRAFT or ISSUED and REVERSED reachable from
+        APPLIED. APPLIED, CANCELLED, and REVERSED are terminal. APPLIED requires
+        an `installmentId` in the status command and credits the note amount to
+        that open billing installment; a partial credit leaves the installment
+        open and a credit that covers its uncredited remainder moves it to
+        CREDITED. REVERSED requires a `reason` and releases the note amount from
+        that installment. `creditNoteId` is the domain's public name for the
+        expert row id; `noteNumber` is server-generated as `CN-{7 digits}` and
+        is unique per policy. `issuedAt` is stamped by ISSUED and preserved
+        afterwards; `appliedAt` is stamped only by APPLIED; `createdAt` is the
+        request instant. `appliedInstallmentId` names the installment an APPLIED
+        note was credited against and stays null for every other status,
+        including a legacy APPLIED note that predates installment application;
+        a REVERSED note keeps it so the original credit stays auditable.
+        `reversedAt` and `reversalReason` are written only by the REVERSED
+        transition and are null for every other status. `reason` is the optional
+        creation reason and is null when it was omitted or blank; it is distinct
+        from `reversalReason`. The projection does not expose `tenantId`. The
+        lifecycle, reason freedom, and event names are narrower than the SPEC
+        `credit_note_request` (MISMATCHES.md M-41).
       required:
         - creditNoteId
         - noteNumber
@@ -5682,6 +5741,8 @@ components:
         - appliedAt
         - appliedInstallmentId
         - createdAt
+        - reversedAt
+        - reversalReason
       properties:
         creditNoteId:
           type: string
@@ -5703,9 +5764,8 @@ components:
           type: [string, 'null']
           maxLength: 500
           description: >
-            Optional free-text adjustment reason. Blank input is stored as
-            null. The SPEC 11.2.13 credit-note reason enum is not enforced
-            (M-41).
+            Optional free-text creation reason. Blank input is stored as null.
+            The SPEC 11.2.13 credit-note reason enum is not enforced (M-41).
         status:
           $ref: '#/components/schemas/CreditNoteStatus'
         issuedAt:
@@ -5720,26 +5780,41 @@ components:
           type: [string, 'null']
           format: uuid
           description: >
-            Installment the note was credited against; stamped by APPLIED and
-            null for DRAFT, ISSUED, CANCELLED, and legacy APPLIED notes.
+            Installment the note was credited against; stamped by APPLIED,
+            retained by REVERSED, and null for DRAFT, ISSUED, CANCELLED, and
+            legacy APPLIED notes.
         createdAt:
           type: string
           format: date-time
+        reversedAt:
+          type: [string, 'null']
+          format: date-time
+          description: >
+            Stamped only by the REVERSED transition; null for every other
+            status.
+        reversalReason:
+          type: [string, 'null']
+          maxLength: 500
+          description: >
+            Required, trimmed, non-blank explanation supplied with REVERSED;
+            null for every other status.
     CreditNoteStatus:
       type: string
       description: >
         Closed credit-note lifecycle vocabulary. A note is created DRAFT; the
-        public status command accepts only ISSUED, APPLIED, or CANCELLED.
-        APPLIED credits the note to a billing installment and CANCELLED ends the
-        note; both are terminal. CREDITED is an installment status, not a
-        credit-note status. The SPEC `credit_note_request`
-        status set is REQUESTED/APPROVED/SENT_TO_SAP/ISSUED/REJECTED instead
-        (M-41).
+        public status command accepts only ISSUED, APPLIED, CANCELLED, or
+        REVERSED. APPLIED credits the note to a billing installment, CANCELLED
+        ends the note before it is applied, and REVERSED releases an applied
+        credit; APPLIED, CANCELLED, and REVERSED are terminal. CREDITED is an
+        installment status, not a credit-note status. The SPEC
+        `credit_note_request` status set is
+        REQUESTED/APPROVED/SENT_TO_SAP/ISSUED/REJECTED instead (M-41).
       enum:
         - DRAFT
         - ISSUED
         - APPLIED
         - CANCELLED
+        - REVERSED
     CreateCreditNoteRequest:
       type: object
       description: >
@@ -5781,13 +5856,19 @@ components:
         only and is rejected here; an unknown value is 400
         `INVALID_CREDIT_NOTE_STATUS`. `installmentId` selects the billing
         installment that receives the credit and is required when `status` is
-        APPLIED; it is ignored by ISSUED and CANCELLED. A missing id on APPLIED
-        is 400 `INVALID_CREDIT_NOTE_INSTALLMENT`. The expert applies the
-        transition graph and the same-tenant/policy open-installment and
-        amount-fit rules, and returns 409 `INVALID_CREDIT_NOTE_TRANSITION` for
-        an illegal or repeated terminal edge, `INSTALLMENT_NOT_CREDITABLE` for
-        a settled target, and `CREDIT_NOTE_EXCEEDS_INSTALLMENT` when the note
-        does not fit the uncredited remainder.
+        APPLIED; it is ignored by ISSUED, CANCELLED, and REVERSED. A missing id
+        on APPLIED is 400 `INVALID_CREDIT_NOTE_INSTALLMENT`. `reason` explains a
+        reversal and is required when `status` is REVERSED; it is trimmed,
+        non-blank, and capped at 500 characters, and it is ignored by the other
+        statuses. A missing or blank reason on REVERSED is 400
+        `INVALID_CREDIT_NOTE_REASON`; a longer value is 400 `VALIDATION_ERROR`
+        (the expert's `INVALID_CREDIT_NOTE_REASON` is the internal backstop).
+        The expert applies the transition graph and the same-tenant/policy
+        open-installment, amount-fit, and credit-release rules, and returns 409
+        `INVALID_CREDIT_NOTE_TRANSITION` for an illegal or repeated terminal
+        edge, `INSTALLMENT_NOT_CREDITABLE` for a settled target, and
+        `CREDIT_NOTE_EXCEEDS_INSTALLMENT` when the note does not fit the
+        uncredited remainder.
       required:
         - status
       properties:
@@ -5797,12 +5878,19 @@ components:
             - ISSUED
             - APPLIED
             - CANCELLED
+            - REVERSED
         installmentId:
           type: [string, 'null']
           format: uuid
           description: >
-            Installment to credit; required for APPLIED and ignored by ISSUED
-            and CANCELLED.
+            Installment to credit; required for APPLIED and ignored by ISSUED,
+            CANCELLED, and REVERSED.
+        reason:
+          type: [string, 'null']
+          maxLength: 500
+          description: >
+            Reversal explanation; required for REVERSED, ignored by the other
+            statuses.
       allOf:
         - description: APPLIED requires the credited installment.
           if:
@@ -5818,6 +5906,21 @@ components:
               installmentId:
                 type: string
                 format: uuid
+        - description: REVERSED requires the reversal reason.
+          if:
+            required:
+              - status
+            properties:
+              status:
+                const: REVERSED
+          then:
+            required:
+              - reason
+            properties:
+              reason:
+                type: string
+                minLength: 1
+                maxLength: 500
     LegalEntity:
       type: object
       description: >
@@ -6229,14 +6332,20 @@ x-implementation:
     APPLIED requires an `installmentId`: the note is credited to an open
     DUE/OVERDUE installment on the same tenant and policy, the installment's
     `creditedAmount` grows, a partial credit leaves it open, and a credit that
-    covers the uncredited remainder moves it to CREDITED. The projection carries
-    the nullable `appliedInstallmentId`, and the `applied` event additionally
-    carries `installmentId` and the cumulative `creditedAmount`. Creation bumps
-    the policy row version without an event; each accepted transition writes its
-    `policy.credit-note.*` event in the same transaction. The short path, the
-    four-state lifecycle, the free-text reason, the missing approval and SAP
-    credit-memo steps, and the event names differ from SPEC 11.2.13 and are
-    recorded in M-22 and M-41.
+    covers the uncredited remainder moves it to CREDITED. REVERSED is reachable
+    only from APPLIED and requires a non-blank reason: it releases the note
+    amount from the installment recorded at application time, clamps the
+    credited total at zero, and reopens a CREDITED installment as DUE or OVERDUE
+    when it no longer covers its gross amount. The projection carries the
+    nullable `appliedInstallmentId`, `reversedAt`, and `reversalReason`; the
+    `applied` event additionally carries `installmentId` and the cumulative
+    `creditedAmount`, and the `reversed` event carries the note identifiers, the
+    nullable applied installment, the amount, the reason, and status REVERSED.
+    Creation bumps the policy row version without an event; each accepted
+    transition writes its `policy.credit-note.*` event in the same transaction.
+    The short path, the five-state lifecycle, the free-text reason, the missing
+    approval and SAP credit-memo steps, and the event names differ from SPEC
+    11.2.13 and are recorded in M-22 and M-41.
 
     The legal-entity catalog is a tenant-scoped DIRECT-book resource. The domain
     proxies the expert's `/internal/v1` alias with the tenant and DIRECT book;
@@ -6253,26 +6362,29 @@ x-implementation:
     catalog, the SPEC 11.2.16 path, and the nullable assignment against LE-01 are
     recorded in M-01, M-12, and M-43.
 x-compatibility:
-  contractVersion: 2.12.0
-  previousContractVersion: 2.11.0
+  contractVersion: 2.13.0
+  previousContractVersion: 2.12.0
   breaking: []
   compatible:
-    - Adds the nullable Program.capacityAmount, Program.capacityCurrency, and Program.utilizationPct response properties.
-    - Adds the Program.usedAmount and Program.policyCount response properties.
-    - Adds the optional CreateProgramRequest.capacityAmount and capacityCurrency request properties with the both-or-neither rule.
-    - Documents the capacity usage derivation (sum of assigned policy limits and utilization) and the 400 INVALID_PROGRAM_CAPACITY code.
-    - Adds no path or event, changes no existing field meaning, and removes no response field.
+    - Adds the optional UpdateCreditNoteStatusRequest.reason request property with the required-for-REVERSED rule and the 500-character cap.
+    - Adds REVERSED to the CreditNoteStatus enum and the status request enum.
+    - Adds the nullable CreditNote.reversedAt and CreditNote.reversalReason response properties.
+    - Documents the APPLIED -> REVERSED transition, the credit-release and installment-reopen rules, and the 400/409 rejections.
+    - Adds the policy.credit-note.reversed event and its creditNoteId, noteNumber, installmentId, amount, reason, and status payload.
+    - Removes no path or response field and changes no existing field meaning; consumers must tolerate the new enum value.
   note: >
-    The program-capacity slice is additive over 2.11.0: three nullable and two
-    required response members on `Program`, plus one optional request pair on
-    `CreateProgramRequest`. A create that omits both capacity members produces
-    the same program as before, so no existing client changes. The flat
-    optional pair is narrower than the SPEC 10.11.3 capacity structure and the
-    LE-02 share rules, and the public domain currently reports a capacity
-    request-shape failure as 400 `VALIDATION_ERROR` rather than the canonical
-    400 `INVALID_PROGRAM_CAPACITY`; MISMATCHES.md M-39 records both. The HTTP
-    API version stays `/api/v1`, no path, event name, channel, or event version
-    changes, and the catalog counts are unchanged.
+    The credit-note reversal slice is additive over 2.12.0: one optional request
+    member, one enum value on the credit-note status and request vocabularies,
+    two nullable response members, one transition, and one event name. A client
+    that never sends REVERSED sees the same credit-note lifecycle and response
+    fields as before; a client that reads `status` must tolerate the new
+    REVERSED value, and `reversedAt`/`reversalReason` are null on every existing
+    note. The HTTP API version stays `/api/v1` and the event keeps `eventVersion`
+    1 because the payload is a new name rather than a change to the existing
+    credit-note payload. The new event brings the catalog to 208 published and
+    88 implemented names, with Policy at 32 published and 20 implemented. The
+    reversal extension and its missing SPEC equivalent are recorded in
+    MISMATCHES.md M-22 and M-41.
 x-planned-operations:
   - method: POST
     path: /api/v1/policies/{policyId}/bind

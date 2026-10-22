@@ -1252,6 +1252,42 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   updates M-14, M-22, and M-40 for the new events and the implemented hold.
 - `python scripts/validate_contracts.py` passes 13,501 checks with 0 failures.
 
+### Added in the Policy credit-note reversal contract (2026-10-21)
+
+- `openapi/policy.yaml` is 2.13.0: the credit-note status body is
+  `{status, installmentId?, reason?}`. `reason` is optional, nullable, capped at
+  500 characters, and required for REVERSED with a non-blank value; the
+  `CreditNoteStatus` and request enums gain REVERSED. `CreditNote` adds the
+  required-but-nullable `reversedAt` and `reversalReason` members, and the
+  document describes the APPLIED -> REVERSED edge, the credit release from the
+  installment recorded at application time, the zero clamp on `creditedAmount`,
+  the DUE/OVERDUE reopen of a fully credited row, the legacy APPLIED note with
+  no installment, and the 400 `INVALID_CREDIT_NOTE_REASON`/`VALIDATION_ERROR`
+  and 409 `INVALID_CREDIT_NOTE_TRANSITION`/`CONCURRENT_MODIFICATION`
+  rejections. The new `policy.credit-note.reversed` payload is documented on
+  the status operation. `x-compatibility` moves to 2.13.0 over 2.12.0.
+- `asyncapi/policy.yaml` is 1.10.0: the implemented
+  `policy.credit-note.reversed` channel and `send` operation with a dedicated
+  `PolicyCreditNoteReversedData` payload (`creditNoteId`, `noteNumber`,
+  nullable `installmentId`, `amount`, required `reason`, and `status:
+  REVERSED`). The shared `PolicyCreditNoteData` remains the issued/applied/
+  cancelled payload, and the new event keeps `eventVersion` 1.
+- `asyncapi/event-catalog.yaml` is 1.25.0: `policy.credit-note.reversed` is
+  published and implemented, for 208 published and 88 implemented names
+  (Policy 32 published and 20 implemented).
+- `scripts/validate_contracts.py` requires the optional nullable 500-character
+  request `reason`, its conditional REVERSED requirement, the five-value
+  `CreditNoteStatus` enum, the nullable `reversedAt` and `reversalReason`
+  members, the APPLIED -> REVERSED documentation and the
+  `INVALID_CREDIT_NOTE_REASON` code, the four implemented channels, the
+  dedicated reversed payload and its field bounds, and the catalog entry. It
+  also requires `policy.credit-note.reversed` in the Policy implemented subset.
+- `README.md` records the new slice, the reversal semantics, the payload, the
+  catalog totals, and the validation count; `MISMATCHES.md` rewrites M-41 for
+  the five-state lifecycle and the reversal extension and updates M-14, M-22,
+  and M-27 for the new event.
+- `python scripts/validate_contracts.py` passes 13,558 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was
