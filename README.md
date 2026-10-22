@@ -367,8 +367,31 @@ returns the updated `Payment`. The expert owns the graph, the approval gate,
 and the concurrency check, and the public API preserves its 400/404/409 codes
 (`INVALID_STATUS`, `INVALID_STATUS_TRANSITION`, `PAYMENT_NOT_APPROVED`,
 `CONCURRENT_MODIFICATION`, `PAYMENT_NOT_FOUND`). The graph and its widening
-over SPEC 11.7.6, plus the reason-length enforcement gap, are recorded in
-`MISMATCHES.md` M-46. The full validation run passes 13,978 checks.
+over SPEC 11.7.6, plus the reason-length enforcement gap that 1.6.0 closes, are
+recorded in `MISMATCHES.md` M-46. The full validation run passes 13,978 checks.
+
+### Payment status reason projection (2026-10-22)
+
+Payment 1.6.0 exposes the latest status reason on the payment projection. The
+change is additive: one required-but-nullable response member, no path, request
+field, or event changes, and a caller that ignores unknown response members is
+unaffected.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/payment.yaml` | 1.6.0 | Additive | `Payment` adds the required-but-nullable 200-character `statusReason` and documents the latest-status-reason semantics; the status PATCH and both transition request schemas record that the accepted `reason` is returned and that an over-long value is 400 `VALIDATION_ERROR`. |
+
+`statusReason` is the trimmed `reason` supplied with the most recent accepted
+status change, whether through `PATCH /api/v1/payments/{paymentId}/status` or
+one of the named actions (`/submit`, `/authorize`, `/approve`, and `/issue`
+supply their own text). Each accepted change replaces the previous value, and a
+change without a reason clears it, so the member describes the current `status`
+only and is not a status history. A payment that has never changed status, or
+whose latest change carried no reason, returns `null`; the member is always
+present. The value is persisted in `payment.status_reason` (`varchar(200)`); the
+expert rejects a longer request reason with 400 `VALIDATION_ERROR` before any
+write. `MISMATCHES.md` M-46 records the SPEC-less route and graph and the closed
+reason-validation and projection gaps. The full run passes 14,098 checks.
 
 ### Claim task and note idempotency (2026-10-20)
 
@@ -2450,10 +2473,13 @@ to an execution status (`SUBMITTED`, `ACCEPTED`, `PROCESSING`, `PAID`,
 `PAYMENT_NOT_APPROVED`. `expectedVersion` is optional: when supplied, a stale
 value is 409 `CONCURRENT_MODIFICATION` and writes nothing; when omitted, the
 transition is not version-checked. `reason` is optional and capped at 200
-characters by the contract, trimmed, and stored as the status reason; it is not
-returned in the `Payment` projection. The expert does not pre-validate the
-reason length, so an over-long value currently fails at persistence rather than
-with a 400 (M-46).
+characters; it is trimmed and stored as the latest status reason, which the
+updated `Payment` returns as `statusReason`. Each accepted change replaces the
+value, and a change without a reason clears it, so a payment that has never
+transitioned, or whose latest change carried no reason, returns null. An
+over-long reason is 400 `VALIDATION_ERROR` before the transition and version
+checks and writes nothing; the named actions replace the value with their own
+fixed text.
 
 The graph is wider than the SPEC 11.7.6 mermaid: it adds the CANCELLED/VOID
 escape edges, `SUBMITTED`/`ACCEPTED` -> `FAILED`, `PROCESSING` ->
@@ -2974,10 +3000,12 @@ missing directory.
    absence of the implemented path from `x-planned-operations`, the public
    payment status PATCH with its shared `TenantHeader` and `paymentId` path
    parameter, the required `UpdatePaymentStatusRequest`, the 200 `Payment` and
-   400/404/409 responses, the 34 documented edges and terminal statuses, the
-   `PaymentStatus` enum coverage, the optional `expectedVersion` and
-   200-character `reason` on both transition schemas, the error-code and event
-   documentation, and the absence of the status path from
+   400/404/409 responses, the required-but-nullable 200-character
+   `Payment.statusReason` and its latest/trim/clear description, the returned
+   status reason on the PATCH description, the 34 documented edges and terminal
+   statuses, the `PaymentStatus` enum coverage, the optional `expectedVersion`
+   and 200-character `reason` on both transition schemas, the error-code and
+   event documentation, and the absence of the status path from
    `x-planned-operations`, the implemented
    `payment.allocation.created` channel and payload, the three
    Policy billing operations, the optional shared
@@ -3224,10 +3252,12 @@ missing directory.
   (SPEC 11.7.11 lists only named actions). The implemented graph is wider than
   the SPEC 11.7.6 mermaid (CANCELLED/VOID escape edges, `SUBMITTED`/`ACCEPTED`
   -> `FAILED`, `PROCESSING` -> `PARTIALLY_PAID`, and the `PARTIALLY_PAID`
-  edges), the contract caps `reason` at the 200-character column width but the
-  expert does not pre-validate the length, and a status write publishes the
-  generic `payment.payment.updated`/`.status-changed` names rather than the
-  SPEC per-verb facts (M-22, M-46);
+  edges), the contract caps `reason` at the 200-character column width and the
+  expert rejects a longer value with 400 `VALIDATION_ERROR`, the payment
+  projection returns the latest trimmed `statusReason` but no status history,
+  and a status write publishes the generic
+  `payment.payment.updated`/`.status-changed` names rather than the SPEC
+  per-verb facts (M-22, M-46);
 - document associations are implemented as tenant-scoped `/links` with a flat
   `linkedType`/`linkedId` target and no role, book, or DOC-09 target-existence
   check, and publish `document.link.added`/`.removed` rather than the SPEC

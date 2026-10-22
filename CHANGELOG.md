@@ -1525,6 +1525,28 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   validation evidence.
 - `python scripts/validate_contracts.py` passes 14,088 checks with 0 failures.
 
+### Added in the payment status reason contract (2026-10-22)
+
+- `openapi/payment.yaml` is 1.6.0: `Payment` adds the required-but-nullable
+  200-character `statusReason`, the trimmed reason from the most recent accepted
+  status change. The description records that each accepted change replaces the
+  value, a change without a reason clears it, the named actions supply their own
+  text, and a payment that has never changed status returns null. The status
+  PATCH and both transition request schemas record that the accepted `reason` is
+  returned as `statusReason` and that an over-long value is 400
+  `VALIDATION_ERROR` before the transition and version checks. `x-compatibility`
+  moves to 1.6.0 over 1.5.0.
+- `scripts/validate_contracts.py` requires the `Payment.statusReason` property,
+  its membership in `Payment.required`, its `string | null` type and
+  200-character cap, its latest/trimmed/clear description, and the returned
+  status reason on the PATCH description instead of documenting it as absent.
+- `README.md` records the additive version, the latest-status-reason semantics,
+  the null cases, the 400 before write, the SPEC gaps, and the validation
+  count; `MISMATCHES.md` updates M-46 and M-24 for the returned reason, the
+  now-enforced 200-character limit, the revised evidence, and the still-planned
+  status history.
+- `python scripts/validate_contracts.py` passes 14,098 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

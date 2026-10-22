@@ -3313,6 +3313,37 @@ def check_payment_status(contracts: ContractSet, document, relative: str):
             f"{relative}: PaymentStatus must name the terminal {terminal} status",
         )
 
+    # The status reason is part of the Payment projection: it is always
+    # serialized, null when the latest change carried no reason, and capped at
+    # the payment.status_reason column width.
+    payment_schema = schemas.get("Payment") or {}
+    payment_properties = payment_schema.get("properties") or {}
+    payment_required = set(payment_schema.get("required") or [])
+    contracts.check(
+        isinstance(payment_properties.get("statusReason"), dict),
+        f"{relative}: Payment.statusReason is required",
+    )
+    contracts.check(
+        "statusReason" in payment_required,
+        f"{relative}: Payment.required must list statusReason",
+    )
+    payment_status_reason = payment_properties.get("statusReason") or {}
+    contracts.check(
+        _schema_types(payment_status_reason) == {"string", "null"}
+        and payment_status_reason.get("maxLength")
+        == PAYMENT_STATUS_REASON_MAX_LENGTH,
+        f"{relative}: Payment.statusReason must be a required-but-nullable "
+        f"string capped at {PAYMENT_STATUS_REASON_MAX_LENGTH} characters",
+    )
+    payment_status_reason_description = str(
+        payment_status_reason.get("description") or ""
+    ).lower()
+    for term in ("latest", "trimmed", "clears"):
+        contracts.check(
+            term in payment_status_reason_description,
+            f"{relative}: Payment.statusReason description must document {term}",
+        )
+
     # The transition table is the machine-checkable form of the graph: a
     # terminal status has no outgoing edge and every other status has at least
     # one.
@@ -3453,6 +3484,14 @@ def check_payment_status(contracts: ContractSet, document, relative: str):
             term in description,
             f"{where}: description must document {term}",
         )
+    contracts.check(
+        "statusReason" in description,
+        f"{where}: description must document the returned statusReason",
+    )
+    contracts.check(
+        "not returned" not in description,
+        f"{where}: description must not claim the status reason is not returned",
+    )
 
     # The public request and the internal command must describe the same wire
     # shape: only status is required, status is the shared PaymentStatus enum,

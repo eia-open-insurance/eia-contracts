@@ -196,7 +196,7 @@ removed per the resolution policy.
 | M-43 | Policy legal entity catalog is a narrow five-type slice with a nullable issuing-entity link | M |
 | M-44 | Document legal holds and disposition are a per-document, synchronous slice without the SPEC hold collection or the approval/certificate workflow | L |
 | M-45 | Direct Claims settlement payment links are a SPEC-less route and event over one stored Payment id | L |
-| M-46 | Payment public status PATCH is SPEC-less, its graph is wider than SPEC 11.7.6, and the 200-character reason is not pre-validated | L |
+| M-46 | Payment public status PATCH is SPEC-less and its graph is wider than SPEC 11.7.6 | L |
 | M-47 | Document content tombstones add a SPEC-less DELETE route and event and keep the metadata; a disposition now applies the same tombstone without the SPEC approval/certificate job | L |
 | M-48 | Notifications adds a SPEC-less `DUNNING_NOTICE` type to the closed `NotificationType` enum | L |
 
@@ -733,9 +733,9 @@ unimplemented fields and list the missing operations under
   also accepts a complete `sourceType` + `sourceId` pair to return the payments
   linked to one source; that filter is documented in `openapi/payment.yaml`
   1.3.0 and M-24. The generic lifecycle command is implemented at
-  `PATCH /api/v1/payments/{paymentId}/status` (M-46); the projection still
-  omits the status reason and any status history, and the `/history` read
-  remains planned.
+  `PATCH /api/v1/payments/{paymentId}/status` (M-46); the projection returns
+  the latest `statusReason`, but there is no status history and the `/history`
+  read remains planned.
 - Notifications: no `category`, `severity`, `subject` reference,
   `requiresAction`, `dueAt`, `actions[]`, inbox, read/acknowledge, stream,
   subscriptions, preferences, or admin surfaces.
@@ -1177,7 +1177,7 @@ Evidence:
   (`validateSourceLinkage`); the expert constants are at `:39-45`
   (`SOURCE_TYPES`, `SOURCE_REFERENCE_MAX_LENGTH`).
 - `repos/eia-payment-expert/.../CreatePaymentRequest.java:19-21` and
-  `Payment.java:26-28`; `repos/eia-payment-domain/.../PaymentDto.java:23-25`
+  `Payment.java:27-29`; `repos/eia-payment-domain/.../PaymentDto.java:24-26`
   and `CreatePaymentCommand.java:17-19`.
 - `repos/eia-payment-domain/.../PaymentService.java:107-117` (search matches
   `sourceId` and `sourceReference`) and `:134-155` (secondary suffix).
@@ -2991,7 +2991,8 @@ SPEC 11.7.11 lists named payment actions (`authorize`, `issue`, `confirm`,
 `void`, `stop`, `reissue`, `reverse`) and no generic status route. The
 2026-10-21 contract documents the implemented public
 `PATCH /api/v1/payments/{paymentId}/status`, which forwards
-`{status, expectedVersion?, reason?}` to the expert.
+`{status, expectedVersion?, reason?}` to the expert. The 2026-10-22 1.6.0
+contract adds the latest status reason to the payment projection.
 
 | Aspect | Implemented | SPEC / gap |
 |---|---|---|
@@ -3000,7 +3001,7 @@ SPEC 11.7.11 lists named payment actions (`authorize`, `issue`, `confirm`,
 | Graph | 34 edges from `DRAFT` through `RECONCILED`, with `CANCELLED`, `STOPPED`, `REJECTED`, `VOID`, `REVERSED`, and `ESCHEATED` terminal | The SPEC mermaid omits the CANCELLED/VOID escape edges, `SUBMITTED`/`ACCEPTED` -> `FAILED`, `PROCESSING` -> `PARTIALLY_PAID`, and the `PARTIALLY_PAID` edges; it also has no `VOID` state. The contract documents the implemented graph. |
 | Approval gate | `DRAFT`, `PENDING_AUTHORITY`, and `AUTHORIZED` -> an execution status is 400 `PAYMENT_NOT_APPROVED` | SPEC 11.7.7 PAY-04 and PAY-18 require approval and no active hold; the implemented gate only checks the pre-approval source status and does not evaluate authority, SoD, sanctions, duplicate, or holds. |
 | Concurrency | Optional `expectedVersion`; a stale value is 409 `CONCURRENT_MODIFICATION`; omitted means unchecked | SPEC 12.6 expects a version token on writes. The named payment actions send the version the domain read; the generic route is the only Payment command that accepts a caller version. |
-| Reason | Optional, trimmed, stored in `payment.status_reason` (`varchar(200)`), and emitted in `payment.payment.status-changed` | The contract caps it at 200 characters, but neither the domain nor the expert rejects a longer value with a 400: the update fails at the database and the public call surfaces 502 `EXPERT_UNAVAILABLE`. The projection does not return the reason. |
+| Reason | Optional, trimmed, stored in `payment.status_reason` (`varchar(200)`), returned as the required-but-nullable `Payment.statusReason`, and emitted in `payment.payment.status-changed` when non-blank | The SPEC named actions carry no reason field. The contract caps it at 200 characters; the expert's `@Size(max = 200)` now answers 400 `VALIDATION_ERROR` before persistence, but the public domain still forwards without pre-validating, so the 400 comes from the expert. Each accepted change replaces the value and a change without a reason clears it; there is no status history. |
 | Events | `payment.payment.updated` and `payment.payment.status-changed` at the new row version | SPEC 11.7.10 publishes per-verb names such as `payment.payment.authorized` and `payment.payment.paid`; the two generic names are recorded in M-22. |
 | Book | Not book-scoped; only `X-EIA-Tenant`; the event is stamped DIRECT | SPEC 3.6.1 requires the book on every payment; the payment row carries no book (M-08, M-12). |
 
@@ -3008,31 +3009,39 @@ Evidence:
 
 - `repos/eia-payment-domain/.../PaymentController.java:74-79` (the public PATCH
   mapping) and `PaymentService.java:122-130` (forwarding without re-deriving the
-  graph), plus `UpdatePaymentStatusCommand.java:5-13` (the body record) and
+  graph), plus `UpdatePaymentStatusCommand.java:5-13` (the body record),
+  `PaymentDto.java:10-27` (the returned `statusReason`), and
   `PaymentClient.java:103-120,176-202` (the expert call and the preserved
   400/404/409 translation).
 - `repos/eia-payment-expert/.../PaymentController.java:45-50` (the internal
-  PATCH), `UpdatePaymentStatusRequest.java:5-9`, `PaymentService.java:65-81`
-  (transition, version check, row update, and the two outbox writes),
-  `PaymentRules.java:54-78,303-323` (`TRANSITIONS`, the execution statuses, and
-  `validateTransition`), and `PaymentRepository.java:106-122` (the
-  `status_reason` write, the version bump, and `CONCURRENT_MODIFICATION`),
-  plus `schema.sql:14` (`status_reason VARCHAR(200)`).
+  PATCH), `UpdatePaymentStatusRequest.java:6-10` (`@Size(max = 200)` on
+  `reason`), `Payment.java:13-29` (the persisted `statusReason`),
+  `PaymentService.java:65-81` (transition, version check, row update, and the
+  two outbox writes), `PaymentRules.java:54-78,303-323` (`TRANSITIONS`, the
+  execution statuses, and `validateTransition`), and
+  `PaymentRepository.java:19-43,107-123,143-145` (the `status_reason` select,
+  the trimmed update with the version bump and `CONCURRENT_MODIFICATION`, and
+  the blank-to-null helper), plus `schema.sql:14`
+  (`status_reason VARCHAR(200)`).
 - `repos/eia-payment-expert/.../PaymentEvents.java:68-89`
   (`payment.payment.updated` and `payment.payment.status-changed`, with the
   optional trimmed `reason`).
-- `openapi/payment.yaml` 1.5.0, the README payment status section, and the
+- Tests: `PaymentStatusReasonIntegrationTest` (null on create, the trimmed
+  round trip, clearing without a reason, and the 200-character value) and
+  `PaymentControllerTest` (the returned reason and the 201-character 400
+  `VALIDATION_ERROR`).
+- `openapi/payment.yaml` 1.6.0, the README payment status sections, and the
   validator checks record the implemented shape.
 
 Resolution: either add the generic status route and the widened graph to SPEC
 11.7.6/11.7.11 (or record them as an agreed extension) or restrict the contract
 to the SPEC mermaid and implement the remaining named actions. The approval
 gate needs the authority, SoD, sanctions, duplicate, and hold checks from
-SPEC 11.7.7. The reason should be rejected with 400 `VALIDATION_ERROR` at the
-public boundary before the version check, and the payment projection needs the
-status reason plus a status-history read (the SPEC 11.7.11 `/history` read
-remains planned). A future `/v2` or an EV-05 dual-publish window applies if a
-route or event name is renamed.
+SPEC 11.7.7. The 200-character reason limit is now enforced with 400
+`VALIDATION_ERROR` and the projection returns the latest `statusReason`; a
+public-boundary pre-check would still avoid the expert call, and a status-history
+read (the SPEC 11.7.11 `/history` read) remains planned. A future `/v2` or an
+EV-05 dual-publish window applies if a route or event name is renamed.
 
 ## M-47 Document content tombstones are a SPEC-less command and event, now also applied by disposition
 

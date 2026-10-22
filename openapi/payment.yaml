@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: EIA Payment API
-  version: 1.5.0
+  version: 1.6.0
   summary: Payment instruction administration and the Payment expert API.
   description: >
     This document describes the implemented public Payment domain API and the
@@ -15,6 +15,14 @@ info:
     SUBMITTED and later execution states are unreachable before APPROVED. The
     status operation lists the implemented transition graph and its terminal
     statuses.
+
+    Every payment returns the latest status reason as `statusReason`. It is the
+    trimmed `reason` supplied with the most recent accepted status change,
+    whether through the status PATCH or one of the named actions (which supply
+    their own text). Each accepted change replaces the previous value, and a
+    change without a reason clears it, so the member describes the current
+    status only and is not a status history. A payment that has never changed
+    status returns null.
 
     A payment may optionally link to the business record it disburses through
     `sourceType`/`sourceId`/`sourceReference`. `sourceType` is DIRECT_CLAIM,
@@ -400,9 +408,13 @@ paths:
         payment `version`; a stale value is 409 `CONCURRENT_MODIFICATION` with
         no row change and no event. When it is omitted the transition is not
         version-checked. `reason` is optional and at most 200 characters; it is
-        trimmed and stored as the status reason, and it is not returned in the
-        `Payment` projection. An accepted transition bumps the payment
-        `version` and writes `payment.payment.updated` and
+        trimmed and stored as the latest status reason, which the updated
+        `Payment` returns as `statusReason`. An over-long reason is 400
+        `VALIDATION_ERROR` before the transition and version checks; a blank
+        reason is treated as absent and clears the stored reason. The named
+        `/submit`, `/authorize`, `/approve`, and `/issue` actions also replace
+        the stored reason with their own text. An accepted transition bumps the
+        payment `version` and writes `payment.payment.updated` and
         `payment.payment.status-changed` in the same transaction. An unknown
         payment, including another tenant's payment, is 404
         `PAYMENT_NOT_FOUND`.
@@ -711,6 +723,7 @@ components:
         - paymentNumber
         - paymentType
         - status
+        - statusReason
         - amount
         - currency
         - payeePartyId
@@ -731,6 +744,20 @@ components:
           $ref: '#/components/schemas/PaymentType'
         status:
           $ref: '#/components/schemas/PaymentStatus'
+        statusReason:
+          type: [string, 'null']
+          maxLength: 200
+          description: >
+            Latest status reason, always present and null when there is none.
+            It is the trimmed `reason` supplied with the most recent accepted
+            status change, whether through `PATCH
+            /api/v1/payments/{paymentId}/status` or the named `/submit`,
+            `/authorize`, `/approve`, and `/issue` actions (which supply their
+            own text). Each accepted change replaces the previous value, and a
+            change without a reason clears it, so the member describes the
+            current status only and is not a status history. A payment that has
+            never changed status, or whose latest change carried no reason,
+            returns null. See MISMATCHES.md M-46.
         amount:
           $ref: './components.yaml#/components/schemas/MoneyAmount'
         currency:
@@ -1120,8 +1147,11 @@ components:
         value is 400 `INVALID_STATUS`, a repeated or undeclared edge is 400
         `INVALID_STATUS_TRANSITION`, and a pre-approval state that requests an
         execution status is 400 `PAYMENT_NOT_APPROVED`. `expectedVersion` is
-        optional and a stale value is 409 `CONCURRENT_MODIFICATION`;
-        `reason` is optional, trimmed, and stored as the status reason.
+        optional and a stale value is 409 `CONCURRENT_MODIFICATION`; `reason`
+        is optional, trimmed, and stored as the latest status reason, which the
+        updated `Payment` returns as `statusReason`. A reason longer than 200
+        characters is 400 `VALIDATION_ERROR`, and a blank reason clears the
+        stored value.
       required:
         - status
       properties:
@@ -1138,8 +1168,11 @@ components:
           type: string
           maxLength: 200
           description: >
-            Optional status reason. It is trimmed and stored with the payment
-            but is not returned in the `Payment` projection.
+            Optional status reason. It is trimmed and stored as the payment's
+            latest status reason, returned as `Payment.statusReason`, and
+            replaces any previous value. A blank value clears the stored
+            reason. A value longer than 200 characters is 400
+            `VALIDATION_ERROR`.
     UpdatePaymentStatusRequestInternal:
       type: object
       description: Internal lifecycle transition command accepted by the Payment expert.
@@ -1154,10 +1187,14 @@ components:
         reason:
           type: string
           maxLength: 200
+          description: >
+            Optional status reason. The expert trims it, stores it as the
+            payment's latest status reason, and returns it as
+            `Payment.statusReason`; a blank value clears the stored reason.
 x-vertical: payment
 x-implementation:
   status: implemented
-  verifiedAt: '2026-10-21'
+  verifiedAt: '2026-10-22'
   verifiedAgainst:
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentController.java
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/PaymentSearchResponse.java
@@ -1175,6 +1212,7 @@ x-implementation:
     - repos/eia-payment-domain/src/main/java/com/eia/payment/domain/ApiExceptionHandler.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentController.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/Payment.java
+    - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentRepository.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/CreatePaymentRequest.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/UpdatePaymentStatusRequest.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentRules.java
@@ -1188,6 +1226,7 @@ x-implementation:
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/PaymentEvents.java
     - repos/eia-payment-expert/src/main/java/com/eia/payment/expert/ApiExceptionHandler.java
     - repos/eia-payment-expert/src/test/java/com/eia/payment/expert/PaymentSourceFilterIntegrationTest.java
+    - repos/eia-payment-expert/src/test/java/com/eia/payment/expert/PaymentStatusReasonIntegrationTest.java
     - repos/eia-payment-expert/src/test/java/com/eia/payment/expert/PaymentAllocationControllerTest.java
     - repos/eia-payment-expert/src/test/java/com/eia/payment/expert/PaymentAllocationIntegrationTest.java
     - repos/eia-payment-domain/src/test/java/com/eia/payment/domain/PaymentAllocationRulesTest.java
@@ -1201,7 +1240,10 @@ x-implementation:
     its 400/404/409 problems; the expert owns the transition graph (including
     the SUBMITTED/ACCEPTED -> FAILED retries, PROCESSING -> PARTIALLY_PAID, and
     the CANCELLED/VOID escape edges), the approval gate, and the version check.
-    Amount is a decimal string but not yet the Money object.
+    The expert also trims and persists the optional status reason and returns
+    it as the required-but-nullable Payment.statusReason; a status change
+    without a reason clears it, and the named actions supply their own reason
+    text. Amount is a decimal string but not yet the Money object.
     Source linkage is optional and denormalized: the payment stores a classified
     source type, its UUID, and a human reference instead of embedding the claim
     or policy. The tenant-scoped list forwards an optional sourceType + sourceId
@@ -1215,21 +1257,18 @@ x-implementation:
     calls; the alias is an implementation detail and is not part of this public
     contract. See MISMATCHES.md M-12, M-24, M-35, and M-46.
 x-compatibility:
-  contractVersion: 1.5.0
-  previousContractVersion: 1.4.0
+  contractVersion: 1.6.0
+  previousContractVersion: 1.5.0
   breaking: []
   compatible:
-    - Adds PATCH /api/v1/payments/{paymentId}/status.
-    - Adds the UpdatePaymentStatusRequest schema.
-    - Documents the implemented DRAFT -> PENDING_AUTHORITY -> AUTHORIZED -> APPROVED -> SCHEDULED -> SUBMITTED -> ACCEPTED -> PROCESSING -> PAID -> RECONCILED lifecycle and its other edges.
-    - Documents the terminal statuses CANCELLED, STOPPED, REJECTED, VOID, REVERSED, and ESCHEATED.
-    - Documents the optional expectedVersion concurrency check (409 CONCURRENT_MODIFICATION) and the optional 200-character reason.
+    - Adds the required-but-nullable 200-character Payment.statusReason.
+    - Documents the latest status reason semantics, including the trim, replace, clear, and named-action behaviour.
   note: >
-    The status route is additive over 1.4.0: no existing path, request field,
-    response field, or event changes. A caller that keeps using the four named
-    actions is unaffected. The public route requires X-EIA-Tenant and is
-    tenant-scoped but not book-scoped; the expert's /internal/v1 alias is not
-    part of this public contract.
+    Status reason is additive over 1.5.0: the Payment projection gains one
+    always-present member, and no path, request field, event, or existing
+    response field changes. A caller that ignores unknown response members is
+    unaffected. The member is null for a payment that has never changed status
+    and after a change without a reason.
 x-planned-operations:
   - method: POST
     path: /api/v1/payments/{paymentId}/void
