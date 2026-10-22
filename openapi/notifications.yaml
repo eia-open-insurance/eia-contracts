@@ -1,12 +1,14 @@
 openapi: 3.1.0
 info:
   title: EIA Notifications API
-  version: 1.1.0
+  version: 1.2.0
   summary: Notification drafting and delivery administration and the Notifications expert API.
   description: >
     This document describes the implemented public Notifications domain API and
     the internal Notifications expert API. The authoritative requirement is
     SPEC 11.8 and SPEC 12; the implemented surface is the first vertical slice.
+    `NotificationType` is the closed SPEC 11.8.5 v1 list plus the implemented
+    `DUNNING_NOTICE` dunning escalation type.
 
     The slice supports list, detail, create, and send. Inbox, read and
     acknowledge, actions, dismiss, unread count, the SSE stream, subscriptions,
@@ -352,7 +354,12 @@ components:
           format: date-time
     NotificationType:
       type: string
-      description: Notification type from the SPEC 11.8.5 v1 list, as enforced by the expert.
+      description: >
+        Notification type from the SPEC 11.8.5 v1 list, plus the implemented
+        `DUNNING_NOTICE` escalation type, as enforced by the expert. The set is
+        closed: an unknown value is 400 `EIA-NTF-9403`
+        `INVALID_NOTIFICATION_TYPE`, and an added type is an additive minor
+        change (SPEC 10.4).
       enum:
         - NEW_CLAIM_NOTICE
         - CLAIM_ASSIGNED
@@ -412,6 +419,7 @@ components:
         - RECONCILIATION_EXCEPTION
         - SAP_POSTING_FAILED
         - ESCHEATMENT_DUE
+        - DUNNING_NOTICE
         - NEW_DOCUMENT_UPLOAD
         - DOCUMENT_ASSOCIATED
         - DOCUMENT_REQUEST

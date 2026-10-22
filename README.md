@@ -192,6 +192,37 @@ response field, or event changed.
 the Policy page envelope. The search operations keep the document-level
 security and add no required request field outside the tenant and book headers.
 
+### Notifications DUNNING_NOTICE type (2026-10-22)
+
+Notifications 1.2.0 adds the implemented dunning escalation type. The change is
+additive: one member joins the closed `NotificationType` enum, and no path,
+request field, response field, or event changes.
+
+| Document | Version | Classification | Change |
+|---|---|---|---|
+| `openapi/notifications.yaml` | 1.2.0 | Additive | `NotificationType` adds `DUNNING_NOTICE` between `ESCHEATMENT_DUE` and `NEW_DOCUMENT_UPLOAD`. |
+
+- `DUNNING_NOTICE` is the type the receivables workbench prefills when a
+  collector hands an overdue installment off to Notifications. The shell opens
+  the new-notification form with `notificationType=DUNNING_NOTICE`, the
+  Notifications web remote lists the value, and the domain and expert accept and
+  persist it. The hand-off only drafts the notification; Notifications owns the
+  send.
+- The type is SPEC-less. SPEC 11.8.5 v1 ends the Payment category at
+  `ESCHEATMENT_DUE`, begins Document at `NEW_DOCUMENT_UPLOAD`, and names no
+  dunning notification; SPEC 11.2.13 models dunning levels on the billing
+  account instead. `MISMATCHES.md` M-48 records the deviation.
+- The enum stays closed. An unknown value is 400 `EIA-NTF-9403`
+  `INVALID_NOTIFICATION_TYPE`; adding a type is an additive minor change and
+  removing one is breaking (SPEC 10.4).
+- `Notification.notificationType`, `CreateNotificationRequest.notificationType`,
+  and `CreateNotificationRequestInternal.notificationType` all reference the one
+  `NotificationType` schema, so the type is accepted on both create commands and
+  returned by every read.
+- The validator requires the member, its position between `ESCHEATMENT_DUE` and
+  `NEW_DOCUMENT_UPLOAD`, no repeated value, and the three references with their
+  required membership. The full run passes 14,069 checks.
+
 ### Direct Claims task and note contract (2026-10-20)
 
 Direct Claims 1.3.0 adds the diary task and append-only note surface. The change
@@ -2980,7 +3011,11 @@ missing directory.
    `Policy.legalEntityId`, the 201 `Location`, the assignment 200 `ETag`, the
    201/200/400/404/409 responses, and the absence of the implemented paths from
    `x-planned-operations`, and agreement between
-   `info.version` and `x-compatibility.contractVersion`.
+   `info.version` and `x-compatibility.contractVersion`. It also requires the
+   Notifications `NotificationType` member `DUNNING_NOTICE`, its position
+   between `ESCHEATMENT_DUE` and `NEW_DOCUMENT_UPLOAD`, no repeated enum value,
+   and the `NotificationType` reference on the `Notification` projection and on
+   both create commands with `notificationType` required on all three.
 4. **AsyncAPI structure.** `asyncapi: 3.0.0`, channel addresses, `x-event-type`,
    `x-status: planned|implemented`, `x-implemented-by` on every implemented
    channel, one `send` operation per channel, a `DomainEvent` message on
@@ -3155,6 +3190,10 @@ missing directory.
   compact `TENANT_REQUIRED` 400 rather than the canonical Problem, and the
   download exposes the stored bytes rather than a short-lived URL (M-02, M-22,
   M-40, M-47);
+- Notifications accepts the implemented `DUNNING_NOTICE` type, which SPEC 11.8.5
+  v1 does not list. The type is the target of the shell's dunning draft
+  hand-off, and the expert still rejects any value outside the closed list
+  (M-48);
 - document legal holds and disposition are implemented per document at
   `POST /api/v1/documents/{documentId}/hold`, `.../hold/release`, and
   `.../dispose`, with the new `document.legal-hold.placed`/`.released` events

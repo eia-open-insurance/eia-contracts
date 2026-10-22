@@ -1,6 +1,6 @@
 # Contract-to-implementation audit
 
-Status: open, reviewed 2026-10-22 (Document content tombstones).
+Status: open, reviewed 2026-10-22 (Notifications DUNNING_NOTICE type).
 
 This document records every known difference between the canonical contracts in
 this repository and the services that implement them. It is part of the
@@ -117,6 +117,10 @@ where the running code does not meet it yet.
   controller, service, rules, repository, tombstone SQL, content and metadata
   records, `DocumentContentEvents`, the two deletion exceptions, the exception
   handler, and the domain and expert tombstone tests.
+  The Notifications DUNNING_NOTICE pass reads the domain and expert
+  `NotificationType` enums and their create validation, the notification
+  service and controller tests, the web workbench's notification-type list and
+  prefill defaults, and the shell receivables hand-off constants and links.
 - Gateway routing: `repos/eia-platform/gateway/src/main/resources/application.yml`.
 - Method: static review of controller mappings, request and response records,
   `@JsonFormat` annotations, exception handlers, book-wall filters, idempotency
@@ -189,6 +193,7 @@ removed per the resolution policy.
 | M-45 | Direct Claims settlement payment links are a SPEC-less route and event over one stored Payment id | L |
 | M-46 | Payment public status PATCH is SPEC-less, its graph is wider than SPEC 11.7.6, and the 200-character reason is not pre-validated | L |
 | M-47 | Document content tombstones add a SPEC-less standalone DELETE route and event and keep the metadata, where SPEC deletes content only inside an approved disposition | L |
+| M-48 | Notifications adds a SPEC-less `DUNNING_NOTICE` type to the closed `NotificationType` enum | L |
 
 ## M-01 Public base paths
 
@@ -3077,10 +3082,66 @@ expert primitive behind it, or amend SPEC 11.6.8/11.6.10 to the standalone
 tombstone and add the fact to SPEC 11.6.9. Renaming the route or event is
 breaking and needs an ADR and a `/v2` or EV-05 dual-publish window.
 
+## M-48 Notifications adds a SPEC-less `DUNNING_NOTICE` type to the closed enum
+
+SPEC 11.8.5 v1 enumerates `NotificationType` by category and ends the Payment
+category at `ESCHEATMENT_DUE`; the next member is Document's
+`NEW_DOCUMENT_UPLOAD`, and no dunning or collections type is named. The
+2026-10-22 notifications pass adds the implemented `DUNNING_NOTICE` member
+between those two values and accepts it on both create commands.
+
+| Aspect | Implemented | SPEC / gap |
+|---|---|---|
+| Type | `DUNNING_NOTICE` in the closed `NotificationType` enum, between `ESCHEATMENT_DUE` and `NEW_DOCUMENT_UPLOAD` | SPEC 11.8.5 v1 lists no dunning escalation type |
+| Validation | the expert calls `NotificationType.from(...)` and rejects an unknown value with 400 `EIA-NTF-9403` `INVALID_NOTIFICATION_TYPE`; the domain enum carries the same 84 values in the same order | SPEC 11.8.5 is a closed v1 list; an addition is an additive minor change under SPEC 10.4 and a removal is breaking |
+| Create and projection | both create commands and the `Notification` projection reference the one `NotificationType` schema and require `notificationType` | no SPEC shape change: the type rides the existing create and read |
+| Use | the shell receivables page opens the Notifications workbench with `notificationType=DUNNING_NOTICE`; the web remote lists the value and leaves the template empty for it | SPEC 11.2.13 models dunning levels on the billing account and names no notification; the hand-off creates a draft only and Notifications owns the send |
+| Version | `openapi/notifications.yaml` 1.2.0 (additive) | no SPEC version has the type |
+
+Consequences:
+
+- A client generated from SPEC 11.8.5 alone will not know the type; a client
+  generated from the OpenAPI enum will. No path, request field, response field,
+  or event changes, so existing clients are unaffected.
+- The type is accepted for any channel and template; a `DUNNING_NOTICE` draft
+  does not require a dedicated template, and a send still requires an approved
+  template for the tenant and channel (NTF-01, NTF-14).
+- The type is a notification label, not a dunning command: creating it does not
+  advance `billing_account.dunning_status` or emit `policy.dunning.sent`
+  (M-38).
+- The expert and domain enums are hand-maintained copies; a future type must be
+  added to both services, the web list, and this contract together.
+
+Evidence:
+
+- `repos/eia-notifications-expert/.../NotificationType.java:69`
+  (`DUNNING_NOTICE`) and `NotificationService.java:48`
+  (`NotificationType.from`), with `ErrorCode.java:20` (400 `EIA-NTF-9403`
+  `INVALID_NOTIFICATION_TYPE`).
+- `repos/eia-notifications-domain/.../NotificationType.java:69` (the same
+  member on the domain copy).
+- `repos/eia-notifications-expert/src/test/java/com/eia/notifications/expert/NotificationControllerTest.java:101`,
+  `NotificationServiceTest.java:98`, and
+  `NotificationOutboxIntegrationTest.java:98-105` (create, persist, and outbox
+  round trip).
+- `repos/eia-notifications-web/src/App.jsx:19` and `:137` (the type list and the
+  empty template for a dunning prefill), with `README.md:51`.
+- `repos/eia-frontend/shell/src/receivables.js:32-33` (the dunning
+  notification-type and template constants) and `:193` (the prefill link, which
+  sends the type and no template code), with `ReceivablesPage.jsx:214` (the
+  draft-only hand-off label).
+- `openapi/notifications.yaml` 1.2.0 records the closed enum and the member.
+
+Resolution: add `DUNNING_NOTICE` to SPEC 11.8.5 v1 (for example a Collections
+category or the Payment category after `ESCHEATMENT_DUE`) and name the dunning
+hand-off in SPEC 11.2.13, or keep the implemented type and treat the OpenAPI
+enum as canonical. The addition needs no `/v2`; removing the member later would
+be breaking under SPEC 10.4.
+
 ## Validation evidence
 
 The repository validator was run on the working tree after the 2026-10-22
-Document content-tombstone contract:
+Notifications DUNNING_NOTICE contract:
 
 ```text
 $ python scripts/validate_contracts.py
@@ -3119,7 +3180,7 @@ JSON Reference resolution
   OK walked 22 YAML documents
 
 Result
-  PASS 14058 checks, 0 failures
+  PASS 14069 checks, 0 failures
 ```
 
 Additional checks and limits:
@@ -3379,7 +3440,12 @@ Additional checks and limits:
   removing the 410 responses each fail with the specific missing-operation,
   required-field, implemented-event, or gone-response message. All four were run
   on a throwaway copy and exited non-zero (exit 1); the working copy was left
-  unchanged.
+  unchanged. The Notifications DUNNING_NOTICE pass added three more: removing
+  the enum member, moving it below `NEW_DOCUMENT_UPLOAD`, and pointing
+  `CreateNotificationRequest.notificationType` at another schema each fail with
+  the specific missing-member, position, or reference message. All three were
+  run on a throwaway copy and exited non-zero (exit 1); the working copy was
+  left unchanged.
 
 ## Resolution policy
 

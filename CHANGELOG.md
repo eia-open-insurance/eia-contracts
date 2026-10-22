@@ -1475,6 +1475,25 @@ The format is based on Keep a Changelog and the project uses Semantic Versioning
   M-22, M-40, and M-44, and refreshes the validation evidence.
 - `python scripts/validate_contracts.py` passes 14,058 checks with 0 failures.
 
+### Added in the Notifications DUNNING_NOTICE contract (2026-10-22)
+
+- `openapi/notifications.yaml` is 1.2.0: `NotificationType` adds
+  `DUNNING_NOTICE` between `ESCHEATMENT_DUE` and `NEW_DOCUMENT_UPLOAD`, and its
+  description records the closed set and the 400 `EIA-NTF-9403`
+  `INVALID_NOTIFICATION_TYPE` rejection. The `Notification` projection and both
+  create commands keep their one `NotificationType` reference, so the value is
+  accepted on create and returned on read. `DUNNING_NOTICE` is SPEC-less:
+  SPEC 11.8.5 v1 names no dunning notification and SPEC 11.2.13 models dunning
+  on the billing account; M-48 records the deviation.
+- `scripts/validate_contracts.py` requires the member, its position between
+  `ESCHEATMENT_DUE` and `NEW_DOCUMENT_UPLOAD`, no repeated enum value, and the
+  `NotificationType` reference plus required `notificationType` membership on
+  the `Notification` projection and both create commands.
+- `README.md` records the additive version, the dunning draft hand-off, the
+  closed-enum rule, and the validation count; `MISMATCHES.md` adds M-48 for the
+  SPEC-less type and refreshes the validation evidence.
+- `python scripts/validate_contracts.py` passes 14,069 checks with 0 failures.
+
 ### Notes
 
 - No runtime dependency, CI workflow, Maven build, or hosted pipeline was

@@ -2102,6 +2102,23 @@ DOCUMENT_LIFECYCLE_EVENT_FIELDS = (
     "status",
 )
 
+
+# Notifications. SPEC 11.8.5 v1 does not name a dunning escalation type; the
+# implemented expert and domain add DUNNING_NOTICE to the closed NotificationType
+# set between ESCHEATMENT_DUE and NEW_DOCUMENT_UPLOAD. The Notification
+# projection and both create commands reference the one NotificationType schema,
+# so the contract must enumerate the type once and keep all three references, or
+# a create would accept a value the read cannot return (or the reverse).
+NOTIFICATION_TYPE_SCHEMA = "NotificationType"
+NOTIFICATION_DUNNING_TYPE = "DUNNING_NOTICE"
+NOTIFICATION_TYPE_PREDECESSOR = "ESCHEATMENT_DUE"
+NOTIFICATION_TYPE_SUCCESSOR = "NEW_DOCUMENT_UPLOAD"
+NOTIFICATION_TYPE_REFERENCES = (
+    ("Notification", "notificationType"),
+    ("CreateNotificationRequest", "notificationType"),
+    ("CreateNotificationRequestInternal", "notificationType"),
+)
+
 EVENT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$")
 VALID_JSON_TYPES = {"null", "boolean", "object", "array", "number", "string", "integer"}
 
@@ -10316,6 +10333,74 @@ def check_direct_claim_list_filter(contracts: ContractSet, document, relative: s
         )
 
 
+# ---------------------------------------------------------------------------
+# Notifications NotificationType checks
+# ---------------------------------------------------------------------------
+
+
+def check_notifications_openapi(contracts: ContractSet, document, relative: str):
+    """Require the implemented DUNNING_NOTICE type on the closed enum.
+
+    The SPEC 11.8.5 v1 list has no dunning escalation type; the expert and the
+    domain accept DUNNING_NOTICE between ESCHEATMENT_DUE and NEW_DOCUMENT_UPLOAD.
+    Both create commands and the projection reference the one NotificationType
+    schema, so the enum must carry the member and all three references must point
+    at it.
+    """
+    schemas = (document.get("components") or {}).get("schemas") or {}
+    notification_type = schemas.get(NOTIFICATION_TYPE_SCHEMA) or {}
+    enum = notification_type.get("enum")
+
+    contracts.check(
+        notification_type.get("type") == "string",
+        f"{relative}: {NOTIFICATION_TYPE_SCHEMA}.type must be string",
+    )
+    contracts.check(
+        isinstance(enum, list) and NOTIFICATION_DUNNING_TYPE in enum,
+        f"{relative}: {NOTIFICATION_TYPE_SCHEMA}.enum must include "
+        f"{NOTIFICATION_DUNNING_TYPE}",
+    )
+    if isinstance(enum, list):
+        contracts.check(
+            len(enum) == len({str(value) for value in enum}),
+            f"{relative}: {NOTIFICATION_TYPE_SCHEMA}.enum must not repeat a value",
+        )
+        contracts.check(
+            enum.count(NOTIFICATION_DUNNING_TYPE) == 1,
+            f"{relative}: {NOTIFICATION_TYPE_SCHEMA}.enum must name "
+            f"{NOTIFICATION_DUNNING_TYPE} exactly once",
+        )
+        index = (
+            enum.index(NOTIFICATION_DUNNING_TYPE)
+            if NOTIFICATION_DUNNING_TYPE in enum
+            else None
+        )
+        contracts.check(
+            index is not None
+            and 0 < index < len(enum) - 1
+            and enum[index - 1] == NOTIFICATION_TYPE_PREDECESSOR
+            and enum[index + 1] == NOTIFICATION_TYPE_SUCCESSOR,
+            f"{relative}: {NOTIFICATION_TYPE_SCHEMA}.enum must place "
+            f"{NOTIFICATION_DUNNING_TYPE} between "
+            f"{NOTIFICATION_TYPE_PREDECESSOR} and {NOTIFICATION_TYPE_SUCCESSOR}",
+        )
+
+    for schema_name, property_name in NOTIFICATION_TYPE_REFERENCES:
+        schema = schemas.get(schema_name) or {}
+        properties = schema.get("properties") or {}
+        property_schema = properties.get(property_name) or {}
+        where = f"{relative}: {schema_name}.{property_name}"
+        contracts.check(
+            property_schema.get("$ref")
+            == f"#/components/schemas/{NOTIFICATION_TYPE_SCHEMA}",
+            f"{where} must reference {NOTIFICATION_TYPE_SCHEMA}",
+        )
+        contracts.check(
+            property_name in (schema.get("required") or []),
+            f"{where} must stay required",
+        )
+
+
 def check_openapi(contracts: ContractSet, verbose: bool):
     print("\nOpenAPI 3.1 documents")
     expected = {"components"} | set(VERTICAL_FILES)
@@ -10938,6 +11023,8 @@ def check_openapi(contracts: ContractSet, verbose: bool):
             check_direct_claim_allocations(contracts, document, relative)
             check_direct_claim_list_filter(contracts, document, relative)
             check_direct_claim_settlement_payment(contracts, document, relative)
+        if vertical == "notifications":
+            check_notifications_openapi(contracts, document, relative)
         contracts.check_openapi_schemas(document, relative)
         if verbose:
             print(f"  OK {relative}  paths={len(paths)} operations={operation_count}")
